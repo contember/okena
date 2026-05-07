@@ -35,13 +35,13 @@ Observable state with auto-notify:
 - `RequestBroker` — decoupled transient UI request routing (overlay/sidebar requests)
 - `SettingsState` — user preferences with debounced auto-save
 - `AppTheme` — current theme mode and colors
-- `RootView` — main view, owns SidebarController + OverlayManager
+- `WindowView` — per-window view, owns SidebarController + OverlayManager
 - `OverlayManager` — centralized modal overlay lifecycle
 
 ### Event Flow
 
 1. **PTY events**: `PtyManager` → `async_channel` → `Okena` → `Terminal` (+ `PtyBroadcaster` for remote clients)
-2. **UI requests**: `RequestBroker` → `cx.notify()` → observers in RootView/Sidebar
+2. **UI requests**: `RequestBroker` → `cx.notify()` → observers in WindowView/Sidebar
 3. **State mutations**: `Workspace` notify → observers update UI
 4. **Persistence**: debounced 500ms save to disk
 

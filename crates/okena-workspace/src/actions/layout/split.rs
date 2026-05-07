@@ -1,5 +1,6 @@
 //! Split operations: `split_terminal`, split-size updates, equalize.
 
+use crate::focus::FocusManager;
 use crate::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 
@@ -7,6 +8,7 @@ impl Workspace {
     /// Split a terminal at a path
     pub fn split_terminal(
         &mut self,
+        focus_manager: &mut FocusManager,
         project_id: &str,
         path: &[usize],
         direction: SplitDirection,
@@ -64,7 +66,7 @@ impl Workspace {
         self.notify_data(cx);
 
         if let Some(new_path) = new_path {
-            self.set_focused_terminal(project_id.to_string(), new_path, cx);
+            self.set_focused_terminal(focus_manager, project_id.to_string(), new_path, cx);
         }
     }
 
@@ -109,8 +111,8 @@ impl Workspace {
     }
 
     /// Equalize pane sizes in the focused terminal's parent split.
-    pub fn equalize_focused_split(&mut self, cx: &mut Context<Self>) {
-        if let Some(target) = self.focus_manager.focused_terminal_state() {
+    pub fn equalize_focused_split(&mut self, focus_manager: &FocusManager, cx: &mut Context<Self>) {
+        if let Some(target) = focus_manager.focused_terminal_state() {
             if let Some(project) = self.project_mut(&target.project_id) {
                 if let Some(ref mut layout) = project.layout {
                     let parent_path = if target.layout_path.is_empty() {

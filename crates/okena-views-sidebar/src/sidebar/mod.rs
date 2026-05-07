@@ -109,6 +109,7 @@ pub struct Sidebar {
     /// sees only its own per-window state.
     pub(crate) window_id: WindowId,
     pub(crate) workspace: Entity<Workspace>,
+    pub(crate) focus_manager: Entity<okena_workspace::focus::FocusManager>,
     pub request_broker: Entity<RequestBroker>,
     pub(crate) expanded_projects: HashSet<String>,
     /// Projects whose worktree children list is collapsed.
@@ -160,7 +161,7 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
+    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, focus_manager: Entity<okena_workspace::focus::FocusManager>, request_broker: Entity<RequestBroker>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
         // Observe RequestBroker to drain sidebar requests outside of render().
         // Requests are stored in pending_sidebar_requests and applied in render()
         // where Window access is available (needed for focus/rename).
@@ -181,6 +182,7 @@ impl Sidebar {
         Self {
             window_id,
             workspace,
+            focus_manager,
             request_broker,
             expanded_projects: HashSet::new(),
             collapsed_worktrees: HashSet::new(),
@@ -324,7 +326,7 @@ impl Sidebar {
         self.folder_click_detector.check(folder_id.to_string())
     }
 
-    /// Public accessor for the focus handle (used by RootView for FocusSidebar)
+    /// Public accessor for the focus handle (used by WindowView for FocusSidebar)
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
     }
@@ -424,6 +426,7 @@ impl Sidebar {
     pub(super) fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace_entity = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
         let window_id = self.window_id;
 
         div()
@@ -436,9 +439,11 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .id("projects-header")
             .on_click(move |_, _window, cx| {
-                workspace_entity.update(cx, |ws, cx| {
-                    ws.set_focused_project(None, cx);
-                    ws.set_folder_filter(window_id, None, cx);
+                focus_manager.update(cx, |fm, cx| {
+                    workspace_entity.update(cx, |ws, cx| {
+                        ws.set_focused_project(fm, None, cx);
+                        ws.set_folder_filter(window_id, None, cx);
+                    });
                 });
             })
             .child(

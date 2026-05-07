@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// GPUI Entity managing all remote connections.
 ///
 /// Observed by the Sidebar for rendering remote projects,
-/// and by RootView for focus coordination.
+/// and by WindowView for focus coordination.
 pub struct RemoteConnectionManager {
     connections: HashMap<String, RemoteConnection>,
     terminals: TerminalsRegistry,

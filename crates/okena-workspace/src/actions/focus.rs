@@ -1,7 +1,14 @@
 //! Focus and fullscreen workspace actions
 //!
 //! Actions for managing terminal and project focus, including fullscreen mode.
+//!
+//! Per slice 03 of the multi-window plan, `FocusManager` is owned per-window
+//! by `WindowView` rather than as a field on the `Workspace` entity. These
+//! action methods take `focus_manager: &mut FocusManager` as a parameter so
+//! every caller threads in the focus state belonging to the window driving
+//! the action -- mutations stay scoped to that window.
 
+use crate::focus::FocusManager;
 use crate::state::{Workspace, WindowId};
 use gpui::*;
 
@@ -11,16 +18,21 @@ impl Workspace {
     /// This zooms the main view to show only this project.
     /// Also focuses the first terminal in the project if one exists.
     /// If the project has no layout, drills into the first worktree child.
-    pub fn set_focused_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_focused_project(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         // Clear fullscreen without restoring old project_id (we're overriding it)
-        self.focus_manager.clear_fullscreen_without_restore();
+        focus_manager.clear_fullscreen_without_restore();
 
         // Set the focused project via FocusManager (controls main view zoom)
-        self.focus_manager.set_focused_project_id(project_id.clone());
+        focus_manager.set_focused_project_id(project_id.clone());
 
         // Focus the first terminal in the project
         if let Some(ref pid) = project_id {
-            self.focus_first_terminal_in(pid);
+            self.focus_first_terminal_in(focus_manager, pid);
         }
 
         cx.notify();
@@ -28,12 +40,17 @@ impl Workspace {
 
     /// Set focused project in individual mode (show only this project, not its worktree children).
     /// Used when clicking a "main worktree" entry in the sidebar.
-    pub fn set_focused_project_individual(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
-        self.focus_manager.clear_fullscreen_without_restore();
-        self.focus_manager.set_focused_project_id_individual(project_id.clone());
+    pub fn set_focused_project_individual(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        focus_manager.clear_fullscreen_without_restore();
+        focus_manager.set_focused_project_id_individual(project_id.clone());
 
         if let Some(ref pid) = project_id {
-            self.focus_first_terminal_in(pid);
+            self.focus_first_terminal_in(focus_manager, pid);
         }
 
         cx.notify();
@@ -50,15 +67,21 @@ impl Workspace {
     /// targeted window's `WindowState::folder_filter`. Unknown extra ids
     /// are a silent no-op (close-race contract inherited from both the
     /// reader and the setter).
-    pub fn toggle_folder_focus(&mut self, window_id: WindowId, folder_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_folder_focus(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        window_id: WindowId,
+        folder_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         let selecting = self.active_folder_filter(window_id).map(|s| s.as_str()) != Some(folder_id);
         if selecting {
             self.set_folder_filter(window_id, Some(folder_id.to_string()), cx);
             // Clear project focus so all visible folder projects show
-            self.focus_manager.set_focused_project_id(None);
+            focus_manager.set_focused_project_id(None);
             // Focus the first project's terminal
             if let Some(first_pid) = self.folder(folder_id).and_then(|f| f.project_ids.first()).cloned() {
-                self.focus_first_terminal_in(&first_pid);
+                self.focus_first_terminal_in(focus_manager, &first_pid);
             }
         } else {
             self.set_folder_filter(window_id, None, cx);
@@ -70,7 +93,11 @@ impl Workspace {
     ///
     /// If the project has no layout (e.g. only worktree children), drills into
     /// the first worktree child that has a terminal.
-    fn focus_first_terminal_in(&mut self, project_id: &str) {
+    pub(crate) fn focus_first_terminal_in(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+    ) {
         // Try the project itself first, then its worktree children
         let candidates = std::iter::once(project_id.to_string())
             .chain(self.worktree_child_ids(project_id));
@@ -79,7 +106,7 @@ impl Workspace {
                 if let Some(layout) = project.layout.as_ref() {
                     // Focus the currently visible terminal (follows active tabs)
                     let path = layout.find_visible_terminal_path();
-                    self.focus_manager.focus_terminal(id, path);
+                    focus_manager.focus_terminal(id, path);
                     return;
                 }
             }
@@ -89,6 +116,7 @@ impl Workspace {
     /// Enter fullscreen mode for a terminal
     pub fn set_fullscreen_terminal(
         &mut self,
+        focus_manager: &mut FocusManager,
         project_id: String,
         terminal_id: String,
         cx: &mut Context<Self>,
@@ -104,7 +132,7 @@ impl Workspace {
         log::info!("layout_path for terminal: {:?}", layout_path);
 
         // Use FocusManager for fullscreen entry (saves current state + sets focused_project_id)
-        self.focus_manager.enter_fullscreen(project_id, layout_path, terminal_id.clone());
+        focus_manager.enter_fullscreen(project_id, layout_path, terminal_id.clone());
 
         log::info!("fullscreen_terminal set via FocusManager with terminal_id={}", terminal_id);
 
@@ -114,10 +142,8 @@ impl Workspace {
     /// Exit fullscreen mode
     ///
     /// Restores focus to the previously focused terminal and project view mode.
-    pub fn exit_fullscreen(&mut self, cx: &mut Context<Self>) {
-        // Use FocusManager for focus + project_id restoration
-        self.focus_manager.exit_fullscreen();
-
+    pub fn exit_fullscreen(&mut self, focus_manager: &mut FocusManager, cx: &mut Context<Self>) {
+        focus_manager.exit_fullscreen();
         cx.notify();
     }
 
@@ -126,12 +152,13 @@ impl Workspace {
     /// Focus events propagate: terminal focus -> pane focus -> project awareness
     pub fn set_focused_terminal(
         &mut self,
+        focus_manager: &mut FocusManager,
         project_id: String,
         layout_path: Vec<usize>,
         cx: &mut Context<Self>,
     ) {
         // Update FocusManager
-        self.focus_manager.focus_terminal(project_id.clone(), layout_path.clone());
+        focus_manager.focus_terminal(project_id.clone(), layout_path.clone());
 
         // Record project access time for recency sorting
         self.touch_project(&project_id);
@@ -143,19 +170,16 @@ impl Workspace {
     ///
     /// This is typically called when entering a modal context (search, rename, etc.)
     /// The current focus is saved for restoration when the modal closes.
-    pub fn clear_focused_terminal(&mut self, cx: &mut Context<Self>) {
-        // Use FocusManager to save focus for restoration
-        self.focus_manager.enter_modal();
-        // Visual indicator remains during modal (FocusManager keeps current_focus)
+    pub fn clear_focused_terminal(&mut self, focus_manager: &mut FocusManager, cx: &mut Context<Self>) {
+        focus_manager.enter_modal();
         cx.notify();
     }
 
     /// Restore focused terminal after modal dismissal
     ///
     /// Called when exiting a modal context to restore the previous focus.
-    pub fn restore_focused_terminal(&mut self, cx: &mut Context<Self>) {
-        // Use FocusManager to restore focus
-        self.focus_manager.exit_modal();
+    pub fn restore_focused_terminal(&mut self, focus_manager: &mut FocusManager, cx: &mut Context<Self>) {
+        focus_manager.exit_modal();
         cx.notify();
     }
 
@@ -164,6 +188,7 @@ impl Workspace {
     /// This is a convenience method that looks up the layout path and calls set_focused_terminal.
     pub fn focus_terminal_by_id(
         &mut self,
+        focus_manager: &mut FocusManager,
         project_id: &str,
         terminal_id: &str,
         cx: &mut Context<Self>,
@@ -179,7 +204,7 @@ impl Workspace {
                     }
                     self.notify_data(cx);
                     // Focus the terminal without changing which projects are shown
-                    self.set_focused_terminal(project_id.to_string(), path, cx);
+                    self.set_focused_terminal(focus_manager, project_id.to_string(), path, cx);
                 }
             }
         }
@@ -189,6 +214,7 @@ impl Workspace {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
+    use crate::focus::FocusManager;
     use crate::state::{FolderData, WindowId, WindowState, Workspace, WorkspaceData};
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
@@ -220,16 +246,17 @@ mod gpui_tests {
         // Pins the round-trip semantic on the main path, byte-for-byte
         // identical to the pre-migration shape.
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+        let mut fm = FocusManager::new();
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_folder_focus(WindowId::Main, "f1", cx);
+            ws.toggle_folder_focus(&mut fm, WindowId::Main, "f1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data().main_window.folder_filter.as_deref(), Some("f1"));
         });
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_folder_focus(WindowId::Main, "f1", cx);
+            ws.toggle_folder_focus(&mut fm, WindowId::Main, "f1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(ws.data().main_window.folder_filter.is_none());
@@ -252,9 +279,10 @@ mod gpui_tests {
         let extra_b_id = extra_b.id;
         data.extra_windows = vec![extra_a, extra_b];
         let workspace = cx.new(|_cx| Workspace::new(data));
+        let mut fm = FocusManager::new();
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_folder_focus(WindowId::Extra(extra_a_id), "f1", cx);
+            ws.toggle_folder_focus(&mut fm, WindowId::Extra(extra_a_id), "f1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -283,16 +311,17 @@ mod gpui_tests {
         let extra_a_id = extra_a.id;
         data.extra_windows = vec![extra_a];
         let workspace = cx.new(|_cx| Workspace::new(data));
+        let mut fm = FocusManager::new();
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_folder_focus(WindowId::Extra(extra_a_id), "f1", cx);
+            ws.toggle_folder_focus(&mut fm, WindowId::Extra(extra_a_id), "f1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data().extra_windows[0].folder_filter.as_deref(), Some("f1"));
         });
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_folder_focus(WindowId::Extra(extra_a_id), "f1", cx);
+            ws.toggle_folder_focus(&mut fm, WindowId::Extra(extra_a_id), "f1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(ws.data().extra_windows[0].folder_filter.is_none());
@@ -312,10 +341,11 @@ mod gpui_tests {
         let mut data = make_workspace_data();
         data.main_window.folder_filter = Some("f1".to_string());
         let workspace = cx.new(|_cx| Workspace::new(data));
+        let mut fm = FocusManager::new();
         let unknown = uuid::Uuid::new_v4();
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_folder_focus(WindowId::Extra(unknown), "f1", cx);
+            ws.toggle_folder_focus(&mut fm, WindowId::Extra(unknown), "f1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {

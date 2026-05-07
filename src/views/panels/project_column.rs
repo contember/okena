@@ -20,7 +20,7 @@ use okena_core::api::ActionRequest;
 use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 use okena_views_services::service_panel::ServicePanel;
 use crate::views::panels::hook_panel::HookPanel;
-use crate::views::root::TerminalsRegistry;
+use crate::views::window::TerminalsRegistry;
 
 /// A single project column with header and layout
 pub struct ProjectColumn {
@@ -35,6 +35,7 @@ pub struct ProjectColumn {
     /// `toggle_project_overview_visibility` call.
     pub(crate) window_id: WindowId,
     workspace: Entity<Workspace>,
+    focus_manager: Entity<crate::workspace::focus::FocusManager>,
     request_broker: Entity<RequestBroker>,
     project_id: String,
     #[allow(dead_code)]
@@ -61,6 +62,7 @@ impl ProjectColumn {
     pub fn new(
         window_id: WindowId,
         workspace: Entity<Workspace>,
+        focus_manager: Entity<crate::workspace::focus::FocusManager>,
         request_broker: Entity<RequestBroker>,
         project_id: String,
         backend: Arc<dyn TerminalBackend>,
@@ -89,12 +91,13 @@ impl ProjectColumn {
         let service_panel = {
             let pid = project_id.clone();
             let ws = workspace.clone();
+            let fm = focus_manager.clone();
             let rb = request_broker.clone();
             let be = backend.clone();
             let ts = terminals.clone();
             let ad = active_drag.clone();
             cx.new(move |cx| {
-                ServicePanel::new(pid, ws, rb, be, ts, ad, initial_service_height, cx)
+                ServicePanel::new(pid, ws, fm, rb, be, ts, ad, initial_service_height, cx)
             })
         };
         // Observe service_panel so ProjectColumn re-renders when panel state changes
@@ -106,12 +109,13 @@ impl ProjectColumn {
         let hook_panel = {
             let pid = project_id.clone();
             let ws = workspace.clone();
+            let fm = focus_manager.clone();
             let rb = request_broker.clone();
             let be = backend.clone();
             let ts = terminals.clone();
             let ad = active_drag.clone();
             cx.new(move |cx| {
-                HookPanel::new(pid, ws, rb, be, ts, ad, initial_hook_height, cx)
+                HookPanel::new(pid, ws, fm, rb, be, ts, ad, initial_hook_height, cx)
             })
         };
         cx.observe(&hook_panel, |_, _, cx| cx.notify()).detach();
@@ -119,6 +123,7 @@ impl ProjectColumn {
         Self {
             window_id,
             workspace,
+            focus_manager,
             request_broker,
             project_id,
             backend,
@@ -241,6 +246,7 @@ impl ProjectColumn {
     fn ensure_layout_container(&mut self, project_path: String, cx: &mut Context<Self>) {
         if self.layout_container.is_none() {
             let workspace = self.workspace.clone();
+            let focus_manager = self.focus_manager.clone();
             let request_broker = self.request_broker.clone();
             let project_id = self.project_id.clone();
             let backend = self.backend.clone();
@@ -251,6 +257,7 @@ impl ProjectColumn {
             self.layout_container = Some(cx.new(move |_cx| {
                 LayoutContainer::new(
                     workspace,
+                    focus_manager,
                     request_broker,
                     project_id,
                     project_path,
@@ -363,6 +370,7 @@ impl ProjectColumn {
     fn render_header(&self, project: &ProjectData, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
         let workspace_for_hide = self.workspace.clone();
         let project_id = self.project_id.clone();
         let project_id_for_hide = self.project_id.clone();
@@ -551,8 +559,11 @@ impl ProjectColumn {
                                     })
                                     .on_click(move |_, _window, cx| {
                                         cx.stop_propagation();
-                                        workspace.update(cx, |ws, cx| {
-                                            ws.set_focused_project(Some(project_id.clone()), cx);
+                                        let pid = project_id.clone();
+                                        focus_manager.update(cx, |fm, cx| {
+                                            workspace.update(cx, |ws, cx| {
+                                                ws.set_focused_project(fm, Some(pid), cx);
+                                            });
                                         });
                                     })
                                     .child(

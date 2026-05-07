@@ -1,5 +1,6 @@
 //! Tab group operations: add, set-active, reorder.
 
+use crate::focus::FocusManager;
 use crate::state::{LayoutNode, Workspace};
 use gpui::*;
 
@@ -7,6 +8,7 @@ impl Workspace {
     /// Add a new tab - either to existing tab group (if parent is Tabs) or create new tab group
     pub fn add_tab(
         &mut self,
+        focus_manager: &mut FocusManager,
         project_id: &str,
         path: &[usize],
         cx: &mut Context<Self>,
@@ -20,7 +22,7 @@ impl Workspace {
                 if let Some(ref layout) = project.layout {
                     if let Some(LayoutNode::Tabs { .. }) = layout.get_at_path(parent_path) {
                         // Parent is Tabs - add new tab to the group
-                        self.add_tab_to_group(project_id, parent_path, cx);
+                        self.add_tab_to_group(focus_manager, project_id, parent_path, cx);
                         return;
                     }
                 }
@@ -41,12 +43,13 @@ impl Workspace {
         // Focus the new tab
         let mut new_path = path.to_vec();
         new_path.push(1);
-        self.set_focused_terminal(project_id.to_string(), new_path, cx);
+        self.set_focused_terminal(focus_manager, project_id.to_string(), new_path, cx);
     }
 
     /// Add a new tab to an existing Tabs container
     pub fn add_tab_to_group(
         &mut self,
+        focus_manager: &mut FocusManager,
         project_id: &str,
         tabs_path: &[usize],
         cx: &mut Context<Self>,
@@ -67,7 +70,7 @@ impl Workspace {
         // Focus the new tab
         let mut new_path = tabs_path.to_vec();
         new_path.push(new_tab_index);
-        self.set_focused_terminal(project_id.to_string(), new_path, cx);
+        self.set_focused_terminal(focus_manager, project_id.to_string(), new_path, cx);
     }
 
     /// Set active tab in a tabs container

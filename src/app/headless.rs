@@ -8,7 +8,7 @@ use super::observe_project_services;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
-use crate::views::root::TerminalsRegistry;
+use crate::views::window::TerminalsRegistry;
 use crate::workspace::persistence;
 use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
 use async_channel::Receiver;
@@ -201,15 +201,21 @@ impl HeadlessApp {
         // Start remote command bridge loop (shared with GUI)
         let local_backend: Arc<dyn TerminalBackend> =
             Arc::new(LocalBackend::new(pty_manager));
+        // Headless mode has no GUI window. Provide a standalone FocusManager
+        // so remote action methods that take `&mut FocusManager` still
+        // compile -- in headless the focus state never drives a render so it
+        // is effectively dormant.
+        let focus_manager = cx.new(|_| crate::workspace::focus::FocusManager::new());
         cx.spawn({
             let workspace = workspace.clone();
+            let focus_manager = focus_manager.clone();
             let terminals = terminals.clone();
             let state_version = state_version.clone();
             let git_status_tx = git_status_tx.clone();
             let service_manager = service_manager.clone();
             async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
                 remote_command_loop(
-                    bridge_rx, local_backend, workspace, terminals,
+                    bridge_rx, local_backend, workspace, focus_manager, terminals,
                     state_version, git_status_tx, service_manager, cx,
                 ).await;
             }

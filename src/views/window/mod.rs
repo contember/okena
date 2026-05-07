@@ -18,6 +18,7 @@ use crate::views::panels::status_bar::StatusBar;
 use crate::views::panels::toast::ToastOverlay;
 use crate::views::chrome::title_bar::TitleBar;
 use crate::settings::settings;
+use crate::workspace::focus::FocusManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
@@ -42,17 +43,32 @@ pub fn content_pane_registry() -> &'static ContentPaneRegistry {
     CONTENT_PANE_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-/// Root view of the application
-pub struct RootView {
+/// Per-window view of the application: one instance per OS window.
+///
+/// Owns the per-window UI state (sidebar, overlays, toasts, scroll handles,
+/// drag state, project columns) and addresses window-scoped state on the
+/// shared `Workspace` via its own `window_id`. The single OS window opened
+/// today hosts a `WindowView` for `WindowId::Main`; slice 05 spawns extras
+/// that mint distinct `WindowId::Extra(uuid)`s.
+pub struct WindowView {
     /// Identifies which window-scoped slot on the shared `Workspace` this
     /// view addresses (folder filter, hidden set, widths, collapse, focus
-    /// zoom). Today every reader of window-scoped state still passes
-    /// `WindowId::Main` literal at the call site; subsequent slice 03 commits
-    /// migrate those readers to route through `self.window_id`. Slice 05
-    /// then spawns extra windows that mint `WindowId::Extra(uuid)` and
-    /// thread it in here so each `RootView` (soon-to-be `WindowView`) sees
-    /// only its own per-window state.
+    /// zoom). Always `WindowId::Main` in single-window runtime; slice 05
+    /// spawns extras that mint distinct `WindowId::Extra(uuid)`s and thread
+    /// them in here so each `WindowView` sees only its own per-window state.
     window_id: WindowId,
+    /// Per-window focus state: terminal focus stack, project zoom,
+    /// fullscreen, modal context. Slice 03 of the multi-window plan moves
+    /// this off the shared `Workspace` entity onto each `WindowView` so
+    /// every window can zoom and modal-stack independently. Wrapped in
+    /// `Entity<FocusManager>` so child views (sidebar, project column,
+    /// terminal pane, layout container) can hold a handle to the same
+    /// instance and update it through `Entity::update` without needing
+    /// to route through `WindowView` first. Workspace action methods that
+    /// touched focus state (`set_focused_terminal`, `set_focused_project`,
+    /// etc.) now take `focus_manager: &mut FocusManager` as a parameter
+    /// so the focus mutation stays scoped to the window driving the action.
+    focus_manager: Entity<FocusManager>,
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
     backend: Arc<dyn TerminalBackend>,
@@ -102,22 +118,34 @@ pub struct RootView {
     last_project_paths: HashMap<String, String>,
 }
 
-impl RootView {
+impl WindowView {
     pub fn new(
         window_id: WindowId,
         workspace: Entity<Workspace>,
-        request_broker: Entity<RequestBroker>,
         pty_manager: Arc<PtyManager>,
         cx: &mut Context<Self>,
     ) -> Self {
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+
+        // Per-window UI request broker. Each window (slice 05 onward) owns its
+        // own queue so overlay/sidebar requests stay scoped to the window that
+        // produced them; closes slice 03 acceptance criterion that per-window
+        // UI entities are constructed inside `WindowView::new` rather than
+        // passed in from the `Okena` singleton.
+        let request_broker = cx.new(|_| RequestBroker::new());
+
+        // Per-window focus state: terminal focus stack, project zoom,
+        // fullscreen, modal context. Wrapped in Entity<FocusManager> so
+        // child views (sidebar, project column, terminal pane, layout
+        // container) can hold handles and update through Entity::update.
+        let focus_manager = cx.new(|_| FocusManager::new());
 
         // Create sidebar controller from current global settings
         let app_settings = settings(cx);
         let sidebar_ctrl = SidebarController::new(&app_settings);
 
         // Create sidebar entity once to preserve state
-        let sidebar = cx.new(|cx| Sidebar::new(window_id, workspace.clone(), request_broker.clone(), terminals.clone(), cx));
+        let sidebar = cx.new(|cx| Sidebar::new(window_id, workspace.clone(), focus_manager.clone(), request_broker.clone(), terminals.clone(), cx));
 
         // Create title bar entity (sync initial sidebar state)
         let sidebar_initially_open = sidebar_ctrl.is_open();
@@ -129,14 +157,15 @@ impl RootView {
 
         // Create status bar entity (sync initial sidebar state)
         let workspace_for_status = workspace.clone();
+        let focus_manager_for_status = focus_manager.clone();
         let status_bar = cx.new(|cx| {
-            let mut sb = StatusBar::new(workspace_for_status, cx);
+            let mut sb = StatusBar::new(workspace_for_status, focus_manager_for_status, cx);
             sb.set_sidebar_open(sidebar_initially_open, cx);
             sb
         });
 
         // Create overlay manager
-        let overlay_manager = cx.new(|_cx| OverlayManager::new(window_id, workspace.clone(), request_broker.clone()));
+        let overlay_manager = cx.new(|_cx| OverlayManager::new(window_id, workspace.clone(), focus_manager.clone(), request_broker.clone()));
 
         // Create toast overlay
         let toast_overlay = cx.new(ToastOverlay::new);
@@ -160,6 +189,7 @@ impl RootView {
         // Wire up sidebar callbacks
         {
             let workspace_for_dispatch = workspace.clone();
+            let focus_manager_for_dispatch = focus_manager.clone();
             let backend_for_dispatch = backend.clone();
             let terminals_for_dispatch = terminals.clone();
             sidebar.update(cx, |s, _cx| {
@@ -168,6 +198,7 @@ impl RootView {
                     if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
                         project_id,
                         &workspace_for_dispatch,
+                        &focus_manager_for_dispatch,
                         &Some(backend_for_dispatch.clone()),
                         &terminals_for_dispatch,
                         &None, // service_manager - wired later
@@ -191,6 +222,7 @@ impl RootView {
 
         let mut view = Self {
             window_id,
+            focus_manager,
             workspace,
             request_broker,
             backend,
@@ -222,11 +254,13 @@ impl RootView {
             last_project_paths: HashMap::new(),
         };
 
-        // Observe workspace to scroll focused project into view
-        cx.observe(&view.workspace, |this, workspace, cx| {
-            let ws = workspace.read(cx);
-            let is_project_focused = ws.focus_manager.focused_project_id().is_some();
-            let focused_terminal_project = ws.focus_manager
+        // Observe focus_manager to scroll focused project into view.
+        // (Workspace observers no longer fire on focus changes since
+        // focus moved off the Workspace entity in slice 03.)
+        cx.observe(&view.focus_manager, |this, fm, cx| {
+            let fm = fm.read(cx);
+            let is_project_focused = fm.focused_project_id().is_some();
+            let focused_terminal_project = fm
                 .focused_terminal_state()
                 .map(|f| f.project_id.clone());
 
@@ -242,7 +276,12 @@ impl RootView {
             }
 
             this.was_project_focused = is_project_focused;
+            cx.notify();
+        }).detach();
 
+        // Observe workspace data changes so project path renames refresh
+        // cached git providers / service paths.
+        cx.observe(&view.workspace, |this, _workspace, cx| {
             this.refresh_for_project_path_changes(cx);
         }).detach();
 
@@ -272,6 +311,16 @@ impl RootView {
         self.window_id
     }
 
+    /// Per-window focus state, owned by this WindowView. Returned as an
+    /// `Entity<FocusManager>` handle so callers (children, sibling views)
+    /// can `update`/`read` it without going through `WindowView`. Workspace
+    /// action methods that mutate focus (`set_focused_terminal`,
+    /// `set_focused_project`, etc.) take `&mut FocusManager` as a parameter,
+    /// supplied via `focus_manager.update(cx, |fm, cx| ws.method(fm, ...))`.
+    pub fn focus_manager(&self) -> Entity<FocusManager> {
+        self.focus_manager.clone()
+    }
+
     /// Set the git watcher entity (called by Okena after creation).
     pub fn set_git_watcher(&mut self, watcher: Entity<GitStatusWatcher>, cx: &mut Context<Self>) {
         self.git_watcher = Some(watcher);
@@ -284,8 +333,9 @@ impl RootView {
     pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
         // Observe remote manager and sync remote projects into workspace
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
         cx.observe(&manager, move |this, rm, cx| {
-            Self::sync_remote_projects_into_workspace(&workspace, &rm, cx);
+            Self::sync_remote_projects_into_workspace(&workspace, &focus_manager, &rm, cx);
             this.sync_project_columns(cx);
             cx.notify();
         }).detach();
@@ -365,6 +415,7 @@ impl RootView {
     /// Rebuild the sidebar dispatch action callback with current service/remote managers.
     fn rebuild_sidebar_dispatch(&self, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
         let backend = self.backend.clone();
         let terminals = self.terminals.clone();
         let service_manager = self.service_manager.clone();
@@ -374,6 +425,7 @@ impl RootView {
                 if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
                     project_id,
                     &workspace,
+                    &focus_manager,
                     &Some(backend.clone()),
                     &terminals,
                     &service_manager,
@@ -389,6 +441,7 @@ impl RootView {
     /// Sync remote connection state into workspace as materialized ProjectData entries.
     fn sync_remote_projects_into_workspace(
         workspace: &Entity<Workspace>,
+        focus_manager: &Entity<FocusManager>,
         rm: &Entity<RemoteConnectionManager>,
         cx: &mut Context<Self>,
     ) {
@@ -623,29 +676,31 @@ impl RootView {
 
         // Focus newly appeared terminals for projects that had a pending CreateTerminal.
         if !old_terminal_ids.is_empty() {
-            workspace.update(cx, |ws, cx| {
-                let pending: Vec<String> = ws.drain_pending_remote_focus();
-                for pid in pending {
-                    let old_ids = match old_terminal_ids.get(&pid) {
-                        Some(ids) => ids,
-                        None => continue,
-                    };
-                    let new_ids = match ws.project(&pid).and_then(|p| p.layout.as_ref()) {
-                        Some(layout) => layout.collect_terminal_ids(),
-                        None => continue,
-                    };
-                    // Find the first terminal ID that wasn't in the old set
-                    let old_set: std::collections::HashSet<&str> =
-                        old_ids.iter().map(|s| s.as_str()).collect();
-                    if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str())) {
-                        if let Some(path) = ws.project(&pid)
-                            .and_then(|p| p.layout.as_ref())
-                            .and_then(|l| l.find_terminal_path(new_tid))
-                        {
-                            ws.set_focused_terminal(pid.clone(), path, cx);
+            focus_manager.update(cx, |fm, cx| {
+                workspace.update(cx, |ws, cx| {
+                    let pending: Vec<String> = ws.drain_pending_remote_focus();
+                    for pid in pending {
+                        let old_ids = match old_terminal_ids.get(&pid) {
+                            Some(ids) => ids,
+                            None => continue,
+                        };
+                        let new_ids = match ws.project(&pid).and_then(|p| p.layout.as_ref()) {
+                            Some(layout) => layout.collect_terminal_ids(),
+                            None => continue,
+                        };
+                        // Find the first terminal ID that wasn't in the old set
+                        let old_set: std::collections::HashSet<&str> =
+                            old_ids.iter().map(|s| s.as_str()).collect();
+                        if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str())) {
+                            if let Some(path) = ws.project(&pid)
+                                .and_then(|p| p.layout.as_ref())
+                                .and_then(|l| l.find_terminal_path(new_tid))
+                            {
+                                ws.set_focused_terminal(fm, pid.clone(), path, cx);
+                            }
                         }
                     }
-                }
+                });
             });
         }
 
@@ -701,7 +756,8 @@ impl RootView {
     fn sync_project_columns(&mut self, cx: &mut Context<Self>) {
         let visible_projects: Vec<(String, bool, Option<String>)> = {
             let ws = self.workspace.read(cx);
-            ws.visible_projects().iter().map(|p| {
+            let fm = self.focus_manager.read(cx);
+            ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| {
                 (p.id.clone(), p.is_remote, p.connection_id.clone())
             }).collect()
         };
@@ -747,16 +803,19 @@ impl RootView {
             .and_then(|rm| rm.read(cx).backend_for(conn_id))?;
 
         let workspace_clone = self.workspace.clone();
+        let focus_manager_clone = self.focus_manager.clone();
         let request_broker_clone = self.request_broker.clone();
         let terminals_clone = self.terminals.clone();
         let active_drag_clone = self.active_drag.clone();
         let id = project_id.to_string();
         let workspace_for_dispatch = self.workspace.clone();
+        let focus_manager_for_dispatch = self.focus_manager.clone();
         let action_dispatcher = self.remote_manager.as_ref().map(|rm| {
             crate::action_dispatch::ActionDispatcher::Remote {
                 connection_id: conn_id.to_string(),
                 manager: rm.clone(),
                 workspace: workspace_for_dispatch,
+                focus_manager: focus_manager_for_dispatch,
             }
         });
         let ws_for_observe = self.workspace.clone();
@@ -768,6 +827,7 @@ impl RootView {
             let mut col = ProjectColumn::new(
                 window_id,
                 workspace_clone,
+                focus_manager_clone,
                 request_broker_clone,
                 id,
                 backend,
@@ -792,12 +852,14 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Entity<ProjectColumn> {
         let workspace_clone = self.workspace.clone();
+        let focus_manager_clone = self.focus_manager.clone();
         let request_broker_clone = self.request_broker.clone();
         let terminals_clone = self.terminals.clone();
         let active_drag_clone = self.active_drag.clone();
         let id = project_id.to_string();
         let backend_clone = self.backend.clone();
         let workspace_for_dispatch = self.workspace.clone();
+        let focus_manager_for_dispatch = self.focus_manager.clone();
         let backend_for_dispatch = self.backend.clone();
         let terminals_for_dispatch = self.terminals.clone();
         let git_watcher = self.git_watcher.clone();
@@ -818,6 +880,7 @@ impl RootView {
             let mut col = ProjectColumn::new(
                 window_id,
                 workspace_clone,
+                focus_manager_clone,
                 request_broker_clone,
                 id,
                 backend_clone,
@@ -830,6 +893,7 @@ impl RootView {
             col.set_action_dispatcher(Some(
                 crate::action_dispatch::ActionDispatcher::Local {
                     workspace: workspace_for_dispatch,
+                    focus_manager: focus_manager_for_dispatch,
                     backend: backend_for_dispatch,
                     terminals: terminals_for_dispatch,
                     service_manager: None, // set later via set_service_manager
@@ -844,4 +908,4 @@ impl RootView {
     }
 }
 
-impl_focusable!(RootView);
+impl_focusable!(WindowView);

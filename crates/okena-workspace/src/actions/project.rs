@@ -3,6 +3,7 @@
 //! Actions for creating, modifying, and deleting projects.
 
 use okena_core::theme::FolderColor;
+use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
 use crate::state::{LayoutNode, ProjectData, Workspace, WindowId};
@@ -116,7 +117,7 @@ impl Workspace {
     }
 
     /// Add a new terminal to a project by splitting the root layout
-    pub fn add_terminal(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn add_terminal(&mut self, focus_manager: &mut FocusManager, project_id: &str, cx: &mut Context<Self>) {
         if let Some(project) = self.project_mut(project_id) {
             if let Some(ref old_layout) = project.layout {
                 let old_layout = old_layout.clone();
@@ -137,7 +138,7 @@ impl Workspace {
             .and_then(|p| p.layout.as_ref())
             .and_then(|l| l.find_uninitialized_terminal_path());
         if let Some(path) = new_path {
-            self.set_focused_terminal(project_id.to_string(), path, cx);
+            self.set_focused_terminal(focus_manager, project_id.to_string(), path, cx);
         }
     }
 
@@ -231,7 +232,7 @@ impl Workspace {
     }
 
     /// Delete a project
-    pub fn delete_project(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
+    pub fn delete_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
         // Queue all project terminals for killing before removing state.
         // Okena (which owns PtyManager) drains this queue via observer.
         if let Some(project) = self.project(project_id) {
@@ -288,12 +289,12 @@ impl Workspace {
         // Clear closing state
         self.lifecycle.finish_closing(project_id);
         // Clear focus if this was the focused project
-        if self.focus_manager.focused_project_id().map(|s| s.as_str()) == Some(project_id) {
-            self.focus_manager.set_focused_project_id(None);
+        if focus_manager.focused_project_id().map(|s| s.as_str()) == Some(project_id) {
+            focus_manager.set_focused_project_id(None);
         }
         // Exit fullscreen if this project's terminal was in fullscreen
-        if self.focus_manager.fullscreen_project_id() == Some(project_id) {
-            self.focus_manager.exit_fullscreen();
+        if focus_manager.fullscreen_project_id() == Some(project_id) {
+            focus_manager.exit_fullscreen();
         }
         self.notify_data(cx);
 
@@ -749,7 +750,7 @@ impl Workspace {
 
     /// Remove a worktree project and its git worktree
 
-    pub fn remove_worktree_project(&mut self, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> Result<(), String> {
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
 
@@ -782,7 +783,7 @@ impl Workspace {
             .map_err(|e| e.to_string())?;
 
         // Delete the project from workspace (this also fires on_project_close)
-        self.delete_project(project_id, global_hooks, cx);
+        self.delete_project(focus_manager, project_id, global_hooks, cx);
 
         Ok(())
     }
@@ -954,6 +955,7 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
+    use crate::focus::FocusManager;
     use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
     use okena_core::theme::FolderColor;
@@ -1031,7 +1033,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("p1", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "p1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1461,7 +1463,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("p1", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "p1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1502,7 +1504,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("p1", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "p1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1590,7 +1592,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("wt1", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "wt1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1610,7 +1612,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("parent", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "parent", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1648,7 +1650,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_terminal("p1", cx);
+            ws.add_terminal(&mut FocusManager::new(), "p1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {

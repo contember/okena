@@ -42,6 +42,7 @@ enum ProcessingState {
 /// Checks for dirty state and optionally merges the branch back.
 pub struct CloseWorktreeDialog {
     workspace: Entity<Workspace>,
+    focus_manager: Entity<okena_workspace::focus::FocusManager>,
     focus_handle: FocusHandle,
     project_id: String,
     project_name: String,
@@ -64,6 +65,7 @@ pub struct CloseWorktreeDialog {
 impl CloseWorktreeDialog {
     pub fn new(
         workspace: Entity<Workspace>,
+        focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         worktree_config: WorktreeConfig,
         hooks_config: HooksConfig,
@@ -86,6 +88,7 @@ impl CloseWorktreeDialog {
 
         Self {
             workspace,
+            focus_manager,
             focus_handle: cx.focus_handle(),
             project_id,
             project_name,
@@ -144,6 +147,7 @@ impl CloseWorktreeDialog {
         let delete_branch_enabled = self.delete_branch_enabled;
         let is_dirty = self.is_dirty;
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
 
         // Read hooks config and monitor before spawning
         let ws = workspace.read(cx);
@@ -564,8 +568,10 @@ impl CloseWorktreeDialog {
                 });
 
                 cx.update(|cx| {
-                    let result = workspace.update(cx, |ws, cx| {
-                        ws.remove_worktree_project(&project_id, force_remove, &global_hooks, cx)
+                    let result = focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.remove_worktree_project(fm, &project_id, force_remove, &global_hooks, cx)
+                        })
                     });
 
                     match result {

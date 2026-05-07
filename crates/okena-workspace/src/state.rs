@@ -31,10 +31,13 @@ impl Global for GlobalWorkspace {}
 ///
 /// Composes focused helper types by ownership. `Workspace` itself is a
 /// coordinator — it does not own the raw transient HashSets/HashMaps directly.
+///
+/// Per slice 03 of the multi-window plan, `FocusManager` is no longer a field
+/// here; each `WindowView` owns its own. Action methods that touch focus state
+/// take `focus_manager: &mut FocusManager` as a parameter so the focus
+/// mutation stays scoped to the window driving the action.
 pub struct Workspace {
     pub data: WorkspaceData,
-    /// Unified focus manager for the workspace.
-    pub focus_manager: FocusManager,
     /// Transient project lifecycle state (creating / closing / removing).
     pub lifecycle: ProjectLifecycleTracker,
     /// Remote-sync coordination state (pending focus, remote snapshots).
@@ -52,7 +55,6 @@ impl Workspace {
     pub fn new(data: WorkspaceData) -> Self {
         Self {
             data,
-            focus_manager: FocusManager::new(),
             lifecycle: ProjectLifecycleTracker::new(),
             remote_sync: RemoteSyncState::new(),
             access_history: ProjectAccessHistory::new(),
@@ -82,9 +84,9 @@ impl Workspace {
 
     /// Replace workspace data wholesale (e.g. from disk reload).
     /// Does NOT bump data_version — the data came from disk, not a user edit.
-    pub fn replace_data(&mut self, data: WorkspaceData, cx: &mut Context<Self>) {
+    pub fn replace_data(&mut self, focus_manager: &mut FocusManager, data: WorkspaceData, cx: &mut Context<Self>) {
         self.data = data;
-        self.focus_manager.clear_all();
+        focus_manager.clear_all();
         cx.notify();
     }
 
@@ -431,22 +433,24 @@ impl Workspace {
         &self.data.projects
     }
 
-    /// Get the currently focused/zoomed project ID.
-    /// Delegates to FocusManager (single source of truth).
-    pub fn focused_project_id(&self) -> Option<&String> {
-        self.focus_manager.focused_project_id()
-    }
-
     /// Get visible projects in order, expanding folders into their contained projects.
     /// When a folder filter is active, only projects from that folder are shown
     /// (top-level projects are hidden). Focused project override still takes priority.
-    pub fn visible_projects(&self) -> Vec<&ProjectData> {
+    ///
+    /// Per slice 03 of the multi-window plan, callers pass the focused
+    /// project id and individual-mode flag from their per-window
+    /// `FocusManager` -- visibility is now scoped to the calling window.
+    pub fn visible_projects(
+        &self,
+        focused_project_id: Option<&String>,
+        focus_individual: bool,
+    ) -> Vec<&ProjectData> {
         // Source folder filter (and hidden set / widths / collapse map) from
         // the main window's persisted WindowState.
         compute_visible_projects(
             &self.data,
-            self.focused_project_id(),
-            self.focus_manager.is_focus_individual(),
+            focused_project_id,
+            focus_individual,
             &self.data.main_window,
         )
     }
@@ -546,7 +550,7 @@ impl Workspace {
 
     /// Remove all remote projects (and their folder) for a given connection_id.
     #[allow(dead_code)]
-    pub fn remove_remote_projects(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+    pub fn remove_remote_projects(&mut self, focus_manager: &mut FocusManager, connection_id: &str, cx: &mut Context<Self>) {
         let prefix = format!("remote:{}:", connection_id);
 
         self.data.projects.retain(|p| !p.id.starts_with(&prefix));
@@ -556,9 +560,9 @@ impl Workspace {
 
         self.remote_sync.retain_not_starting_with(&prefix);
 
-        if let Some(focused) = self.focus_manager.focused_project_id() {
+        if let Some(focused) = focus_manager.focused_project_id() {
             if focused.starts_with(&prefix) {
-                self.focus_manager.set_focused_project_id(None);
+                focus_manager.set_focused_project_id(None);
             }
         }
 
@@ -668,7 +672,7 @@ mod workspace_tests {
         data.main_window.hidden_project_ids.insert("p2".to_string());
         let ws = Workspace::new(data);
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "p3");
@@ -681,11 +685,12 @@ mod workspace_tests {
             vec!["p1", "p2", "p3"],
         );
         data.main_window.hidden_project_ids.insert("p3".to_string());
-        let mut ws = Workspace::new(data);
+        let ws = Workspace::new(data);
 
-        ws.focus_manager.set_focused_project_id(Some("p3".to_string()));
+        let mut fm = crate::focus::FocusManager::new();
+        fm.set_focused_project_id(Some("p3".to_string()));
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual());
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "p3");
     }
@@ -705,7 +710,7 @@ mod workspace_tests {
 
         let ws = Workspace::new(data);
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "p2");
@@ -806,16 +811,16 @@ mod workspace_tests {
 
         let mut ws = Workspace::new(data);
 
-        assert_eq!(ws.visible_projects().len(), 5);
+        assert_eq!(ws.visible_projects(None, false).len(), 5);
 
         ws.data.main_window.folder_filter = Some("f1".to_string());
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "p2");
 
         ws.data.main_window.folder_filter = Some("f2".to_string());
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p3");
         assert_eq!(visible[1].id, "p4");
@@ -840,7 +845,7 @@ mod workspace_tests {
         let mut ws = Workspace::new(data);
         ws.data.main_window.folder_filter = Some("f1".to_string());
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 2);
         assert!(visible.iter().all(|p| p.id != "p3"));
     }
@@ -870,22 +875,23 @@ mod workspace_tests {
             vec![p1, w1, w2, make_project("p2")],
             vec!["p1", "p2"],
         );
-        let mut ws = Workspace::new(data);
+        let ws = Workspace::new(data);
+        let mut fm = crate::focus::FocusManager::new();
 
-        ws.focus_manager.set_focused_project_id(Some("p1".to_string()));
-        let visible = ws.visible_projects();
+        fm.set_focused_project_id(Some("p1".to_string()));
+        let visible = ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual());
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "w1");
         assert_eq!(visible[2].id, "w2");
 
-        ws.focus_manager.set_focused_project_id(Some("w1".to_string()));
-        let visible = ws.visible_projects();
+        fm.set_focused_project_id(Some("w1".to_string()));
+        let visible = ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual());
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "w1");
 
-        ws.focus_manager.set_focused_project_id(None);
-        let visible = ws.visible_projects();
+        fm.set_focused_project_id(None);
+        let visible = ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual());
         assert_eq!(visible.len(), 4);
     }
 
@@ -923,10 +929,10 @@ mod workspace_tests {
 
         let mut ws = Workspace::new(data);
 
-        assert_eq!(ws.visible_projects().len(), 4);
+        assert_eq!(ws.visible_projects(None, false).len(), 4);
 
         ws.data.main_window.folder_filter = Some("f1".to_string());
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "w1");
@@ -961,7 +967,7 @@ mod workspace_tests {
         let mut ws = Workspace::new(data);
         ws.data.main_window.folder_filter = Some("f1".to_string());
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 2);
         assert_eq!(visible.iter().filter(|p| p.id == "w1").count(), 1);
     }
@@ -1000,7 +1006,7 @@ mod workspace_tests {
         ];
 
         let ws = Workspace::new(data);
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
 
         assert_eq!(visible.len(), 4);
         assert_eq!(visible[0].id, "p1");
@@ -1044,7 +1050,7 @@ mod workspace_tests {
         ];
 
         let ws = Workspace::new(data);
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
 
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
@@ -1087,7 +1093,7 @@ mod workspace_tests {
         ];
 
         let ws = Workspace::new(data);
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
 
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "w1");
@@ -1125,7 +1131,7 @@ mod workspace_tests {
         ];
 
         let ws = Workspace::new(data);
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
 
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "p1");
@@ -1152,7 +1158,7 @@ mod workspace_tests {
         data.main_window.hidden_project_ids.insert("p1".to_string());
         let ws = Workspace::new(data);
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "w1");
     }
@@ -1176,9 +1182,10 @@ mod workspace_tests {
         let mut ws = Workspace::new(data);
         ws.data.main_window.folder_filter = Some("f1".to_string());
 
-        ws.focus_manager.set_focused_project_id(Some("p3".to_string()));
+        let mut fm = crate::focus::FocusManager::new();
+        fm.set_focused_project_id(Some("p3".to_string()));
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual());
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "p3");
     }
@@ -1206,7 +1213,7 @@ mod workspace_tests {
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let ws = Workspace::new(data);
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "parent");
         assert_eq!(visible[1].id, "wt1");
@@ -1235,7 +1242,7 @@ mod workspace_tests {
         }];
         let ws = Workspace::new(data);
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "parent");
         assert_eq!(visible[1].id, "wt1");
@@ -1263,10 +1270,11 @@ mod workspace_tests {
             branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
-        let mut ws = Workspace::new(data);
-        ws.focus_manager.set_focused_project_id(Some("parent".to_string()));
+        let ws = Workspace::new(data);
+        let mut fm = crate::focus::FocusManager::new();
+        fm.set_focused_project_id(Some("parent".to_string()));
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual());
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "parent");
         assert_eq!(visible[1].id, "wt1");
@@ -1294,10 +1302,11 @@ mod workspace_tests {
             branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
-        let mut ws = Workspace::new(data);
-        ws.focus_manager.set_focused_project_id(Some("wt1".to_string()));
+        let ws = Workspace::new(data);
+        let mut fm = crate::focus::FocusManager::new();
+        fm.set_focused_project_id(Some("wt1".to_string()));
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual());
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "wt1");
     }
@@ -1323,15 +1332,16 @@ mod workspace_tests {
             branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
-        let mut ws = Workspace::new(data);
+        let ws = Workspace::new(data);
+        let mut fm = crate::focus::FocusManager::new();
 
-        ws.focus_manager.set_focused_project_id_individual(Some("parent".to_string()));
-        let visible = ws.visible_projects();
+        fm.set_focused_project_id_individual(Some("parent".to_string()));
+        let visible = ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual());
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "parent");
 
-        ws.focus_manager.set_focused_project_id(Some("parent".to_string()));
-        let visible = ws.visible_projects();
+        fm.set_focused_project_id(Some("parent".to_string()));
+        let visible = ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual());
         assert_eq!(visible.len(), 3);
     }
 
@@ -1355,7 +1365,7 @@ mod workspace_tests {
         data.main_window.folder_filter = Some("f1".to_string());
         let ws = Workspace::new(data);
 
-        let visible = ws.visible_projects();
+        let visible = ws.visible_projects(None, false);
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "p2");
@@ -1473,24 +1483,22 @@ mod gpui_tests {
 
     #[gpui::test]
     fn test_replace_data_resets_focus(cx: &mut gpui::TestAppContext) {
+        use crate::focus::FocusManager;
+
         let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
         let workspace = cx.new(|_cx| Workspace::new(data));
+        let mut fm = FocusManager::new();
 
-        workspace.update(cx, |ws: &mut Workspace, _cx| {
-            ws.focus_manager.set_focused_project_id(Some("p1".to_string()));
-        });
-
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.focused_project_id().is_some());
-        });
+        fm.set_focused_project_id(Some("p1".to_string()));
+        assert!(fm.focused_project_id().is_some());
 
         let new_data = make_workspace_data(vec![make_project("p2")], vec!["p2"]);
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.replace_data(new_data, cx);
+            ws.replace_data(&mut fm, new_data, cx);
         });
 
+        assert!(fm.focused_project_id().is_none());
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.focused_project_id().is_none());
             assert_eq!(ws.data().projects.len(), 1);
             assert_eq!(ws.data().projects[0].id, "p2");
         });
@@ -1507,7 +1515,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let visible = ws.visible_projects();
+            let visible = ws.visible_projects(None, false);
             assert_eq!(visible.len(), 1);
             assert_eq!(visible[0].id, "p2");
         });
@@ -1517,7 +1525,7 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let visible = ws.visible_projects();
+            let visible = ws.visible_projects(None, false);
             assert_eq!(visible.len(), 2);
             assert_eq!(visible[0].id, "p1");
             assert_eq!(visible[1].id, "p2");
@@ -1560,7 +1568,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.remove_remote_projects("conn1", cx);
+            ws.remove_remote_projects(&mut crate::focus::FocusManager::new(), "conn1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1600,7 +1608,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let visible = ws.visible_projects();
+            let visible = ws.visible_projects(None, false);
             assert_eq!(visible.len(), 2);
             assert_eq!(visible[0].id, "local1");
             assert_eq!(visible[1].id, "remote:conn1:p1");

@@ -13,7 +13,7 @@ pub use descriptions::get_action_descriptions;
 #[allow(unused_imports)]
 pub use types::{ActionDescription, KeybindingConflict, KeybindingEntry};
 
-// App-level actions (handled by root view, overlay manager, sidebar)
+// App-level actions (handled by window view, overlay manager, sidebar)
 actions!(
     okena,
     [
