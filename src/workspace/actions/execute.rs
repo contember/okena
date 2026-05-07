@@ -464,7 +464,7 @@ pub fn execute_action(
             }
         }
         ActionRequest::AddProject { name, path } => {
-            let project_id = ws.add_project(name, path, true, &settings(cx).hooks, cx);
+            let project_id = ws.add_project(name, path, true, &settings(cx).hooks, window_id, cx);
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
         ActionRequest::ReorderProjectInFolder {
@@ -696,7 +696,7 @@ pub fn execute_action(
             let (worktree_path, wt_project_path) = okena_git::compute_target_paths(&git_root, &subdir, &path_template, &branch);
             let global_hooks = settings(cx).hooks.clone();
 
-            match ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &wt_project_path, create_branch, &global_hooks, cx) {
+            match ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &wt_project_path, create_branch, &global_hooks, window_id, cx) {
                 Ok(new_project_id) => {
                     let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, cx);
                     let terminal_id = ws.project(&new_project_id)

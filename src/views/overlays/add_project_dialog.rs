@@ -9,7 +9,7 @@ use crate::views::components::{
     modal_header, PathAutoCompleteState, SimpleInput, SimpleInputState,
 };
 use okena_ui::dialog_actions::dialog_actions;
-use crate::workspace::state::Workspace;
+use crate::workspace::state::{WindowId, Workspace};
 use crate::ui::tokens::{ui_text_md, ui_text_ms};
 use gpui::prelude::*;
 use gpui::*;
@@ -27,6 +27,11 @@ enum AddProjectTarget {
 
 pub struct AddProjectDialog {
     workspace: Entity<Workspace>,
+    /// Spawning window for the multi-window new-project visibility rule
+    /// (PRD user story 14): the new project lands visible in this window
+    /// only, hidden in every other window. Threaded from the originating
+    /// `WindowView` through `OverlayManager::toggle_add_project_dialog`.
+    window_id: WindowId,
     remote_manager: Option<Entity<RemoteConnectionManager>>,
     focus_handle: FocusHandle,
     name_input: Entity<SimpleInputState>,
@@ -48,6 +53,7 @@ impl AddProjectDialog {
     pub fn new(
         workspace: Entity<Workspace>,
         remote_manager: Option<Entity<RemoteConnectionManager>>,
+        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter project name..."));
@@ -69,6 +75,7 @@ impl AddProjectDialog {
 
         Self {
             workspace,
+            window_id,
             remote_manager,
             focus_handle: cx.focus_handle(),
             name_input,
@@ -102,8 +109,9 @@ impl AddProjectDialog {
 
         match self.targets.get(self.selected_target) {
             Some(AddProjectTarget::Local) | None => {
+                let window_id = self.window_id;
                 self.workspace.update(cx, |ws, cx| {
-                    ws.add_project(name, path, true, &settings(cx).hooks, cx);
+                    ws.add_project(name, path, true, &settings(cx).hooks, window_id, cx);
                 });
             }
             Some(AddProjectTarget::Remote {

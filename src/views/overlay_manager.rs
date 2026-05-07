@@ -419,7 +419,8 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
-            let entity = cx.new(|cx| AddProjectDialog::new(workspace, remote_manager, cx));
+            let window_id = self.window_id;
+            let entity = cx.new(|cx| AddProjectDialog::new(workspace, remote_manager, window_id, cx));
             cx.subscribe(&entity, |this, _, event: &AddProjectDialogEvent, cx| {
                 if event.is_close() {
                     this.close_modal(cx);
@@ -633,9 +634,10 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
+        let window_id = self.window_id;
         let app_settings = crate::settings::settings(cx);
         let dialog = cx.new(|cx| {
-            WorktreeDialog::new(workspace, project_id, project_path, app_settings.worktree, app_settings.hooks, cx)
+            WorktreeDialog::new(workspace, project_id, project_path, app_settings.worktree, app_settings.hooks, window_id, cx)
         });
         cx.subscribe(&dialog, |this, _, event: &WorktreeDialogEvent, cx| {
             match event {
@@ -1136,8 +1138,9 @@ impl OverlayManager {
 
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
+        let window_id = self.window_id;
         let hooks = crate::settings::settings(cx).hooks.clone();
-        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, focus_manager, project_id, position, hooks, cx));
+        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, focus_manager, project_id, position, hooks, window_id, cx));
 
         cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
             if event.is_close() {

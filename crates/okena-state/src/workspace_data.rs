@@ -1129,6 +1129,138 @@ mod tests {
     }
 
     #[test]
+    fn add_project_hide_in_other_windows_main_spawn_inserts_in_extras_only() {
+        // PRD user story 14 + slice 06 cri 6: "add_project_from_window with
+        // two extras present -- project ID is in both extras' hidden set,
+        // not in main_window.hidden_project_ids." Pin the rule's main-spawn
+        // direction: id lands in every extra; main stays clean so the new
+        // project is visible there.
+        let mut data = make_workspace();
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        data.extra_windows = vec![extra_a, extra_b];
+
+        data.add_project_hide_in_other_windows("p1", WindowId::Main);
+
+        assert!(!data.main_window.hidden_project_ids.contains("p1"));
+        let after_a = data.window(WindowId::Extra(extra_a_id)).unwrap();
+        assert!(after_a.hidden_project_ids.contains("p1"));
+        let after_b = data.window(WindowId::Extra(extra_b_id)).unwrap();
+        assert!(after_b.hidden_project_ids.contains("p1"));
+    }
+
+    #[test]
+    fn add_project_hide_in_other_windows_extra_spawn_inserts_in_main_and_other_extras() {
+        // PRD user story 14 + slice 06 cri 7: "same call with WindowId::Extra
+        // -- main's hidden set gets it, the targeted extra's does not." Pin
+        // the extra-spawn direction: id lands in main + every sibling extra,
+        // but the spawning extra stays clean so the new project is visible
+        // there. Defends against a regression that always writes to main or
+        // skips the wrong extra.
+        let mut data = make_workspace();
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        data.extra_windows = vec![extra_a, extra_b];
+
+        data.add_project_hide_in_other_windows("p1", WindowId::Extra(extra_a_id));
+
+        assert!(data.main_window.hidden_project_ids.contains("p1"));
+        let after_a = data.window(WindowId::Extra(extra_a_id)).unwrap();
+        assert!(!after_a.hidden_project_ids.contains("p1"));
+        let after_b = data.window(WindowId::Extra(extra_b_id)).unwrap();
+        assert!(after_b.hidden_project_ids.contains("p1"));
+    }
+
+    #[test]
+    fn add_project_hide_in_other_windows_no_extras_main_spawn_is_noop() {
+        // Single-window case: zero extras + spawn from Main -> no other
+        // window exists to hide in, main stays clean. Slice 06 notes line 41:
+        // "If only main exists (zero extras), the helper degenerates to a
+        // no-op for the hide-elsewhere step. Single-window users see no
+        // behavior change." Pre-populate main with a sibling project's
+        // hidden state to ensure the call doesn't accidentally touch other
+        // entries on main.
+        let mut data = make_workspace();
+        data.main_window.hidden_project_ids.insert("sibling".to_string());
+
+        data.add_project_hide_in_other_windows("p1", WindowId::Main);
+
+        assert!(!data.main_window.hidden_project_ids.contains("p1"));
+        // Sibling state preserved.
+        assert!(data.main_window.hidden_project_ids.contains("sibling"));
+    }
+
+    #[test]
+    fn add_project_hide_in_other_windows_unknown_extra_hides_everywhere() {
+        // Defensive contract: an Extra(uuid) that does not match any live
+        // extra (e.g. caller raced a close, or a sentinel id signaling "no
+        // spawning window") falls through both the main-skip and the
+        // extra-skip and inserts the id into every window. The new project
+        // has no live viewport that would benefit from default visibility,
+        // so the rule degenerates to fully hidden. Mirrors the silent-no-op
+        // shape of window-scoped setters targeting unknown extras.
+        let mut data = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+
+        let unknown = uuid::Uuid::new_v4();
+        data.add_project_hide_in_other_windows("p1", WindowId::Extra(unknown));
+
+        assert!(data.main_window.hidden_project_ids.contains("p1"));
+        let after = data.window(WindowId::Extra(extra_id)).unwrap();
+        assert!(after.hidden_project_ids.contains("p1"));
+    }
+
+    #[test]
+    fn add_project_hide_in_other_windows_idempotent_on_duplicate_call() {
+        // Running the same rule twice for the same id is a no-op on the
+        // second pass. Pins the contract that re-applying the rule (e.g.
+        // a caller that defensively re-runs after a state-mutation path)
+        // doesn't toggle visibility back on. HashSet::insert returns bool
+        // but never panics on duplicate; the test pins that we don't rely
+        // on first-insert semantics.
+        let mut data = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+
+        data.add_project_hide_in_other_windows("p1", WindowId::Main);
+        data.add_project_hide_in_other_windows("p1", WindowId::Main);
+
+        let after = data.window(WindowId::Extra(extra_id)).unwrap();
+        assert!(after.hidden_project_ids.contains("p1"));
+        assert_eq!(after.hidden_project_ids.iter().filter(|id| *id == "p1").count(), 1);
+    }
+
+    #[test]
+    fn add_project_hide_in_other_windows_does_not_touch_widths_or_filter() {
+        // The rule is scoped to hidden_project_ids. Sibling per-window
+        // storage (project_widths, folder_collapsed, folder_filter,
+        // os_bounds) must not be touched. Defends against a regression that
+        // "clear every map on the targeted window" would silently break
+        // window state on every project add.
+        let mut data = make_workspace();
+        let mut extra = WindowState::default();
+        extra.project_widths.insert("sibling".to_string(), 0.42);
+        extra.folder_collapsed.insert("f1".to_string(), true);
+        extra.folder_filter = Some("f1".to_string());
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+
+        data.add_project_hide_in_other_windows("p1", WindowId::Main);
+
+        let after = data.window(WindowId::Extra(extra_id)).unwrap();
+        assert_eq!(after.project_widths.get("sibling").copied(), Some(0.42));
+        assert_eq!(after.folder_collapsed.get("f1").copied(), Some(true));
+        assert_eq!(after.folder_filter.as_deref(), Some("f1"));
+    }
+
+    #[test]
     fn spawn_extra_window_two_calls_with_same_spawning_bounds_cascade_independently() {
         // Each spawn computes the cascade offset from its own caller-
         // supplied bounds; the data layer does not track "previous spawn"
