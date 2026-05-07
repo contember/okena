@@ -73,7 +73,18 @@ impl Workspace {
 
     /// Add a new project
     /// If `with_terminal` is false, creates a bookmark project without a terminal layout.
-    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> String {
+    ///
+    /// `window_id` identifies the spawning window (PRD user story 14:
+    /// project lands visible there, hidden everywhere else by default).
+    /// After pushing the project onto `data.projects`, the new id is
+    /// inserted into every window's `hidden_project_ids` set EXCEPT the
+    /// spawning window's via `data.add_project_hide_in_other_windows`. UI
+    /// callers pass the originating `WindowView`'s `window_id`; remote-
+    /// bridge callers pass the focused window resolved via
+    /// `Okena::focus_manager_for_active_window` (slice 05 cri 13). When
+    /// only main exists (zero extras), the rule degenerates to a no-op
+    /// for the hide-elsewhere step, matching pre-multi-window behavior.
+    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, global_hooks: &HooksConfig, window_id: WindowId, cx: &mut Context<Self>) -> String {
         let path = expand_tilde(&path);
 
         // Auto-detect WSL UNC paths and set default shell accordingly
@@ -106,6 +117,7 @@ impl Workspace {
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
         self.data.project_order.push(id.clone());
+        self.data.add_project_hide_in_other_windows(&id, window_id);
         self.notify_data(cx);
 
         let folder = self.folder_for_project_or_parent(&id);
@@ -434,6 +446,13 @@ impl Workspace {
     /// This is a synchronous/blocking operation (calls `git worktree add`).
     /// For non-blocking creation, use `register_worktree_project` after
     /// creating the git worktree on a background thread.
+    ///
+    /// `window_id` identifies the spawning window for the multi-window
+    /// new-project visibility rule (PRD user story 14): the new worktree
+    /// project is visible in the spawning window only and hidden in every
+    /// other window via `data.add_project_hide_in_other_windows` after
+    /// the project is pushed. Threaded through to
+    /// `register_worktree_project` -> `register_worktree_project_inner`.
     pub fn create_worktree_project(
         &mut self,
         parent_project_id: &str,
@@ -443,6 +462,7 @@ impl Workspace {
         project_path: &str,
         create_branch: bool,
         global_hooks: &HooksConfig,
+        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         // Create the git worktree at the repo-level target path
@@ -456,7 +476,7 @@ impl Workspace {
             })?;
 
         // Register in workspace state
-        self.register_worktree_project(parent_project_id, branch, repo_path, worktree_path, project_path, global_hooks, cx)
+        self.register_worktree_project(parent_project_id, branch, repo_path, worktree_path, project_path, global_hooks, window_id, cx)
     }
 
     /// Register a worktree project in workspace state.
@@ -464,6 +484,10 @@ impl Workspace {
     /// (hooks may cd into the project path). Pass `false` to defer hooks
     /// and call `fire_worktree_hooks` after the directory is ready.
     /// Returns the new project ID on success.
+    ///
+    /// `window_id` identifies the spawning window for the multi-window
+    /// new-project visibility rule (PRD user story 14). See
+    /// `create_worktree_project` for details.
     pub fn register_worktree_project(
         &mut self,
         parent_project_id: &str,
@@ -472,13 +496,18 @@ impl Workspace {
         worktree_path: &str,
         project_path: &str,
         global_hooks: &HooksConfig,
+        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
-        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, true, global_hooks, cx)
+        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, true, global_hooks, window_id, cx)
     }
 
     /// Same as `register_worktree_project` but defers on_worktree_create hooks.
     /// Call `fire_worktree_hooks` once the worktree directory exists on disk.
+    ///
+    /// `window_id` identifies the spawning window for the multi-window
+    /// new-project visibility rule (PRD user story 14). See
+    /// `create_worktree_project` for details.
     pub fn register_worktree_project_deferred_hooks(
         &mut self,
         parent_project_id: &str,
@@ -487,9 +516,10 @@ impl Workspace {
         worktree_path: &str,
         project_path: &str,
         global_hooks: &HooksConfig,
+        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
-        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, false, global_hooks, cx)
+        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, false, global_hooks, window_id, cx)
     }
 
     fn register_worktree_project_inner(
@@ -501,6 +531,7 @@ impl Workspace {
         project_path: &str,
         fire_hooks: bool,
         global_hooks: &HooksConfig,
+        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         // Get parent project info
@@ -553,6 +584,13 @@ impl Workspace {
         if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_project_id) {
             parent.worktree_ids.push(id.clone());
         }
+
+        // Multi-window new-project visibility rule (PRD user story 14):
+        // worktree children inherit the rule for the window the worktree
+        // was created from -- visible in the spawning window only, hidden
+        // in every other window. Single-window users (zero extras) see no
+        // behavior change since the rule degenerates to a no-op.
+        self.data.add_project_hide_in_other_windows(&id, window_id);
 
         self.notify_data(cx);
 
@@ -620,11 +658,21 @@ impl Workspace {
     /// Add a worktree project discovered by the periodic sync watcher.
     /// Does NOT fire hooks (the worktree was created outside Okena).
     /// Returns the new project ID, or None if already tracked.
+    ///
+    /// `window_id` identifies the spawning window for the multi-window
+    /// new-project visibility rule (PRD user story 14): the discovered
+    /// worktree becomes visible in the spawning window only, hidden in
+    /// every other window. The user explicitly clicks to add the
+    /// discovery from a sidebar in a window, so the click site IS the
+    /// opt-in -- mirroring the user-initiated add path. Single-window
+    /// users (zero extras) see the prior "default hidden" behavior since
+    /// `WindowId::Main` with no extras degenerates to a no-op.
     pub fn add_discovered_worktree(
         &mut self,
         wt_path: &str,
         branch: &str,
         parent_id: &str,
+        window_id: WindowId,
     ) -> Option<String> {
         // For monorepo projects, resolve the subdirectory offset so the
         // project path points to the right place inside the worktree.
@@ -671,14 +719,14 @@ impl Workspace {
             hook_terminals: HashMap::new(),
         };
 
-        // Discovered worktrees default to hidden in the main window (the
-        // user did not opt in via Okena UI). Per-window scoping arrives
-        // with the window-scoped mutation API; today we only have one
-        // window so writing main_window matches the legacy intent.
-        self.data
-            .main_window
-            .hidden_project_ids
-            .insert(id.clone());
+        // Multi-window new-project visibility rule (PRD user story 14):
+        // visible in the spawning window only, hidden in every other
+        // window. Replaces the prior unconditional "hide in main only"
+        // semantic which left discovered worktrees visible in extras --
+        // a stale-default that broke per-window curation. Single-window
+        // users see no behavior change for `WindowId::Main` since the
+        // helper degenerates to a no-op when no extras exist.
+        self.data.add_project_hide_in_other_windows(&id, window_id);
 
         // Insert after parent in project_order
         self.data.projects.push(project);
@@ -995,11 +1043,68 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn add_project_main_spawn_with_extra_hides_in_extra_only(cx: &mut gpui::TestAppContext) {
+        // Slice 06 + PRD user story 14 entity-level pin: add_project from
+        // WindowId::Main with one extra present produces a project that is
+        // hidden in the extra and visible (absent from hidden_project_ids)
+        // in main. Defends against a regression that drops the WindowId
+        // parameter, calls the visibility helper with the wrong target, or
+        // skips the helper entirely. Co-located with the data-layer pin
+        // `add_project_hide_in_other_windows_main_spawn_inserts_in_extras_only`
+        // so the entity layer's threading is verified end-to-end.
+        let mut data = make_workspace_data();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let new_id = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.add_project("p1".to_string(), "/tmp/p1".to_string(), false, &HooksConfig::default(), WindowId::Main, cx)
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.hidden_project_ids.contains(&new_id));
+            let after = ws.data().window(WindowId::Extra(extra_id)).unwrap();
+            assert!(after.hidden_project_ids.contains(&new_id));
+        });
+    }
+
+    #[gpui::test]
+    fn add_project_extra_spawn_hides_in_main_and_other_extras(cx: &mut gpui::TestAppContext) {
+        // Slice 06 + PRD user story 14: add_project from
+        // WindowId::Extra(spawning) with a second extra present hides the
+        // new project in main and the sibling extra, leaves the spawning
+        // extra clean. Defends against a regression that always writes to
+        // main as the spawning window, or scatters the hide across every
+        // extra (including the spawning one). Mirrors the data-layer pin
+        // `add_project_hide_in_other_windows_extra_spawn_inserts_in_main_and_other_extras`.
+        let mut data = make_workspace_data();
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        data.extra_windows = vec![extra_a, extra_b];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let new_id = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.add_project("p1".to_string(), "/tmp/p1".to_string(), false, &HooksConfig::default(), WindowId::Extra(extra_a_id), cx)
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.hidden_project_ids.contains(&new_id));
+            let after_a = ws.data().window(WindowId::Extra(extra_a_id)).unwrap();
+            assert!(!after_a.hidden_project_ids.contains(&new_id));
+            let after_b = ws.data().window(WindowId::Extra(extra_b_id)).unwrap();
+            assert!(after_b.hidden_project_ids.contains(&new_id));
+        });
+    }
+
+    #[gpui::test]
     fn test_add_project_gpui(cx: &mut gpui::TestAppContext) {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("Test".to_string(), "/tmp/test".to_string(), true, &HooksConfig::default(), cx);
+            ws.add_project("Test".to_string(), "/tmp/test".to_string(), true, &HooksConfig::default(), WindowId::Main, cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1017,7 +1122,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("Bookmark".to_string(), "/tmp/bm".to_string(), false, &HooksConfig::default(), cx);
+            ws.add_project("Bookmark".to_string(), "/tmp/bm".to_string(), false, &HooksConfig::default(), WindowId::Main, cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
