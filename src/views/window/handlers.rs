@@ -21,6 +21,7 @@ impl WindowView {
         let backend = Some(self.backend.clone());
         crate::action_dispatch::dispatcher_for_project(
             project_id,
+            self.window_id,
             &self.workspace,
             &self.focus_manager,
             &backend,
@@ -34,6 +35,7 @@ impl WindowView {
             backend: self.backend.clone(),
             terminals: self.terminals.clone(),
             service_manager: self.service_manager.clone(),
+            window_id: self.window_id,
         })
     }
 

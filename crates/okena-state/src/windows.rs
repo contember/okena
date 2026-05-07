@@ -137,4 +137,37 @@ impl WorkspaceData {
             w.os_bounds = bounds;
         }
     }
+
+    /// Append a fresh extra window onto `extra_windows` and return its id.
+    ///
+    /// Snapshots the current set of project IDs into the new window's
+    /// `hidden_project_ids` so the spawned window's grid is empty at first
+    /// render -- the user sees a blank viewport they then curate via the
+    /// per-window "Show in this window" sidebar action.
+    ///
+    /// `spawning_bounds` carries the live OS bounds of the window that
+    /// triggered the spawn (read by the action handler from
+    /// `gpui::Window::window_bounds()`). When `Some`, the new entry's
+    /// `os_bounds` is seeded with origin shifted by `+30,+30` and size
+    /// preserved (the cascade-offset rule from PRD line 27 + slice 05
+    /// notes line 57). When `None` (e.g. the action handler could not
+    /// read its window's live bounds), `os_bounds` stays `None` and the
+    /// OS picks a default position when the observer opens the window.
+    /// The data layer takes the caller-supplied bounds rather than
+    /// reaching into GPUI itself so this function stays GPUI-free and
+    /// unit-testable. Other per-window fields (`folder_filter`,
+    /// `project_widths`, `folder_collapsed`) are left at default.
+    pub fn spawn_extra_window(&mut self, spawning_bounds: Option<WindowBounds>) -> WindowId {
+        let mut state = WindowState::default();
+        state.hidden_project_ids = self.projects.iter().map(|p| p.id.clone()).collect();
+        state.os_bounds = spawning_bounds.map(|b| WindowBounds {
+            origin_x: b.origin_x + 30.0,
+            origin_y: b.origin_y + 30.0,
+            width: b.width,
+            height: b.height,
+        });
+        let id = state.id;
+        self.extra_windows.push(state);
+        WindowId::Extra(id)
+    }
 }

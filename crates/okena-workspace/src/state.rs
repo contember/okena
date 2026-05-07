@@ -218,6 +218,39 @@ impl Workspace {
         self.notify_data(cx);
     }
 
+    /// Spawn a fresh extra window onto `extra_windows` and return its id.
+    ///
+    /// Delegates to `data.spawn_extra_window`, which appends a new
+    /// `WindowState` whose `hidden_project_ids` snapshots every current
+    /// project ID (so the spawned window's grid is empty at first render --
+    /// the user curates it via the per-window "Show in this window" sidebar
+    /// action). The returned `WindowId::Extra(uuid)` is the handle the
+    /// observer in `src/app/extras.rs` uses to look the corresponding
+    /// `Entity<WindowView>` up in `Okena::extra_windows`.
+    ///
+    /// `spawning_bounds` carries the live OS bounds of the window that
+    /// triggered the spawn (read by the action handler from
+    /// `gpui::Window::window_bounds()`). When `Some`, the data layer
+    /// seeds the new entry's `os_bounds` with origin shifted by `+30,+30`
+    /// (the cascade-offset rule); the observer then passes that
+    /// `os_bounds` straight into `cx.open_window`'s `window_bounds` so
+    /// the OS positions the new window cascade-offset from its parent.
+    /// When `None`, `os_bounds` stays `None` and the OS picks a default
+    /// position.
+    ///
+    /// Bumps `data_version` because the new entry is persisted -- the
+    /// auto-save observer must trigger so a freshly-spawned extra survives
+    /// a quit-during-spawn race.
+    pub fn spawn_extra_window(
+        &mut self,
+        spawning_bounds: Option<WindowBounds>,
+        cx: &mut Context<Self>,
+    ) -> WindowId {
+        let id = self.data.spawn_extra_window(spawning_bounds);
+        self.notify_data(cx);
+        id
+    }
+
     // === ProjectLifecycleTracker conveniences ===
 
     pub fn is_creating_project(&self, project_id: &str) -> bool {
@@ -2245,6 +2278,122 @@ mod gpui_tests {
             assert!(ws.data().main_window.os_bounds.is_none());
             let kept = ws.data().window(WindowId::Extra(extra_id)).unwrap();
             assert!(kept.os_bounds.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn spawn_extra_window_pushes_entry_and_bumps_version(cx: &mut gpui::TestAppContext) {
+        // Wrapper contract: a single call pushes exactly one entry onto
+        // `extra_windows`, returns a `WindowId::Extra(uuid)` whose uuid
+        // matches the pushed entry's `state.id`, and bumps `data_version`
+        // by one so the auto-save observer triggers. Pinned at the entity
+        // layer because both halves -- the data-layer push and the version
+        // bump -- are part of the spawn contract the upcoming `NewWindow`
+        // action handler relies on.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let returned = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.spawn_extra_window(None, cx)
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().extra_windows.len(), 1);
+            let pushed = &ws.data().extra_windows[0];
+            assert_eq!(returned, WindowId::Extra(pushed.id));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn spawn_extra_window_snapshot_hides_every_current_project(cx: &mut gpui::TestAppContext) {
+        // Wrapper-boundary regression defense: a future refactor that
+        // re-implemented the wrapper inline (instead of delegating to
+        // `data.spawn_extra_window`) could drop the snapshot semantic and
+        // produce a window whose grid renders every project on first
+        // open -- defeating PRD line 26 ("a new window to start empty"). Pin
+        // the snapshot contract at the entity layer too so a stale wrapper
+        // surfaces here, not just in the data-layer test.
+        let data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
+            vec!["p1", "p2", "p3"],
+        );
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let id = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.spawn_extra_window(None, cx)
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let spawned = ws.data().window(id).unwrap();
+            assert!(spawned.hidden_project_ids.contains("p1"));
+            assert!(spawned.hidden_project_ids.contains("p2"));
+            assert!(spawned.hidden_project_ids.contains("p3"));
+            assert_eq!(spawned.hidden_project_ids.len(), 3);
+        });
+    }
+
+    #[gpui::test]
+    fn spawn_extra_window_two_calls_produce_distinct_extras_and_two_version_bumps(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Per-call distinct ids + per-call data_version bumps. Pins the
+        // "Cmd+Shift+N twice opens two windows" contract at the entity
+        // layer: defends against (a) a hypothetical wrapper that coalesces
+        // duplicate spawns by hidden-set contents (two windows that both
+        // start fully hidden are still two distinct windows), and (b) a
+        // wrapper that lazily defers the version bump (which would let the
+        // auto-save observer miss the second spawn until something else
+        // mutated the data).
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let (first, second) = workspace.update(cx, |ws: &mut Workspace, cx| {
+            let a = ws.spawn_extra_window(None, cx);
+            let b = ws.spawn_extra_window(None, cx);
+            (a, b)
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_ne!(first, second);
+            assert_eq!(ws.data().extra_windows.len(), 2);
+            assert!(ws.data().window(first).is_some());
+            assert!(ws.data().window(second).is_some());
+            assert_eq!(ws.data_version(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn spawn_extra_window_threads_spawning_bounds_into_cascade_offset(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Wrapper threads `spawning_bounds: Option<WindowBounds>` into the
+        // data layer, which seeds os_bounds with the +30,+30 cascade. This
+        // test pins the entity-layer threading -- a future refactor that
+        // dropped the parameter (e.g. went back to the no-args wrapper)
+        // would surface here as a missing os_bounds on the spawned entry,
+        // independent of the data-layer's `spawn_extra_window_with_
+        // spawning_bounds_cascades_origin_by_30_30_preserves_size` test.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let spawning = WindowBounds {
+            origin_x: 50.0,
+            origin_y: 75.0,
+            width: 1024.0,
+            height: 768.0,
+        };
+
+        let id = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.spawn_extra_window(Some(spawning), cx)
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let spawned = ws.data().window(id).unwrap();
+            let bounds = spawned.os_bounds.expect("cascade-offset os_bounds");
+            assert_eq!(bounds.origin_x, 80.0);
+            assert_eq!(bounds.origin_y, 105.0);
+            assert_eq!(bounds.width, 1024.0);
+            assert_eq!(bounds.height, 768.0);
         });
     }
 

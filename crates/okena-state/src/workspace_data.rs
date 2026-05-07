@@ -1030,4 +1030,129 @@ mod tests {
         assert!(!value.as_object().unwrap().contains_key("project_widths"),
             "top-level project_widths must not appear in serialized form (field removed)");
     }
+
+    #[test]
+    fn spawn_extra_window_starts_with_every_current_project_hidden() {
+        // PRD `plans/multi-window.md` line 26: "I want a new window to start
+        // empty (no project columns visible) so that I can deliberately
+        // curate what goes in it without inheriting noise from elsewhere."
+        // Implementation: snapshot every current project ID into the new
+        // window's hidden_project_ids set so the grid is empty at spawn.
+        // Pins the behavior that the new extra is fully filtered, not a
+        // copy of main's filter state and not an empty-hidden window.
+        let mut data = make_workspace();
+        let mut p1 = make_project("/p1");
+        p1.id = "p1".to_string();
+        let mut p2 = make_project("/p2");
+        p2.id = "p2".to_string();
+        data.projects = vec![p1, p2];
+
+        let new_id = data.spawn_extra_window(None);
+
+        let new_window = data
+            .window(new_id)
+            .expect("spawn_extra_window returns a live id");
+        assert!(new_window.hidden_project_ids.contains("p1"));
+        assert!(new_window.hidden_project_ids.contains("p2"));
+        assert_eq!(new_window.hidden_project_ids.len(), 2);
+    }
+
+    #[test]
+    fn spawn_extra_window_returns_extra_id_pointing_at_pushed_entry() {
+        // Returned WindowId must be `WindowId::Extra(uuid)` (never Main) and
+        // must address the just-pushed entry. Pins the contract that callers
+        // can immediately use the returned id with `window_mut` to seed
+        // bounds, folder_filter, etc. without re-walking `extra_windows` for
+        // the entry they just created.
+        let mut data = make_workspace();
+        let new_id = data.spawn_extra_window(None);
+
+        match new_id {
+            WindowId::Main => panic!("spawn_extra_window must not return Main"),
+            WindowId::Extra(uuid) => {
+                assert_eq!(data.extra_windows.len(), 1);
+                assert_eq!(data.extra_windows[0].id, uuid);
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_extra_window_appends_distinct_entries_per_call() {
+        // Two consecutive spawn calls produce two distinct extras with
+        // distinct ids -- not a single coalesced entry, not the same uuid.
+        // Pins the contract that the spawn flow can be invoked repeatedly
+        // (Cmd+Shift+N, Cmd+Shift+N) and each press yields its own window.
+        let mut data = make_workspace();
+        let id_a = data.spawn_extra_window(None);
+        let id_b = data.spawn_extra_window(None);
+
+        assert_ne!(id_a, id_b);
+        assert_eq!(data.extra_windows.len(), 2);
+    }
+
+    #[test]
+    fn spawn_extra_window_no_spawning_bounds_leaves_os_bounds_none() {
+        // When no spawning bounds are supplied (e.g. the action handler
+        // could not read its window's live bounds), the new entry's
+        // os_bounds stays None so the OS picks a default position. Mirrors
+        // the prior "leaves os_bounds at default" contract from before
+        // the cascade-offset parameter landed.
+        let mut data = make_workspace();
+        let new_id = data.spawn_extra_window(None);
+        let new_window = data.window(new_id).expect("spawn returns a live id");
+        assert!(new_window.os_bounds.is_none());
+    }
+
+    #[test]
+    fn spawn_extra_window_with_spawning_bounds_cascades_origin_by_30_30_preserves_size() {
+        // PRD line 27 + slice 05 cri 2: "I want a new window to cascade-
+        // offset from the spawning window's position so that it does not
+        // stack invisibly on top." Cascade rule (slice 05 notes line 57):
+        // shift origin by +30,+30, keep the same size, persist into the
+        // new entry's os_bounds. Pins the cascade arithmetic at the data
+        // layer so the observer can pass os_bounds straight into
+        // cx.open_window without recomputing.
+        let mut data = make_workspace();
+        let spawning = WindowBounds {
+            origin_x: 100.0,
+            origin_y: 200.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        let new_id = data.spawn_extra_window(Some(spawning));
+        let new_window = data.window(new_id).expect("spawn returns a live id");
+        let bounds = new_window.os_bounds.expect("os_bounds seeded by cascade");
+        assert_eq!(bounds.origin_x, 130.0);
+        assert_eq!(bounds.origin_y, 230.0);
+        assert_eq!(bounds.width, 1280.0);
+        assert_eq!(bounds.height, 800.0);
+    }
+
+    #[test]
+    fn spawn_extra_window_two_calls_with_same_spawning_bounds_cascade_independently() {
+        // Each spawn computes the cascade offset from its own caller-
+        // supplied bounds; the data layer does not track "previous spawn"
+        // state to chain cascades automatically. Cri 5 ("no cap") + cri
+        // 6 ("from extra cascades from that extra") rely on the caller
+        // (action handler) reading its own window's live bounds at each
+        // press -- so two presses from the same window produce two extras
+        // both at the same +30,+30 from that window. Pins the data
+        // layer's stateless contract.
+        let mut data = make_workspace();
+        let spawning = WindowBounds {
+            origin_x: 100.0,
+            origin_y: 100.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let _ = data.spawn_extra_window(Some(spawning));
+        let _ = data.spawn_extra_window(Some(spawning));
+
+        let a = data.extra_windows[0].os_bounds.expect("first cascade");
+        let b = data.extra_windows[1].os_bounds.expect("second cascade");
+        assert_eq!(a.origin_x, 130.0);
+        assert_eq!(a.origin_y, 130.0);
+        assert_eq!(b.origin_x, 130.0);
+        assert_eq!(b.origin_y, 130.0);
+    }
 }

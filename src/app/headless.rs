@@ -10,7 +10,7 @@ use crate::terminal::backend::TerminalBackend;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::window::TerminalsRegistry;
 use crate::workspace::persistence;
-use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
+use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
 use okena_core::api::ApiGitStatus;
@@ -23,7 +23,7 @@ use tokio::sync::watch as tokio_watch;
 
 use crate::terminal::backend::LocalBackend;
 
-use super::remote_commands::remote_command_loop;
+use super::remote_commands::{remote_command_loop, FocusManagerResolver};
 
 /// Headless application entity — runs workspace, PTY management, and remote
 /// server without any GUI windows. Used when running over SSH or on machines
@@ -204,18 +204,24 @@ impl HeadlessApp {
         // Headless mode has no GUI window. Provide a standalone FocusManager
         // so remote action methods that take `&mut FocusManager` still
         // compile -- in headless the focus state never drives a render so it
-        // is effectively dormant.
+        // is effectively dormant. The bridge loop's resolver is constant in
+        // headless: there's no focused window to consult, so it always
+        // returns the same dormant FocusManager paired with WindowId::Main
+        // (per-window data mutations land on the always-present main slot).
         let focus_manager = cx.new(|_| crate::workspace::focus::FocusManager::new());
+        let focus_manager_for_resolver = focus_manager.clone();
+        let focus_manager_resolver: FocusManagerResolver = Arc::new(move |_cx: &gpui::App| {
+            (WindowId::Main, focus_manager_for_resolver.clone())
+        });
         cx.spawn({
             let workspace = workspace.clone();
-            let focus_manager = focus_manager.clone();
             let terminals = terminals.clone();
             let state_version = state_version.clone();
             let git_status_tx = git_status_tx.clone();
             let service_manager = service_manager.clone();
             async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
                 remote_command_loop(
-                    bridge_rx, local_backend, workspace, focus_manager, terminals,
+                    bridge_rx, local_backend, workspace, focus_manager_resolver, terminals,
                     state_version, git_status_tx, service_manager, cx,
                 ).await;
             }

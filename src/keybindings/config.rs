@@ -312,6 +312,14 @@ impl KeybindingConfig {
             ],
         );
 
+        bindings.insert(
+            "NewWindow".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-n", None),
+                KeybindingEntry::new("ctrl-shift-n", None),
+            ],
+        );
+
         Self {
             version: 1,
             bindings,

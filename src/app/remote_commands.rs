@@ -8,7 +8,7 @@ use crate::services::manager::{ServiceManager, ServiceStatus};
 use crate::terminal::backend::TerminalBackend;
 use crate::views::window::TerminalsRegistry;
 use crate::workspace::actions::execute::{ensure_terminal, execute_action};
-use crate::workspace::state::Workspace;
+use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
 use okena_core::api::ApiGitStatus;
 use std::collections::{HashMap, HashSet};
@@ -17,15 +17,35 @@ use tokio::sync::watch as tokio_watch;
 
 use super::Okena;
 
+/// Resolver returning the focused window's `(WindowId, FocusManager)` for a
+/// remote-bridge action.
+///
+/// In GUI mode the resolver consults `cx.active_window()` and yields the
+/// focused window's per-window `WindowId` + `FocusManager` (PRD cri 13);
+/// the `WindowId` lets per-window state mutations (e.g.
+/// `SetProjectShowInOverview`) land on the focused window. In headless mode
+/// it returns `(WindowId::Main, dormant FocusManager)` since there are no
+/// windows to consult.
+pub(crate) type FocusManagerResolver = Arc<
+    dyn Fn(&App) -> (WindowId, Entity<crate::workspace::focus::FocusManager>) + Send + Sync,
+>;
+
 /// Shared remote command loop used by both GUI (`Okena`) and headless (`HeadlessApp`).
 ///
 /// Processes commands from the remote API bridge on the GPUI main thread.
 /// Callers are responsible for spawning this via `cx.spawn()`.
+///
+/// `focus_manager_resolver` is consulted per-action so the focused-window
+/// scope (PRD user story 27 / slice 05 cri 13) is honored at the moment the
+/// action lands, not at loop startup. GUI callers pass a closure that reads
+/// `cx.active_window()` and looks the corresponding `WindowView` up on
+/// `Okena`; headless callers pass a constant closure returning the synthetic
+/// dormant `FocusManager` paired with `WindowId::Main`.
 pub(crate) async fn remote_command_loop(
     bridge_rx: BridgeReceiver,
     backend: Arc<dyn TerminalBackend>,
     workspace: Entity<Workspace>,
-    focus_manager: Entity<crate::workspace::focus::FocusManager>,
+    focus_manager_resolver: FocusManagerResolver,
     terminals: TerminalsRegistry,
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
@@ -109,9 +129,14 @@ pub(crate) async fn remote_command_loop(
                     }
                     action => {
                         cx.update(|cx| {
+                            // Resolve focus_manager + window_id per-action so
+                            // the focused window's per-window state is the
+                            // target for both focus mutations and per-window
+                            // data mutations (PRD cri 13 / CLI fallback).
+                            let (window_id, focus_manager) = focus_manager_resolver(cx);
                             focus_manager.update(cx, |fm, cx| {
                                 workspace.update(cx, |ws, cx| {
-                                    execute_action(action, ws, fm, &*backend, &terminals, cx)
+                                    execute_action(action, ws, window_id, fm, &*backend, &terminals, cx)
                                         .into_command_result()
                                 })
                             })
@@ -274,6 +299,12 @@ pub(crate) async fn remote_command_loop(
 impl Okena {
     /// Process commands from the remote API bridge.
     /// Thin wrapper that spawns the shared `remote_command_loop`.
+    ///
+    /// Builds a focus-manager resolver that, per-action, asks the live `Okena`
+    /// entity which OS window currently has focus and returns that window's
+    /// `(WindowId, FocusManager)` (PRD cri 13). When the `Okena` weak handle
+    /// has been dropped (loop racing app shutdown) the resolver falls back to
+    /// `(WindowId::Main, captured main FocusManager)`.
     pub(super) fn start_remote_command_loop(
         &mut self,
         bridge_rx: BridgeReceiver,
@@ -281,8 +312,14 @@ impl Okena {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
-        // Per the multi-window PRD, remote actions target main window's per-window state.
-        let focus_manager = self.main_window.read(cx).focus_manager();
+        let main_focus_manager = self.main_window.read(cx).focus_manager();
+        let okena_weak = cx.entity().downgrade();
+        let focus_manager_resolver: FocusManagerResolver = Arc::new(move |cx: &App| {
+            okena_weak
+                .upgrade()
+                .map(|okena| okena.read(cx).focus_manager_for_active_window(cx))
+                .unwrap_or_else(|| (WindowId::Main, main_focus_manager.clone()))
+        });
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
         let git_status_tx = self.git_status_tx.clone();
@@ -290,7 +327,7 @@ impl Okena {
 
         cx.spawn(async move |_this: WeakEntity<Okena>, cx: &mut AsyncApp| {
             remote_command_loop(
-                bridge_rx, backend, workspace, focus_manager, terminals,
+                bridge_rx, backend, workspace, focus_manager_resolver, terminals,
                 state_version, git_status_tx, service_manager, cx,
             ).await;
         })

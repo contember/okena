@@ -220,6 +220,7 @@ impl WindowView {
                 s.set_dispatch_action(Box::new(move |project_id, action, cx| {
                     if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
                         project_id,
+                        window_id,
                         &workspace_for_dispatch,
                         &focus_manager_for_dispatch,
                         &Some(backend_for_dispatch.clone()),
@@ -443,10 +444,12 @@ impl WindowView {
         let terminals = self.terminals.clone();
         let service_manager = self.service_manager.clone();
         let remote_manager = self.remote_manager.clone();
+        let window_id = self.window_id;
         self.sidebar.update(cx, |s, _cx| {
             s.set_dispatch_action(Box::new(move |project_id, action, cx| {
                 if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
                     project_id,
+                    window_id,
                     &workspace,
                     &focus_manager,
                     &Some(backend.clone()),
@@ -920,6 +923,7 @@ impl WindowView {
                     backend: backend_for_dispatch,
                     terminals: terminals_for_dispatch,
                     service_manager: None, // set later via set_service_manager
+                    window_id,
                 },
             ));
             col

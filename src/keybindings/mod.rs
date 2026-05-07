@@ -50,6 +50,7 @@ actions!(
         EqualizeLayout,
         ShowBranchSwitcher,
         ShowProfileManager,
+        NewWindow,
     ]
 );
 
@@ -324,6 +325,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "EqualizeLayout" => Some(KeyBinding::new(keystroke, EqualizeLayout, context)),
         "ShowBranchSwitcher" => Some(KeyBinding::new(keystroke, ShowBranchSwitcher, context)),
         "ShowProfileManager" => Some(KeyBinding::new(keystroke, ShowProfileManager, context)),
+        "NewWindow" => Some(KeyBinding::new(keystroke, NewWindow, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None
