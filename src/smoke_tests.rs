@@ -106,10 +106,11 @@ mod tests {
                 version: 1,
                 projects: vec![],
                 project_order: vec![],
-                project_widths: Default::default(),
                 folders: vec![],
                 service_panel_heights: Default::default(),
                 hook_panel_heights: Default::default(),
+                main_window: Default::default(),
+                extra_windows: Vec::new(),
             })
         });
     }

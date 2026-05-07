@@ -14,7 +14,6 @@ impl Workspace {
             id: id.clone(),
             name,
             project_ids: Vec::new(),
-            collapsed: false,
             folder_color: FolderColor::default(),
         });
         self.data.project_order.push(id.clone());
@@ -44,6 +43,9 @@ impl Workspace {
         }
 
         self.data.folders.retain(|f| f.id != folder_id);
+        // Scrub the folder's entry from the per-window collapsed map so a
+        // re-added folder with the same id does not inherit stale state.
+        self.data.main_window.folder_collapsed.remove(folder_id);
         self.notify_data(cx);
     }
 
@@ -63,12 +65,39 @@ impl Workspace {
         }
     }
 
-    /// Toggle folder collapsed state
+    /// Returns whether a folder is collapsed in this workspace's main window.
+    ///
+    /// Reads from `main_window.folder_collapsed` (the per-window viewport
+    /// model, new source of truth). Today this is always the main window;
+    /// per-window scoping arrives with the window-scoped mutation API
+    /// (slice 02). Missing entry == expanded.
+    pub fn is_folder_collapsed(&self, folder_id: &str) -> bool {
+        self.data
+            .main_window
+            .folder_collapsed
+            .get(folder_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Toggle folder collapsed state.
+    ///
+    /// Writes to `main_window.folder_collapsed` (the source of truth).
+    /// Absence in the map == expanded.
     pub fn toggle_folder_collapsed(&mut self, folder_id: &str, cx: &mut Context<Self>) {
-        if let Some(folder) = self.folder_mut(folder_id) {
-            folder.collapsed = !folder.collapsed;
-            self.notify_data(cx);
+        if !self.data.folders.iter().any(|f| f.id == folder_id) {
+            return;
         }
+        let now_collapsed = !self.is_folder_collapsed(folder_id);
+        if now_collapsed {
+            self.data
+                .main_window
+                .folder_collapsed
+                .insert(folder_id.to_string(), true);
+        } else {
+            self.data.main_window.folder_collapsed.remove(folder_id);
+        }
+        self.notify_data(cx);
     }
 
     /// Move a project into a folder at a given position
@@ -150,7 +179,6 @@ mod tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -171,10 +199,11 @@ mod tests {
             version: 1,
             projects,
             project_order: order.into_iter().map(String::from).collect(),
-            project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
             hook_panel_heights: HashMap::new(),
             folders: vec![],
+            main_window: crate::state::WindowState::default(),
+            extra_windows: Vec::new(),
         }
     }
 
@@ -218,7 +247,6 @@ mod tests {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p2".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
 
@@ -237,7 +265,6 @@ mod tests {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
 
@@ -262,7 +289,6 @@ mod gpui_tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -283,10 +309,11 @@ mod gpui_tests {
             version: 1,
             projects,
             project_order: order.into_iter().map(String::from).collect(),
-            project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
             hook_panel_heights: HashMap::new(),
             folders: vec![],
+            main_window: crate::state::WindowState::default(),
+            extra_windows: Vec::new(),
         }
     }
 
@@ -317,7 +344,6 @@ mod gpui_tests {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
         let workspace = cx.new(|_cx| Workspace::new(data));
@@ -342,7 +368,6 @@ mod gpui_tests {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec![],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
         let workspace = cx.new(|_cx| Workspace::new(data));
@@ -368,15 +393,13 @@ mod gpui_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
         ];
         let workspace = cx.new(|_cx| Workspace::new(data));
@@ -401,6 +424,90 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn is_folder_collapsed_reads_from_main_window_folder_collapsed(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: collapsed state is read from
+        // main_window.folder_collapsed (the new source of truth). A future
+        // regression that re-routes the read back to FolderData.collapsed
+        // should fail loudly: this fixture populates ONLY main_window and
+        // leaves FolderData.collapsed=false.
+        let mut data = make_workspace_data(vec![], vec!["f1"]);
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec![],
+            folder_color: FolderColor::default(),
+        }];
+        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.is_folder_collapsed("f1"));
+            // Missing entry defaults to expanded.
+            assert!(!ws.is_folder_collapsed("missing"));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_folder_collapsed_writes_to_main_window(cx: &mut gpui::TestAppContext) {
+        // Toggling collapsed flips main_window.folder_collapsed (the source of
+        // truth). The legacy FolderData.collapsed field has been removed from
+        // the struct; runtime mutations now have only one site to write.
+        let mut data = make_workspace_data(vec![], vec!["f1"]);
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec![],
+            folder_color: FolderColor::default(),
+        }];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // First toggle: false -> true. main_window inserts true.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_collapsed("f1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().main_window.folder_collapsed.get("f1"), Some(&true));
+        });
+
+        // Second toggle: true -> false. main_window removes the entry
+        // (absence == expanded).
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_collapsed("f1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.folder_collapsed.contains_key("f1"));
+        });
+    }
+
+    #[gpui::test]
+    fn delete_folder_clears_main_window_folder_collapsed(cx: &mut gpui::TestAppContext) {
+        // Deleting a folder must scrub its entry from main_window.folder_collapsed
+        // (the new source of truth). Without the scrub, a re-added folder with
+        // the same id would inherit the deleted folder's collapsed state on
+        // the next render.
+        let mut data = make_workspace_data(
+            vec![make_project("p1")],
+            vec!["f1"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string()],
+            folder_color: FolderColor::default(),
+        }];
+        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_folder("f1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.folder_collapsed.contains_key("f1"));
+        });
+    }
+
+    #[gpui::test]
     fn test_folder_filter_not_cleared_on_other_folder_delete(cx: &mut gpui::TestAppContext) {
         let mut data = make_workspace_data(
             vec![make_project("p1"), make_project("p2")],
@@ -411,15 +518,13 @@ mod gpui_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
         ];
         let workspace = cx.new(|_cx| Workspace::new(data));

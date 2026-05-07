@@ -13,7 +13,6 @@ fn make_project(id: &str) -> ProjectData {
         id: id.to_string(),
         name: format!("Project {}", id),
         path: "/tmp/test".to_string(),
-        show_in_overview: true,
         layout: Some(LayoutNode::Terminal {
             terminal_id: Some(format!("term_{}", id)),
             minimized: false,
@@ -40,10 +39,11 @@ fn make_workspace_data(projects: Vec<ProjectData>, order: Vec<&str>) -> Workspac
         version: 1,
         projects,
         project_order: order.into_iter().map(String::from).collect(),
-        project_widths: HashMap::new(),
         service_panel_heights: HashMap::new(),
         hook_panel_heights: HashMap::new(),
         folders: vec![],
+        main_window: crate::state::WindowState::default(),
+        extra_windows: Vec::new(),
     }
 }
 
@@ -260,7 +260,6 @@ fn make_project_with_layout(id: &str, layout: LayoutNode) -> ProjectData {
         id: id.to_string(),
         name: format!("Project {}", id),
         path: "/tmp/test".to_string(),
-        show_in_overview: true,
         layout: Some(layout),
         terminal_names: HashMap::new(),
         hidden_terminals: HashMap::new(),
