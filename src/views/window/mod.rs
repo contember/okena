@@ -31,9 +31,12 @@ use std::sync::Arc;
 /// Shared terminals registry for PTY event routing (re-exported from okena-terminal)
 pub use okena_terminal::TerminalsRegistry;
 
-/// Registry mapping terminal_id → WeakEntity<TerminalContent> for direct
-/// dirty notification from PTY event loop (avoids per-pane polling).
-pub type ContentPaneRegistry = Arc<Mutex<HashMap<String, WeakEntity<super::layout::terminal_pane::TerminalContent>>>>;
+/// Registry mapping `terminal_id` to every `TerminalContent` weak handle that
+/// renders that terminal. With multiple windows, the same terminal can render
+/// in N project-column instances simultaneously (one per window whose visible
+/// set includes the host project), so the PTY notify path must fan out to
+/// every live entry. Dead weaks are pruned lazily on iteration.
+pub type ContentPaneRegistry = Arc<Mutex<HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>>>;
 
 /// Global content pane registry instance.
 static CONTENT_PANE_REGISTRY: std::sync::OnceLock<ContentPaneRegistry> = std::sync::OnceLock::new();
@@ -41,6 +44,26 @@ static CONTENT_PANE_REGISTRY: std::sync::OnceLock<ContentPaneRegistry> = std::sy
 /// Get or init the global content pane registry.
 pub fn content_pane_registry() -> &'static ContentPaneRegistry {
     CONTENT_PANE_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+/// Notify every weak entity in `weaks` via `cx.notify()`; drop dead weaks in
+/// place. Returns `true` if at least one weak was alive (so callers can tell
+/// whether any UI update was actually triggered). Generic over the target
+/// type so the same helper services the multi-window terminal fan-out and is
+/// testable without standing up a `TerminalContent`.
+pub fn notify_pane_weaks<T: 'static>(
+    weaks: &mut Vec<WeakEntity<T>>,
+    cx: &mut App,
+) -> bool {
+    let mut any_alive = false;
+    weaks.retain(|w| match w.update(cx, |_, cx| cx.notify()) {
+        Ok(_) => {
+            any_alive = true;
+            true
+        }
+        Err(_) => false,
+    });
+    any_alive
 }
 
 /// Per-window view of the application: one instance per OS window.
@@ -909,3 +932,40 @@ impl WindowView {
 }
 
 impl_focusable!(WindowView);
+
+#[cfg(test)]
+mod tests {
+    use super::notify_pane_weaks;
+    use gpui::AppContext as _;
+
+    struct Stub;
+
+    #[gpui::test]
+    fn fans_out_to_every_alive_weak_and_prunes_dead(cx: &mut gpui::TestAppContext) {
+        let (a, b, mut weaks) = cx.update(|cx| {
+            let a = cx.new(|_| Stub);
+            let b = cx.new(|_| Stub);
+            let weaks = vec![a.downgrade(), b.downgrade()];
+            (a, b, weaks)
+        });
+
+        cx.update(|cx| {
+            assert!(notify_pane_weaks(&mut weaks, cx));
+            assert_eq!(weaks.len(), 2, "both alive entries kept");
+        });
+
+        drop(b);
+
+        cx.update(|cx| {
+            assert!(notify_pane_weaks(&mut weaks, cx));
+            assert_eq!(weaks.len(), 1, "dead entry pruned, live entry kept");
+        });
+
+        drop(a);
+
+        cx.update(|cx| {
+            assert!(!notify_pane_weaks(&mut weaks, cx));
+            assert!(weaks.is_empty(), "all dead entries pruned");
+        });
+    }
+}
