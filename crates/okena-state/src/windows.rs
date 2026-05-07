@@ -209,4 +209,22 @@ impl WorkspaceData {
         self.extra_windows.push(state);
         WindowId::Extra(id)
     }
+
+    /// Drop the extra window with the given id from `extra_windows`.
+    ///
+    /// Lifecycle counterpart to `spawn_extra_window` — the slice 07 close-flow
+    /// calls this when the user closes an extra OS window so the entry stops
+    /// being persisted (PRD user story 22 + slice 07 cri 3). `WindowId::Main`
+    /// is a silent no-op: main is the always-present slot that closing-main
+    /// cannot remove (PRD line 53 + slice 07 cri 4 — closing main quits the
+    /// app via `LastWindowClosed`, it does not delete persisted state).
+    /// `WindowId::Extra(uuid)` for an unknown extra (e.g. a double-close
+    /// race where two close events fire for the same window) is also a
+    /// silent no-op, mirroring the close-race contract of every other
+    /// window-scoped operation in this module.
+    pub fn close_extra_window(&mut self, id: WindowId) {
+        if let WindowId::Extra(uuid) = id {
+            self.extra_windows.retain(|w| w.id != uuid);
+        }
+    }
 }

@@ -225,7 +225,7 @@ impl Okena {
         // Create the main window's per-window view (get terminals registry from it)
         let pty_manager_clone = pty_manager.clone();
         let main_window = cx.new(|cx| {
-            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, cx)
+            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, window, cx)
         });
 
         // Get terminals registry from the main window
@@ -379,6 +379,23 @@ impl Okena {
         // `Okena.extra_windows` is the spawn signal.
         cx.observe(&workspace, |this, _workspace, cx| {
             this.handle_extra_windows_changed(cx);
+        })
+        .detach();
+
+        // Slice 07 cri 1: kick the extras observer once so persisted
+        // `WorkspaceData.extra_windows` entries reopen at launch. The observer
+        // above only fires when `workspace` notifies, but `Workspace::new` does
+        // not notify on construction — without an explicit kick, persisted
+        // extras would stay invisible until the user mutates the workspace.
+        // Deferred via `cx.spawn` because `open_extra_window` captures
+        // `cx.entity()` and calls `okena.update` inside `cx.open_window`'s
+        // build closure; running synchronously inside `Okena::new` would touch
+        // a half-constructed entity. By the time the spawned task body runs,
+        // the entity is fully wrapped and `update` is safe.
+        cx.spawn(async move |this: WeakEntity<Okena>, cx| {
+            let _ = this.update(cx, |this, cx| {
+                this.handle_extra_windows_changed(cx);
+            });
         })
         .detach();
 

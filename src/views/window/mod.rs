@@ -20,7 +20,7 @@ use crate::views::chrome::title_bar::TitleBar;
 use crate::settings::settings;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::{WindowId, Workspace};
+use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, Workspace};
 use gpui::*;
 use parking_lot::Mutex;
 use std::cell::RefCell;
@@ -146,6 +146,7 @@ impl WindowView {
         window_id: WindowId,
         workspace: Entity<Workspace>,
         pty_manager: Arc<PtyManager>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
@@ -277,6 +278,32 @@ impl WindowView {
             pending_center_scroll: None,
             last_project_paths: HashMap::new(),
         };
+
+        // Slice 07 cri 7: persist OS bounds back into this window's
+        // `WindowState.os_bounds` whenever GPUI reports a bounds change
+        // (move, resize, snap, monitor switch). The setter delegates to
+        // `data.set_os_bounds` which silently no-ops on an unknown extra id
+        // (close-race contract), so a debounced bounds-observer firing on
+        // a window that's just been closed is safe. The auto-save observer
+        // in `Okena::new` debounces persistence at 500ms; this observer
+        // just bumps `data_version` per bounds change and lets the save
+        // path coalesce. Conversion mirrors the inverse path in
+        // `src/app/extras.rs::open_extra_window` (gpui `Bounds<Pixels>` ->
+        // `PersistedWindowBounds` via four `f32::from(...)` calls).
+        cx.observe_window_bounds(window, |this, window, cx| {
+            let bounds = window.window_bounds().get_bounds();
+            let persisted = PersistedWindowBounds {
+                origin_x: f32::from(bounds.origin.x),
+                origin_y: f32::from(bounds.origin.y),
+                width: f32::from(bounds.size.width),
+                height: f32::from(bounds.size.height),
+            };
+            let window_id = this.window_id;
+            this.workspace.update(cx, |ws, cx| {
+                ws.set_os_bounds(window_id, Some(persisted), cx);
+            });
+        })
+        .detach();
 
         // Observe focus_manager to scroll focused project into view.
         // (Workspace observers no longer fire on focus changes since

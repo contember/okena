@@ -5,9 +5,56 @@ use okena_git;
 use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
 use okena_ui::theme::theme;
 use okena_workspace::requests::ContextMenuRequest;
-use okena_workspace::state::Workspace;
+use okena_workspace::state::{WindowId, Workspace};
 use gpui::prelude::*;
 use gpui::*;
+
+/// Pick the hide/show menu label given (a) whether any extra windows exist and
+/// (b) whether the project is currently hidden in the window hosting the menu.
+///
+/// PRD `plans/multi-window.md` user stories 17 + 18 + slice 08 acceptance
+/// criteria 1 + 2: single-window users keep the legacy "Hide Project" /
+/// "Show Project" labels (no learning tax — user story 30); when at least one
+/// extra window exists the per-window scope becomes explicit via
+/// "Hide from this window" / "Show in this window". The `is_hidden_in_window`
+/// half flips the verb so a click whose effect is to unhide reads as "Show"
+/// and a click whose effect is to hide reads as "Hide".
+pub(crate) fn hide_project_menu_label(
+    extras_exist: bool,
+    is_hidden_in_window: bool,
+) -> &'static str {
+    match (extras_exist, is_hidden_in_window) {
+        (false, false) => "Hide Project",
+        (false, true) => "Show Project",
+        (true, false) => "Hide from this window",
+        (true, true) => "Show in this window",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hide_project_menu_label;
+
+    #[test]
+    fn single_window_visible_reads_hide_project() {
+        assert_eq!(hide_project_menu_label(false, false), "Hide Project");
+    }
+
+    #[test]
+    fn single_window_hidden_reads_show_project() {
+        assert_eq!(hide_project_menu_label(false, true), "Show Project");
+    }
+
+    #[test]
+    fn multi_window_visible_reads_hide_from_this_window() {
+        assert_eq!(hide_project_menu_label(true, false), "Hide from this window");
+    }
+
+    #[test]
+    fn multi_window_hidden_reads_show_in_this_window() {
+        assert_eq!(hide_project_menu_label(true, true), "Show in this window");
+    }
+}
 
 /// Event emitted by ContextMenu
 pub enum ContextMenuEvent {
@@ -36,6 +83,12 @@ impl okena_ui::overlay::CloseEvent for ContextMenuEvent {
 
 /// Project context menu component
 pub struct ContextMenu {
+    /// Identifies the window-scoped slot on the shared `Workspace` this menu
+    /// addresses. Read at render time to (a) look up the project's hidden
+    /// state in this window's `hidden_project_ids` and (b) emit a toggle that
+    /// targets the same window via the existing `ToggleProjectVisibility`
+    /// event flow. Mirrors `FolderContextMenu::window_id`.
+    window_id: WindowId,
     workspace: Entity<Workspace>,
     request: ContextMenuRequest,
     focus_handle: FocusHandle,
@@ -43,12 +96,14 @@ pub struct ContextMenu {
 
 impl ContextMenu {
     pub fn new(
+        window_id: WindowId,
         workspace: Entity<Workspace>,
         request: ContextMenuRequest,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         Self {
+            window_id,
             workspace,
             request,
             focus_handle,
@@ -180,6 +235,18 @@ impl Render for ContextMenu {
         let project_path_for_worktree = project_path.clone();
         let project_path_for_rename_dir = project_path.clone();
         let project_name_for_rename = project_name.clone();
+        let extras_exist = !ws.data().extra_windows.is_empty();
+        let is_hidden_in_window = ws
+            .data()
+            .window(self.window_id)
+            .map(|w| w.hidden_project_ids.contains(&self.request.project_id))
+            .unwrap_or(false);
+        let hide_project_label = hide_project_menu_label(extras_exist, is_hidden_in_window);
+        let hide_project_icon = if is_hidden_in_window {
+            "icons/eye.svg"
+        } else {
+            "icons/eye-off.svg"
+        };
 
         div()
             .track_focus(&self.focus_handle)
@@ -247,9 +314,9 @@ impl Render for ContextMenu {
                                 this.focus_project(cx);
                             })),
                     )
-                    // Hide Project
+                    // Hide / Show Project (label + icon depend on extras presence and per-window hidden state)
                     .child(
-                        menu_item("context-menu-hide-project", "icons/eye-off.svg", "Hide Project", &t)
+                        menu_item("context-menu-hide-project", hide_project_icon, hide_project_label, &t)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.hide_project(cx);
                             })),

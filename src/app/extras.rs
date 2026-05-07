@@ -54,6 +54,33 @@ pub(super) fn extras_to_open(
         .collect()
 }
 
+/// Resolve the OS bounds an extra window should open at: prefer the entry's
+/// persisted `os_bounds`; fall back to a cascade-offset (+30,+30 origin,
+/// preserved size) from main's live bounds when the entry has none recorded.
+/// Returns `None` if both are absent so the OS picks a default position.
+///
+/// Pure function — slice 07 cri 2. The persisted-wins precedence covers the
+/// common case (user resized an extra, quit, relaunched: bounds round-trip
+/// exactly). The cascade fallback covers entries that pre-date slice 05's
+/// cascade-offset spawn snapshot, or any future caller that pushes onto
+/// `extra_windows` without pre-seeding `os_bounds`. The arithmetic mirrors
+/// the spawn-time cascade in `WorkspaceData::spawn_extra_window` (also
+/// +30,+30 origin shift, size preserved) so a freshly-minted extra and a
+/// fallback-restored extra land at visually equivalent offsets.
+pub(super) fn resolve_extra_window_bounds(
+    persisted: Option<PersistedWindowBounds>,
+    main_bounds: Option<PersistedWindowBounds>,
+) -> Option<PersistedWindowBounds> {
+    persisted.or_else(|| {
+        main_bounds.map(|b| PersistedWindowBounds {
+            origin_x: b.origin_x + 30.0,
+            origin_y: b.origin_y + 30.0,
+            width: b.width,
+            height: b.height,
+        })
+    })
+}
+
 /// Resolve the `WindowId` that the currently focused OS window corresponds to,
 /// or fall back to `WindowId::Main` if no Okena window is focused (e.g. another
 /// application has focus, or the active window isn't tracked).
@@ -132,29 +159,50 @@ impl Okena {
 
     /// Open an OS window for the given extra `WindowId::Extra(uuid)` and
     /// register the resulting `Entity<WindowView>` in `Okena.extra_windows`.
+    /// Wires an `on_window_should_close` hook so closing the OS window drops
+    /// the entry from `WorkspaceData.extra_windows` (slice 07 cri 3 — close
+    /// forgets) plus the `Okena`-side `extra_windows` and
+    /// `extra_window_handles` maps.
     fn open_extra_window(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
         let pty_manager = self.pty_manager.clone();
         let okena = cx.entity().clone();
 
-        // Read the persisted cascade-offset bounds seeded by
-        // `Workspace::spawn_extra_window` and lift them into the gpui
-        // `WindowBounds::Windowed` shape that `cx.open_window` expects.
-        // `PersistedWindowBounds` is the persisted f32 origin/size struct
-        // from `okena-state`; aliased on import to disambiguate from the
-        // gpui `WindowBounds` enum brought in by `use gpui::*;`.
-        let window_bounds = self
+        // Resolve the OS bounds: prefer persisted `os_bounds` (seeded by
+        // `Workspace::spawn_extra_window` at action-handler time, or
+        // round-tripped through persistence from a prior session); else
+        // cascade-offset from main's live bounds (slice 07 cri 2 fallback for
+        // entries with no recorded bounds — pre-slice-05 persisted entries,
+        // or future callers that spawn without pre-seeding). The conversion
+        // chain is f32 → `PersistedWindowBounds` → gpui `WindowBounds` so the
+        // cascade arithmetic stays in the pure helper, free of GPUI types.
+        // `PersistedWindowBounds` is the persisted f32 struct from
+        // `okena-state`; aliased on import to disambiguate from the gpui
+        // `WindowBounds` enum brought in by `use gpui::*;`.
+        let persisted = self
             .workspace
             .read(cx)
             .data()
             .window(window_id)
-            .and_then(|w| w.os_bounds)
-            .map(|b: PersistedWindowBounds| {
+            .and_then(|w| w.os_bounds);
+        let main_bounds = self
+            .main_window_handle
+            .update(cx, |_, window, _| window.window_bounds().get_bounds())
+            .ok()
+            .map(|b| PersistedWindowBounds {
+                origin_x: f32::from(b.origin.x),
+                origin_y: f32::from(b.origin.y),
+                width: f32::from(b.size.width),
+                height: f32::from(b.size.height),
+            });
+        let window_bounds = resolve_extra_window_bounds(persisted, main_bounds).map(
+            |b: PersistedWindowBounds| {
                 WindowBounds::Windowed(Bounds {
                     origin: point(px(b.origin_x), px(b.origin_y)),
                     size: size(px(b.width), px(b.height)),
                 })
-            });
+            },
+        );
 
         let result = cx.open_window(
             WindowOptions {
@@ -183,7 +231,7 @@ impl Okena {
             },
             move |window, cx| {
                 let view = cx.new(|cx| {
-                    WindowView::new(window_id, workspace.clone(), pty_manager.clone(), cx)
+                    WindowView::new(window_id, workspace.clone(), pty_manager.clone(), window, cx)
                 });
                 let view_for_okena = view.clone();
                 let handle = window.window_handle();
@@ -191,10 +239,35 @@ impl Okena {
                     this.extra_windows.insert(window_id, view_for_okena);
                     // Track the OS window handle so the remote-bridge command
                     // loop can resolve actions to whichever window is focused
-                    // (PRD cri 13). The handle is removed on close in the
-                    // upcoming slice 07 close-flow.
+                    // (PRD cri 13). The handle is removed on close below.
                     this.extra_window_handles.insert(window_id, handle);
                 });
+
+                // Slice 07 cri 3 close-flow: when the user closes this OS
+                // window, drop the entry from `WorkspaceData.extra_windows`
+                // (so persistence forgets it -- PRD user story 22) and from
+                // `Okena.extra_windows` + `extra_window_handles` (so the
+                // remote-bridge resolver and the spawn-side observer stop
+                // seeing it). Order matters: the workspace mutation runs
+                // FIRST so save/observers fire on a still-alive
+                // `Entity<WindowView>` (the strong handle in
+                // `Okena.extra_windows` keeps it alive until the second
+                // step). The Okena-side removes drop the strong handle so
+                // the entity then drops with the OS window. Returning
+                // `true` allows the OS close to proceed.
+                let workspace_for_close = workspace.clone();
+                let okena_for_close = okena.clone();
+                window.on_window_should_close(cx, move |_window, cx| {
+                    workspace_for_close.update(cx, |ws, cx| {
+                        ws.close_extra_window(window_id, cx);
+                    });
+                    okena_for_close.update(cx, |this, _cx| {
+                        this.extra_windows.remove(&window_id);
+                        this.extra_window_handles.remove(&window_id);
+                    });
+                    true
+                });
+
                 cx.new(|cx| Root::new(view, window, cx))
             },
         );
@@ -207,8 +280,8 @@ impl Okena {
 
 #[cfg(test)]
 mod tests {
-    use super::{extras_to_open, resolve_focused_window_id};
-    use crate::workspace::state::{WindowId, WindowState, WorkspaceData};
+    use super::{extras_to_open, resolve_extra_window_bounds, resolve_focused_window_id};
+    use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WindowState, WorkspaceData};
     use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
 
@@ -284,6 +357,88 @@ mod tests {
         let ids: Vec<WindowId> = (0..5).map(|_| data.spawn_extra_window(None)).collect();
         let opened = HashSet::new();
         assert_eq!(extras_to_open(&data, &opened), ids);
+    }
+
+    #[test]
+    fn default_workspace_yields_no_extras_to_open() {
+        // Slice 07 cri 8: first launch on a system with no `workspace.json`
+        // opens exactly one window (main), `extra_windows` empty. The
+        // structural chain: `main.rs::265+520` calls
+        // `persistence::load_workspace(...).unwrap_or_else(|_|
+        // default_workspace())`, so a missing file (no Err — line 330 in
+        // persistence.rs returns `Ok(default_workspace())` directly) AND a
+        // corrupt-file Err (cri 9 path) both bottom out at
+        // `default_workspace()`. Pin the contract: the fallback shape has
+        // empty `extra_windows`, so the slice 07 cri 1 restore-at-launch
+        // kickoff (`handle_extra_windows_changed` -> `extras_to_open`)
+        // surfaces nothing to open. Main always opens unconditionally per
+        // `main.rs::cx.open_window` for the Okena view, so the visible
+        // window count is exactly one.
+        //
+        // Defends against a regression where a future refactor pre-populates
+        // `default_workspace().extra_windows` (e.g. with a synthesized "tip"
+        // window for new users), which would silently break the
+        // single-window-on-fresh-install contract.
+        let data = crate::workspace::persistence::default_workspace();
+        assert!(
+            data.extra_windows.is_empty(),
+            "default_workspace must produce zero extras so first-launch opens main only"
+        );
+        let opened = HashSet::new();
+        assert!(
+            extras_to_open(&data, &opened).is_empty(),
+            "restore-at-launch kickoff must find no extras to open on the default workspace"
+        );
+    }
+
+    #[test]
+    fn corrupt_workspace_json_errors_without_panic_and_fallback_has_no_extras() {
+        // Slice 07 cri 9: corrupt/missing `windows` section: app falls back
+        // to one fresh main window — no panics. The structural chain:
+        // `persistence::load_workspace` calls `serde_json::from_str` on the
+        // file content; on parse error, the loader backs the file up as
+        // `workspace.json.bak`, sets `LOADED_FROM_DEFAULT` (blocks save),
+        // and returns Err. `main.rs::265+520`'s `unwrap_or_else` substitutes
+        // `default_workspace()` (already pinned empty by the cri 8 test
+        // above). The "no panic" half of the contract reduces to: serde
+        // returns Result::Err on malformed input rather than panicking.
+        //
+        // Pin both halves:
+        //   (a) `serde_json::from_str::<WorkspaceData>` on malformed JSON
+        //       returns Err (no panic). The loader's backup + Err-return
+        //       path is then exercised by the unwrap_or_else in main.rs.
+        //   (b) the fallback `default_workspace()` has empty
+        //       `extra_windows` — the same structural contract as cri 8,
+        //       reasserted here because cri 9 names the no-panic +
+        //       single-window guarantee independently.
+        //
+        // The "missing windows section" branch of cri 9 (legacy JSON without
+        // `main_window` / `extra_windows` fields) is already pinned by the
+        // existing `workspace_data_old_shape_loads_with_default_main_window`
+        // test in `crates/okena-state/src/workspace_data.rs::tests` (line
+        // 365): legacy JSON parses successfully and yields a default
+        // `main_window` + empty `extra_windows`. This test covers the
+        // "corrupt/wrong-type" branch (e.g. `extra_windows: "not an array"`)
+        // where serde must err rather than panic.
+        let corrupt_json = r#"{
+            "version": 1,
+            "projects": [],
+            "project_order": [],
+            "extra_windows": "this should be an array, not a string"
+        }"#;
+        let parse_result: Result<crate::workspace::state::WorkspaceData, _> =
+            serde_json::from_str(corrupt_json);
+        assert!(
+            parse_result.is_err(),
+            "corrupt workspace.json must produce serde Err (no panic) so loader's backup + fallback path runs"
+        );
+
+        // Fallback path produces the single-main-window shape.
+        let fallback = crate::workspace::persistence::default_workspace();
+        assert!(
+            fallback.extra_windows.is_empty(),
+            "default_workspace fallback (used by main.rs's unwrap_or_else on load Err) must produce zero extras so corrupt-file recovery opens main only"
+        );
     }
 
     #[test]
@@ -367,6 +522,80 @@ mod tests {
         let handles: Vec<(WindowId, u32)> = Vec::new();
         assert_eq!(resolve_focused_window_id(Some(1), &handles), WindowId::Main);
         assert_eq!(resolve_focused_window_id::<u32>(None, &handles), WindowId::Main);
+    }
+
+    // ── Restore-bounds resolver ──────────────────────────────────────────
+
+    #[test]
+    fn resolve_extra_window_bounds_persisted_wins_over_main() {
+        // Slice 07 cri 2: when the persisted entry already has `os_bounds`
+        // (the common case after a quit/relaunch round-trip, or after a
+        // fresh spawn that seeded bounds via the slice 05 cascade), the
+        // resolver returns the persisted value verbatim. Main's live bounds
+        // are ignored — without this precedence, restoring a manually-resized
+        // extra would silently snap it back to a cascade offset.
+        let persisted = PersistedWindowBounds {
+            origin_x: 500.0,
+            origin_y: 300.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let main_bounds = PersistedWindowBounds {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        let resolved = resolve_extra_window_bounds(Some(persisted), Some(main_bounds))
+            .expect("persisted bounds resolve to Some");
+        assert_eq!(resolved, persisted);
+    }
+
+    #[test]
+    fn resolve_extra_window_bounds_no_persisted_cascades_from_main() {
+        // The fallback path: persisted `os_bounds` is None (e.g. a
+        // pre-slice-05 entry, or a future caller that spawns without
+        // bounds). Resolver computes +30,+30 origin shift, preserves size.
+        // Mirrors the data-layer cascade rule from
+        // `WorkspaceData::spawn_extra_window` so a fresh spawn and a
+        // fallback restore land at visually equivalent offsets.
+        let main_bounds = PersistedWindowBounds {
+            origin_x: 100.0,
+            origin_y: 200.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        let resolved = resolve_extra_window_bounds(None, Some(main_bounds))
+            .expect("cascade fallback resolves to Some");
+        assert_eq!(resolved.origin_x, 130.0);
+        assert_eq!(resolved.origin_y, 230.0);
+        assert_eq!(resolved.width, 1280.0);
+        assert_eq!(resolved.height, 800.0);
+    }
+
+    #[test]
+    fn resolve_extra_window_bounds_no_persisted_no_main_returns_none() {
+        // Both inputs absent — the OS picks a default position. Defends
+        // against a future regression that synthesised a "default" bounds
+        // (e.g. fixed 0,0,1280,800) when both inputs are None: such a
+        // change would silently override the user's OS default.
+        assert!(resolve_extra_window_bounds(None, None).is_none());
+    }
+
+    #[test]
+    fn resolve_extra_window_bounds_persisted_some_main_none_passes_through() {
+        // Symmetric case: main's bounds couldn't be read (e.g. drop race on
+        // shutdown), but the persisted entry has bounds. The persisted
+        // path doesn't need main, so the absent main_bounds is irrelevant.
+        let persisted = PersistedWindowBounds {
+            origin_x: 50.0,
+            origin_y: 75.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let resolved = resolve_extra_window_bounds(Some(persisted), None)
+            .expect("persisted alone is sufficient");
+        assert_eq!(resolved, persisted);
     }
 
     #[test]
