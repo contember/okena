@@ -208,16 +208,15 @@ pub fn create_profile(display_name: &str) -> Result<String> {
     });
 
     let id = unique_id(display_name, &index);
+    let claude_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(format!(".claude-okena-{id}"));
     let entry = ProfileEntry {
         id: id.clone(),
         display_name: display_name.to_string(),
         created_at: now_iso8601(),
         // New profiles get their own claude dir; user can override via settings.json
-        claude_config_dir: Some(
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(format!(".claude-okena-{id}"))
-        ),
+        claude_config_dir: Some(claude_dir.clone()),
         icon: None,
         color: None,
     };
@@ -228,10 +227,6 @@ pub fn create_profile(display_name: &str) -> Result<String> {
     // so the Claude extension picks up the right config_dir immediately.
     let profile_root = root.join("profiles").join(&id);
     std::fs::create_dir_all(&profile_root)?;
-
-    let claude_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(format!(".claude-okena-{id}"));
     let settings_json = serde_json::json!({
         "version": 3,
         "extension_settings": {
