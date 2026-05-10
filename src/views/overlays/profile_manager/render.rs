@@ -15,12 +15,7 @@ impl ProfileManager {
         let display_name = entry.display_name.clone();
         let is_active = id == self.active_id;
         let is_deleting = self.show_delete_confirmation.as_deref() == Some(&id);
-        let is_default = {
-            okena_core::profiles::ProfileIndex::load(&okena_core::profiles::config_root())
-                .ok()
-                .map(|idx| idx.default_profile == id)
-                .unwrap_or(false)
-        };
+        let is_default = id == self.default_profile_id;
 
         let id_for_switch = id.clone();
         let id_for_delete = id.clone();
