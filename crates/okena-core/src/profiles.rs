@@ -178,7 +178,7 @@ fn pick_profile_id(index: &ProfileIndex) -> Result<String> {
 }
 
 fn validate_profile_id(id: &str) -> Result<()> {
-    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") || id.contains('\0') {
         bail!("Invalid profile id: '{id}'");
     }
     Ok(())

@@ -367,14 +367,19 @@ impl RootView {
 
         // 3. Spawn current_exe with --profile <id>. Strip any existing --profile arg
         //    so we don't double-pass it.
-        if let Ok(exe) = std::env::current_exe() {
-            let mut args: Vec<String> = std::env::args().skip(1).collect();
-            strip_profile_args(&mut args);
-            let _ = std::process::Command::new(&exe)
-                .args(&args)
-                .arg("--profile")
-                .arg(&id)
-                .spawn();
+        match std::env::current_exe() {
+            Ok(exe) => {
+                let mut args: Vec<String> = std::env::args().skip(1).collect();
+                strip_profile_args(&mut args);
+                let _ = std::process::Command::new(&exe)
+                    .args(&args)
+                    .arg("--profile")
+                    .arg(&id)
+                    .spawn();
+            }
+            Err(e) => {
+                log::error!("profile switch: could not resolve current_exe, relaunch aborted: {e}");
+            }
         }
 
         cx.quit();
