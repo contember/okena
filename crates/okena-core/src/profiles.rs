@@ -169,11 +169,13 @@ fn pick_profile_id(index: &ProfileIndex) -> Result<String> {
         }
     }
     // Ambiguous — give the user a clear error
-    eprintln!("Multiple profiles found. Specify one with --profile <id> or OKENA_PROFILE:");
+    let mut msg = String::from(
+        "Multiple profiles found. Specify one with --profile <id> or OKENA_PROFILE:\n",
+    );
     for p in &index.profiles {
-        eprintln!("  {:<20} {}", p.id, p.display_name);
+        msg.push_str(&format!("  {:<20} {}\n", p.id, p.display_name));
     }
-    std::process::exit(1);
+    bail!("{}", msg.trim_end());
 }
 
 fn make_profile_paths(entry: &ProfileEntry, config_root: &Path) -> ProfilePaths {
