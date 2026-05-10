@@ -130,7 +130,7 @@ pub fn resolve_active_profile(flag_id: Option<String>) -> Result<ProfilePaths> {
         Err(_) => {
             // No profiles.json — first ever run. Bootstrap default profile.
             let idx = bootstrap_default_profile(&root)?;
-            let paths = make_profile_paths(&idx.profiles[0], &root);
+            let paths = make_profile_paths(&idx.profiles[0], &root)?;
             migrate_legacy_layout_if_needed(&paths)?;
             return Ok(paths);
         }
@@ -152,7 +152,7 @@ pub fn resolve_active_profile(flag_id: Option<String>) -> Result<ProfilePaths> {
 
     index.set_last_used(&id, &root);
     let entry = index.profiles.iter().find(|p| p.id == id).unwrap().clone();
-    Ok(make_profile_paths(&entry, &root))
+    make_profile_paths(&entry, &root)
 }
 
 fn pick_profile_id(index: &ProfileIndex) -> Result<String> {
@@ -178,13 +178,21 @@ fn pick_profile_id(index: &ProfileIndex) -> Result<String> {
     bail!("{}", msg.trim_end());
 }
 
-fn make_profile_paths(entry: &ProfileEntry, config_root: &Path) -> ProfilePaths {
+fn validate_profile_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        bail!("Invalid profile id: '{id}'");
+    }
+    Ok(())
+}
+
+fn make_profile_paths(entry: &ProfileEntry, config_root: &Path) -> Result<ProfilePaths> {
+    validate_profile_id(&entry.id)?;
     let root = config_root.join("profiles").join(&entry.id);
-    ProfilePaths {
+    Ok(ProfilePaths {
         id: entry.id.clone(),
         root,
         config_root: config_root.to_path_buf(),
-    }
+    })
 }
 
 // ─── Profile creation ─────────────────────────────────────────────────────────
@@ -269,7 +277,7 @@ pub fn delete_profile(id: &str) -> Result<()> {
             bail!("Cannot delete the active profile — switch to another profile first");
         }
     }
-    let paths = make_profile_paths(&entry, &root);
+    let paths = make_profile_paths(&entry, &root)?;
     if is_profile_running(&paths) {
         bail!("Profile '{id}' is currently in use by another Okena instance");
     }
