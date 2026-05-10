@@ -209,7 +209,7 @@ pub fn create_profile(display_name: &str) -> Result<String> {
     let id = unique_id(display_name, &index);
     let claude_dir = dirs::home_dir()
         .unwrap_or_default()
-        .join(format!(".claude-okena-{id}"));
+        .join(format!(".claude-{id}"));
     let entry = ProfileEntry {
         id: id.clone(),
         display_name: display_name.to_string(),
@@ -254,7 +254,7 @@ pub fn all_profiles() -> Result<Vec<ProfileEntry>> {
 /// Delete a profile. Refuses to delete the active profile, the default profile, or a
 /// profile whose `remote.json` points to a live PID. Removes the profile directory and
 /// updates `profiles.json` (index written first so partial FS failure leaves index clean).
-/// Claude credentials at `~/.claude-okena-<id>/` are intentionally preserved.
+/// Claude credentials at `~/.claude-<id>/` are intentionally preserved.
 pub fn delete_profile(id: &str) -> Result<()> {
     let root = config_root();
     let mut index = ProfileIndex::load(&root)?;
