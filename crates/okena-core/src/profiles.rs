@@ -129,10 +129,9 @@ pub fn resolve_active_profile(flag_id: Option<String>) -> Result<ProfilePaths> {
         Ok(idx) => idx,
         Err(_) => {
             // No profiles.json — first ever run. Bootstrap default profile.
+            // Migration is handled by the caller (main.rs) after init_profile.
             let idx = bootstrap_default_profile(&root)?;
-            let paths = make_profile_paths(&idx.profiles[0], &root)?;
-            migrate_legacy_layout_if_needed(&paths)?;
-            return Ok(paths);
+            return make_profile_paths(&idx.profiles[0], &root);
         }
     };
 
