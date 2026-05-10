@@ -341,6 +341,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // SAFETY: called before any threads are spawned; no concurrent reads of the environment.
     unsafe { std::env::set_var("OKENA_PROFILE", &profile_paths.id) };
     let profile_log = profile_paths.log_path();
     let profile_log_prev = profile_paths.root.join("okena.log.1");
