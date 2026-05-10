@@ -368,12 +368,20 @@ pub fn migrate_legacy_layout_if_needed(paths: &ProfilePaths) -> Result<()> {
     eprintln!("Migrating legacy Okena state into profile 'default'…");
     std::fs::create_dir_all(dst)?;
 
+    const SENSITIVE: &[&str] = &["remote_secret", "remote_tokens.json", "pair_code"];
+
     for name in &candidates {
         let from = src.join(name);
         if from.exists() {
             let to = dst.join(name);
             if let Err(e) = std::fs::rename(&from, &to) {
                 eprintln!("Warning: could not migrate {name}: {e}");
+            } else {
+                #[cfg(unix)]
+                if SENSITIVE.contains(name) {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600));
+                }
             }
         }
     }
