@@ -27,6 +27,15 @@ fn icon_style_for(filename: &str) -> Option<FileIconStyle> {
         "ts" => FileIconStyle { color: 0x3178c6, label: "ts" },
         "tsx" => FileIconStyle { color: 0x3178c6, label: "tx" },
         "jsx" => FileIconStyle { color: 0x51b5d0, label: "jx" },
+        // Component frameworks
+        "astro" => FileIconStyle { color: 0xff5d01, label: "as" },
+        "svelte" => FileIconStyle { color: 0xff3e00, label: "sv" },
+        "vue" => FileIconStyle { color: 0x42b883, label: "vu" },
+        // Schema / IaC / RPC
+        "graphql" | "gql" | "graphqls" => FileIconStyle { color: 0xe10098, label: "gq" },
+        "prisma" => FileIconStyle { color: 0x5a67d8, label: "pr" },
+        "tf" | "tfvars" | "hcl" => FileIconStyle { color: 0x7b42bc, label: "tf" },
+        "proto" | "protobuf" => FileIconStyle { color: 0x4285f4, label: "pb" },
         // CSS / SCSS
         "css" => FileIconStyle { color: 0x569cd6, label: "cs" },
         "scss" | "sass" => FileIconStyle { color: 0xcd6799, label: "sc" },

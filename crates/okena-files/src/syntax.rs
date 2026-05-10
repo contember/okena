@@ -89,8 +89,13 @@ pub fn map_extension_to_syntax(ext: &str) -> Option<&'static str> {
         "tsx" => Some("tsx"),
         "jsx" => Some("tsx"), // JSX uses TypeScriptReact syntax (best JSX support)
         "mjs" | "cjs" => Some("js"),
-        // Vue/Svelte - use HTML
-        "vue" | "svelte" => Some("html"),
+        // Vue/Svelte/Astro - use HTML
+        "vue" | "svelte" | "astro" => Some("html"),
+        // Schema / IaC / RPC
+        "graphql" | "gql" | "graphqls" => Some("graphql"),
+        "prisma" => Some("graphql"), // Prisma SDL is GraphQL-like
+        "tf" | "tfvars" | "hcl" => Some("tf"),
+        "proto" | "protobuf" => Some("proto"),
         // Config files
         "yml" | "yaml" => Some("yaml"),
         "json" | "jsonc" | "json5" => Some("json"),
@@ -118,7 +123,7 @@ pub fn map_extension_to_syntax(ext: &str) -> Option<&'static str> {
         "pl" | "pm" => Some("pl"),
         "lua" => Some("lua"),
         "sql" => Some("sql"),
-        "md" | "markdown" => Some("md"),
+        "md" | "mdx" | "markdown" => Some("md"),
         "tex" | "latex" => Some("tex"),
         "diff" | "patch" => Some("diff"),
         "dockerfile" => Some("dockerfile"),
