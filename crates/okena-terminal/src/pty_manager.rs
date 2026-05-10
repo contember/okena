@@ -217,7 +217,9 @@ impl PtyManager {
         // These are profile-scoped values (e.g. CLAUDE_CONFIG_DIR) that must
         // override whatever the user's shell rc or the parent process has set.
         for (key, val) in &*self.extra_env.lock() {
-            cmd.env(key, val);
+            if std::env::var(key).is_err() {
+                cmd.env(key, val);
+            }
         }
 
         // Spawn the process
