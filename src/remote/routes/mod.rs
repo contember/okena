@@ -72,19 +72,23 @@ pub fn build_router(
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
         .route("/v1/tokens/{id}", axum::routing::delete(tokens::revoke_token))
-        .route(
-            "/v1/auth/reload",
-            axum::routing::post(auth_reload::post_reload),
-        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
         ));
 
-    // Public routes (no auth required)
+    // Public routes (no auth required).
+    // `/v1/auth/reload` is intentionally unauthenticated: the CLI register
+    // flow calls it before the new token is visible in-memory, so auth would
+    // deadlock. Server binds 127.0.0.1, endpoint is no-input/no-leak and just
+    // re-reads `remote_tokens.json` (0o600).
     let public = Router::new()
         .route("/health", axum::routing::get(health::get_health))
-        .route("/v1/pair", axum::routing::post(pair::post_pair));
+        .route("/v1/pair", axum::routing::post(pair::post_pair))
+        .route(
+            "/v1/auth/reload",
+            axum::routing::post(auth_reload::post_reload),
+        );
 
     public
         .merge(protected)
