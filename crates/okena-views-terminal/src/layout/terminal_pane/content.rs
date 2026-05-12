@@ -1,12 +1,15 @@
 //! Terminal content component.
 
-use crate::elements::terminal_element::{LinkKind, SearchMatch, TerminalElement};
+use crate::elements::terminal_element::{
+    deregister_resize_viewer as deregister_shared_resize_viewer, next_resize_viewer_id, LinkKind,
+    SearchMatch, TerminalElement,
+};
 use crate::terminal_view_settings;
 use okena_terminal::terminal::Terminal;
 use okena_files::theme::theme;
 use okena_ui::color_utils::tint_color;
 use crate::layout::navigation::register_pane_bounds;
-use okena_workspace::state::Workspace;
+use okena_workspace::state::{WindowId, Workspace};
 use gpui::*;
 use std::sync::Arc;
 use std::time::Instant;
@@ -26,6 +29,7 @@ pub enum TerminalContentEvent {
 /// Terminal content view handling display and mouse interactions.
 pub struct TerminalContent {
     terminal: Option<Arc<Terminal>>,
+    resize_viewer_id: u64,
     focus_handle: FocusHandle,
     url_detector: UrlDetector,
     scrollbar: Entity<Scrollbar>,
@@ -38,6 +42,7 @@ pub struct TerminalContent {
     search_current_index: Option<usize>,
     project_id: String,
     layout_path: Vec<usize>,
+    window_id: Option<WindowId>,
     workspace: Entity<Workspace>,
     scroll_accumulator: f32,
     mouse_down_cell: Option<(usize, i32)>,
@@ -48,6 +53,7 @@ pub struct TerminalContent {
 impl TerminalContent {
     pub fn new(
         focus_handle: FocusHandle,
+        window_id: Option<WindowId>,
         project_id: String,
         layout_path: Vec<usize>,
         workspace: Entity<Workspace>,
@@ -57,6 +63,7 @@ impl TerminalContent {
 
         Self {
             terminal: None,
+            resize_viewer_id: next_resize_viewer_id(),
             focus_handle,
             url_detector: UrlDetector::new(),
             scrollbar,
@@ -69,6 +76,7 @@ impl TerminalContent {
             search_current_index: None,
             project_id,
             layout_path,
+            window_id,
             workspace,
             scroll_accumulator: 0.0,
             mouse_down_cell: None,
@@ -147,10 +155,22 @@ impl TerminalContent {
     }
 
     pub fn set_terminal(&mut self, terminal: Option<Arc<Terminal>>, cx: &mut Context<Self>) {
+        if let Some(old_terminal) = self.terminal.as_ref() {
+            let next_id = terminal.as_ref().map(|terminal| terminal.terminal_id.as_str());
+            if next_id != Some(old_terminal.terminal_id.as_str()) {
+                deregister_shared_resize_viewer(&old_terminal.terminal_id, self.resize_viewer_id);
+            }
+        }
         self.terminal = terminal.clone();
         self.scrollbar.update(cx, |scrollbar, _| {
             scrollbar.set_terminal(terminal);
         });
+    }
+
+    pub(crate) fn deregister_resize_viewer(&mut self) {
+        if let Some(terminal) = self.terminal.as_ref() {
+            deregister_shared_resize_viewer(&terminal.terminal_id, self.resize_viewer_id);
+        }
     }
 
     pub fn set_cursor_visible(&mut self, visible: bool) {
@@ -494,11 +514,14 @@ impl Render for TerminalContent {
 
         let element_bounds_setter = {
             let entity = cx.entity().downgrade();
+            let window_id = self.window_id;
             let project_id = self.project_id.clone();
             let layout_path = self.layout_path.clone();
             let fh = self.focus_handle.clone();
             move |bounds: Bounds<Pixels>, _window: &mut Window, cx: &mut App| {
-                register_pane_bounds(project_id.clone(), layout_path.clone(), bounds, Some(fh.clone()));
+                if let Some(window_id) = window_id {
+                    register_pane_bounds(window_id, project_id.clone(), layout_path.clone(), bounds, Some(fh.clone()));
+                }
 
                 if let Some(entity) = entity.upgrade() {
                     entity.update(cx, |this, _| {
@@ -624,7 +647,7 @@ impl Render for TerminalContent {
                     .p(px(4.0))
                     .bg(rgb(term_bg))
                     .child(
-                        TerminalElement::new(terminal_clone, focus_handle)
+                        TerminalElement::new(terminal_clone, focus_handle, self.resize_viewer_id)
                             .with_zoom(zoom_level)
                             .with_bg_tint(bg_tint)
                             .with_search(self.search_matches.clone(), self.search_current_index)
@@ -638,6 +661,12 @@ impl Render for TerminalContent {
             )
             .child(self.scrollbar.clone())
             .into_any_element()
+    }
+}
+
+impl Drop for TerminalContent {
+    fn drop(&mut self) {
+        self.deregister_resize_viewer();
     }
 }
 

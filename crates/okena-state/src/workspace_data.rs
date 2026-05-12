@@ -51,33 +51,46 @@ impl WorkspaceData {
     /// Return a copy with all remote projects, remote folders, and their
     /// associated widths/heights stripped out (for saving to disk).
     pub fn without_remote_projects(&self) -> Self {
-        let remote_ids: HashSet<&str> = self.projects.iter()
+        let remote_ids: HashSet<String> = self.projects.iter()
             .filter(|p| p.is_remote)
-            .map(|p| p.id.as_str())
+            .map(|p| p.id.clone())
+            .collect();
+        let remote_folder_ids: HashSet<String> = self.folders.iter()
+            .filter(|f| f.id.starts_with("remote:"))
+            .map(|f| f.id.clone())
             .collect();
 
-        if remote_ids.is_empty() {
+        if remote_ids.is_empty() && remote_folder_ids.is_empty() {
             return self.clone();
         }
 
-        Self {
+        let mut data = Self {
             version: self.version,
             projects: self.projects.iter().filter(|p| !p.is_remote).cloned().collect(),
             project_order: self.project_order.iter()
-                .filter(|id| !id.starts_with("remote:") && !remote_ids.contains(id.as_str()))
+                .filter(|id| !id.starts_with("remote:") && !remote_ids.contains(*id))
                 .cloned().collect(),
             service_panel_heights: self.service_panel_heights.iter()
-                .filter(|(id, _)| !remote_ids.contains(id.as_str()))
+                .filter(|(id, _)| !remote_ids.contains(*id))
                 .map(|(k, v)| (k.clone(), *v)).collect(),
             hook_panel_heights: self.hook_panel_heights.iter()
-                .filter(|(id, _)| !remote_ids.contains(id.as_str()))
+                .filter(|(id, _)| !remote_ids.contains(*id))
                 .map(|(k, v)| (k.clone(), *v)).collect(),
             folders: self.folders.iter()
                 .filter(|f| !f.id.starts_with("remote:"))
                 .cloned().collect(),
             main_window: self.main_window.clone(),
             extra_windows: self.extra_windows.clone(),
+        };
+
+        for project_id in &remote_ids {
+            data.delete_project_scrub_all_windows(project_id);
         }
+        for folder_id in &remote_folder_ids {
+            data.delete_folder_scrub_all_windows(folder_id);
+        }
+
+        data
     }
 }
 
@@ -432,6 +445,82 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
         assert!(!value.as_object().unwrap().contains_key("show_in_overview"),
             "ProjectData.show_in_overview must not appear in serialized form (field removed)");
+    }
+
+    #[test]
+    fn without_remote_projects_scrubs_remote_window_state() {
+        let mut data = make_workspace();
+        let mut local = make_project("/tmp/local");
+        local.id = "local".to_string();
+        let mut remote = make_project("/tmp/remote");
+        remote.id = "remote:c1:p1".to_string();
+        remote.is_remote = true;
+        remote.connection_id = Some("c1".to_string());
+
+        data.projects = vec![local, remote];
+        data.project_order = vec![
+            "local".to_string(),
+            "remote:c1:p1".to_string(),
+            "remote:c1:f1".to_string(),
+        ];
+        data.folders = vec![
+            FolderData {
+                id: "local-folder".to_string(),
+                name: "Local".to_string(),
+                project_ids: vec!["local".to_string()],
+                folder_color: Default::default(),
+            },
+            FolderData {
+                id: "remote:c1:f1".to_string(),
+                name: "Remote".to_string(),
+                project_ids: vec!["remote:c1:p1".to_string()],
+                folder_color: Default::default(),
+            },
+        ];
+        data.service_panel_heights.insert("local".to_string(), 1.0);
+        data.service_panel_heights.insert("remote:c1:p1".to_string(), 2.0);
+        data.hook_panel_heights.insert("local".to_string(), 3.0);
+        data.hook_panel_heights.insert("remote:c1:p1".to_string(), 4.0);
+
+        data.main_window.hidden_project_ids.insert("local".to_string());
+        data.main_window.hidden_project_ids.insert("remote:c1:p1".to_string());
+        data.main_window.project_widths.insert("local".to_string(), 0.25);
+        data.main_window.project_widths.insert("remote:c1:p1".to_string(), 0.75);
+        data.main_window.folder_filter = Some("remote:c1:f1".to_string());
+        data.main_window.folder_collapsed.insert("local-folder".to_string(), true);
+        data.main_window.folder_collapsed.insert("remote:c1:f1".to_string(), true);
+
+        let mut extra = WindowState::default();
+        let extra_id = extra.id;
+        extra.hidden_project_ids.insert("remote:c1:p1".to_string());
+        extra.project_widths.insert("remote:c1:p1".to_string(), 0.50);
+        extra.folder_filter = Some("remote:c1:f1".to_string());
+        extra.folder_collapsed.insert("remote:c1:f1".to_string(), true);
+        data.extra_windows.push(extra);
+
+        let saved = data.without_remote_projects();
+
+        assert_eq!(saved.projects.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["local"]);
+        assert_eq!(saved.project_order, vec!["local"]);
+        assert_eq!(saved.folders.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec!["local-folder"]);
+        assert_eq!(saved.service_panel_heights.get("local").copied(), Some(1.0));
+        assert!(!saved.service_panel_heights.contains_key("remote:c1:p1"));
+        assert_eq!(saved.hook_panel_heights.get("local").copied(), Some(3.0));
+        assert!(!saved.hook_panel_heights.contains_key("remote:c1:p1"));
+
+        assert!(saved.main_window.hidden_project_ids.contains("local"));
+        assert!(!saved.main_window.hidden_project_ids.contains("remote:c1:p1"));
+        assert_eq!(saved.main_window.project_widths.get("local").copied(), Some(0.25));
+        assert!(!saved.main_window.project_widths.contains_key("remote:c1:p1"));
+        assert!(saved.main_window.folder_filter.is_none());
+        assert_eq!(saved.main_window.folder_collapsed.get("local-folder").copied(), Some(true));
+        assert!(!saved.main_window.folder_collapsed.contains_key("remote:c1:f1"));
+
+        let saved_extra = saved.window(WindowId::Extra(extra_id)).unwrap();
+        assert!(!saved_extra.hidden_project_ids.contains("remote:c1:p1"));
+        assert!(!saved_extra.project_widths.contains_key("remote:c1:p1"));
+        assert!(saved_extra.folder_filter.is_none());
+        assert!(!saved_extra.folder_collapsed.contains_key("remote:c1:f1"));
     }
 
     #[test]
@@ -1214,6 +1303,24 @@ mod tests {
         assert!(data.main_window.hidden_project_ids.contains("p1"));
         let after = data.window(WindowId::Extra(extra_id)).unwrap();
         assert!(after.hidden_project_ids.contains("p1"));
+    }
+
+    #[test]
+    fn hide_project_in_all_windows_inserts_in_main_and_extras() {
+        let mut data = make_workspace();
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        data.extra_windows = vec![extra_a, extra_b];
+
+        data.hide_project_in_all_windows("p1");
+
+        assert!(data.main_window.hidden_project_ids.contains("p1"));
+        let after_a = data.window(WindowId::Extra(extra_a_id)).unwrap();
+        assert!(after_a.hidden_project_ids.contains("p1"));
+        let after_b = data.window(WindowId::Extra(extra_b_id)).unwrap();
+        assert!(after_b.hidden_project_ids.contains("p1"));
     }
 
     #[test]

@@ -54,6 +54,25 @@ pub(super) fn extras_to_open(
         .collect()
 }
 
+/// Compute which opened extra windows no longer have a matching persisted
+/// `WorkspaceData.extra_windows` entry.
+pub(super) fn extras_to_close(
+    data: &WorkspaceData,
+    opened: &HashSet<WindowId>,
+) -> Vec<WindowId> {
+    let desired: HashSet<WindowId> = data
+        .extra_windows
+        .iter()
+        .map(|w| WindowId::Extra(w.id))
+        .collect();
+
+    opened
+        .iter()
+        .copied()
+        .filter(|id| matches!(id, WindowId::Extra(_)) && !desired.contains(id))
+        .collect()
+}
+
 /// Resolve the OS bounds an extra window should open at: prefer the entry's
 /// persisted `os_bounds`; fall back to a cascade-offset (+30,+30 origin,
 /// preserved size) from main's live bounds when the entry has none recorded.
@@ -120,6 +139,15 @@ impl Okena {
     pub(super) fn handle_extra_windows_changed(&mut self, cx: &mut Context<Self>) {
         let data = self.workspace.read(cx).data().clone();
         let opened: HashSet<WindowId> = self.extra_windows.keys().copied().collect();
+        for window_id in extras_to_close(&data, &opened) {
+            if let Some(handle) = self.extra_window_handles.remove(&window_id) {
+                let _ = handle.update(cx, |_, window, _| {
+                    window.remove_window();
+                });
+            }
+            self.extra_windows.remove(&window_id);
+        }
+
         for window_id in extras_to_open(&data, &opened) {
             self.open_extra_window(window_id, cx);
         }
@@ -166,6 +194,7 @@ impl Okena {
     fn open_extra_window(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
         let pty_manager = self.pty_manager.clone();
+        let terminals = self.terminals.clone();
         let okena = cx.entity().clone();
 
         // Resolve the OS bounds: prefer persisted `os_bounds` (seeded by
@@ -231,16 +260,42 @@ impl Okena {
             },
             move |window, cx| {
                 let view = cx.new(|cx| {
-                    WindowView::new(window_id, workspace.clone(), pty_manager.clone(), window, cx)
+                    WindowView::new(window_id, workspace.clone(), pty_manager.clone(), terminals.clone(), window, cx)
                 });
                 let view_for_okena = view.clone();
                 let handle = window.window_handle();
-                okena.update(cx, |this, _| {
-                    this.extra_windows.insert(window_id, view_for_okena);
-                    // Track the OS window handle so the remote-bridge command
-                    // loop can resolve actions to whichever window is focused
-                    // (PRD cri 13). The handle is removed on close below.
-                    this.extra_window_handles.insert(window_id, handle);
+                // Defer the registration: this build closure runs while Okena
+                // is already leased (the workspace observer that triggered
+                // `open_extra_window` holds the Okena update lease for the
+                // duration of `flush_effects`). Calling `okena.update` here
+                // synchronously would double-lease and panic. `cx.defer`
+                // schedules the registration to run after the current effect
+                // flush completes, when the lease has released.
+                let okena_for_register = okena.clone();
+                cx.defer(move |cx| {
+                    okena_for_register.update(cx, |this, cx| {
+                        this.extra_windows.insert(window_id, view_for_okena.clone());
+                        // Track the OS window handle so the remote-bridge
+                        // command loop can resolve actions to whichever window
+                        // is focused (PRD cri 13). The handle is removed on
+                        // close below.
+                        this.extra_window_handles.insert(window_id, handle);
+
+                        // Wire the per-window UI to the shared singletons
+                        // main was wired with at startup. Without this, the
+                        // extra's ProjectColumns have no git_watcher (no +/-
+                        // diff badges), no service_manager (service panel
+                        // dead), and no remote_manager (remote actions don't
+                        // route).
+                        let git_watcher = this.git_watcher.clone();
+                        let service_manager = this.service_manager.clone();
+                        let remote_manager = this.remote_manager.clone();
+                        view_for_okena.update(cx, |rv, cx| {
+                            rv.set_git_watcher(git_watcher, cx);
+                            rv.set_service_manager(service_manager, cx);
+                            rv.set_remote_manager(remote_manager, cx);
+                        });
+                    });
                 });
 
                 // Slice 07 cri 3 close-flow: when the user closes this OS
@@ -280,7 +335,7 @@ impl Okena {
 
 #[cfg(test)]
 mod tests {
-    use super::{extras_to_open, resolve_extra_window_bounds, resolve_focused_window_id};
+    use super::{extras_to_close, extras_to_open, resolve_extra_window_bounds, resolve_focused_window_id};
     use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WindowState, WorkspaceData};
     use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
@@ -335,6 +390,36 @@ mod tests {
         opened.insert(id1);
         opened.insert(id2);
         assert!(extras_to_open(&data, &opened).is_empty());
+    }
+
+    #[test]
+    fn no_removed_extras_returns_empty_close_set() {
+        let mut data = empty_workspace();
+        let id1 = data.spawn_extra_window(None);
+        let id2 = data.spawn_extra_window(None);
+        let opened = HashSet::from([id1, id2]);
+
+        assert!(extras_to_close(&data, &opened).is_empty());
+    }
+
+    #[test]
+    fn returns_opened_extras_missing_from_workspace_data() {
+        let mut data = empty_workspace();
+        let surviving = data.spawn_extra_window(None);
+        let removed = WindowId::Extra(Uuid::new_v4());
+        let opened = HashSet::from([surviving, removed]);
+
+        let pending: HashSet<WindowId> = extras_to_close(&data, &opened).into_iter().collect();
+
+        assert_eq!(pending, HashSet::from([removed]));
+    }
+
+    #[test]
+    fn close_diff_ignores_main_window_id() {
+        let data = empty_workspace();
+        let opened = HashSet::from([WindowId::Main]);
+
+        assert!(extras_to_close(&data, &opened).is_empty());
     }
 
     #[test]

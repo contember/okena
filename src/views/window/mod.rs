@@ -146,10 +146,10 @@ impl WindowView {
         window_id: WindowId,
         workspace: Entity<Workspace>,
         pty_manager: Arc<PtyManager>,
+        terminals: TerminalsRegistry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
 
         // Per-window UI request broker. Each window (slice 05 onward) owns its
         // own queue so overlay/sidebar requests stay scoped to the window that
@@ -164,9 +164,25 @@ impl WindowView {
         // container) can hold handles and update through Entity::update.
         let focus_manager = cx.new(|_| FocusManager::new());
 
-        // Create sidebar controller from current global settings
+        // Sidebar open/closed state is per-window (persisted on WindowState).
+        // Seed SidebarController from the calling window's persisted value;
+        // fall back to the global setting for the very first launch where
+        // no per-window value exists yet.
         let app_settings = settings(cx);
-        let sidebar_ctrl = SidebarController::new(&app_settings);
+        let mut sidebar_ctrl = SidebarController::new(&app_settings);
+        if let Some(window_state) = workspace.read(cx).data().window(window_id) {
+            // Override open-state with per-window persisted value. If the
+            // controller's open flag doesn't match, toggle to flip it AND
+            // snap `animation` to the matching endpoint — toggle() returns an
+            // animation target the caller is expected to drive, but at init
+            // we want no animation, just the right starting visual.
+            if let Some(sidebar_open) = window_state.sidebar_open
+                && sidebar_ctrl.is_open() != sidebar_open
+            {
+                sidebar_ctrl.toggle();
+                sidebar_ctrl.set_animation(if sidebar_open { 1.0 } else { 0.0 });
+            }
+        }
 
         // Create sidebar entity once to preserve state
         let sidebar = cx.new(|cx| Sidebar::new(window_id, workspace.clone(), focus_manager.clone(), request_broker.clone(), terminals.clone(), cx));
@@ -385,8 +401,15 @@ impl WindowView {
         // Observe remote manager and sync remote projects into workspace
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
+        let window_id = self.window_id;
         cx.observe(&manager, move |this, rm, cx| {
-            Self::sync_remote_projects_into_workspace(&workspace, &focus_manager, &rm, cx);
+            Self::sync_remote_projects_into_workspace(
+                window_id,
+                &workspace,
+                &focus_manager,
+                &rm,
+                cx,
+            );
             this.sync_project_columns(cx);
             cx.notify();
         }).detach();
@@ -493,6 +516,7 @@ impl WindowView {
 
     /// Sync remote connection state into workspace as materialized ProjectData entries.
     fn sync_remote_projects_into_workspace(
+        window_id: WindowId,
         workspace: &Entity<Workspace>,
         focus_manager: &Entity<FocusManager>,
         rm: &Entity<RemoteConnectionManager>,
@@ -520,17 +544,6 @@ impl WindowView {
         let mut expected_remote_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let active_conn_ids: std::collections::HashSet<String> = snapshots.iter()
             .map(|s| s.config.id.clone()).collect();
-
-        // Collect old terminal IDs for projects pending focus, so we can detect new ones after sync.
-        let old_terminal_ids: std::collections::HashMap<String, Vec<String>> = workspace.update(cx, |ws, _cx| {
-            ws.remote_sync.pending_focus().iter().filter_map(|pid| {
-                let ids = ws.project(pid)
-                    .and_then(|p| p.layout.as_ref())
-                    .map(|l| l.collect_terminal_ids())
-                    .unwrap_or_default();
-                Some((pid.clone(), ids))
-            }).collect()
-        });
 
         for snap in &snapshots {
             let conn_id = &snap.config.id;
@@ -643,10 +656,7 @@ impl WindowView {
                             // the `existing` branch above and leave the
                             // local hidden set alone.
                             if !api_project.show_in_overview {
-                                ws.data
-                                    .main_window
-                                    .hidden_project_ids
-                                    .insert(prefixed_id.clone());
+                                ws.data.hide_project_in_all_windows(&prefixed_id);
                             }
                             ws.data.projects.push(ProjectData {
                                 id: prefixed_id.clone(),
@@ -677,6 +687,16 @@ impl WindowView {
                 // Sync remote folders and project_order into workspace
                 let remote_prefix = format!("remote:{}:", conn_id);
                 workspace.update(cx, |ws, _cx| {
+                    let next_remote_folder_ids: std::collections::HashSet<String> =
+                        remote_folders.iter().map(|f| f.id.clone()).collect();
+                    let removed_folder_ids: Vec<String> = ws.data.folders.iter()
+                        .filter(|f| f.id.starts_with(&remote_prefix) && !next_remote_folder_ids.contains(&f.id))
+                        .map(|f| f.id.clone())
+                        .collect();
+                    for folder_id in removed_folder_ids {
+                        ws.data.delete_folder_scrub_all_windows(&folder_id);
+                    }
+
                     // Remove old remote folders for this connection
                     ws.data.folders.retain(|f| !f.id.starts_with(&remote_prefix));
                     // Remove old remote entries from project_order for this connection
@@ -694,6 +714,21 @@ impl WindowView {
                 // No state (disconnected/connecting) — remove materialized projects and folders
                 let prefix = format!("remote:{}:", conn_id);
                 workspace.update(cx, |ws, _cx| {
+                    let removed_project_ids: Vec<String> = ws.data.projects.iter()
+                        .filter(|p| p.id.starts_with(&prefix))
+                        .map(|p| p.id.clone())
+                        .collect();
+                    let removed_folder_ids: Vec<String> = ws.data.folders.iter()
+                        .filter(|f| f.id.starts_with(&prefix))
+                        .map(|f| f.id.clone())
+                        .collect();
+                    for project_id in removed_project_ids {
+                        ws.data.delete_project_scrub_all_windows(&project_id);
+                    }
+                    for folder_id in removed_folder_ids {
+                        ws.data.delete_folder_scrub_all_windows(&folder_id);
+                    }
+
                     ws.data.projects.retain(|p| !p.id.starts_with(&prefix));
                     ws.data.folders.retain(|f| !f.id.starts_with(&prefix));
                     ws.data.project_order.retain(|id| !id.starts_with(&prefix));
@@ -703,6 +738,31 @@ impl WindowView {
 
         // Remove stale remote projects/folders from connections that no longer exist
         workspace.update(cx, |ws, _cx| {
+            let removed_project_ids: Vec<String> = ws.data.projects.iter()
+                .filter(|p| p.is_remote && !expected_remote_ids.contains(&p.id))
+                .map(|p| p.id.clone())
+                .collect();
+            let removed_folder_ids: Vec<String> = ws.data.folders.iter()
+                .filter(|f| {
+                    if f.id.starts_with("remote:") {
+                        // Remote folder IDs are "remote:{conn_id}:{folder_id}"
+                        // Extract conn_id (second segment)
+                        let rest = f.id.strip_prefix("remote:").unwrap_or("");
+                        let conn_id = rest.split(':').next().unwrap_or("");
+                        !active_conn_ids.contains(conn_id)
+                    } else {
+                        false
+                    }
+                })
+                .map(|f| f.id.clone())
+                .collect();
+            for project_id in removed_project_ids {
+                ws.data.delete_project_scrub_all_windows(&project_id);
+            }
+            for folder_id in removed_folder_ids {
+                ws.data.delete_folder_scrub_all_windows(&folder_id);
+            }
+
             ws.data.projects.retain(|p| {
                 if p.is_remote {
                     expected_remote_ids.contains(&p.id)
@@ -728,34 +788,33 @@ impl WindowView {
         });
 
         // Focus newly appeared terminals for projects that had a pending CreateTerminal.
-        if !old_terminal_ids.is_empty() {
-            focus_manager.update(cx, |fm, cx| {
-                workspace.update(cx, |ws, cx| {
-                    let pending: Vec<String> = ws.drain_pending_remote_focus();
-                    for pid in pending {
-                        let old_ids = match old_terminal_ids.get(&pid) {
-                            Some(ids) => ids,
-                            None => continue,
-                        };
-                        let new_ids = match ws.project(&pid).and_then(|p| p.layout.as_ref()) {
-                            Some(layout) => layout.collect_terminal_ids(),
-                            None => continue,
-                        };
-                        // Find the first terminal ID that wasn't in the old set
-                        let old_set: std::collections::HashSet<&str> =
-                            old_ids.iter().map(|s| s.as_str()).collect();
-                        if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str())) {
-                            if let Some(path) = ws.project(&pid)
-                                .and_then(|p| p.layout.as_ref())
-                                .and_then(|l| l.find_terminal_path(new_tid))
-                            {
-                                ws.set_focused_terminal(fm, pid.clone(), path, cx);
-                            }
+        focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| {
+                let pending = ws.drain_pending_remote_focus(window_id);
+                for pending_focus in pending {
+                    let pid = pending_focus.project_id;
+                    let new_ids = match ws.project(&pid).and_then(|p| p.layout.as_ref()) {
+                        Some(layout) => layout.collect_terminal_ids(),
+                        None => continue,
+                    };
+                    // Find the first terminal ID that wasn't present when the
+                    // CreateTerminal action originated in this window.
+                    let old_set: std::collections::HashSet<&str> = pending_focus
+                        .old_terminal_ids
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect();
+                    if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str())) {
+                        if let Some(path) = ws.project(&pid)
+                            .and_then(|p| p.layout.as_ref())
+                            .and_then(|l| l.find_terminal_path(new_tid))
+                        {
+                            ws.set_focused_terminal(fm, pid.clone(), path, cx);
                         }
                     }
-                });
+                }
             });
-        }
+        });
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
         workspace.update(cx, |ws, cx| {
@@ -810,7 +869,7 @@ impl WindowView {
         let visible_projects: Vec<(String, bool, Option<String>)> = {
             let ws = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
-            ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| {
+            ws.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| {
                 (p.id.clone(), p.is_remote, p.connection_id.clone())
             }).collect()
         };
@@ -819,15 +878,7 @@ impl WindowView {
         let visible_ids: std::collections::HashSet<&str> = visible_projects.iter()
             .map(|(id, _, _)| id.as_str())
             .collect();
-        self.project_columns.retain(|id, _| {
-            // Keep local project columns even when not visible (they may become visible again)
-            // But remove remote project columns that are gone
-            if id.starts_with("remote:") {
-                visible_ids.contains(id.as_str())
-            } else {
-                true
-            }
-        });
+        self.project_columns.retain(|id, _| visible_ids.contains(id.as_str()));
 
         // Create columns for new projects
         for (project_id, is_remote, connection_id) in &visible_projects {
@@ -863,18 +914,19 @@ impl WindowView {
         let id = project_id.to_string();
         let workspace_for_dispatch = self.workspace.clone();
         let focus_manager_for_dispatch = self.focus_manager.clone();
+        let window_id = self.window_id;
         let action_dispatcher = self.remote_manager.as_ref().map(|rm| {
             crate::action_dispatch::ActionDispatcher::Remote {
                 connection_id: conn_id.to_string(),
                 manager: rm.clone(),
                 workspace: workspace_for_dispatch,
                 focus_manager: focus_manager_for_dispatch,
+                window_id,
             }
         });
         let ws_for_observe = self.workspace.clone();
 
         let git_provider = self.build_git_provider(project_id, cx)?;
-        let window_id = self.window_id;
 
         Some(cx.new(move |cx| {
             let mut col = ProjectColumn::new(

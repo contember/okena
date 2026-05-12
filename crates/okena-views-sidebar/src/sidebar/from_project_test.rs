@@ -7,7 +7,7 @@
 use super::SidebarProjectInfo;
 use okena_core::theme::FolderColor;
 use okena_workspace::settings::HooksConfig;
-use okena_workspace::state::{LayoutNode, ProjectData, WindowState, Workspace, WorkspaceData};
+use okena_workspace::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
 use std::collections::HashMap;
 
 fn make_project(id: &str) -> ProjectData {
@@ -57,13 +57,13 @@ fn from_project_show_in_overview_reads_from_workspace_hidden_set() {
     let p_hidden = make_project("p_hidden");
     let p_visible = make_project("p_visible");
 
-    let info_hidden = SidebarProjectInfo::from_project(&p_hidden, &workspace);
+    let info_hidden = SidebarProjectInfo::from_project(&p_hidden, &workspace, WindowId::Main);
     assert!(
         !info_hidden.show_in_overview,
         "project listed in main_window.hidden_project_ids must project as not-visible"
     );
 
-    let info_visible = SidebarProjectInfo::from_project(&p_visible, &workspace);
+    let info_visible = SidebarProjectInfo::from_project(&p_visible, &workspace, WindowId::Main);
     assert!(
         info_visible.show_in_overview,
         "project absent from hidden set must project as visible (legacy field is ignored)"

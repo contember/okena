@@ -143,6 +143,19 @@ impl WorkspaceData {
         }
     }
 
+    /// Hide a project in every persisted window state.
+    ///
+    /// Used for remote projects whose server-side `show_in_overview` flag is
+    /// false. Unlike `add_project_hide_in_other_windows`, there is no spawning
+    /// window that should see the project by default; every open viewport must
+    /// start hidden.
+    pub fn hide_project_in_all_windows(&mut self, project_id: &str) {
+        self.main_window.hidden_project_ids.insert(project_id.to_string());
+        for extra in &mut self.extra_windows {
+            extra.hidden_project_ids.insert(project_id.to_string());
+        }
+    }
+
     /// Remove a project's id from every window's per-project storage.
     ///
     /// Walks `main_window` plus every entry in `extra_windows`, and removes
@@ -163,6 +176,24 @@ impl WorkspaceData {
         }
     }
 
+    /// Remove a folder id from every window's per-folder storage.
+    ///
+    /// Clears `folder_filter` when it points at the deleted folder and removes
+    /// any collapsed-state entry for the same folder. Idempotent, mirroring the
+    /// project scrub helper.
+    pub fn delete_folder_scrub_all_windows(&mut self, folder_id: &str) {
+        if self.main_window.folder_filter.as_deref() == Some(folder_id) {
+            self.main_window.folder_filter = None;
+        }
+        self.main_window.folder_collapsed.remove(folder_id);
+        for extra in &mut self.extra_windows {
+            if extra.folder_filter.as_deref() == Some(folder_id) {
+                extra.folder_filter = None;
+            }
+            extra.folder_collapsed.remove(folder_id);
+        }
+    }
+
     /// Set the OS window bounds on the targeted window.
     ///
     /// `Some(bounds)` records the latest OS-reported origin/size so the next
@@ -174,6 +205,14 @@ impl WorkspaceData {
     pub fn set_os_bounds(&mut self, id: WindowId, bounds: Option<WindowBounds>) {
         if let Some(w) = self.window_mut(id) {
             w.os_bounds = bounds;
+        }
+    }
+
+    /// Set the sidebar open/closed state on the targeted window. Unknown
+    /// extra ids are a silent no-op, matching the `window_mut` contract.
+    pub fn set_sidebar_open(&mut self, id: WindowId, open: bool) {
+        if let Some(w) = self.window_mut(id) {
+            w.sidebar_open = Some(open);
         }
     }
 

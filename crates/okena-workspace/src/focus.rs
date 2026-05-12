@@ -333,6 +333,58 @@ impl FocusManager {
         self.context = FocusContext::Terminal;
     }
 
+    /// Scrub any references to project IDs that no longer exist in
+    /// `valid_project_ids`. Called by the Okena workspace observer after
+    /// a delete so every window's focus manager — not just the one that
+    /// invoked the delete — drops stale references. Without this, an
+    /// extra that was zoomed on a project deleted via main (or vice
+    /// versa) keeps a ghost focus_project_id and renders a missing
+    /// project's column.
+    ///
+    /// Returns `true` if anything was cleared (caller can decide whether
+    /// to notify).
+    pub fn clear_stale_focus<F>(&mut self, project_exists: F) -> bool
+    where
+        F: Fn(&str) -> bool + Copy,
+    {
+        let mut changed = false;
+        if let Some(id) = self.focused_project_id.as_deref() {
+            if !project_exists(id) {
+                self.focused_project_id = None;
+                changed = true;
+            }
+        }
+        if let Some(ref target) = self.current_focus {
+            if !project_exists(&target.project_id) {
+                self.current_focus = None;
+                self.context = FocusContext::Terminal;
+                changed = true;
+            }
+        }
+        if let Some(ref target) = self.pre_zoom_focus {
+            if !project_exists(&target.project_id) {
+                self.pre_zoom_focus = None;
+                changed = true;
+            }
+        }
+        let before = self.focus_stack.len();
+        self.focus_stack.retain(|entry| {
+            let target_alive = entry
+                .target
+                .as_ref()
+                .map_or(true, |t| project_exists(&t.project_id));
+            let project_alive = entry
+                .focused_project_id
+                .as_deref()
+                .map_or(true, project_exists);
+            target_alive && project_alive
+        });
+        if self.focus_stack.len() != before {
+            changed = true;
+        }
+        changed
+    }
+
     /// Clear all focus state: current focus, focused_project_id, and stack.
     ///
     /// Used when switching workspaces to reset everything.

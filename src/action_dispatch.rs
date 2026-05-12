@@ -44,12 +44,12 @@ pub fn dispatcher_for_project(
     if project.is_remote {
         let connection_id = project.connection_id.as_ref()?;
         let manager = remote_manager.as_ref()?;
-        let _ = window_id; // Remote variant doesn't carry window_id today
         Some(ActionDispatcher::Remote {
             connection_id: connection_id.clone(),
             manager: manager.clone(),
             workspace: workspace.clone(),
             focus_manager: focus_manager.clone(),
+            window_id,
         })
     } else {
         let backend = backend.as_ref()?;
@@ -86,14 +86,14 @@ pub enum ActionDispatcher {
     /// Remote project — send actions via HTTP to the remote server.
     /// Visual/presentation actions (split sizes, minimize, fullscreen, active tab, focus)
     /// are executed locally on the client workspace to avoid server round-trips
-    /// and to survive state syncs. No `window_id` field today: visual mirror
-    /// actions touch focus state via the (already-per-window) `focus_manager`,
-    /// and per-window data mutations have no remote counterpart yet.
+    /// and to survive state syncs. `window_id` carries the originating window
+    /// for deferred focus after remote terminal creation.
     Remote {
         connection_id: String,
         manager: Entity<RemoteConnectionManager>,
         workspace: Entity<Workspace>,
         focus_manager: Entity<FocusManager>,
+        window_id: WindowId,
     },
 }
 
@@ -176,6 +176,7 @@ impl ActionDispatcher {
                 manager,
                 workspace,
                 focus_manager,
+                window_id,
             } => {
                 // Visual/presentation actions are executed locally on the client
                 // workspace. They never reach the server, so each client has
@@ -245,8 +246,14 @@ impl ActionDispatcher {
                         // the next state sync brings the new terminal into the
                         // client's layout (see sync_remote_projects_into_workspace).
                         let pid = project_id.clone();
+                        let window_id = *window_id;
                         workspace.update(cx, |ws, _cx| {
-                            ws.queue_pending_remote_focus(&pid);
+                            let old_terminal_ids = ws
+                                .project(&pid)
+                                .and_then(|p| p.layout.as_ref())
+                                .map(|layout| layout.collect_terminal_ids())
+                                .unwrap_or_default();
+                            ws.queue_pending_remote_focus(window_id, &pid, old_terminal_ids);
                         });
                         // Don't return — action proceeds to be sent to server below
                     }

@@ -1,5 +1,5 @@
 use crate::terminal_view_settings;
-use okena_terminal::terminal::Terminal;
+use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_files::theme::theme;
 use okena_ui::theme::ansi_to_hsla;
 use okena_ui::color_utils::tint_color;
@@ -9,10 +9,121 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::grid::Dimensions;
 use gpui::*;
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use super::terminal_input::TerminalInputHandler;
 use super::terminal_rendering::{BatchedTextRun, LayoutRect, is_default_bg};
+
+type ResizeViewerSizes = HashMap<String, HashMap<u64, TerminalSize>>;
+
+static NEXT_RESIZE_VIEWER_ID: AtomicU64 = AtomicU64::new(1);
+static RESIZE_VIEWER_SIZES: OnceLock<Mutex<ResizeViewerSizes>> = OnceLock::new();
+
+pub(crate) fn next_resize_viewer_id() -> u64 {
+    NEXT_RESIZE_VIEWER_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{deregister_resize_viewer, shared_resize_target};
+    use okena_terminal::terminal::TerminalSize;
+
+    fn size(cols: u16, rows: u16) -> TerminalSize {
+        TerminalSize {
+            cols,
+            rows,
+            cell_width: 8.0,
+            cell_height: 16.0,
+        }
+    }
+
+    #[test]
+    fn shared_resize_target_uses_per_dimension_minimum() {
+        let terminal_id = "shared_resize_target_uses_per_dimension_minimum";
+
+        let (count, target) = shared_resize_target(terminal_id, 1, size(120, 15));
+        assert_eq!(count, 1);
+        assert_eq!((target.cols, target.rows), (120, 15));
+
+        let (count, target) = shared_resize_target(terminal_id, 2, size(80, 40));
+        assert_eq!(count, 2);
+        assert_eq!((target.cols, target.rows), (80, 15));
+
+        deregister_resize_viewer(terminal_id, 1);
+        deregister_resize_viewer(terminal_id, 2);
+    }
+
+    #[test]
+    fn shared_resize_target_grows_when_every_viewer_can_fit() {
+        let terminal_id = "shared_resize_target_grows_when_every_viewer_can_fit";
+
+        let _ = shared_resize_target(terminal_id, 1, size(80, 15));
+        let _ = shared_resize_target(terminal_id, 2, size(80, 20));
+        let (count, target) = shared_resize_target(terminal_id, 1, size(100, 25));
+
+        assert_eq!(count, 2);
+        assert_eq!((target.cols, target.rows), (80, 20));
+
+        deregister_resize_viewer(terminal_id, 1);
+        deregister_resize_viewer(terminal_id, 2);
+    }
+
+    #[test]
+    fn deregistered_viewer_no_longer_clamps_resize_target() {
+        let terminal_id = "deregistered_viewer_no_longer_clamps_resize_target";
+
+        let _ = shared_resize_target(terminal_id, 1, size(80, 15));
+        deregister_resize_viewer(terminal_id, 1);
+        let (count, target) = shared_resize_target(terminal_id, 2, size(120, 40));
+
+        assert_eq!(count, 1);
+        assert_eq!((target.cols, target.rows), (120, 40));
+
+        deregister_resize_viewer(terminal_id, 2);
+    }
+}
+
+pub(crate) fn deregister_resize_viewer(terminal_id: &str, viewer_id: u64) {
+    let mut sizes = resize_viewer_sizes().lock();
+    if let Some(viewers) = sizes.get_mut(terminal_id) {
+        viewers.remove(&viewer_id);
+        if viewers.is_empty() {
+            sizes.remove(terminal_id);
+        }
+    }
+}
+
+fn resize_viewer_sizes() -> &'static Mutex<ResizeViewerSizes> {
+    RESIZE_VIEWER_SIZES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn shared_resize_target(
+    terminal_id: &str,
+    viewer_id: u64,
+    desired_size: TerminalSize,
+) -> (usize, TerminalSize) {
+    let mut sizes = resize_viewer_sizes().lock();
+    let viewers = sizes.entry(terminal_id.to_string()).or_default();
+    viewers.insert(viewer_id, desired_size);
+
+    let viewer_count = viewers.len();
+    let min_cols = viewers.values().map(|size| size.cols).min().unwrap_or(desired_size.cols);
+    let min_rows = viewers.values().map(|size| size.rows).min().unwrap_or(desired_size.rows);
+
+    (
+        viewer_count,
+        TerminalSize {
+            cols: min_cols,
+            rows: min_rows,
+            cell_width: desired_size.cell_width,
+            cell_height: desired_size.cell_height,
+        },
+    )
+}
 
 /// A search match in the terminal grid
 #[derive(Clone, Debug)]
@@ -50,6 +161,7 @@ pub struct URLMatch {
 pub struct TerminalElement {
     terminal: Arc<Terminal>,
     focus_handle: FocusHandle,
+    resize_viewer_id: u64,
     search_matches: Arc<Vec<SearchMatch>>,
     current_match_index: Option<usize>,
     url_matches: Arc<Vec<URLMatch>>,
@@ -62,10 +174,11 @@ pub struct TerminalElement {
 }
 
 impl TerminalElement {
-    pub fn new(terminal: Arc<Terminal>, focus_handle: FocusHandle) -> Self {
+    pub fn new(terminal: Arc<Terminal>, focus_handle: FocusHandle, resize_viewer_id: u64) -> Self {
         Self {
             terminal,
             focus_handle,
+            resize_viewer_id,
             search_matches: Arc::new(Vec::new()),
             current_match_index: None,
             url_matches: Arc::new(Vec::new()),
@@ -287,19 +400,31 @@ impl Element for TerminalElement {
         let new_cols = ((available_width - 0.5) / cell_width_f).floor().max(1.0) as u16;
         let new_rows = ((available_height - 0.5) / line_height_f).floor().max(1.0) as u16;
 
+        let desired_size = TerminalSize {
+            cols: new_cols,
+            rows: new_rows,
+            cell_width: cell_width_f,
+            cell_height: line_height_f,
+        };
+        let (n_viewers, resize_size) = shared_resize_target(
+            &self.terminal.terminal_id,
+            self.resize_viewer_id,
+            desired_size,
+        );
+
         let current_size = self.terminal.resize_state.lock().size;
-        let cols_rows_changed = new_cols != current_size.cols || new_rows != current_size.rows;
+        let cols_rows_changed = resize_size.cols != current_size.cols || resize_size.rows != current_size.rows;
         let cell_size_changed = (cell_width_f - current_size.cell_width).abs() > 0.001
             || (line_height_f - current_size.cell_height).abs() > 0.001;
 
         if cols_rows_changed && self.terminal.is_resize_owner_local() {
-            let new_size = okena_terminal::terminal::TerminalSize {
-                cols: new_cols,
-                rows: new_rows,
-                cell_width: cell_width_f,
-                cell_height: line_height_f,
-            };
-            self.terminal.resize(new_size);
+            // Multi-window resize gate: when the same terminal is rendered in
+            // more than one visible pane, resize to the per-dimension minimum
+            // desired by all live viewers. This avoids ping-pong between
+            // differently shaped windows while still allowing growth once every
+            // visible viewer can fit the larger dimension.
+            let target = if n_viewers <= 1 { desired_size } else { resize_size };
+            self.terminal.resize(target);
         } else if cell_size_changed {
             let mut rs = self.terminal.resize_state.lock();
             rs.size.cell_width = cell_width_f;

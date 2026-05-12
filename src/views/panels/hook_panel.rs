@@ -10,7 +10,7 @@ use crate::theme::ThemeColors;
 use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 use crate::views::window::TerminalsRegistry;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, Workspace};
+use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, WindowId, Workspace};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -28,6 +28,7 @@ pub struct HookPanel {
     workspace: Entity<Workspace>,
     focus_manager: Entity<crate::workspace::focus::FocusManager>,
     request_broker: Entity<RequestBroker>,
+    window_id: WindowId,
     backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
     active_drag: ActiveDrag,
@@ -56,6 +57,7 @@ impl HookPanel {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
+        window_id: WindowId,
         initial_height: f32,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -102,6 +104,7 @@ impl HookPanel {
             workspace,
             focus_manager,
             request_broker,
+            window_id,
             backend,
             terminals,
             active_drag,
@@ -132,6 +135,7 @@ impl HookPanel {
         let ws = self.workspace.clone();
         let fm = self.focus_manager.clone();
         let rb = self.request_broker.clone();
+        let window_id = self.window_id;
         let backend = self.backend.clone();
         let terminals = self.terminals.clone();
         let pid = self.project_id.clone();
@@ -142,6 +146,7 @@ impl HookPanel {
                 ws,
                 fm,
                 rb,
+                window_id,
                 pid,
                 project_path,
                 vec![usize::MAX],

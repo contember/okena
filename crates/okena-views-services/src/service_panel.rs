@@ -17,7 +17,7 @@ use okena_views_terminal::layout::terminal_pane::TerminalPane;
 use okena_views_terminal::elements::resize_handle::ResizeHandle;
 use okena_views_terminal::ActionDispatch;
 use okena_workspace::request_broker::RequestBroker;
-use okena_workspace::state::Workspace;
+use okena_workspace::state::{WindowId, Workspace};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -33,6 +33,7 @@ pub struct ServicePanel<D: ActionDispatch + Send + Sync> {
     workspace: Entity<Workspace>,
     focus_manager: Entity<okena_workspace::focus::FocusManager>,
     request_broker: Entity<RequestBroker>,
+    window_id: WindowId,
     backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
     active_drag: ActiveDrag,
@@ -60,6 +61,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
+        window_id: WindowId,
         initial_height: f32,
         _cx: &mut Context<Self>,
     ) -> Self {
@@ -68,6 +70,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
             workspace,
             focus_manager,
             request_broker,
+            window_id,
             backend,
             terminals,
             active_drag,
@@ -180,6 +183,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
             let ws = self.workspace.clone();
             let fm = self.focus_manager.clone();
             let rb = self.request_broker.clone();
+            let window_id = self.window_id;
             let backend = self.backend.clone();
             let terminals = self.terminals.clone();
             let pid = self.project_id.clone();
@@ -189,6 +193,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                     ws,
                     fm,
                     rb,
+                    window_id,
                     pid,
                     project_path,
                     vec![usize::MAX],
