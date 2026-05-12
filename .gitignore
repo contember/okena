@@ -33,3 +33,11 @@ web/dist/
 
 # claude
 .claude/settings.local.json
+
+# Ralph loop runtime artifacts
+plans/observer-*.log
+plans/overseer-*.log
+plans/agent-reports-*.log
+.ralph-stop
+.ralph-steer
+.ralph-ci-failed
