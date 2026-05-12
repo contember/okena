@@ -820,7 +820,7 @@ impl Okena {
             // scrubs focus state on the main window's per-window manager.
             let focus_manager = self.main_window.read(cx).focus_manager();
             let pending_data = focus_manager.update(cx, |fm, cx| {
-                self.workspace.update(cx, |ws, cx| {
+                let pending_data = self.workspace.update(cx, |ws, cx| {
                     // Update hook terminal status
                     let status = if success {
                         crate::workspace::state::HookTerminalStatus::Succeeded
@@ -848,7 +848,9 @@ impl Okena {
                         ws.finish_closing_project(&pending.project_id);
                         None
                     }
-                })
+                });
+                cx.notify();
+                pending_data
             });
 
             if let Some((pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name)) = pending_data {
@@ -951,4 +953,3 @@ impl Render for Okena {
         div().size_full().child(self.main_window.clone())
     }
 }
-

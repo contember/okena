@@ -169,6 +169,7 @@ impl ActionDispatcher {
                     workspace.update(cx, |ws, cx| {
                         execute_action(action, ws, window_id, fm, &*backend, &terminals, cx);
                     });
+                    cx.notify();
                 });
             }
             Self::Remote {
@@ -212,6 +213,7 @@ impl ActionDispatcher {
                                     None => ws.exit_fullscreen(fm, cx),
                                 }
                             });
+                            cx.notify();
                         });
                         return;
                     }
@@ -238,6 +240,7 @@ impl ActionDispatcher {
                                     }
                                 }
                             });
+                            cx.notify();
                         });
                         return;
                     }
@@ -291,6 +294,7 @@ impl ActionDispatcher {
                     workspace.update(cx, |ws, cx| {
                         ws.split_terminal(fm, &pid, &lp, direction, cx);
                     });
+                    cx.notify();
                 });
             }
             Self::Remote { .. } => {
@@ -327,6 +331,7 @@ impl ActionDispatcher {
                             ws.add_tab(fm, &pid, &lp, cx);
                         }
                     });
+                    cx.notify();
                 });
             }
             Self::Remote { .. } => {

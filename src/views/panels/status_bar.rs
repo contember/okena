@@ -400,6 +400,7 @@ impl Render for StatusBar {
                                             workspace.update(cx, |ws, cx| {
                                                 ws.set_focused_project(fm, None, cx);
                                             });
+                                            cx.notify();
                                         });
                                     }),
                             )

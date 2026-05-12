@@ -642,6 +642,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 workspace_clone.update(cx, |ws, cx| {
                                     ws.set_focused_terminal(fm, pid, terminal_path, cx);
                                 });
+                                cx.notify();
                             });
                         }
 

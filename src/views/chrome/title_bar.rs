@@ -1,4 +1,4 @@
-use crate::keybindings::{Quit, ShowCommandPalette, ShowKeybindings, ShowSettings, ShowThemeSelector, ToggleSidebar};
+use crate::keybindings::{CloseWindow, Quit, ShowCommandPalette, ShowKeybindings, ShowSettings, ShowThemeSelector, ToggleSidebar};
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_xl};
 use crate::views::components::menu_item;
@@ -213,7 +213,7 @@ impl TitleBar {
                                     window.zoom_window();
                                 }
                                 WindowControlType::Close => {
-                                    cx.quit();
+                                    window.dispatch_action(Box::new(CloseWindow), cx);
                                 }
                             }
                         }

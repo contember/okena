@@ -101,7 +101,7 @@ impl Workspace {
         if self.project(project_id).is_none() {
             return;
         }
-        let was_hidden = self.is_project_hidden(project_id);
+        let was_hidden = self.is_project_hidden(window_id, project_id);
 
         // When hiding the project that owns the currently focused terminal,
         // capture the ordered visible list so we can pick a neighbor to focus
@@ -115,6 +115,7 @@ impl Workspace {
                 == Some(project_id);
         let visible_before: Vec<String> = if needs_focus_redirect {
             self.visible_projects(
+                window_id,
                 focus_manager.focused_project_id(),
                 focus_manager.is_focus_individual(),
             )
@@ -130,6 +131,7 @@ impl Workspace {
         if needs_focus_redirect {
             let visible_after: Vec<String> = self
                 .visible_projects(
+                    window_id,
                     focus_manager.focused_project_id(),
                     focus_manager.is_focus_individual(),
                 )

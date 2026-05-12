@@ -61,6 +61,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             workspace.update(cx, |ws, cx| {
                 ws.set_focused_terminal(fm, target_project, target_path, cx);
             });
+            cx.notify();
         });
     }
 

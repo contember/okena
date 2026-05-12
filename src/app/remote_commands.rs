@@ -135,10 +135,12 @@ pub(crate) async fn remote_command_loop(
                             // data mutations (PRD cri 13 / CLI fallback).
                             let (window_id, focus_manager) = focus_manager_resolver(cx);
                             focus_manager.update(cx, |fm, cx| {
-                                workspace.update(cx, |ws, cx| {
+                                let result = workspace.update(cx, |ws, cx| {
                                     execute_action(action, ws, window_id, fm, &*backend, &terminals, cx)
                                         .into_command_result()
-                                })
+                                });
+                                cx.notify();
+                                result
                             })
                         })
                     }

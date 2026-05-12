@@ -158,6 +158,7 @@ impl Sidebar {
                                 workspace.update(cx, |ws, cx| {
                                     ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
                                 });
+                                cx.notify();
                             });
                         }
                         cx.stop_propagation();
@@ -270,6 +271,7 @@ impl Sidebar {
                         workspace.update(cx, |ws, cx| {
                             ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
                         });
+                        cx.notify();
                     });
                 }
             }));
@@ -341,6 +343,7 @@ impl Sidebar {
                         workspace.update(cx, |ws, cx| {
                             ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
                         });
+                        cx.notify();
                     });
                 }
             }));
@@ -441,6 +444,7 @@ impl Sidebar {
                         workspace.update(cx, |ws, cx| {
                             ws.focus_terminal_by_id(fm, &project_id, &terminal_id, cx);
                         });
+                        cx.notify();
                     });
                 }
             }))
@@ -513,6 +517,7 @@ impl Sidebar {
                                         workspace.update(cx, |ws, cx| {
                                             ws.focus_terminal_by_id(fm, &pid, &tid, cx);
                                         });
+                                        cx.notify();
                                     });
                                 }
                                 cx.stop_propagation();
@@ -693,6 +698,7 @@ impl Sidebar {
                         workspace.update(cx, |ws, cx| {
                             ws.set_focused_project(fm, Some(project_id.clone()), cx);
                         });
+                        cx.notify();
                     });
                 }
             }))
@@ -751,6 +757,7 @@ impl Sidebar {
                                     workspace.update(cx, |ws, cx| {
                                         ws.set_focused_project(fm, Some(pid), cx);
                                     });
+                                    cx.notify();
                                 });
                             }
                             cx.stop_propagation();
@@ -801,6 +808,7 @@ impl Sidebar {
                         workspace.update(cx, |ws, cx| {
                             ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
                         });
+                        cx.notify();
                     });
                 }
             }))
