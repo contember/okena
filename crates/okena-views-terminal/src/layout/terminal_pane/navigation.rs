@@ -14,7 +14,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane_map = get_pane_map();
+        let pane_map = get_pane_map(self.window_id);
 
         let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
             Some(pane) => pane.clone(),
@@ -32,7 +32,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane_map = get_pane_map();
+        let pane_map = get_pane_map(self.window_id);
 
         let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
             Some(pane) => pane.clone(),

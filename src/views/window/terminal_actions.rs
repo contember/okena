@@ -138,7 +138,7 @@ impl WindowView {
                 .map(|f| f.project_id.clone())
                 .or_else(|| {
                     // Fallback: use the first visible project
-                    ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
+                    ws.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual())
                         .first()
                         .map(|p| p.id.clone())
                 });

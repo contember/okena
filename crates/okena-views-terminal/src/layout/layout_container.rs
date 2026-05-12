@@ -12,11 +12,11 @@ use crate::layout::terminal_pane::TerminalPane;
 use okena_terminal::TerminalsRegistry;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::request_broker::RequestBroker;
-use okena_workspace::state::{LayoutNode, SplitDirection, Workspace};
+use okena_workspace::state::{LayoutNode, SplitDirection, WindowId, Workspace};
 use gpui::*;
 use gpui::prelude::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -28,6 +28,7 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) workspace: Entity<Workspace>,
     pub(super) focus_manager: Entity<FocusManager>,
     pub(super) request_broker: Entity<RequestBroker>,
+    pub(super) window_id: WindowId,
     pub(super) project_id: String,
     pub(super) project_path: String,
     pub(super) layout_path: Vec<usize>,
@@ -51,6 +52,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         workspace: Entity<Workspace>,
         focus_manager: Entity<FocusManager>,
         request_broker: Entity<RequestBroker>,
+        window_id: WindowId,
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
@@ -63,6 +65,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             workspace,
             focus_manager,
             request_broker,
+            window_id,
             project_id,
             project_path,
             layout_path,
@@ -108,6 +111,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             let workspace = self.workspace.clone();
             let focus_manager = self.focus_manager.clone();
             let request_broker = self.request_broker.clone();
+            let window_id = self.window_id;
             let project_id = self.project_id.clone();
             let project_path = self.project_path.clone();
             let layout_path = self.layout_path.clone();
@@ -120,6 +124,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     workspace,
                     focus_manager,
                     request_broker,
+                    window_id,
                     project_id,
                     project_path,
                     layout_path,
@@ -163,6 +168,34 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             }
         }
         None
+    }
+
+    pub(super) fn deregister_resize_viewers(&mut self, cx: &mut Context<Self>) {
+        if let Some(pane) = self.terminal_pane.clone() {
+            pane.update(cx, |pane, cx| pane.deregister_resize_viewer(cx));
+        }
+
+        let children: Vec<_> = self.child_containers.values().cloned().collect();
+        for child in children {
+            child.update(cx, |child, cx| child.deregister_resize_viewers(cx));
+        }
+    }
+
+    pub(super) fn deregister_child_resize_viewers_except(
+        &mut self,
+        visible_paths: &HashSet<Vec<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        let hidden_children: Vec<_> = self
+            .child_containers
+            .iter()
+            .filter(|(path, _)| !visible_paths.contains(*path))
+            .map(|(_, child)| child.clone())
+            .collect();
+
+        for child in hidden_children {
+            child.update(cx, |child, cx| child.deregister_resize_viewers(cx));
+        }
     }
 
     fn is_in_tab_group(&self, cx: &Context<Self>) -> bool {
@@ -393,6 +426,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             let mut child_path = self.layout_path.clone();
             child_path.push(zoomed_idx);
 
+            let visible_paths = HashSet::from([child_path.clone()]);
+            self.deregister_child_resize_viewers_except(&visible_paths, cx);
+
             let container = self
                 .child_containers
                 .entry(child_path.clone())
@@ -402,6 +438,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.workspace.clone(),
                             self.focus_manager.clone(),
                             self.request_broker.clone(),
+                            self.window_id,
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
@@ -433,9 +470,6 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 path
             })
             .collect();
-        self.child_containers.retain(|path, _| valid_paths.contains(path));
-
-        let container_bounds_ref = self.container_bounds_ref.clone();
 
         let mut visible_children_info: Vec<(usize, f32)> = Vec::new();
         for (i, child) in children.iter().enumerate() {
@@ -444,6 +478,18 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 visible_children_info.push((i, size));
             }
         }
+        let visible_paths: HashSet<Vec<usize>> = visible_children_info
+            .iter()
+            .map(|(i, _)| {
+                let mut path = self.layout_path.clone();
+                path.push(*i);
+                path
+            })
+            .collect();
+        self.deregister_child_resize_viewers_except(&visible_paths, cx);
+        self.child_containers.retain(|path, _| valid_paths.contains(path));
+
+        let container_bounds_ref = self.container_bounds_ref.clone();
 
         let total_visible_size: f32 = visible_children_info.iter().map(|(_, s)| s).sum();
         let normalized_sizes: Vec<f32> = if total_visible_size > 0.0 {
@@ -467,6 +513,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.workspace.clone(),
                             self.focus_manager.clone(),
                             self.request_broker.clone(),
+                            self.window_id,
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
@@ -539,15 +586,17 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
         match &layout {
             Some(LayoutNode::Terminal { .. }) => {
                 if !self.child_containers.is_empty() {
+                    self.deregister_child_resize_viewers_except(&HashSet::new(), cx);
                     self.child_containers.clear();
                 }
             }
             Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) => {
-                if self.terminal_pane.is_some() {
-                    self.terminal_pane = None;
+                if let Some(pane) = self.terminal_pane.take() {
+                    pane.update(cx, |pane, cx| pane.deregister_resize_viewer(cx));
                 }
             }
             None => {
+                self.deregister_resize_viewers(cx);
                 self.terminal_pane = None;
                 self.child_containers.clear();
             }

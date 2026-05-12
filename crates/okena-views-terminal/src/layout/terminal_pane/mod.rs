@@ -23,7 +23,7 @@ use okena_terminal::TerminalsRegistry;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::hooks;
 use okena_workspace::request_broker::RequestBroker;
-use okena_workspace::state::Workspace;
+use okena_workspace::state::{WindowId, Workspace};
 use gpui::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +34,7 @@ pub struct TerminalPane<D: ActionDispatch> {
     workspace: Entity<Workspace>,
     pub(super) focus_manager: Entity<FocusManager>,
     request_broker: Entity<RequestBroker>,
+    pub(super) window_id: WindowId,
     project_id: String,
     project_path: String,
     layout_path: Vec<usize>,
@@ -68,6 +69,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         workspace: Entity<Workspace>,
         focus_manager: Entity<FocusManager>,
         request_broker: Entity<RequestBroker>,
+        window_id: WindowId,
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
@@ -89,6 +91,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         let content = cx.new(|cx| {
             TerminalContent::new(
                 focus_handle.clone(),
+                Some(window_id),
                 project_id.clone(),
                 layout_path.clone(),
                 workspace.clone(),
@@ -105,6 +108,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             workspace,
             focus_manager,
             request_broker,
+            window_id,
             project_id,
             project_path,
             layout_path,
@@ -458,6 +462,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub fn set_detached(&mut self, detached: bool, cx: &mut Context<Self>) {
         if self.detached != detached {
             self.detached = detached;
+            if detached {
+                self.deregister_resize_viewer(cx);
+            }
             cx.notify();
         }
     }
@@ -465,8 +472,17 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub fn set_minimized(&mut self, minimized: bool, cx: &mut Context<Self>) {
         if self.minimized != minimized {
             self.minimized = minimized;
+            if minimized {
+                self.deregister_resize_viewer(cx);
+            }
             cx.notify();
         }
+    }
+
+    pub(super) fn deregister_resize_viewer(&mut self, cx: &mut Context<Self>) {
+        self.content.update(cx, |content, _| {
+            content.deregister_resize_viewer();
+        });
     }
 
     fn id_suffix(&self) -> String {
@@ -489,7 +505,7 @@ impl<D: ActionDispatch> Drop for TerminalPane<D> {
     fn drop(&mut self) {
         // Remove this pane from the spatial navigation map so stale entries
         // don't linger after a terminal is closed.
-        crate::layout::navigation::deregister_pane_bounds(&self.project_id, &self.layout_path);
+        crate::layout::navigation::deregister_pane_bounds(self.window_id, &self.project_id, &self.layout_path);
     }
 }
 

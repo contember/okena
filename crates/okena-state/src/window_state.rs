@@ -50,6 +50,10 @@ pub struct WindowState {
     /// Last-known OS window bounds (used to restore position on next launch).
     #[serde(default)]
     pub os_bounds: Option<WindowBounds>,
+    /// Whether the sidebar is open in this window. `None` means no per-window
+    /// value has been recorded yet, so callers should fall back to app settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_open: Option<bool>,
 }
 
 impl Default for WindowState {
@@ -63,6 +67,7 @@ impl Default for WindowState {
             project_widths: HashMap::new(),
             folder_collapsed: HashMap::new(),
             os_bounds: None,
+            sidebar_open: None,
         }
     }
 }
@@ -105,6 +110,7 @@ mod tests {
                 width: 1280.0,
                 height: 800.0,
             }),
+            sidebar_open: Some(false),
         };
 
         let json = serde_json::to_string(&original).unwrap();
@@ -116,6 +122,13 @@ mod tests {
         assert_eq!(reloaded.project_widths, original.project_widths);
         assert_eq!(reloaded.folder_collapsed, original.folder_collapsed);
         assert_eq!(reloaded.os_bounds, original.os_bounds);
+        assert_eq!(reloaded.sidebar_open, original.sidebar_open);
+    }
+
+    #[test]
+    fn missing_sidebar_open_deserializes_as_unset() {
+        let s: WindowState = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.sidebar_open, None);
     }
 
     #[test]
@@ -155,5 +168,6 @@ mod tests {
         assert!(s.project_widths.is_empty());
         assert!(s.folder_collapsed.is_empty());
         assert!(s.os_bounds.is_none());
+        assert_eq!(s.sidebar_open, None);
     }
 }

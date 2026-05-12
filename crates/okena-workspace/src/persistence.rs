@@ -288,6 +288,19 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
                 return Err(e.into());
             }
         };
+        // JSON-level pre-migration: legacy v0/v1 files carry per-project
+        // `show_in_overview`, per-folder `collapsed`, and a top-level
+        // `project_widths` map. The struct fields for those are gone in v2,
+        // so serde would silently drop them on the typed parse. Walk the
+        // raw JSON first and fold the legacy values into `main_window`.
+        let content = match migrate_legacy_json(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("Legacy JSON migration failed: {}; loading raw", e);
+                content
+            }
+        };
+
         let mut data: WorkspaceData = match serde_json::from_str(&content) {
             Ok(data) => data,
             Err(e) => {
@@ -387,6 +400,131 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     std::fs::rename(&tmp_path, &path)?;
 
     Ok(())
+}
+
+/// Pre-deserialization JSON migration: fold legacy v0/v1 fields into
+/// `main_window` before the typed parse drops them.
+///
+/// Legacy fields handled:
+/// - per-project `show_in_overview: false` / `is_visible: false` → push
+///   project id into `main_window.hidden_project_ids`
+/// - per-folder `collapsed: true` → insert `(folder_id, true)` into
+///   `main_window.folder_collapsed`
+/// - top-level `project_widths` map → moved to `main_window.project_widths`
+///
+/// Handles both a raw `WorkspaceData` JSON object and an exported-workspace
+/// wrapper with a nested `workspace` object.
+///
+/// No-op when the workspace is already v2+ (main_window already present).
+/// Idempotent: running twice on the same content yields the same result.
+pub(crate) fn migrate_legacy_json(content: &str) -> Result<String> {
+    use serde_json::Value;
+
+    let mut value: Value = serde_json::from_str(content)?;
+    if let Some(workspace) = value
+        .as_object_mut()
+        .and_then(|map| map.get_mut("workspace"))
+        .filter(|workspace| workspace.is_object())
+    {
+        migrate_legacy_workspace_value(workspace);
+    } else {
+        migrate_legacy_workspace_value(&mut value);
+    }
+
+    Ok(serde_json::to_string(&value)?)
+}
+
+fn migrate_legacy_workspace_value(value: &mut serde_json::Value) {
+    use serde_json::Value;
+
+    let Value::Object(map) = value else {
+        return;
+    };
+
+    let version = map.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    if version >= 2 {
+        return;
+    }
+
+    let mut main_window = map
+        .remove("main_window")
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !main_window.is_object() {
+        main_window = serde_json::json!({});
+    }
+
+    // Fold top-level project_widths
+    if let Some(widths) = map.remove("project_widths") {
+        if let Value::Object(mw) = &mut main_window {
+            mw.entry("project_widths".to_string())
+                .or_insert(widths);
+        }
+    }
+
+    // Walk projects, strip show_in_overview/is_visible, collect hidden ids
+    let mut hidden_ids: Vec<String> = Vec::new();
+    if let Some(Value::Array(projects)) = map.get_mut("projects") {
+        for p in projects.iter_mut() {
+            if let Value::Object(po) = p {
+                let show_in_overview = po
+                    .remove("show_in_overview")
+                    .and_then(|v| v.as_bool());
+                let is_visible = po
+                    .remove("is_visible")
+                    .and_then(|v| v.as_bool());
+                let visible = show_in_overview.or(is_visible).unwrap_or(true);
+                if !visible {
+                    if let Some(id) = po.get("id").and_then(|v| v.as_str()) {
+                        hidden_ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if !hidden_ids.is_empty() {
+        if let Value::Object(mw) = &mut main_window {
+            let entry = mw
+                .entry("hidden_project_ids".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Value::Array(arr) = entry {
+                for id in hidden_ids {
+                    arr.push(Value::String(id));
+                }
+            }
+        }
+    }
+
+    // Walk folders, strip collapsed, build folder_collapsed map
+    let mut collapsed_ids: Vec<String> = Vec::new();
+    if let Some(Value::Array(folders)) = map.get_mut("folders") {
+        for f in folders.iter_mut() {
+            if let Value::Object(fo) = f {
+                let collapsed = fo
+                    .remove("collapsed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if collapsed {
+                    if let Some(id) = fo.get("id").and_then(|v| v.as_str()) {
+                        collapsed_ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if !collapsed_ids.is_empty() {
+        if let Value::Object(mw) = &mut main_window {
+            let entry = mw
+                .entry("folder_collapsed".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(fc) = entry {
+                for id in collapsed_ids {
+                    fc.insert(id, Value::Bool(true));
+                }
+            }
+        }
+    }
+
+    map.insert("main_window".to_string(), main_window);
 }
 
 /// Migrate workspace data from older versions to the current version
@@ -698,17 +836,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_folder_collapsed_does_not_migrate_into_main_window() {
-        // Once the legacy `FolderData.collapsed` field is removed from the
-        // struct, a v1 workspace.json carrying a `collapsed: true` flag on a
-        // folder is silently dropped on load -- serde ignores the unknown key
-        // (the struct field is gone) and migrate_workspace has no fold helper
-        // to copy the flag into `main_window.folder_collapsed`. Documents the
-        // accepted tradeoff: by the time this lands, real-world files are
-        // already at v2 (the v1 -> v2 fold ran on the previous schema), so
-        // the loss is moot in practice. This test pins the post-deletion
-        // contract: a v1 file's collapsed flag must not resurrect on the
-        // per-window viewport state.
+    fn legacy_v1_folder_collapsed_folds_into_main_window() {
+        // Legacy v1 file has `collapsed: true` on a folder. The JSON-level
+        // pre-migration must move that flag into
+        // `main_window.folder_collapsed` so per-window collapsed state is
+        // preserved across the schema bump.
         let json = r#"{
             "version": 1,
             "projects": [],
@@ -722,25 +854,23 @@ mod tests {
                 }
             ]
         }"#;
-        let data: WorkspaceData = serde_json::from_str(json).unwrap();
+        let migrated_json = migrate_legacy_json(json).expect("migrate_legacy_json must succeed");
+        let data: WorkspaceData = serde_json::from_str(&migrated_json).unwrap();
         let migrated = migrate_workspace(data);
         assert_eq!(migrated.version, WORKSPACE_VERSION);
-        assert!(migrated.main_window.folder_collapsed.is_empty(),
-            "legacy FolderData.collapsed must not fold into main_window after field removal");
+        assert_eq!(
+            migrated.main_window.folder_collapsed.get("f1").copied(),
+            Some(true),
+            "legacy collapsed=true must land in main_window.folder_collapsed",
+        );
     }
 
     #[test]
-    fn legacy_v1_show_in_overview_does_not_migrate_into_main_window() {
-        // Once the legacy `ProjectData.show_in_overview` field is removed from
-        // the struct, a v1 workspace.json carrying a `show_in_overview: false`
-        // flag on a project is silently dropped on load -- serde ignores the
-        // unknown key (the struct field is gone) and migrate_workspace has no
-        // fold helper to copy the flag into `main_window.hidden_project_ids`.
-        // Documents the accepted tradeoff: by the time this lands, real-world
-        // files are already at v2 (the v1 -> v2 fold ran on the previous
-        // schema), so the loss is moot in practice. This test pins the
-        // post-deletion contract: a v1 file's show_in_overview must not
-        // resurrect on the per-window viewport state.
+    fn legacy_v1_show_in_overview_folds_into_main_window() {
+        // Legacy v1 file has `show_in_overview: false` on a project. The
+        // JSON-level pre-migration must add that project's id to
+        // `main_window.hidden_project_ids` so user-hidden projects stay
+        // hidden across the schema bump.
         let json = r#"{
             "version": 1,
             "projects": [
@@ -754,35 +884,100 @@ mod tests {
             ],
             "project_order": ["p1"]
         }"#;
-        let data: WorkspaceData = serde_json::from_str(json).unwrap();
+        let migrated_json = migrate_legacy_json(json).expect("migrate_legacy_json must succeed");
+        let data: WorkspaceData = serde_json::from_str(&migrated_json).unwrap();
         let migrated = migrate_workspace(data);
         assert_eq!(migrated.version, WORKSPACE_VERSION);
-        assert!(migrated.main_window.hidden_project_ids.is_empty(),
-            "legacy show_in_overview must not fold into main_window after field removal");
+        assert!(
+            migrated.main_window.hidden_project_ids.contains("p1"),
+            "legacy show_in_overview=false must fold into main_window.hidden_project_ids",
+        );
     }
 
     #[test]
-    fn legacy_v1_top_level_project_widths_does_not_migrate_into_main_window() {
-        // Once the legacy WorkspaceData.project_widths field is removed from
-        // the struct, a v1 workspace.json carrying a top-level project_widths
-        // key is silently dropped on load -- serde ignores the unknown key
-        // and migrate_workspace has no helper to fold it. Documents the
-        // accepted tradeoff: by the time this lands, real-world files are
-        // already at v2 (the v1 -> v2 fold ran on the previous schema), so
-        // the loss is moot in practice. This test pins the post-deletion
-        // contract: a v1 file's project_widths must not resurrect on the
-        // per-window viewport state.
+    fn legacy_v1_is_visible_alias_folds_into_main_window() {
+        // Older files could write the former visibility field using the
+        // `is_visible` alias. It must migrate identically to
+        // `show_in_overview` before typed deserialization drops the key.
+        let json = r#"{
+            "version": 1,
+            "projects": [
+                {
+                    "id": "p1",
+                    "name": "Hidden",
+                    "path": "/tmp",
+                    "layout": null,
+                    "is_visible": false
+                }
+            ],
+            "project_order": ["p1"]
+        }"#;
+        let migrated_json = migrate_legacy_json(json).expect("migrate_legacy_json must succeed");
+        let data: WorkspaceData = serde_json::from_str(&migrated_json).unwrap();
+        let migrated = migrate_workspace(data);
+        assert_eq!(migrated.version, WORKSPACE_VERSION);
+        assert!(
+            migrated.main_window.hidden_project_ids.contains("p1"),
+            "legacy is_visible=false must fold into main_window.hidden_project_ids",
+        );
+    }
+
+    #[test]
+    fn legacy_v1_top_level_project_widths_folds_into_main_window() {
+        // Legacy v1 file has a top-level `project_widths` map. The
+        // JSON-level pre-migration must move it into
+        // `main_window.project_widths` so user-set column widths survive
+        // the schema bump.
         let json = r#"{
             "version": 1,
             "projects": [],
             "project_order": [],
             "project_widths": {"p1": 60.0, "p2": 40.0}
         }"#;
-        let data: WorkspaceData = serde_json::from_str(json).unwrap();
+        let migrated_json = migrate_legacy_json(json).expect("migrate_legacy_json must succeed");
+        let data: WorkspaceData = serde_json::from_str(&migrated_json).unwrap();
         let migrated = migrate_workspace(data);
         assert_eq!(migrated.version, WORKSPACE_VERSION);
-        assert!(migrated.main_window.project_widths.is_empty(),
-            "legacy top-level project_widths must not fold into main_window after field removal");
+        assert_eq!(migrated.main_window.project_widths.get("p1").copied(), Some(60.0));
+        assert_eq!(migrated.main_window.project_widths.get("p2").copied(), Some(40.0));
+    }
+
+    #[test]
+    fn legacy_exported_workspace_folds_nested_workspace_fields() {
+        let json = r#"{
+            "version": 1,
+            "exported_at": "2026-05-12T00:00:00Z",
+            "workspace": {
+                "version": 1,
+                "projects": [
+                    {
+                        "id": "p1",
+                        "name": "Hidden",
+                        "path": "/tmp",
+                        "layout": null,
+                        "show_in_overview": false
+                    }
+                ],
+                "project_order": ["p1"],
+                "folders": [
+                    {
+                        "id": "f1",
+                        "name": "F",
+                        "project_ids": ["p1"],
+                        "collapsed": true
+                    }
+                ],
+                "project_widths": {"p1": 60.0}
+            }
+        }"#;
+        let migrated_json = migrate_legacy_json(json).expect("migrate_legacy_json must succeed");
+        let exported: ExportedWorkspace = serde_json::from_str(&migrated_json).unwrap();
+        let migrated = migrate_workspace(exported.workspace);
+
+        assert_eq!(migrated.version, WORKSPACE_VERSION);
+        assert!(migrated.main_window.hidden_project_ids.contains("p1"));
+        assert_eq!(migrated.main_window.folder_collapsed.get("f1").copied(), Some(true));
+        assert_eq!(migrated.main_window.project_widths.get("p1").copied(), Some(60.0));
     }
 
     #[test]

@@ -5,7 +5,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::persistence::{get_config_dir, migrate_workspace, validate_workspace_data, WORKSPACE_VERSION};
+use super::persistence::{
+    get_config_dir, migrate_legacy_json, migrate_workspace, validate_workspace_data,
+    WORKSPACE_VERSION,
+};
 
 /// Metadata about a saved session
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,7 +67,13 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
 
                 // Try to read workspace to get project count
                 let project_count = if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(data) = serde_json::from_str::<WorkspaceData>(&content) {
+                    if let Ok(content) = migrate_legacy_json(&content) {
+                        if let Ok(data) = serde_json::from_str::<WorkspaceData>(&content) {
+                            data.projects.len()
+                        } else {
+                            0
+                        }
+                    } else if let Ok(data) = serde_json::from_str::<WorkspaceData>(&content) {
                         data.projects.len()
                     } else {
                         0
@@ -117,6 +126,8 @@ pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData
 
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read session file: {}", path.display()))?;
+    let content = migrate_legacy_json(&content)
+        .with_context(|| format!("Failed to migrate legacy session file: {}", path.display()))?;
     let mut data: WorkspaceData = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse session file: {}", path.display()))?;
 
@@ -185,6 +196,8 @@ pub fn export_workspace(data: &WorkspaceData, path: &std::path::Path) -> Result<
 pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
+    let content = migrate_legacy_json(&content)
+        .with_context(|| format!("Failed to migrate legacy workspace file: {}", path.display()))?;
 
     // Try to parse as ExportedWorkspace first (has version/metadata)
     let mut data = if let Ok(exported) = serde_json::from_str::<ExportedWorkspace>(&content) {
@@ -195,7 +208,9 @@ pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
             .with_context(|| "Failed to parse workspace file")?
     };
 
-    // Imported workspaces always get current version (no migration needed)
+    data = migrate_workspace(data);
+
+    // Imported workspaces always get current version after migration
     data.version = WORKSPACE_VERSION;
 
     // Always clear terminal IDs on import, plus full validation with folder consistency
@@ -273,4 +288,97 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 /// Check if a year is a leap year
 fn is_leap_year(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn write_import_file(content: &str) -> PathBuf {
+        let id = NEXT_TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "okena-import-workspace-{}-{}.json",
+            std::process::id(),
+            id,
+        ));
+        fs::write(&path, content).expect("test import file should be writable");
+        path
+    }
+
+    #[test]
+    fn import_raw_legacy_workspace_runs_json_migration() {
+        let path = write_import_file(r#"{
+            "version": 1,
+            "projects": [
+                {
+                    "id": "p1",
+                    "name": "Hidden",
+                    "path": "/tmp",
+                    "layout": null,
+                    "is_visible": false
+                }
+            ],
+            "project_order": ["p1"],
+            "folders": [
+                {
+                    "id": "f1",
+                    "name": "F",
+                    "project_ids": ["p1"],
+                    "collapsed": true
+                }
+            ],
+            "project_widths": {"p1": 60.0}
+        }"#);
+
+        let data = import_workspace(&path).expect("legacy raw import should load");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(data.version, WORKSPACE_VERSION);
+        assert!(data.main_window.hidden_project_ids.contains("p1"));
+        assert_eq!(data.main_window.folder_collapsed.get("f1").copied(), Some(true));
+        assert_eq!(data.main_window.project_widths.get("p1").copied(), Some(60.0));
+    }
+
+    #[test]
+    fn import_exported_legacy_workspace_runs_nested_json_migration() {
+        let path = write_import_file(r#"{
+            "version": 1,
+            "exported_at": "2026-05-12T00:00:00Z",
+            "workspace": {
+                "version": 1,
+                "projects": [
+                    {
+                        "id": "p1",
+                        "name": "Hidden",
+                        "path": "/tmp",
+                        "layout": null,
+                        "show_in_overview": false
+                    }
+                ],
+                "project_order": ["p1"],
+                "folders": [
+                    {
+                        "id": "f1",
+                        "name": "F",
+                        "project_ids": ["p1"],
+                        "collapsed": true
+                    }
+                ],
+                "project_widths": {"p1": 60.0}
+            }
+        }"#);
+
+        let data = import_workspace(&path).expect("legacy exported import should load");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(data.version, WORKSPACE_VERSION);
+        assert!(data.main_window.hidden_project_ids.contains("p1"));
+        assert_eq!(data.main_window.folder_collapsed.get("f1").copied(), Some(true));
+        assert_eq!(data.main_window.project_widths.get("p1").copied(), Some(60.0));
+    }
 }

@@ -23,19 +23,6 @@ impl Workspace {
 
     /// Delete a folder, splicing its contained projects back into project_order at the folder's position
     pub fn delete_folder(&mut self, folder_id: &str, cx: &mut Context<Self>) {
-        // Clear folder filter on main if the deleted folder was its active
-        // filter. Folder delete is a workspace-level event (no window_id
-        // parameter on this action), so the scrub stays main-only here. A
-        // future helper analogous to `delete_project_scrub_all_windows`
-        // would fan the clear out to every window's folder_filter; until
-        // then, an extra holding the deleted folder's id as its filter
-        // surfaces an empty viewport instead of an unfiltered grid -- the
-        // visibility computation already treats a stale folder id as "no
-        // matches", so the UI still degrades gracefully.
-        if self.active_folder_filter(WindowId::Main).map(|s| s.as_str()) == Some(folder_id) {
-            self.data.main_window.folder_filter = None;
-        }
-
         let project_ids = self.data.folders.iter()
             .find(|f| f.id == folder_id)
             .map(|f| f.project_ids.clone())
@@ -51,9 +38,7 @@ impl Workspace {
         }
 
         self.data.folders.retain(|f| f.id != folder_id);
-        // Scrub the folder's entry from the per-window collapsed map so a
-        // re-added folder with the same id does not inherit stale state.
-        self.data.main_window.folder_collapsed.remove(folder_id);
+        self.data.delete_folder_scrub_all_windows(folder_id);
         self.notify_data(cx);
     }
 
@@ -635,6 +620,51 @@ mod gpui_tests {
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.folder_collapsed.contains_key("f1"));
+        });
+    }
+
+    #[gpui::test]
+    fn delete_folder_scrubs_extra_window_folder_state(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2")],
+            vec!["f1", "f2"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string()],
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                folder_color: FolderColor::default(),
+            },
+        ];
+        data.main_window.folder_filter = Some("f1".to_string());
+        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+
+        let mut extra = WindowState::default();
+        extra.folder_filter = Some("f1".to_string());
+        extra.folder_collapsed.insert("f1".to_string(), true);
+        extra.folder_collapsed.insert("f2".to_string(), true);
+        data.extra_windows.push(extra);
+
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_folder("f1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.folder_filter.is_none());
+            assert!(!ws.data().main_window.folder_collapsed.contains_key("f1"));
+            let extra = &ws.data().extra_windows[0];
+            assert!(extra.folder_filter.is_none());
+            assert!(!extra.folder_collapsed.contains_key("f1"));
+            assert_eq!(extra.folder_collapsed.get("f2"), Some(&true));
         });
     }
 

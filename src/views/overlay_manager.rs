@@ -465,7 +465,8 @@ impl OverlayManager {
         } else {
             let ws = self.workspace.clone();
             let fm = self.focus_manager.clone();
-            let entity = cx.new(|cx| CommandPalette::new(ws, fm, cx));
+            let window_id = self.window_id;
+            let entity = cx.new(|cx| CommandPalette::new(ws, fm, window_id, cx));
             cx.subscribe(&entity, |this, _, event: &CommandPaletteEvent, cx| {
                 if event.is_close() {
                     this.close_modal(cx);
@@ -538,7 +539,8 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
-            let entity = cx.new(|cx| ProjectSwitcher::new(workspace, cx));
+            let window_id = self.window_id;
+            let entity = cx.new(|cx| ProjectSwitcher::new(window_id, workspace, cx));
             cx.subscribe(&entity, |this, _, event: &ProjectSwitcherEvent, cx| {
                 match event {
                     ProjectSwitcherEvent::Close => {

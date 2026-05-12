@@ -45,6 +45,7 @@ pub struct CommandPalette {
     #[allow(dead_code)]
     workspace: Entity<okena_workspace::state::Workspace>,
     focus_manager: Entity<okena_workspace::focus::FocusManager>,
+    window_id: okena_workspace::state::WindowId,
     focus_handle: FocusHandle,
     state: ListOverlayState<CommandEntry>,
     /// When true, the entire query is "selected" — first keystroke replaces it.
@@ -52,7 +53,7 @@ pub struct CommandPalette {
 }
 
 impl CommandPalette {
-    pub fn new(workspace: Entity<okena_workspace::state::Workspace>, focus_manager: Entity<okena_workspace::focus::FocusManager>, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<okena_workspace::state::Workspace>, focus_manager: Entity<okena_workspace::focus::FocusManager>, window_id: okena_workspace::state::WindowId, cx: &mut Context<Self>) -> Self {
         // Build command list from action descriptions
         let descriptions = get_action_descriptions();
         let config_data = get_config();
@@ -109,7 +110,7 @@ impl CommandPalette {
         let state = ListOverlayState::new(commands, config, cx);
         let focus_handle = state.focus_handle.clone();
 
-        let mut palette = Self { workspace, focus_manager, focus_handle, state, select_all };
+        let mut palette = Self { workspace, focus_manager, window_id, focus_handle, state, select_all };
 
         if !query.is_empty() {
             palette.state.search_query = query;
@@ -157,7 +158,7 @@ impl CommandPalette {
             // Restore focus to the terminal pane before dispatching so that
             // context-scoped actions (e.g. CloseTerminal on "TerminalPane")
             // are routed to the correct element.
-            let pane_map = okena_views_terminal::layout::navigation::get_pane_map();
+            let pane_map = okena_views_terminal::layout::navigation::get_pane_map(self.window_id);
             if let Some(focused) = self.focus_manager.read(cx)
                 .focused_terminal_state()
             {

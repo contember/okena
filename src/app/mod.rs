@@ -155,6 +155,10 @@ pub struct Okena {
     force_remote: bool,
     /// Service manager for project-scoped background processes
     service_manager: Entity<ServiceManager>,
+    /// Remote connection manager. Held so extras spawned at runtime can
+    /// be wired with the same singleton main was wired with at startup
+    /// (`open_extra_window` calls `set_remote_manager` on the new view).
+    remote_manager: Entity<RemoteConnectionManager>,
 }
 
 impl Okena {
@@ -227,14 +231,21 @@ impl Okena {
         })
         .detach();
 
-        // Create the main window's per-window view (get terminals registry from it)
-        let pty_manager_clone = pty_manager.clone();
-        let main_window = cx.new(|cx| {
-            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, window, cx)
-        });
+        // Shared terminals registry — one per Okena instance, threaded into
+        // every WindowView (main + extras). Each TerminalPane looks up the
+        // existing Arc<Terminal> for its terminal_id from this registry; if
+        // each window had its own registry, an extra rendering a project
+        // already shown in main would create a NEW Terminal model and PTY
+        // bytes (which feed the original Arc<Terminal>) would never reach
+        // the extra's content pane.
+        let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
 
-        // Get terminals registry from the main window
-        let terminals = main_window.read(cx).terminals().clone();
+        // Create the main window's per-window view, sharing the registry.
+        let pty_manager_clone = pty_manager.clone();
+        let terminals_for_main = terminals.clone();
+        let main_window = cx.new(|cx| {
+            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, terminals_for_main, window, cx)
+        });
 
         // Create service manager for project-scoped background processes
         let local_backend_for_services: Arc<dyn crate::terminal::backend::TerminalBackend> =
@@ -340,6 +351,7 @@ impl Okena {
             listen_addr,
             force_remote,
             service_manager: service_manager.clone(),
+            remote_manager: remote_manager.clone(),
         };
 
         // Propagate claude config dir to spawned PTYs so `claude` CLI invocations inside
@@ -384,6 +396,33 @@ impl Okena {
         // `Okena.extra_windows` is the spawn signal.
         cx.observe(&workspace, |this, _workspace, cx| {
             this.handle_extra_windows_changed(cx);
+        })
+        .detach();
+
+        // Scrub stale focus across every window's FocusManager on each
+        // workspace change. Deleting a project from one window can leave
+        // another window's focus pointing at a now-gone project; without
+        // this, the orphaned window renders a ghost zoom of the deleted
+        // project (or worse, panics on missing data).
+        cx.observe(&workspace, |this, workspace, cx| {
+            let valid_ids: HashSet<String> = workspace
+                .read(cx)
+                .projects()
+                .iter()
+                .map(|p| p.id.clone())
+                .collect();
+            let mut fms: Vec<Entity<crate::workspace::focus::FocusManager>> = Vec::with_capacity(1 + this.extra_windows.len());
+            fms.push(this.main_window.read(cx).focus_manager());
+            for view in this.extra_windows.values() {
+                fms.push(view.read(cx).focus_manager());
+            }
+            for fm in fms {
+                fm.update(cx, |fm, cx| {
+                    if fm.clear_stale_focus(|id| valid_ids.contains(id)) {
+                        cx.notify();
+                    }
+                });
+            }
         })
         .detach();
 
@@ -723,7 +762,13 @@ impl Okena {
                     }
 
                     if !exit_events.is_empty() {
+                        // A terminal exited — every window rendering its
+                        // project column needs to re-render so the layout
+                        // reflects the removal. Fan out to all live windows.
                         this.main_window.update(cx, |_, cx| cx.notify());
+                        for view in this.extra_windows.values() {
+                            view.update(cx, |_, cx| cx.notify());
+                        }
                     }
                 });
             }

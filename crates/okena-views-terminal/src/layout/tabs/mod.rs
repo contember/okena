@@ -216,6 +216,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             let mut child_path = self.layout_path.clone();
             child_path.push(zoomed_idx);
 
+            let visible_paths = HashSet::from([child_path.clone()]);
+            self.deregister_child_resize_viewers_except(&visible_paths, cx);
+
             let container = self
                 .child_containers
                 .entry(child_path.clone())
@@ -225,6 +228,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.workspace.clone(),
                             self.focus_manager.clone(),
                             self.request_broker.clone(),
+                            self.window_id,
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
@@ -252,6 +256,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 path
             })
             .collect();
+        let active_path = {
+            let mut path = self.layout_path.clone();
+            path.push(active_tab);
+            path
+        };
+        let visible_paths = HashSet::from([active_path]);
+        self.deregister_child_resize_viewers_except(&visible_paths, cx);
         self.child_containers.retain(|path, _| valid_paths.contains(path));
 
         let container_bounds_ref = self.container_bounds_ref.clone();
@@ -282,6 +293,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                     self.workspace.clone(),
                                     self.focus_manager.clone(),
                                     self.request_broker.clone(),
+                                    self.window_id,
                                     self.project_id.clone(),
                                     self.project_path.clone(),
                                     child_path.clone(),

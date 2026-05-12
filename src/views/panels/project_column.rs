@@ -96,8 +96,9 @@ impl ProjectColumn {
             let be = backend.clone();
             let ts = terminals.clone();
             let ad = active_drag.clone();
+            let window_id = window_id;
             cx.new(move |cx| {
-                ServicePanel::new(pid, ws, fm, rb, be, ts, ad, initial_service_height, cx)
+                ServicePanel::new(pid, ws, fm, rb, be, ts, ad, window_id, initial_service_height, cx)
             })
         };
         // Observe service_panel so ProjectColumn re-renders when panel state changes
@@ -114,8 +115,9 @@ impl ProjectColumn {
             let be = backend.clone();
             let ts = terminals.clone();
             let ad = active_drag.clone();
+            let window_id = window_id;
             cx.new(move |cx| {
-                HookPanel::new(pid, ws, fm, rb, be, ts, ad, initial_hook_height, cx)
+                HookPanel::new(pid, ws, fm, rb, be, ts, ad, window_id, initial_hook_height, cx)
             })
         };
         cx.observe(&hook_panel, |_, _, cx| cx.notify()).detach();
@@ -253,12 +255,14 @@ impl ProjectColumn {
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
             let action_dispatcher = self.action_dispatcher.clone();
+            let window_id = self.window_id;
 
             self.layout_container = Some(cx.new(move |_cx| {
                 LayoutContainer::new(
                     workspace,
                     focus_manager,
                     request_broker,
+                    window_id,
                     project_id,
                     project_path,
                     vec![],
