@@ -170,6 +170,7 @@ impl Render for WorktreeListPopover {
                                     workspace.update(cx, |ws, cx| {
                                         ws.delete_project(fm, &id, &hooks, cx);
                                     });
+                                    cx.notify();
                                 });
                             }
                         } else {

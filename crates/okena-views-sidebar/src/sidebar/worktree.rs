@@ -154,6 +154,7 @@ impl Sidebar {
                                 ws.finish_creating_project(&project_id);
                                 ws.delete_project(fm, &project_id, &hooks_for_error, cx);
                             });
+                            cx.notify();
                         });
                     });
                 }

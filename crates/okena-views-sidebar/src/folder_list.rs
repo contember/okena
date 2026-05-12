@@ -131,6 +131,7 @@ impl Sidebar {
                         workspace.update(cx, |ws, cx| {
                             ws.toggle_folder_focus(fm, window_id, &folder_id, cx);
                         });
+                        cx.notify();
                     });
                 }
             }))
@@ -196,6 +197,7 @@ impl Sidebar {
                                     workspace.update(cx, |ws, cx| {
                                         ws.toggle_folder_focus(fm, window_id, &fid, cx);
                                     });
+                                    cx.notify();
                                 });
                             }
                             cx.stop_propagation();
@@ -332,6 +334,7 @@ impl Sidebar {
                         workspace.update(cx, |ws, cx| {
                             ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
                         });
+                        cx.notify();
                     });
                 }
             }))
@@ -396,6 +399,7 @@ impl Sidebar {
                                     workspace.update(cx, |ws, cx| {
                                         ws.set_focused_project_individual(fm, Some(pid), cx);
                                     });
+                                    cx.notify();
                                 });
                             }
                             cx.stop_propagation();

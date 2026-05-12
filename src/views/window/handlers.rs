@@ -174,6 +174,7 @@ impl WindowView {
                     workspace.update(cx, |ws, cx| {
                         ws.delete_project(fm, &pid, &settings(cx).hooks, cx);
                     });
+                    cx.notify();
                 });
                 for tid in hook_tids {
                     self.terminals.lock().remove(&tid);
@@ -214,6 +215,7 @@ impl WindowView {
                         workspace.update(cx, |ws, cx| {
                             ws.set_focused_project(fm, Some(parent_id), cx);
                         });
+                        cx.notify();
                     });
                 }
             }
@@ -224,6 +226,7 @@ impl WindowView {
                     workspace.update(cx, |ws, cx| {
                         ws.set_focused_project(fm, Some(pid), cx);
                     });
+                    cx.notify();
                 });
             }
             OverlayManagerEvent::ToggleProjectVisibility(project_id) => {
@@ -403,6 +406,7 @@ impl WindowView {
             workspace.update(cx, |ws, cx| {
                 ws.replace_data(fm, data, cx);
             });
+            cx.notify();
         });
 
         // Sync project columns for new data
