@@ -569,9 +569,11 @@ impl CloseWorktreeDialog {
 
                 cx.update(|cx| {
                     let result = focus_manager.update(cx, |fm, cx| {
-                        workspace.update(cx, |ws, cx| {
+                        let result = workspace.update(cx, |ws, cx| {
                             ws.remove_worktree_project(fm, &project_id, force_remove, &global_hooks, cx)
-                        })
+                        });
+                        cx.notify();
+                        result
                     });
 
                     match result {

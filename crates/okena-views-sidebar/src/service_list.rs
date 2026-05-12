@@ -187,6 +187,7 @@ impl Sidebar {
                                 workspace.update(cx, |ws, cx| {
                                     ws.set_focused_project_individual(fm, Some(pid), cx);
                                 });
+                                cx.notify();
                             });
                             this.request_broker.update(cx, |broker, cx| {
                                 broker.push_overlay_request(

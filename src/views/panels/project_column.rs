@@ -568,6 +568,7 @@ impl ProjectColumn {
                                             workspace.update(cx, |ws, cx| {
                                                 ws.set_focused_project(fm, Some(pid), cx);
                                             });
+                                            cx.notify();
                                         });
                                     })
                                     .child(

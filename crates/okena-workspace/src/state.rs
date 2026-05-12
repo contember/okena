@@ -47,6 +47,8 @@ pub struct Workspace {
     /// Monotonic counter incremented only on persistent data mutations.
     /// The auto-save observer compares this to skip saves for UI-only changes.
     data_version: u64,
+    /// Monotonic counter incremented when all workspace data is replaced.
+    data_replacement_epoch: u64,
     /// Terminal IDs queued for killing by the app layer (drained by Okena observer).
     pending_terminal_kills: Vec<String>,
 }
@@ -59,6 +61,7 @@ impl Workspace {
             remote_sync: RemoteSyncState::new(),
             access_history: ProjectAccessHistory::new(),
             data_version: 0,
+            data_replacement_epoch: 0,
             pending_terminal_kills: Vec::new(),
         }
     }
@@ -66,6 +69,11 @@ impl Workspace {
     /// Current data version (incremented on persistent data mutations)
     pub fn data_version(&self) -> u64 {
         self.data_version
+    }
+
+    /// Current wholesale data replacement epoch.
+    pub fn data_replacement_epoch(&self) -> u64 {
+        self.data_replacement_epoch
     }
 
     /// Read-only access to persistent workspace data.
@@ -86,8 +94,10 @@ impl Workspace {
     /// Does NOT bump data_version — the data came from disk, not a user edit.
     pub fn replace_data(&mut self, focus_manager: &mut FocusManager, data: WorkspaceData, cx: &mut Context<Self>) {
         self.data = data;
+        self.data_replacement_epoch += 1;
         focus_manager.clear_all();
         cx.notify();
+        cx.refresh_windows();
     }
 
     /// Record that a project was accessed (for sorting by recency)

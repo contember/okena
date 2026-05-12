@@ -125,6 +125,7 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                         workspace.update(cx, |ws, cx| {
                             ws.set_focused_terminal(fm, project_id, layout_path, cx);
                         });
+                        cx.notify();
                     });
                 }),
             )
@@ -190,6 +191,7 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                     workspace.update(cx, |ws, cx| {
                         ws.set_focused_terminal(fm, project_id, layout_path, cx);
                     });
+                    cx.notify();
                 });
             }))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| { this.handle_file_drop(paths, cx); }))

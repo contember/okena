@@ -444,6 +444,7 @@ impl Sidebar {
                         ws.set_focused_project(fm, None, cx);
                         ws.set_folder_filter(window_id, None, cx);
                     });
+                    cx.notify();
                 });
             })
             .child(

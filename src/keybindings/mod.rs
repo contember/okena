@@ -26,6 +26,7 @@ actions!(
         NewProject,
         CreateWorktree,
         ClearFocus,
+        CloseWindow,
         FocusActiveProject,
         ScrollUp,
         ScrollDown,

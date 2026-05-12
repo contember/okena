@@ -266,6 +266,7 @@ impl OverlayManager {
             let workspace = self.workspace.clone();
             self.focus_manager.update(cx, |fm, cx| {
                 workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+                cx.notify();
             });
             cx.notify();
         }
@@ -280,6 +281,7 @@ impl OverlayManager {
             let workspace = self.workspace.clone();
             self.focus_manager.update(cx, |fm, cx| {
                 workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+                cx.notify();
             });
             cx.notify();
         }
@@ -300,6 +302,7 @@ impl OverlayManager {
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
         });
         cx.notify();
     }
@@ -336,6 +339,7 @@ impl OverlayManager {
                 let workspace = this.workspace.clone();
                 this.focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+                    cx.notify();
                 });
                 crate::app::open_detached_overlay::<T, E>(
                     title.clone(),
@@ -349,6 +353,7 @@ impl OverlayManager {
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
         });
         cx.notify();
 
@@ -888,6 +893,7 @@ impl OverlayManager {
                         workspace.update(cx, |ws, cx| {
                             ws.toggle_folder_focus(fm, window_id, &fid, cx);
                         });
+                        cx.notify();
                     });
                 }
             }

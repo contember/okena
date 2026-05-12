@@ -79,6 +79,7 @@ impl SearchBar {
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
         });
         cx.notify();
     }
@@ -92,6 +93,7 @@ impl SearchBar {
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+            cx.notify();
         });
 
         cx.emit(SearchBarEvent::Closed);

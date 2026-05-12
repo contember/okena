@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, NewWindow, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, NewWindow, CloseWindow, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
@@ -565,6 +565,7 @@ impl Render for WindowView {
                         ws.set_focused_project(fm, None, cx);
                         ws.set_folder_filter(window_id, None, cx);
                     });
+                    cx.notify();
                 });
             }))
             // Toggle focus on the active terminal's project (zoom in / zoom out)
@@ -578,6 +579,7 @@ impl Render for WindowView {
                             ws.set_focused_project(fm, None, cx);
                             ws.set_folder_filter(window_id, None, cx);
                         });
+                        cx.notify();
                     });
                 } else {
                     let project_id = this.focus_manager.read(cx)
@@ -589,6 +591,7 @@ impl Render for WindowView {
                             workspace.update(cx, |ws, cx| {
                                 ws.set_focused_project(fm, Some(project_id), cx);
                             });
+                            cx.notify();
                         });
                     }
                 }
@@ -630,6 +633,15 @@ impl Render for WindowView {
                 this.workspace.update(cx, |ws, cx| {
                     ws.spawn_extra_window(Some(spawning_bounds), cx);
                 });
+            }))
+            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| match this.window_id {
+                crate::workspace::state::WindowId::Main => cx.quit(),
+                extra_id @ crate::workspace::state::WindowId::Extra(_) => {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.close_extra_window(extra_id, cx);
+                    });
+                    window.remove_window();
+                }
             }))
             // Handle focus sidebar action (keyboard navigation)
             .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {

@@ -139,6 +139,8 @@ pub struct WindowView {
     /// Last-known on-disk paths per local project, used to detect renames
     /// so we can refresh cached git providers / service paths.
     last_project_paths: HashMap<String, String>,
+    /// Last observed wholesale workspace data replacement epoch.
+    last_data_replacement_epoch: u64,
 }
 
 impl WindowView {
@@ -223,6 +225,8 @@ impl WindowView {
         // Create focus handle for global keybindings
         let focus_handle = cx.focus_handle();
 
+        let last_data_replacement_epoch = workspace.read(cx).data_replacement_epoch();
+
         // Wrap PtyManager in LocalBackend for the TerminalBackend trait
         let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager));
 
@@ -293,6 +297,7 @@ impl WindowView {
             was_project_focused: false,
             pending_center_scroll: None,
             last_project_paths: HashMap::new(),
+            last_data_replacement_epoch,
         };
 
         // Slice 07 cri 7: persist OS bounds back into this window's
@@ -349,6 +354,17 @@ impl WindowView {
         // Observe workspace data changes so project path renames refresh
         // cached git providers / service paths.
         cx.observe(&view.workspace, |this, _workspace, cx| {
+            let data_replacement_epoch = this.workspace.read(cx).data_replacement_epoch();
+            if this.last_data_replacement_epoch != data_replacement_epoch {
+                this.last_data_replacement_epoch = data_replacement_epoch;
+                this.project_columns.clear();
+                this.last_project_paths.clear();
+                this.focus_manager.update(cx, |fm, cx| {
+                    fm.clear_all();
+                    cx.notify();
+                });
+                this.sync_project_columns(cx);
+            }
             this.refresh_for_project_path_changes(cx);
         }).detach();
 
@@ -814,6 +830,7 @@ impl WindowView {
                     }
                 }
             });
+            cx.notify();
         });
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)

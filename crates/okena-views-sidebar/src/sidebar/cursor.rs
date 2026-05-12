@@ -305,12 +305,14 @@ impl Sidebar {
                         workspace.update(cx, |ws, cx| {
                             ws.set_focused_project(fm, Some(project_id.clone()), cx);
                         });
+                        cx.notify();
                     });
                 } else {
                     self.focus_manager.update(cx, |fm, cx| {
                         workspace.update(cx, |ws, cx| {
                             ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
                         });
+                        cx.notify();
                     });
                 }
                 self.cursor_index = None;
@@ -325,6 +327,7 @@ impl Sidebar {
                     workspace.update(cx, |ws, cx| {
                         ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
                     });
+                    cx.notify();
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -338,6 +341,7 @@ impl Sidebar {
                     workspace.update(cx, |ws, cx| {
                         ws.focus_terminal_by_id(fm, &project_id, &terminal_id, cx);
                     });
+                    cx.notify();
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -387,6 +391,7 @@ impl Sidebar {
                     workspace.update(cx, |ws, cx| {
                         ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
                     });
+                    cx.notify();
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -400,6 +405,7 @@ impl Sidebar {
                     workspace.update(cx, |ws, cx| {
                         ws.focus_terminal_by_id(fm, &project_id, &terminal_id, cx);
                     });
+                    cx.notify();
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
