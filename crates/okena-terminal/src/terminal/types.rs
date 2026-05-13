@@ -18,6 +18,12 @@ impl Default for TerminalSize {
     }
 }
 
+#[derive(Default)]
+pub(super) struct FocusReportState {
+    pub(super) viewers: std::collections::HashMap<u64, bool>,
+    pub(super) last_reported: Option<bool>,
+}
+
 /// Which way `jump_to_prompt` looks relative to the currently visible top.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum JumpDirection {

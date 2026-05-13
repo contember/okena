@@ -74,4 +74,50 @@ impl Terminal {
         let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
         self.send_bytes(bytes);
     }
+
+    /// Update one rendered view's focus state and report the aggregate focus
+    /// state for this terminal if it changed.
+    pub fn update_focus_reporter(&self, viewer_id: u64, focused: bool) {
+        let aggregate_focused = {
+            let mut state = self.focus_report_state.lock();
+            state.viewers.insert(viewer_id, focused);
+            state.viewers.values().any(|focused| *focused)
+        };
+
+        self.send_aggregate_focus_if_changed(aggregate_focused);
+    }
+
+    /// Remove one rendered view from focus aggregation.
+    pub fn remove_focus_reporter(&self, viewer_id: u64) {
+        let aggregate_focused = {
+            let mut state = self.focus_report_state.lock();
+            if state.viewers.remove(&viewer_id).is_none() {
+                return;
+            }
+            state.viewers.values().any(|focused| *focused)
+        };
+
+        self.send_aggregate_focus_if_changed(aggregate_focused);
+    }
+
+    fn send_aggregate_focus_if_changed(&self, focused: bool) {
+        if !self.wants_focus_events() {
+            self.focus_report_state.lock().last_reported = None;
+            return;
+        }
+
+        let should_send = {
+            let mut state = self.focus_report_state.lock();
+            if state.last_reported == Some(focused) {
+                false
+            } else {
+                state.last_reported = Some(focused);
+                true
+            }
+        };
+
+        if should_send {
+            self.send_focus(focused);
+        }
+    }
 }
