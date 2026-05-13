@@ -119,13 +119,29 @@ impl AddProjectDialog {
             }) => {
                 if let Some(ref rm) = self.remote_manager {
                     let cid = connection_id.clone();
-                    rm.update(cx, |rm, cx| {
-                        rm.send_action(
-                            &cid,
-                            ActionRequest::AddProject { name, path },
-                            cx,
-                        );
-                    });
+                    let connection_available = rm
+                        .read(cx)
+                        .connections()
+                        .iter()
+                        .any(|(config, _, _)| config.id == cid);
+                    if connection_available {
+                        let window_id = self.window_id;
+                        self.workspace.update(cx, |ws, _cx| {
+                            ws.queue_pending_remote_project_visibility(
+                                window_id,
+                                &cid,
+                                &name,
+                                Some(&path),
+                            );
+                        });
+                        rm.update(cx, |rm, cx| {
+                            rm.send_action(
+                                &cid,
+                                ActionRequest::AddProject { name, path },
+                                cx,
+                            );
+                        });
+                    }
                 }
             }
         }

@@ -66,6 +66,32 @@ pub fn notify_pane_weaks<T: 'static>(
     any_alive
 }
 
+fn apply_initial_remote_project_visibility(
+    ws: &mut Workspace,
+    connection_id: &str,
+    prefixed_id: &str,
+    name: &str,
+    path: &str,
+    show_in_overview: bool,
+) {
+    // Apply one-shot visibility for remote creates issued from a local
+    // window. The server assigns the ID, so the pending request is consumed
+    // when the project first appears in state sync.
+    if let Some(spawning_window) =
+        ws.take_pending_remote_project_visibility(connection_id, name, path)
+    {
+        ws.data.add_project_hide_in_other_windows(prefixed_id, spawning_window);
+        return;
+    }
+
+    // Otherwise translate the wire-format show_in_overview flag into
+    // per-window hidden state on initial sync. Subsequent syncs hit the
+    // existing-project branch and leave the local hidden set alone.
+    if !show_in_overview {
+        ws.data.hide_project_in_all_windows(prefixed_id);
+    }
+}
+
 /// Per-window view of the application: one instance per OS window.
 ///
 /// Owns the per-window UI state (sidebar, overlays, toasts, scroll handles,
@@ -666,14 +692,14 @@ impl WindowView {
                             let worktree_ids: Vec<String> = api_project.worktree_ids.iter()
                                 .map(|id| format!("remote:{}:{}", conn_id, id))
                                 .collect();
-                            // Translate the wire-format show_in_overview
-                            // flag into a per-window hidden_project_ids
-                            // entry on initial sync. Subsequent syncs hit
-                            // the `existing` branch above and leave the
-                            // local hidden set alone.
-                            if !api_project.show_in_overview {
-                                ws.data.hide_project_in_all_windows(&prefixed_id);
-                            }
+                            apply_initial_remote_project_visibility(
+                                ws,
+                                conn_id,
+                                &prefixed_id,
+                                &api_project.name,
+                                &api_project.path,
+                                api_project.show_in_overview,
+                            );
                             ws.data.projects.push(ProjectData {
                                 id: prefixed_id.clone(),
                                 name: api_project.name.clone(),
@@ -1035,10 +1061,25 @@ impl_focusable!(WindowView);
 
 #[cfg(test)]
 mod tests {
-    use super::notify_pane_weaks;
+    use super::{apply_initial_remote_project_visibility, notify_pane_weaks};
+    use crate::workspace::state::{WindowId, WindowState, Workspace, WorkspaceData};
     use gpui::AppContext as _;
+    use std::collections::HashMap;
 
     struct Stub;
+
+    fn make_workspace() -> Workspace {
+        Workspace::new(WorkspaceData {
+            version: 1,
+            projects: Vec::new(),
+            project_order: Vec::new(),
+            folders: Vec::new(),
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        })
+    }
 
     #[gpui::test]
     fn fans_out_to_every_alive_weak_and_prunes_dead(cx: &mut gpui::TestAppContext) {
@@ -1067,5 +1108,76 @@ mod tests {
             assert!(!notify_pane_weaks(&mut weaks, cx));
             assert!(weaks.is_empty(), "all dead entries pruned");
         });
+    }
+
+    #[test]
+    fn remote_project_initial_visibility_consumes_pending_create_window() {
+        let mut ws = make_workspace();
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        ws.data.extra_windows = vec![extra_a, extra_b];
+
+        ws.queue_pending_remote_project_visibility(
+            WindowId::Extra(extra_a_id),
+            "conn",
+            "Project",
+            Some("/repo/project"),
+        );
+        apply_initial_remote_project_visibility(
+            &mut ws,
+            "conn",
+            "remote:conn:p1",
+            "Project",
+            "/repo/project",
+            true,
+        );
+
+        assert!(ws.data.main_window.hidden_project_ids.contains("remote:conn:p1"));
+        assert!(
+            !ws.data
+                .window(WindowId::Extra(extra_a_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:conn:p1")
+        );
+        assert!(
+            ws.data
+                .window(WindowId::Extra(extra_b_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:conn:p1")
+        );
+        assert_eq!(
+            ws.take_pending_remote_project_visibility("conn", "Project", "/repo/project"),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_project_initial_visibility_without_pending_uses_wire_hidden_flag() {
+        let mut ws = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        ws.data.extra_windows = vec![extra];
+
+        apply_initial_remote_project_visibility(
+            &mut ws,
+            "conn",
+            "remote:conn:p1",
+            "Project",
+            "/repo/project",
+            false,
+        );
+
+        assert!(ws.data.main_window.hidden_project_ids.contains("remote:conn:p1"));
+        assert!(
+            ws.data
+                .window(WindowId::Extra(extra_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:conn:p1")
+        );
     }
 }
