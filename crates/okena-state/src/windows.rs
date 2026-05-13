@@ -236,14 +236,16 @@ impl WorkspaceData {
     /// unit-testable. Other per-window fields (`folder_filter`,
     /// `project_widths`, `folder_collapsed`) are left at default.
     pub fn spawn_extra_window(&mut self, spawning_bounds: Option<WindowBounds>) -> WindowId {
-        let mut state = WindowState::default();
-        state.hidden_project_ids = self.projects.iter().map(|p| p.id.clone()).collect();
-        state.os_bounds = spawning_bounds.map(|b| WindowBounds {
-            origin_x: b.origin_x + 30.0,
-            origin_y: b.origin_y + 30.0,
-            width: b.width,
-            height: b.height,
-        });
+        let state = WindowState {
+            hidden_project_ids: self.projects.iter().map(|p| p.id.clone()).collect(),
+            os_bounds: spawning_bounds.map(|b| WindowBounds {
+                origin_x: b.origin_x + 30.0,
+                origin_y: b.origin_y + 30.0,
+                width: b.width,
+                height: b.height,
+            }),
+            ..WindowState::default()
+        };
         let id = state.id;
         self.extra_windows.push(state);
         WindowId::Extra(id)
