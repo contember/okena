@@ -195,12 +195,15 @@ impl GitStatusWatcher {
 
                 // Compare and update
                 let should_continue = this.update(cx, |this, cx| {
-                    // Merge PR info: update cache on PR poll cycles, keep old values otherwise
+                    // Merge into caches rather than replace: when fullscreen narrows
+                    // the visible set to a single project, the un-polled projects
+                    // should keep their last-known values until they're polled again.
                     if check_prs {
-                        this.pr_infos = new_pr_infos;
+                        for (id, pr) in new_pr_infos {
+                            this.pr_infos.insert(id, pr);
+                        }
                     }
 
-                    // Merge CI checks: update cache on CI poll cycles
                     if check_ci {
                         for (id, checks) in new_ci_checks {
                             this.ci_checks.insert(id, checks);
@@ -219,9 +222,13 @@ impl GitStatusWatcher {
                         }
                     }
 
-                    let changed = this.statuses != new_statuses;
+                    let changed = new_statuses.iter()
+                        .any(|(id, s)| this.statuses.get(id) != Some(s));
+                    for (id, status) in new_statuses {
+                        this.statuses.insert(id, status);
+                    }
+
                     if changed {
-                        this.statuses = new_statuses;
                         cx.notify();
 
                         // Push to remote watch channel
