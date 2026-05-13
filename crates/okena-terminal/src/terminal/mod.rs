@@ -46,6 +46,7 @@ pub use types::{
 use event_listener::ZedEventListener;
 use osc_sidecar::OscSidecar;
 use prompt_marks::{PromptSidecar, PromptTracker};
+use types::FocusReportState;
 
 /// A terminal instance wrapping alacritty_terminal
 /// Terminal emulator state.
@@ -164,6 +165,11 @@ pub struct Terminal {
     /// `OscSidecar`: pushed during `process_output`, drained by the GPUI
     /// render path via `drain_notifications`. GPUI thread only.
     pub(super) pending_notifications: Arc<Mutex<Vec<String>>>,
+
+    /// Per-renderer focus state for DEC focus reports. A terminal can appear
+    /// in multiple windows, so focus reports are derived from the aggregate
+    /// instead of whichever view rendered last.
+    focus_report_state: Mutex<FocusReportState>,
 
     /// VTE sidecar parser for OSC/CSI sequences (OSC 7 cwd, OSC 9
     /// notifications, XTVERSION) that alacritty_terminal either ignores or
@@ -321,6 +327,7 @@ impl Terminal {
             initial_cwd,
             reported_cwd,
             pending_notifications,
+            focus_report_state: Mutex::new(FocusReportState::default()),
             osc_sidecar,
             prompt_sidecar: Mutex::new(PromptSidecar::new()),
             prompt_tracker: Mutex::new(PromptTracker::new()),
