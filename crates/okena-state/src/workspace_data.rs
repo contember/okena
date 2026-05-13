@@ -50,6 +50,12 @@ pub struct WorkspaceData {
 impl WorkspaceData {
     /// Return a copy with all remote projects, remote folders, and their
     /// associated widths/heights stripped out (for saving to disk).
+    ///
+    /// Implementation note: clones `self` and uses `retain` to drop the
+    /// remote rows. This keeps the function automatically forward-compatible
+    /// with new `WorkspaceData` fields -- a field-by-field re-construction
+    /// would silently miss any field added after this function was last
+    /// touched.
     pub fn without_remote_projects(&self) -> Self {
         let remote_ids: HashSet<String> = self.projects.iter()
             .filter(|p| p.is_remote)
@@ -64,24 +70,12 @@ impl WorkspaceData {
             return self.clone();
         }
 
-        let mut data = Self {
-            version: self.version,
-            projects: self.projects.iter().filter(|p| !p.is_remote).cloned().collect(),
-            project_order: self.project_order.iter()
-                .filter(|id| !id.starts_with("remote:") && !remote_ids.contains(*id))
-                .cloned().collect(),
-            service_panel_heights: self.service_panel_heights.iter()
-                .filter(|(id, _)| !remote_ids.contains(*id))
-                .map(|(k, v)| (k.clone(), *v)).collect(),
-            hook_panel_heights: self.hook_panel_heights.iter()
-                .filter(|(id, _)| !remote_ids.contains(*id))
-                .map(|(k, v)| (k.clone(), *v)).collect(),
-            folders: self.folders.iter()
-                .filter(|f| !f.id.starts_with("remote:"))
-                .cloned().collect(),
-            main_window: self.main_window.clone(),
-            extra_windows: self.extra_windows.clone(),
-        };
+        let mut data = self.clone();
+        data.projects.retain(|p| !p.is_remote);
+        data.project_order.retain(|id| !id.starts_with("remote:") && !remote_ids.contains(id));
+        data.service_panel_heights.retain(|id, _| !remote_ids.contains(id));
+        data.hook_panel_heights.retain(|id, _| !remote_ids.contains(id));
+        data.folders.retain(|f| !f.id.starts_with("remote:"));
 
         for project_id in &remote_ids {
             data.delete_project_scrub_all_windows(project_id);
