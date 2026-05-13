@@ -89,10 +89,16 @@ impl HeadlessApp {
                         let ws = workspace.read(cx);
                         (ws.data().clone(), ws.data_version())
                     });
-                    if let Err(e) = persistence::save_workspace(&data) {
-                        log::error!("Failed to save workspace: {}", e);
+                    let save_result =
+                        smol::unblock(move || persistence::save_workspace(&data)).await;
+                    match save_result {
+                        Ok(()) => {
+                            last_saved.store(version, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to save workspace: {}", e);
+                        }
                     }
-                    last_saved.store(version, Ordering::Relaxed);
                 }
             })
             .detach();
