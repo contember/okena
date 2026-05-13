@@ -260,6 +260,24 @@ impl ActionDispatcher {
                         });
                         // Don't return — action proceeds to be sent to server below
                     }
+                    ActionRequest::CreateWorktree { branch, .. } => {
+                        // Record pending project visibility — the server assigns
+                        // the new worktree project ID, so the next state sync
+                        // applies the spawning-window rule when the branch-named
+                        // project first appears.
+                        let window_id = *window_id;
+                        let cid = connection_id.clone();
+                        let branch = branch.clone();
+                        workspace.update(cx, |ws, _cx| {
+                            ws.queue_pending_remote_project_visibility(
+                                window_id,
+                                &cid,
+                                &branch,
+                                None,
+                            );
+                        });
+                        // Don't return — action proceeds to be sent to server below
+                    }
                     _ => {}
                 }
 

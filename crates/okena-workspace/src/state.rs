@@ -347,6 +347,27 @@ impl Workspace {
         self.remote_sync.drain_pending_focus(window_id)
     }
 
+    pub fn queue_pending_remote_project_visibility(
+        &mut self,
+        window_id: WindowId,
+        connection_id: &str,
+        name: &str,
+        path: Option<&str>,
+    ) {
+        self.remote_sync
+            .queue_project_visibility(window_id, connection_id, name, path);
+    }
+
+    pub fn take_pending_remote_project_visibility(
+        &mut self,
+        connection_id: &str,
+        name: &str,
+        path: &str,
+    ) -> Option<WindowId> {
+        self.remote_sync
+            .take_project_visibility(connection_id, name, path)
+    }
+
     pub fn remote_snapshot(&self, project_id: &str) -> Option<&RemoteProjectSnapshot> {
         self.remote_sync.snapshot(project_id)
     }
