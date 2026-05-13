@@ -1,3 +1,4 @@
+mod focus_report;
 mod helpers;
 mod osc;
 mod prompt_jump;

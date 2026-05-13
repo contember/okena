@@ -47,7 +47,6 @@ pub struct TerminalContent {
     scroll_accumulator: f32,
     mouse_down_cell: Option<(usize, i32)>,
     forwarded_button: Option<(u8, u8)>,
-    last_focus_reported: Option<bool>,
 }
 
 impl TerminalContent {
@@ -81,7 +80,6 @@ impl TerminalContent {
             scroll_accumulator: 0.0,
             mouse_down_cell: None,
             forwarded_button: None,
-            last_focus_reported: None,
         }
     }
 
@@ -159,6 +157,7 @@ impl TerminalContent {
             let next_id = terminal.as_ref().map(|terminal| terminal.terminal_id.as_str());
             if next_id != Some(old_terminal.terminal_id.as_str()) {
                 deregister_shared_resize_viewer(&old_terminal.terminal_id, self.resize_viewer_id);
+                old_terminal.remove_focus_reporter(self.resize_viewer_id);
             }
         }
         self.terminal = terminal.clone();
@@ -170,6 +169,12 @@ impl TerminalContent {
     pub(crate) fn deregister_resize_viewer(&mut self) {
         if let Some(terminal) = self.terminal.as_ref() {
             deregister_shared_resize_viewer(&terminal.terminal_id, self.resize_viewer_id);
+        }
+    }
+
+    fn deregister_focus_reporter(&mut self) {
+        if let Some(terminal) = self.terminal.as_ref() {
+            terminal.remove_focus_reporter(self.resize_viewer_id);
         }
     }
 
@@ -453,13 +458,8 @@ impl Render for TerminalContent {
         let t = theme(cx);
         let is_focused = self.focus_handle.is_focused(window);
 
-        if self.last_focus_reported != Some(is_focused) {
-            if let Some(ref terminal) = self.terminal {
-                if terminal.wants_focus_events() {
-                    terminal.send_focus(is_focused);
-                }
-            }
-            self.last_focus_reported = Some(is_focused);
+        if let Some(ref terminal) = self.terminal {
+            terminal.update_focus_reporter(self.resize_viewer_id, is_focused);
         }
 
         if let Some(ref terminal) = self.terminal {
@@ -667,6 +667,7 @@ impl Render for TerminalContent {
 impl Drop for TerminalContent {
     fn drop(&mut self) {
         self.deregister_resize_viewer();
+        self.deregister_focus_reporter();
     }
 }
 
