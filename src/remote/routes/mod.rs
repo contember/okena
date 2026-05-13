@@ -77,11 +77,10 @@ pub fn build_router(
             auth_middleware,
         ));
 
-    // Public routes (no auth required).
-    // `/v1/auth/reload` is intentionally unauthenticated: the CLI register
-    // flow calls it before the new token is visible in-memory, so auth would
-    // deadlock. Server binds 127.0.0.1, endpoint is no-input/no-leak and just
-    // re-reads `remote_tokens.json` (0o600).
+    // Public routes (no bearer auth required).
+    // `/v1/auth/reload` is loopback-gated in its handler: the CLI register
+    // flow calls it before the new token is visible in-memory, so bearer auth
+    // would deadlock, but exposed listeners must not accept network callers.
     let public = Router::new()
         .route("/health", axum::routing::get(health::get_health))
         .route("/v1/pair", axum::routing::post(pair::post_pair))
