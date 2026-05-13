@@ -56,6 +56,11 @@ pub(super) fn extras_to_open(
 
 /// Compute which opened extra windows no longer have a matching persisted
 /// `WorkspaceData.extra_windows` entry.
+///
+/// Result is sorted by the extra's uuid bytes so close order is deterministic
+/// even though `opened` is a `HashSet`. Iteration order matters when two
+/// pending closes touch shared state (e.g. the same terminal rendered in both
+/// windows); a flaky order would surface as intermittent test failures.
 pub(super) fn extras_to_close(
     data: &WorkspaceData,
     opened: &HashSet<WindowId>,
@@ -66,11 +71,18 @@ pub(super) fn extras_to_close(
         .map(|w| WindowId::Extra(w.id))
         .collect();
 
-    opened
+    let mut result: Vec<WindowId> = opened
         .iter()
         .copied()
         .filter(|id| matches!(id, WindowId::Extra(_)) && !desired.contains(id))
-        .collect()
+        .collect();
+    result.sort_by_key(|id| match id {
+        WindowId::Extra(uuid) => *uuid.as_bytes(),
+        // Filter above guarantees Extra(_) only; the arm is unreachable in
+        // practice but keeps the match total without an unwrap.
+        WindowId::Main => [0u8; 16],
+    });
+    result
 }
 
 /// Resolve the OS bounds an extra window should open at: prefer the entry's

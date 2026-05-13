@@ -33,6 +33,14 @@ pub struct WindowBounds {
 pub struct WindowState {
     /// Stable identity for this window. Matches `WindowId::Extra(_)` for
     /// extras; unused for the main slot (addressed by variant).
+    ///
+    /// **DO NOT compare `main_window.id` across `WorkspaceData` instances.**
+    /// Main is addressed by `WindowId::Main`, never by id. Every default
+    /// construction mints a fresh uuid, and the serde default behaves the
+    /// same for legacy files written before this field existed, so two
+    /// instances loaded from the same JSON can have different
+    /// `main_window.id` values. Treat the field as identity-only for
+    /// extras; for main it is opaque persistence padding.
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
     /// Project IDs hidden in this window's grid.

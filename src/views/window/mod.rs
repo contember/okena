@@ -77,6 +77,13 @@ fn apply_initial_remote_project_visibility(
     // Apply one-shot visibility for remote creates issued from a local
     // window. The server assigns the ID, so the pending request is consumed
     // when the project first appears in state sync.
+    //
+    // When a pending create matches, the wire `show_in_overview` flag is
+    // intentionally IGNORED: the local spawn intent ("visible in this
+    // window, hidden everywhere else") takes precedence over the server's
+    // initial sync value. The user explicitly created the project from one
+    // window; honouring a stale server-side hidden flag would surprise
+    // them on the very first sync.
     if let Some(spawning_window) =
         ws.take_pending_remote_project_visibility(connection_id, name, path)
     {

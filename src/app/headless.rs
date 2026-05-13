@@ -86,6 +86,7 @@ impl HeadlessApp {
 
                 if save_pending.swap(false, Ordering::Relaxed) {
                     let (data, version) = cx.update(|cx| {
+                        let _slow = okena_core::timing::SlowGuard::new("workspace_save_clone");
                         let ws = workspace.read(cx);
                         (ws.data().clone(), ws.data_version())
                     });

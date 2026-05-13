@@ -981,6 +981,107 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_full_pipeline_migrates_all_fields_into_main_window() {
+        // Stands in for the manual "launch with a v1 workspace.json" check.
+        // Combines all four legacy fields (show_in_overview, is_visible,
+        // FolderData.collapsed, top-level project_widths) on a workspace
+        // with real projects + folders, runs the full load pipeline
+        // (migrate_legacy_json -> serde::from_str -> migrate_workspace ->
+        // validate_workspace_data) and asserts every legacy value lands
+        // on main_window with no residue at the legacy locations.
+        let legacy_json = r#"{
+            "version": 1,
+            "projects": [
+                {
+                    "id": "visible",
+                    "name": "Visible",
+                    "path": "/tmp/visible",
+                    "layout": null
+                },
+                {
+                    "id": "hidden_show_in_overview",
+                    "name": "Hidden via show_in_overview",
+                    "path": "/tmp/hidden1",
+                    "layout": null,
+                    "show_in_overview": false
+                },
+                {
+                    "id": "hidden_is_visible",
+                    "name": "Hidden via is_visible alias",
+                    "path": "/tmp/hidden2",
+                    "layout": null,
+                    "is_visible": false
+                }
+            ],
+            "project_order": ["folder1", "visible", "hidden_show_in_overview", "hidden_is_visible"],
+            "folders": [
+                {
+                    "id": "folder1",
+                    "name": "Group",
+                    "project_ids": [],
+                    "collapsed": true
+                },
+                {
+                    "id": "folder2",
+                    "name": "Expanded",
+                    "project_ids": []
+                }
+            ],
+            "project_widths": {
+                "visible": 60.0,
+                "hidden_show_in_overview": 40.0
+            }
+        }"#;
+
+        let migrated_json = migrate_legacy_json(legacy_json).expect("legacy migration succeeds");
+        let raw: WorkspaceData = serde_json::from_str(&migrated_json).expect("typed parse succeeds");
+        let mut data = migrate_workspace(raw);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
+
+        // Version bumped to current.
+        assert_eq!(data.version, WORKSPACE_VERSION);
+
+        // Both legacy hide flags fold into main_window.hidden_project_ids.
+        assert!(data.main_window.hidden_project_ids.contains("hidden_show_in_overview"));
+        assert!(data.main_window.hidden_project_ids.contains("hidden_is_visible"));
+        assert!(!data.main_window.hidden_project_ids.contains("visible"));
+
+        // FolderData.collapsed folds into main_window.folder_collapsed; only
+        // the explicitly-collapsed folder appears (absence == expanded).
+        assert_eq!(data.main_window.folder_collapsed.get("folder1").copied(), Some(true));
+        assert!(!data.main_window.folder_collapsed.contains_key("folder2"));
+
+        // Top-level project_widths folds into main_window.project_widths.
+        assert_eq!(data.main_window.project_widths.get("visible").copied(), Some(60.0));
+        assert_eq!(
+            data.main_window.project_widths.get("hidden_show_in_overview").copied(),
+            Some(40.0),
+        );
+
+        // Extras default empty -- legacy files have no extras section.
+        assert!(data.extra_windows.is_empty());
+
+        // No residue at legacy locations -- the typed struct no longer has
+        // those fields, but assert via a re-serialise that the saved shape
+        // is clean.
+        let saved = serde_json::to_string(&data).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(!obj.contains_key("project_widths"), "no top-level project_widths after save");
+        let projects = obj.get("projects").and_then(|v| v.as_array()).unwrap();
+        for p in projects {
+            let po = p.as_object().unwrap();
+            assert!(!po.contains_key("show_in_overview"), "no per-project show_in_overview after save");
+            assert!(!po.contains_key("is_visible"), "no per-project is_visible after save");
+        }
+        let folders = obj.get("folders").and_then(|v| v.as_array()).unwrap();
+        for f in folders {
+            let fo = f.as_object().unwrap();
+            assert!(!fo.contains_key("collapsed"), "no per-folder collapsed after save");
+        }
+    }
+
+    #[test]
     fn migrate_current_version_noop() {
         let data = WorkspaceData {
             version: WORKSPACE_VERSION,
