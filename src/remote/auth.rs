@@ -82,6 +82,21 @@ pub struct AuthStore {
     pair_code_path: PathBuf,
 }
 
+#[derive(Debug)]
+enum TokenLoadError {
+    Read(std::io::Error),
+    Parse(serde_json::Error),
+}
+
+impl std::fmt::Display for TokenLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(e) => write!(f, "read failed: {e}"),
+            Self::Parse(e) => write!(f, "parse failed: {e}"),
+        }
+    }
+}
+
 struct AuthStoreInner {
     /// HMAC key (app secret), 32 bytes
     app_secret: Vec<u8>,
@@ -101,7 +116,14 @@ impl AuthStore {
     pub fn new() -> Self {
         let app_secret = load_or_create_secret();
         let t_path = tokens_path();
-        let tokens = load_tokens_from(&t_path);
+        let tokens = match load_tokens_from(&t_path) {
+            Ok(tokens) => tokens,
+            Err(TokenLoadError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                log::warn!("Failed to load remote_tokens.json: {}", e);
+                Vec::new()
+            }
+        };
 
         Self {
             inner: Mutex::new(AuthStoreInner {
@@ -330,10 +352,17 @@ impl AuthStore {
 
     /// Reload tokens from disk, replacing the in-memory token list.
     /// Called after external tools (e.g. CLI) write new tokens to `remote_tokens.json`.
-    pub fn reload_tokens(&self) {
-        let tokens = load_tokens_from(&self.tokens_path);
+    pub fn reload_tokens(&self) -> bool {
+        let tokens = match load_tokens_from(&self.tokens_path) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                log::warn!("Failed to reload remote_tokens.json: {}", e);
+                return false;
+            }
+        };
         let mut inner = self.inner.lock();
         inner.tokens = tokens;
+        true
     }
 
     /// Refresh a valid token: validate the current token, generate a new one,
@@ -576,22 +605,13 @@ fn save_tokens_to(path: &std::path::Path, tokens: &[TokenRecord]) {
 }
 
 /// Load token records from disk, filtering out expired tokens.
-fn load_tokens_from(path: &std::path::Path) -> Vec<TokenRecord> {
-    let data = match std::fs::read_to_string(path) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
-    };
-
-    let persisted: Vec<PersistedToken> = match serde_json::from_str(&data) {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("Failed to parse remote_tokens.json: {}", e);
-            return Vec::new();
-        }
-    };
+fn load_tokens_from(path: &std::path::Path) -> Result<Vec<TokenRecord>, TokenLoadError> {
+    let data = std::fs::read_to_string(path).map_err(TokenLoadError::Read)?;
+    let persisted: Vec<PersistedToken> =
+        serde_json::from_str(&data).map_err(TokenLoadError::Parse)?;
 
     let now = SystemTime::now();
-    persisted
+    Ok(persisted
         .into_iter()
         .filter_map(|p| {
             let hmac_bytes = base64::engine::general_purpose::STANDARD
@@ -611,7 +631,7 @@ fn load_tokens_from(path: &std::path::Path) -> Vec<TokenRecord> {
                 name: None,
             })
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -691,7 +711,7 @@ mod tests {
         assert!(store.validate_token(&token));
 
         // Load tokens back from the same temp path into a fresh store
-        let loaded_tokens = load_tokens_from(&store.tokens_path);
+        let loaded_tokens = load_tokens_from(&store.tokens_path).expect("tokens should load");
         assert!(!loaded_tokens.is_empty(), "tokens should load from disk");
 
         let store2 = AuthStore {
@@ -816,7 +836,7 @@ mod tests {
         ];
 
         save_tokens_to(&store.tokens_path, &tokens);
-        let loaded = load_tokens_from(&store.tokens_path);
+        let loaded = load_tokens_from(&store.tokens_path).expect("tokens should load");
 
         assert_eq!(loaded.len(), 1, "only non-expired token should survive");
         assert_eq!(loaded[0].id, "valid");
@@ -859,13 +879,28 @@ mod tests {
         assert!(!store.validate_token(external_token));
 
         // Reload from disk
-        store.reload_tokens();
+        assert!(store.reload_tokens());
 
         // After reload: both tokens are valid
         assert!(store.validate_token(&token1), "original token should still work");
         assert!(
             store.validate_token(external_token),
             "externally written token should be valid after reload"
+        );
+    }
+
+    #[test]
+    fn reload_tokens_keeps_existing_tokens_on_parse_error() {
+        let store = test_store();
+        let token = pair_token(&store);
+        assert!(store.validate_token(&token));
+
+        std::fs::write(&store.tokens_path, b"{not valid json").unwrap();
+
+        assert!(!store.reload_tokens());
+        assert!(
+            store.validate_token(&token),
+            "failed reload should not clear in-memory tokens"
         );
     }
 }
