@@ -74,6 +74,8 @@ impl DiffViewer {
                         },
                         |d, hash| {
                             let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
+                            let hash_for_click = hash.clone();
+                            let hash_for_rclick = hash.clone();
                             d.child(
                                 div()
                                     .id("commit-hash-copy")
@@ -86,9 +88,15 @@ impl DiffViewer {
                                     .rounded(px(4.0))
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
                                     .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()));
+                                        cx.write_to_clipboard(ClipboardItem::new_string(hash_for_click.clone()));
                                     })
-                                    .tooltip(|_window, cx| gpui_component::tooltip::Tooltip::new("Copy commit hash").build(_window, cx))
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                            this.open_commit_hash_menu(event.position, hash_for_rclick.clone(), cx);
+                                        }),
+                                    )
+                                    .tooltip(|_window, cx| gpui_component::tooltip::Tooltip::new("Click: copy hash \u{00B7} Right-click: more").build(_window, cx))
                                     .child(short),
                             )
                         },
@@ -328,9 +336,11 @@ impl DiffViewer {
             .when_some(commit.cloned(), |d, commit| {
                 let hash = commit.hash.clone();
                 let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
+                let hash_for_click = hash.clone();
+                let hash_for_rclick = hash.clone();
                 let time_str = okena_git::format_relative_time(commit.timestamp);
                 d
-                    // Hash (clickable, copies to clipboard)
+                    // Hash (clickable, copies to clipboard; right-click for menu)
                     .child(
                         div()
                             .id("commit-info-hash")
@@ -343,9 +353,15 @@ impl DiffViewer {
                             .rounded(px(3.0))
                             .hover(|s| s.bg(rgb(t.bg_hover)))
                             .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()));
+                                cx.write_to_clipboard(ClipboardItem::new_string(hash_for_click.clone()));
                             })
-                            .tooltip(|_window, cx| Tooltip::new("Copy hash").build(_window, cx))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.open_commit_hash_menu(event.position, hash_for_rclick.clone(), cx);
+                                }),
+                            )
+                            .tooltip(|_window, cx| Tooltip::new("Click: copy hash \u{00B7} Right-click: more").build(_window, cx))
                             .child(short),
                     )
                     // Author

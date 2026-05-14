@@ -13,6 +13,7 @@ use okena_core::theme::ThemeColors;
 use okena_git::DiffMode;
 use okena_ui::button::button;
 use okena_ui::icon_button::icon_button_sized;
+use okena_files::selection::Selection2DNonEmpty;
 use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
 use okena_ui::modal::{modal_backdrop, modal_content};
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_xl};
@@ -65,6 +66,15 @@ pub(crate) struct DiscardConfirmState {
     pub error_message: Option<String>,
 }
 
+/// Right-click context menu state for the commit hash.
+pub(crate) struct CommitHashContextMenu {
+    pub position: Point<Pixels>,
+    pub hash: String,
+    /// Formatted "Send to Terminal" payload, computed once at open time so we
+    /// don't re-walk `self.commits` and re-format on every render.
+    pub send_text: String,
+}
+
 impl DiffViewer {
     // ── Menu open/close ─────────────────────────────────────────────────────
 
@@ -84,6 +94,32 @@ impl DiffViewer {
         cx.notify();
     }
 
+    pub(super) fn open_commit_hash_menu(
+        &mut self,
+        position: Point<Pixels>,
+        hash: String,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = self.commits.iter().find(|c| c.hash == hash).cloned();
+        let send_text = match entry {
+            Some(e) => crate::commit_send::format_commit_entry(&e),
+            None => crate::commit_send::format_commit_send_text(
+                &hash,
+                self.commit_message.as_deref(),
+                None,
+                None,
+                &[],
+            ),
+        };
+        self.commit_hash_menu = Some(CommitHashContextMenu { position, hash, send_text });
+        cx.notify();
+    }
+
+    pub(super) fn close_commit_hash_menu(&mut self, cx: &mut Context<Self>) {
+        self.commit_hash_menu = None;
+        cx.notify();
+    }
+
     /// Close the topmost transient UI (confirm modal → menu → selection).
     /// Returns `true` if something was dismissed, so the caller knows not to
     /// close the whole diff viewer.
@@ -100,6 +136,16 @@ impl DiffViewer {
         }
         if self.context_menu.is_some() {
             self.context_menu = None;
+            cx.notify();
+            return true;
+        }
+        if self.commit_hash_menu.is_some() {
+            self.commit_hash_menu = None;
+            cx.notify();
+            return true;
+        }
+        if self.selection_context_menu.is_some() {
+            self.selection_context_menu = None;
             cx.notify();
             return true;
         }
@@ -242,7 +288,129 @@ impl DiffViewer {
         if let Some(el) = self.render_discard_confirm(t, cx) {
             return Some(el);
         }
-        self.render_context_menu(t, cx)
+        if let Some(el) = self.render_context_menu(t, cx) {
+            return Some(el);
+        }
+        if let Some(el) = self.render_commit_hash_menu(t, cx) {
+            return Some(el);
+        }
+        self.render_selection_context_menu(t, cx)
+    }
+
+    /// Render the right-click context menu over a non-empty text selection.
+    /// Offers "Send to Terminal" and "Copy".
+    fn render_selection_context_menu(
+        &self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let position = self.selection_context_menu?;
+        self.selection.normalized_non_empty()?;
+
+        let panel = context_menu_panel("dv-selection-context-menu", t)
+            .child(
+                menu_item(
+                    "dv-sel-ctx-send",
+                    "icons/terminal.svg",
+                    "Send to Terminal",
+                    t,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.selection_context_menu = None;
+                    this.send_selection_to_terminal(cx);
+                })),
+            )
+            .child(menu_separator(t))
+            .child(
+                menu_item("dv-sel-ctx-copy", "icons/copy.svg", "Copy", t)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.selection_context_menu = None;
+                        this.copy_selection(cx);
+                    })),
+            );
+
+        Some(
+            div()
+                .id("dv-selection-context-menu-backdrop")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.selection_context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.selection_context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .child(deferred(
+                    anchored().position(position).snap_to_window().child(panel),
+                ))
+                .into_any_element(),
+        )
+    }
+
+    fn render_commit_hash_menu(
+        &self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.commit_hash_menu.as_ref()?;
+        let position = menu.position;
+        let hash_for_copy = menu.hash.clone();
+        let send_text = menu.send_text.clone();
+
+        let panel = context_menu_panel("dv-commit-hash-context-menu", t)
+            .child(
+                menu_item(
+                    "dv-ctx-send-commit-hash",
+                    "icons/terminal.svg",
+                    "Send to Terminal",
+                    t,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.close_commit_hash_menu(cx);
+                    cx.emit(super::DiffViewerEvent::SendToTerminal(
+                        okena_core::send_payload::SendPayload::Text(send_text.clone()),
+                    ));
+                })),
+            )
+            .child(menu_separator(t))
+            .child(
+                menu_item("dv-ctx-copy-commit-hash", "icons/copy.svg", "Copy Hash", t)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(hash_for_copy.clone()));
+                        this.close_commit_hash_menu(cx);
+                    })),
+            );
+
+        Some(
+            div()
+                .id("dv-commit-hash-menu-backdrop")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.close_commit_hash_menu(cx);
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.close_commit_hash_menu(cx);
+                    }),
+                )
+                .child(deferred(
+                    anchored().position(position).snap_to_window().child(panel),
+                ))
+                .into_any_element(),
+        )
     }
 
     fn render_context_menu(
@@ -314,6 +482,28 @@ impl DiffViewer {
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.unstage_from_menu(cx);
+                })),
+            );
+            panel = panel.child(menu_separator(t));
+        }
+
+        {
+            let abs_for_send: std::path::PathBuf = abs_path
+                .clone()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(&path));
+            panel = panel.child(
+                menu_item(
+                    "dv-ctx-send-to-terminal",
+                    "icons/terminal.svg",
+                    "Send to Terminal",
+                    t,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.close_context_menu(cx);
+                    cx.emit(super::DiffViewerEvent::SendToTerminal(
+                        okena_core::send_payload::SendPayload::Path(abs_for_send.clone()),
+                    ));
                 })),
             );
             panel = panel.child(menu_separator(t));

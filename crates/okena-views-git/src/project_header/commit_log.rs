@@ -15,10 +15,15 @@ use std::sync::Arc;
 ///
 /// `on_commit_click` is called with `(commit_hash, commit_message, commit_index)`
 /// when the user clicks on a commit row.
+///
+/// `on_commit_right_click` is called with `(commit_hash, mouse_position)` when
+/// the user right-clicks a commit row — used to open a context menu (e.g.
+/// "Send to Terminal", "Copy Hash").
 pub fn render_commit_log_content(
     entries: &[GraphRow],
     loading: bool,
     on_commit_click: Option<Arc<dyn Fn(&str, &str, usize, &mut Window, &mut App)>>,
+    on_commit_right_click: Option<Arc<dyn Fn(&str, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>>,
     t: &ThemeColors,
     cx: &App,
 ) -> AnyElement {
@@ -76,7 +81,7 @@ pub fn render_commit_log_content(
             entries
                 .iter()
                 .enumerate()
-                .map(|(i, row)| render_graph_row(row, i, max_graph_len, &all_commits, on_commit_click.clone(), t, cx)),
+                .map(|(i, row)| render_graph_row(row, i, max_graph_len, &all_commits, on_commit_click.clone(), on_commit_right_click.clone(), t, cx)),
         )
         .when(loading, |d| {
             d.child(

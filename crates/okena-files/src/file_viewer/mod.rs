@@ -262,6 +262,8 @@ pub struct FileViewer {
     /// True when this viewer is hosted inside a detached window.
     /// Hides the "detach" button and is set by the detached host.
     pub(super) is_detached: bool,
+    /// Right-click context menu over a non-empty text selection.
+    pub(super) selection_context_menu: Option<Point<Pixels>>,
 }
 
 impl FileViewer {
@@ -320,6 +322,7 @@ impl FileViewer {
             delete_confirm: None,
             search_state: None,
             is_detached: false,
+            selection_context_menu: None,
         };
 
         // Kick off the root directory listing and any expanded ancestors so
@@ -366,6 +369,7 @@ impl FileViewer {
             delete_confirm: None,
             search_state: None,
             is_detached: false,
+            selection_context_menu: None,
         };
         viewer.fetch_initial_dirs(cx);
         viewer
@@ -740,6 +744,9 @@ pub enum FileViewerEvent {
     Close,
     /// User requested to detach the viewer into a separate OS window.
     Detach,
+    /// User clicked "Send to terminal" on a selection. Carries the structured
+    /// payload; the host formats it (relative to terminal CWD) before pasting.
+    SendToTerminal(okena_core::send_payload::SendPayload),
 }
 
 impl EventEmitter<FileViewerEvent> for FileViewer {}

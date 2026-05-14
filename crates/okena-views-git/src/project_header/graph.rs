@@ -234,12 +234,17 @@ pub fn render_ref_label(ref_name: &str, t: &ThemeColors, cx: &App) -> AnyElement
 ///
 /// `on_commit_click` is called with `(commit_hash, commit_message, commit_index)`
 /// when the user clicks a commit row.
+///
+/// `on_commit_right_click` is called with `(commit_hash, mouse_position)` when
+/// the user right-clicks a commit row — used to open a context menu (e.g.
+/// "Send to Terminal", "Copy Hash").
 pub fn render_graph_row(
     row: &GraphRow,
     index: usize,
     max_graph_len: usize,
     all_commits: &[CommitLogEntry],
     on_commit_click: Option<Arc<dyn Fn(&str, &str, usize, &mut Window, &mut App)>>,
+    on_commit_right_click: Option<Arc<dyn Fn(&str, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>>,
     t: &ThemeColors,
     cx: &App,
 ) -> AnyElement {
@@ -247,7 +252,7 @@ pub fn render_graph_row(
 
     match row {
         GraphRow::Commit(entry) => {
-            let row_el = h_flex()
+            let mut row_el = h_flex()
                 .id(ElementId::Name(format!("graph-row-{}", index).into()))
                 .pl(px(4.0))
                 .pr(px(12.0))
@@ -285,6 +290,13 @@ pub fn render_graph_row(
                                 .child(entry.author.clone()),
                         ),
                 );
+
+            if let Some(cb) = on_commit_right_click {
+                let hash = entry.hash.clone();
+                row_el = row_el.on_mouse_down(MouseButton::Right, move |event: &MouseDownEvent, window, cx| {
+                    cb(&hash, event.position, window, cx);
+                });
+            }
 
             if let Some(cb) = on_commit_click {
                 let hash = entry.hash.clone();

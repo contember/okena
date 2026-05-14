@@ -68,6 +68,53 @@ impl RootView {
         }
     }
 
+    /// Resolve the focused terminal_id from the workspace's focus_manager and layout.
+    /// Returns (project_id, terminal_id) or None if no terminal is focused or the path
+    /// doesn't lead to a Terminal node with an assigned id.
+    fn focused_terminal_id(&self, cx: &Context<Self>) -> Option<(String, String)> {
+        let ws = self.workspace.read(cx);
+        let state = ws.focus_manager.focused_terminal_state()?;
+        let project = ws.project(&state.project_id)?;
+        let layout = project.layout.as_ref()?;
+        let node = layout.get_at_path(&state.layout_path)?;
+        if let LayoutNode::Terminal { terminal_id: Some(id), .. } = node {
+            Some((state.project_id, id.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// Paste a "Send to Terminal" payload into the currently focused terminal.
+    ///
+    /// Resolves the focused terminal's working directory (OSC 7-reported, else
+    /// the PTY's initial cwd) and formats the payload relative to it before
+    /// sending. Always wrapped in bracketed-paste sequences — see
+    /// `Terminal::send_paste_force_bracketed` for rationale on why we don't
+    /// trust the tracked DECSET 2004 mode flag. Toasts a warning if no
+    /// terminal is focused.
+    fn send_payload_to_active_terminal(
+        &self,
+        payload: okena_core::send_payload::SendPayload,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_project_id, terminal_id)) = self.focused_terminal_id(cx) else {
+            okena_workspace::toast::ToastManager::warning(
+                "No active terminal to send selection to",
+                cx,
+            );
+            return;
+        };
+        let terminals = self.terminals.lock();
+        if let Some(terminal) = terminals.get(&terminal_id) {
+            let cwd = terminal.current_cwd();
+            let cwd_path = std::path::Path::new(&cwd);
+            let text = payload.format(Some(cwd_path));
+            if !text.is_empty() {
+                terminal.send_paste_force_bracketed(&text);
+            }
+        }
+    }
+
     /// Build a ProjectFs provider for the given project (local or remote).
     fn build_project_fs(
         &self,
@@ -479,6 +526,18 @@ impl RootView {
                     }
                 }
             }
+        }
+    }
+
+    /// Drain the broker's "send to terminal" queue and paste each payload into
+    /// the currently focused terminal. Resolves the terminal's CWD per call so
+    /// queued payloads sent while the user navigates use the latest known cwd.
+    pub(super) fn process_pending_send_to_terminal(&mut self, cx: &mut Context<Self>) {
+        let payloads = self.request_broker.update(cx, |broker, _cx| {
+            broker.drain_send_to_terminal()
+        });
+        for payload in payloads {
+            self.send_payload_to_active_terminal(payload, cx);
         }
     }
 

@@ -134,10 +134,17 @@ impl RootView {
         // Subscribe to overlay manager events
         cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event).detach();
 
-        // Observe RequestBroker to process overlay requests outside of render()
+        // Observe RequestBroker to process overlay + terminal-send requests
+        // outside of render().
         cx.observe(&request_broker, |this, _broker, cx| {
-            if this.request_broker.read(cx).has_overlay_requests() {
+            let broker = this.request_broker.read(cx);
+            let has_overlay = broker.has_overlay_requests();
+            let has_send = broker.has_send_to_terminal();
+            if has_overlay {
                 this.process_pending_requests(cx);
+            }
+            if has_send {
+                this.process_pending_send_to_terminal(cx);
             }
         }).detach();
 

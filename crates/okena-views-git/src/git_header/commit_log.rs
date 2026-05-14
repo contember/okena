@@ -1,7 +1,7 @@
 //! Commit log popover — git graph with optional compare mode and an inline
 //! branch picker. Anchored under the commit log button.
 
-use super::{BranchPickerTarget, GitHeader};
+use super::{BranchPickerTarget, CommitRowContextMenu, GitHeader};
 use crate::project_header;
 
 use okena_core::theme::ThemeColors;
@@ -188,16 +188,37 @@ impl GitHeader {
                         });
                     }))
                 };
+            let on_commit_right_click: Option<Arc<dyn Fn(&str, Point<Pixels>, &mut Window, &mut App)>> = {
+                let entity_handle = cx.entity().clone();
+                Some(Arc::new(move |hash: &str, position: Point<Pixels>, _window: &mut Window, cx: &mut App| {
+                    let hash = hash.to_string();
+                    let _ = entity_handle.update(cx, |this, cx| {
+                        let entry = this.commit_log_entries.iter().find_map(|r| match r {
+                            GraphRow::Commit(e) if e.hash == hash => Some(e.clone()),
+                            _ => None,
+                        });
+                        if let Some(entry) = entry {
+                            this.commit_row_menu = Some(CommitRowContextMenu {
+                                position,
+                                hash: entry.hash.clone(),
+                                send_text: crate::commit_send::format_commit_entry(&entry),
+                            });
+                            cx.notify();
+                        }
+                    });
+                }))
+            };
             project_header::render_commit_log_content(
                 &self.commit_log_entries,
                 self.commit_log_loading,
                 on_commit_click,
+                on_commit_right_click,
                 t,
                 cx,
             )
         };
 
-        deferred(
+        let popover = deferred(
             anchored()
                 .position(position)
                 .snap_to_window()
@@ -547,7 +568,77 @@ impl GitHeader {
                                 .child(content),
                         ),
                 ),
+        );
+
+        // Mount the commit row right-click menu as a sibling so it overlays
+        // above the popover — `Deferred` can't take additional children, so we
+        // wrap the pair in a parent div.
+        div()
+            .child(popover)
+            .when_some(self.render_commit_row_menu(t, cx), |d, menu| d.child(menu))
+            .into_any_element()
+    }
+
+    /// Render the right-click context menu for a commit row in the graph.
+    /// Returns `None` when no menu is currently open.
+    pub(super) fn render_commit_row_menu(
+        &self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use okena_ui::menu::{context_menu_panel, menu_item, menu_separator};
+
+        let menu = self.commit_row_menu.as_ref()?;
+        let position = menu.position;
+        let send_text = menu.send_text.clone();
+        let hash_for_copy = menu.hash.clone();
+        let request_broker = self.request_broker.clone();
+
+        let panel = context_menu_panel("commit-row-context-menu", t)
+            .child(
+                menu_item(
+                    "commit-row-ctx-send",
+                    "icons/terminal.svg",
+                    "Send to Terminal",
+                    t,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.commit_row_menu = None;
+                    request_broker.update(cx, |broker, cx| {
+                        broker.push_send_to_terminal(
+                            okena_core::send_payload::SendPayload::Text(send_text.clone()),
+                            cx,
+                        );
+                    });
+                })),
+            )
+            .child(menu_separator(t))
+            .child(
+                menu_item("commit-row-ctx-copy", "icons/copy.svg", "Copy Hash", t)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(hash_for_copy.clone()));
+                        this.commit_row_menu = None;
+                        cx.notify();
+                    })),
+            );
+
+        Some(
+            div()
+                .id("commit-row-menu-backdrop")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.commit_row_menu = None;
+                    cx.notify();
+                }))
+                .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| {
+                    this.commit_row_menu = None;
+                    cx.notify();
+                }))
+                .child(deferred(
+                    anchored().position(position).snap_to_window().child(panel),
+                ))
+                .into_any_element(),
         )
-        .into_any_element()
     }
 }
