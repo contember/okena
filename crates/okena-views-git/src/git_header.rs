@@ -51,6 +51,16 @@ enum BranchKind {
     Remote,
 }
 
+/// State for the right-click context menu on a commit row in the graph.
+/// Captured once at open time so the menu doesn't need a live reference
+/// back to the underlying `CommitLogEntry`.
+pub(super) struct CommitRowContextMenu {
+    pub(super) position: Point<Pixels>,
+    pub(super) hash: String,
+    /// Formatted payload computed once at open time.
+    pub(super) send_text: String,
+}
+
 /// Self-contained GPUI entity managing git status display, diff summary
 /// popover, and commit log popover.
 pub struct GitHeader {
@@ -97,6 +107,9 @@ pub struct GitHeader {
     // ── PR checks popover state ─────────────────────────────────────
     pr_checks_visible: bool,
     pr_badge_bounds: Bounds<Pixels>,
+
+    /// Open right-click context menu for a commit row in the graph.
+    pub(super) commit_row_menu: Option<CommitRowContextMenu>,
 }
 
 impl GitHeader {
@@ -149,6 +162,7 @@ impl GitHeader {
             branch_picker_status: BranchPickerStatus::Idle,
             pr_checks_visible: false,
             pr_badge_bounds: Bounds::default(),
+            commit_row_menu: None,
         }
     }
 

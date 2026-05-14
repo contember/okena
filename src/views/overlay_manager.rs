@@ -1283,7 +1283,8 @@ impl OverlayManager {
     }
 
     /// Subscribe to a FileViewer's events: Close hides modal (keeps cache),
-    /// Detach moves it to a separate OS window.
+    /// Detach moves it to a separate OS window, SendToTerminal routes to the
+    /// focused terminal via the OverlayManager event stream.
     fn subscribe_file_viewer(&mut self, viewer: &Entity<FileViewer>, cx: &mut Context<Self>) {
         cx.subscribe(viewer, |this, _, event: &FileViewerEvent, cx| {
             match event {
@@ -1292,6 +1293,11 @@ impl OverlayManager {
                 }
                 FileViewerEvent::Detach => {
                     this.detach_active_modal(cx);
+                }
+                FileViewerEvent::SendToTerminal(payload) => {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_send_to_terminal(payload.clone(), cx);
+                    });
                 }
             }
         })
@@ -1341,6 +1347,11 @@ impl OverlayManager {
                 }
                 DiffViewerEvent::Detach => {
                     this.detach_active_modal(cx);
+                }
+                DiffViewerEvent::SendToTerminal(payload) => {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_send_to_terminal(payload.clone(), cx);
+                    });
                 }
             }
         })

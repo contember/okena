@@ -122,9 +122,18 @@ impl FileViewer {
             })
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
+                cx.listener(|this, _: &MouseUpEvent, _window, cx| {
                     this.active_tab_mut().selection.finish();
                     cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    if this.active_tab().selection.normalized_non_empty().is_some() {
+                        this.selection_context_menu = Some(event.position);
+                        cx.notify();
+                    }
                 }),
             )
             .child(
@@ -827,6 +836,11 @@ impl Render for FileViewer {
             .when(!is_preview_mode, |d| d.cursor(CursorStyle::IBeam))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| {
                 // Dismiss overlays in priority order before default close behavior
+                if this.selection_context_menu.is_some() {
+                    this.selection_context_menu = None;
+                    cx.notify();
+                    return;
+                }
                 if this.tab_context_menu.is_some() {
                     this.tab_context_menu = None;
                     cx.notify();
@@ -855,8 +869,7 @@ impl Render for FileViewer {
                     this.active_tab_mut().markdown_selection.clear();
                     cx.notify();
                 } else if this.active_tab().selection.normalized_non_empty().is_some() {
-                    this.active_tab_mut().selection.clear();
-                    cx.notify();
+                    this.clear_source_selection(cx);
                 } else {
                     this.close(cx);
                 }
@@ -1586,6 +1599,67 @@ impl Render for FileViewer {
             )
             .when_some(self.render_context_menu(&t, cx), |d, menu| d.child(menu))
             .when_some(self.render_tab_context_menu(&t, cx), |d, menu| d.child(menu))
+            .when_some(self.render_selection_context_menu(&t, cx), |d, menu| d.child(menu))
             .when_some(self.render_delete_confirm(&t, cx), |d, dialog| d.child(dialog))
+    }
+}
+
+impl FileViewer {
+    /// Right-click context menu over a non-empty text selection. Offers
+    /// "Send to Terminal" and "Copy".
+    fn render_selection_context_menu(
+        &self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let position = self.selection_context_menu?;
+        self.active_tab().selection.normalized_non_empty()?;
+
+        let panel = okena_ui::menu::context_menu_panel("fv-selection-context-menu", t)
+            .child(
+                okena_ui::menu::menu_item(
+                    "fv-sel-ctx-send",
+                    "icons/terminal.svg",
+                    "Send to Terminal",
+                    t,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.selection_context_menu = None;
+                    this.send_selection_to_terminal(cx);
+                })),
+            )
+            .child(okena_ui::menu::menu_separator(t))
+            .child(
+                okena_ui::menu::menu_item("fv-sel-ctx-copy", "icons/copy.svg", "Copy", t)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.selection_context_menu = None;
+                        this.copy_selection(cx);
+                    })),
+            );
+
+        Some(
+            div()
+                .id("fv-selection-context-menu-backdrop")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.selection_context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.selection_context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .child(deferred(
+                    anchored().position(position).snap_to_window().child(panel),
+                ))
+                .into_any_element(),
+        )
     }
 }

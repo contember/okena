@@ -103,6 +103,10 @@ pub struct DiffViewer {
     /// True when this viewer is hosted inside a detached window.
     /// Hides the "detach" button and is set by the detached host.
     pub(super) is_detached: bool,
+    /// Open commit-hash right-click context menu.
+    pub(super) commit_hash_menu: Option<context_menu::CommitHashContextMenu>,
+    /// Right-click context menu over a non-empty text selection.
+    pub(super) selection_context_menu: Option<Point<Pixels>>,
 }
 
 impl DiffViewer {
@@ -161,6 +165,8 @@ impl DiffViewer {
             delete_confirm: None,
             discard_confirm: None,
             is_detached: false,
+            commit_hash_menu: None,
+            selection_context_menu: None,
         };
 
         if !provider.is_git_repo() {
@@ -195,6 +201,9 @@ pub enum DiffViewerEvent {
     Close,
     /// User requested to detach the viewer into a separate OS window.
     Detach,
+    /// User clicked "Send to terminal" on a selection. Carries the structured
+    /// payload; the host formats it (relative to terminal CWD) before pasting.
+    SendToTerminal(okena_core::send_payload::SendPayload),
 }
 
 impl EventEmitter<DiffViewerEvent> for DiffViewer {}
