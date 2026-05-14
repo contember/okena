@@ -784,28 +784,100 @@ pub fn get_pr_info(path: &Path) -> Option<super::PrInfo> {
     None
 }
 
-/// Parse CI check buckets from a JSON array string (extracted for testability).
-pub(crate) fn parse_ci_checks(json_str: &str) -> Option<super::CiCheckSummary> {
-    let checks: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
+/// Compute elapsed milliseconds between two ISO-8601 timestamps (those
+/// returned by `gh pr checks --json startedAt,completedAt`). Returns 0
+/// when either timestamp is missing or unparseable — interpreted as
+/// "still running" / "unknown" by the UI.
+fn compute_elapsed_ms(started: Option<&str>, completed: Option<&str>) -> u64 {
+    let (Some(s), Some(c)) = (started, completed) else {
+        return 0;
+    };
+    let started_s = gix::date::parse(s, None).ok().map(|t| t.seconds);
+    let completed_s = gix::date::parse(c, None).ok().map(|t| t.seconds);
+    match (started_s, completed_s) {
+        (Some(a), Some(b)) if b >= a => ((b - a) * 1000) as u64,
+        _ => 0,
+    }
+}
 
-    if checks.is_empty() {
+/// Parse CI check entries from a JSON array string (extracted for testability).
+/// Each entry may carry `bucket`, `name`, `workflow`, `link`, `description`,
+/// and `elapsed` (milliseconds). Skipped checks are kept in the per-check
+/// list (flagged via `is_skipped`) but do not count toward the rollup totals.
+pub(crate) fn parse_ci_checks(json_str: &str) -> Option<super::CiCheckSummary> {
+    let entries: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
+
+    if entries.is_empty() {
         return None;
     }
 
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut pending = 0usize;
+    let mut checks: Vec<super::CiCheck> = Vec::with_capacity(entries.len());
 
-    for check in &checks {
-        match check.get("bucket").and_then(|v| v.as_str()) {
-            Some("pass") => passed += 1,
-            Some("fail") | Some("cancel") => failed += 1,
-            Some("pending") => pending += 1,
-            _ => {} // "skipping" and unknown — don't count toward total
-        }
+    for entry in &entries {
+        let bucket = entry.get("bucket").and_then(|v| v.as_str()).unwrap_or("");
+        let (status, is_skipped) = match bucket {
+            "pass" => {
+                passed += 1;
+                (super::CiStatus::Success, false)
+            }
+            "fail" | "cancel" => {
+                failed += 1;
+                (super::CiStatus::Failure, false)
+            }
+            "pending" => {
+                pending += 1;
+                (super::CiStatus::Pending, false)
+            }
+            "skipping" => (super::CiStatus::Pending, true),
+            _ => continue,
+        };
+
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unnamed)")
+            .to_string();
+        let workflow = entry
+            .get("workflow")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let link = entry
+            .get("link")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let description = entry
+            .get("description")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let elapsed_ms = compute_elapsed_ms(
+            entry.get("startedAt").and_then(|v| v.as_str()),
+            entry.get("completedAt").and_then(|v| v.as_str()),
+        );
+
+        checks.push(super::CiCheck {
+            name,
+            workflow,
+            status,
+            is_skipped,
+            link,
+            description,
+            elapsed_ms,
+        });
     }
 
     let total = passed + failed + pending;
+    if total == 0 && checks.is_empty() {
+        return None;
+    }
+    // Rollup uses only non-skipped buckets so a workflow of all-skipped
+    // checks doesn't surface as a "passing" status. If everything was
+    // skipped we return None — there's nothing actionable to display.
     if total == 0 {
         return None;
     }
@@ -818,17 +890,30 @@ pub(crate) fn parse_ci_checks(json_str: &str) -> Option<super::CiCheckSummary> {
         super::CiStatus::Success
     };
 
-    Some(super::CiCheckSummary { status, passed, failed, pending, total })
+    Some(super::CiCheckSummary {
+        status,
+        passed,
+        failed,
+        pending,
+        total,
+        checks,
+    })
 }
 
 /// Get CI check status for the current branch's PR.
-/// Uses `gh pr checks --json bucket` which returns a flat JSON array.
+/// Uses `gh pr checks --json bucket,name,workflow,link,description,elapsed`
+/// to populate both the rollup summary and per-check details.
 pub fn get_ci_checks(path: &Path) -> Option<super::CiCheckSummary> {
     let path_str = path.to_str()?;
 
     let output = safe_output(
         command("gh")
-            .args(["pr", "checks", "--json", "bucket"])
+            .args([
+                "pr",
+                "checks",
+                "--json",
+                "bucket,name,workflow,link,description,startedAt,completedAt",
+            ])
             .current_dir(path_str),
     )
     .ok()?;
@@ -1514,6 +1599,33 @@ mod tests {
     fn parse_ci_only_skipping() {
         let json = r#"[{"bucket":"skipping"},{"bucket":"skipping"}]"#;
         assert!(super::parse_ci_checks(json).is_none());
+    }
+
+    #[test]
+    fn parse_ci_captures_per_check_details() {
+        let json = r#"[
+            {"bucket":"pass","name":"Lint","workflow":"CI","link":"https://ex/1","startedAt":"2024-01-01T10:00:00Z","completedAt":"2024-01-01T10:01:12Z","description":"ok"},
+            {"bucket":"fail","name":"Test (macos)","workflow":"CI","link":"https://ex/2","startedAt":"2024-01-01T10:00:00Z","completedAt":"2024-01-01T10:02:51Z"},
+            {"bucket":"skipping","name":"Deploy","workflow":"CI"}
+        ]"#;
+        let result = super::parse_ci_checks(json).unwrap();
+        assert_eq!(result.total, 2);
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.checks.len(), 3);
+
+        let lint = &result.checks[0];
+        assert_eq!(lint.name, "Lint");
+        assert_eq!(lint.workflow.as_deref(), Some("CI"));
+        assert_eq!(lint.link.as_deref(), Some("https://ex/1"));
+        assert_eq!(lint.description.as_deref(), Some("ok"));
+        assert_eq!(lint.elapsed_ms, 72_000);
+        assert_eq!(lint.elapsed_label(), "1m12s");
+        assert!(!lint.is_skipped);
+
+        let deploy = &result.checks[2];
+        assert!(deploy.is_skipped);
+        assert_eq!(deploy.elapsed_ms, 0);
+        assert_eq!(deploy.elapsed_label(), "\u{2014}");
     }
 
     // ─── commit graph parsing tests ────────────────────────────────────

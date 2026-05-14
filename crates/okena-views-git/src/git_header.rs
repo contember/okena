@@ -13,7 +13,7 @@ use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKi
 use okena_ui::simple_input::{SimpleInput, SimpleInputState};
 
 use crate::diff_viewer::provider::GitProvider;
-use crate::project_header;
+use crate::project_header::{self, CiStatusColor, PrStateColor};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -80,6 +80,10 @@ pub struct GitHeader {
     branch_picker_create_mode: bool,
     branch_picker_create_name: Entity<SimpleInputState>,
     branch_picker_status: BranchPickerStatus,
+
+    // ── PR checks popover state ─────────────────────────────────────
+    pr_checks_visible: bool,
+    pr_badge_bounds: Bounds<Pixels>,
 }
 
 /// Mutually-exclusive states of the branch switcher popover: idle (waiting
@@ -149,6 +153,8 @@ impl GitHeader {
             branch_picker_create_mode: false,
             branch_picker_create_name,
             branch_picker_status: BranchPickerStatus::Idle,
+            pr_checks_visible: false,
+            pr_badge_bounds: Bounds::default(),
         }
     }
 
@@ -499,6 +505,38 @@ impl GitHeader {
         .detach();
     }
 
+    // ── PR checks popover ───────────────────────────────────────────
+
+    /// Toggle the PR checks popover. Caller is responsible for ensuring
+    /// the PR badge is actually rendered (otherwise the popover anchors
+    /// to stale bounds).
+    pub fn toggle_pr_checks(&mut self, cx: &mut Context<Self>) {
+        self.pr_checks_visible = !self.pr_checks_visible;
+        if self.pr_checks_visible {
+            // Hide siblings so they don't overlap.
+            self.diff_popover_visible = false;
+            self.commit_log_visible = false;
+            self.branch_picker_visible = false;
+        }
+        cx.notify();
+    }
+
+    fn hide_pr_checks(&mut self, cx: &mut Context<Self>) {
+        if !self.pr_checks_visible {
+            return;
+        }
+        self.pr_checks_visible = false;
+        cx.notify();
+    }
+
+    /// Record the on-screen bounds of the PR badge so the checks popover
+    /// can anchor underneath it. Change-detected to avoid notify churn.
+    pub fn set_pr_badge_bounds(&mut self, bounds: Bounds<Pixels>) {
+        if self.pr_badge_bounds != bounds {
+            self.pr_badge_bounds = bounds;
+        }
+    }
+
     // ── Rendering ───────────────────────────────────────────────────
 
     /// Render the git status bar (branch, commit log button, diff stats).
@@ -526,14 +564,16 @@ impl GitHeader {
                     .text_size(ui_text_sm(cx))
                     .line_height(px(12.0))
                     .child({
-                        let pr_url = status.pr_info.as_ref().map(|p| p.url.clone());
-                        let entity_for_bounds = entity_handle.clone();
-                        let entity_for_click = entity_handle.clone();
+                        let entity_for_branch_bounds = entity_handle.clone();
+                        let entity_for_branch_click = entity_handle.clone();
+                        let entity_for_pr_bounds = entity_handle.clone();
+                        let entity_for_pr_click = entity_handle.clone();
                         let supports_switch = self.git_provider.supports_mutations();
+                        let has_pr = status.pr_info.is_some();
                         let on_branch_click: Option<Arc<dyn Fn(&mut Window, &mut App)>> =
                             if supports_switch {
                                 Some(Arc::new(move |window, app| {
-                                    let _ = entity_for_click.update(app, |this, cx| {
+                                    let _ = entity_for_branch_click.update(app, |this, cx| {
                                         if this.branch_picker_visible {
                                             this.hide_branch_picker(cx);
                                         } else {
@@ -545,16 +585,30 @@ impl GitHeader {
                                 None
                             };
                         let on_pr_click: Option<Arc<dyn Fn(&mut Window, &mut App)>> =
-                            pr_url.map(|url| {
-                                let cb: Arc<dyn Fn(&mut Window, &mut App)> =
-                                    Arc::new(move |_window, _app| open_url(&url));
-                                cb
-                            });
+                            if has_pr {
+                                Some(Arc::new(move |_window, app| {
+                                    let _ = entity_for_pr_click.update(app, |this, cx| {
+                                        this.toggle_pr_checks(cx);
+                                    });
+                                }))
+                            } else {
+                                None
+                            };
                         let on_branch_bounds: Option<Arc<dyn Fn(Bounds<Pixels>, &mut App)>> =
                             if supports_switch {
                                 Some(Arc::new(move |bounds, app| {
-                                    let _ = entity_for_bounds.update(app, |this, _cx| {
+                                    let _ = entity_for_branch_bounds.update(app, |this, _cx| {
                                         this.set_branch_chip_bounds(bounds);
+                                    });
+                                }))
+                            } else {
+                                None
+                            };
+                        let on_pr_bounds: Option<Arc<dyn Fn(Bounds<Pixels>, &mut App)>> =
+                            if has_pr {
+                                Some(Arc::new(move |bounds, app| {
+                                    let _ = entity_for_pr_bounds.update(app, |this, _cx| {
+                                        this.set_pr_badge_bounds(bounds);
                                     });
                                 }))
                             } else {
@@ -566,6 +620,7 @@ impl GitHeader {
                                 on_branch_click,
                                 on_pr_click,
                                 on_branch_bounds,
+                                on_pr_bounds,
                             },
                             t,
                         )
@@ -814,39 +869,25 @@ impl GitHeader {
             )
         };
 
-        div()
-            .size_full()
-            .absolute()
-            .inset_0()
-            .child(
-                div()
-                    .id("commit-log-backdrop")
-                    .absolute()
-                    .inset_0()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.hide_commit_log(cx);
-                    }))
-                    .on_scroll_wheel(|_, _, cx| {
-                        cx.stop_propagation();
-                    }),
-            )
-            .child(
-                deferred(
-                    anchored()
-                        .position(position)
-                        .snap_to_window()
-                        .child(
-                            v_flex()
-                                .id("commit-log-popover")
-                                .occlude()
-                                .w(px(520.0))
-                                .max_h(px(420.0))
-                                .bg(rgb(t.bg_primary))
-                                .border_1()
-                                .border_color(rgb(t.border))
-                                .rounded(px(8.0))
-                                .shadow_lg()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+        deferred(
+                anchored()
+                    .position(position)
+                    .snap_to_window()
+                    .child(
+                        v_flex()
+                            .id("commit-log-popover")
+                            .occlude()
+                            .w(px(520.0))
+                            .max_h(px(420.0))
+                            .bg(rgb(t.bg_primary))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .rounded(px(8.0))
+                            .shadow_lg()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.hide_commit_log(cx);
+                            }))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();
                                 })
                                 .on_scroll_wheel(|_, _, cx| {
@@ -1178,7 +1219,6 @@ impl GitHeader {
                                         .child(content),
                                 ),
                         ),
-                ),
             )
             .into_any_element()
     }
@@ -1272,41 +1312,27 @@ impl GitHeader {
                 .child(label)
         };
 
-        div()
-            .size_full()
-            .absolute()
-            .inset_0()
-            .child(
-                div()
-                    .id("branch-picker-backdrop")
-                    .absolute()
-                    .inset_0()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.hide_branch_picker(cx);
-                    }))
-                    .on_scroll_wheel(|_, _, cx| {
-                        cx.stop_propagation();
-                    }),
-            )
-            .child(
-                deferred(
-                    anchored()
-                        .position(position)
-                        .snap_to_window()
-                        .child(
-                            v_flex()
-                                .id("branch-picker-popover")
-                                .occlude()
-                                .w(px(320.0))
-                                .max_h(px(420.0))
-                                .bg(rgb(t.bg_primary))
-                                .border_1()
-                                .border_color(rgb(t.border))
-                                .rounded(px(8.0))
-                                .shadow_lg()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
+        deferred(
+                anchored()
+                    .position(position)
+                    .snap_to_window()
+                    .child(
+                        v_flex()
+                            .id("branch-picker-popover")
+                            .occlude()
+                            .w(px(320.0))
+                            .max_h(px(420.0))
+                            .bg(rgb(t.bg_primary))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .rounded(px(8.0))
+                            .shadow_lg()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.hide_branch_picker(cx);
+                            }))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
                                 .on_scroll_wheel(|_, _, cx| {
                                     cx.stop_propagation();
                                 })
@@ -1479,7 +1505,226 @@ impl GitHeader {
                                         }),
                                 ),
                         ),
-                ),
+            )
+            .into_any_element()
+    }
+
+    /// Render the PR checks popover anchored under the PR badge. Returns a
+    /// zero-size element when hidden or when there's no PR info.
+    pub fn render_pr_checks_popover(
+        &self,
+        pr_info: Option<&git::PrInfo>,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !self.pr_checks_visible {
+            return div().size_0().into_any_element();
+        }
+        let Some(pr) = pr_info else {
+            return div().size_0().into_any_element();
+        };
+
+        let bounds = self.pr_badge_bounds;
+        let position = point(
+            bounds.origin.x,
+            bounds.origin.y + bounds.size.height + px(6.0),
+        );
+
+        let pr_number = pr.number;
+        let pr_url = pr.url.clone();
+        let summary = pr.ci_checks.clone();
+        let pr_state_label = pr.state.label();
+        let pr_state_color = pr.state.color(t);
+        let summary_tooltip = summary.as_ref().map(|s| s.tooltip_text());
+        let checks: Vec<git::CiCheck> = summary
+            .as_ref()
+            .map(|s| s.checks.clone())
+            .unwrap_or_default();
+
+        let row = |check: git::CiCheck, key: String, cx: &mut Context<Self>| -> AnyElement {
+            let link = check.link.clone();
+            let elapsed = check.elapsed_label();
+            let workflow = check.workflow.clone();
+            let description = check.description.clone();
+            let icon_path = if check.is_skipped {
+                "icons/eye-off.svg"
+            } else {
+                check.status.icon()
+            };
+            let icon_color = if check.is_skipped {
+                t.text_muted
+            } else {
+                check.status.color(t)
+            };
+            let is_clickable = link.is_some();
+            let mut el = h_flex()
+                .id(ElementId::Name(key.into()))
+                .px(px(10.0))
+                .py(px(4.0))
+                .gap(px(8.0))
+                .items_center()
+                .text_size(ui_text_ms(cx))
+                .when(is_clickable, |d: Stateful<Div>| {
+                    d.cursor_pointer().hover(|s| s.bg(rgb(t.bg_hover)))
+                })
+                .child(
+                    svg()
+                        .path(icon_path)
+                        .size(px(10.0))
+                        .text_color(rgb(icon_color)),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(1.0))
+                        .child(
+                            div()
+                                .text_color(rgb(t.text_primary))
+                                .text_ellipsis()
+                                .overflow_hidden()
+                                .child(check.name.clone()),
+                        )
+                        .when_some(workflow, |d, wf| {
+                            d.child(
+                                div()
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_muted))
+                                    .text_ellipsis()
+                                    .overflow_hidden()
+                                    .child(wf),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.text_muted))
+                        .flex_shrink_0()
+                        .child(elapsed),
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                });
+            if let Some(desc) = description {
+                el = el.tooltip(move |_window, cx| Tooltip::new(desc.clone()).build(_window, cx));
+            }
+            if let Some(url) = link {
+                el = el.on_click(move |_, _window, _cx| {
+                    open_url(&url);
+                });
+            }
+            el.into_any_element()
+        };
+
+        deferred(
+                anchored()
+                    .position(position)
+                    .snap_to_window()
+                    .child(
+                        v_flex()
+                            .id("pr-checks-popover")
+                            .occlude()
+                            .w(px(360.0))
+                            .max_h(px(420.0))
+                            .bg(rgb(t.bg_primary))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .rounded(px(8.0))
+                            .shadow_lg()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.hide_pr_checks(cx);
+                            }))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                                .on_scroll_wheel(|_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(
+                                    h_flex()
+                                        .px(px(10.0))
+                                        .py(px(6.0))
+                                        .gap(px(6.0))
+                                        .items_center()
+                                        .border_b_1()
+                                        .border_color(rgb(t.border))
+                                        .child(
+                                            svg()
+                                                .path("icons/git-pull-request.svg")
+                                                .size(px(11.0))
+                                                .text_color(rgb(pr_state_color)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_ms(cx))
+                                                .text_color(rgb(t.text_secondary))
+                                                .child(format!("#{} \u{2014} {}", pr_number, pr_state_label)),
+                                        )
+                                        .when_some(summary_tooltip, |d, label| {
+                                            d.child(
+                                                div()
+                                                    .flex_1()
+                                                    .text_size(ui_text_sm(cx))
+                                                    .text_color(rgb(t.text_muted))
+                                                    .text_ellipsis()
+                                                    .overflow_hidden()
+                                                    .child(label),
+                                            )
+                                        }),
+                                )
+                                .child({
+                                    let body = v_flex()
+                                        .id("pr-checks-scroll")
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .py(px(4.0));
+                                    if checks.is_empty() {
+                                        body.child(
+                                            div()
+                                                .px(px(10.0))
+                                                .py(px(8.0))
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(t.text_muted))
+                                                .child("No checks reported"),
+                                        )
+                                    } else {
+                                        body.children(
+                                            checks.into_iter().enumerate().map(|(i, c)| {
+                                                row(c, format!("pr-check-{}", i), cx)
+                                            }),
+                                        )
+                                    }
+                                })
+                                .child(
+                                    h_flex()
+                                        .px(px(10.0))
+                                        .py(px(6.0))
+                                        .justify_end()
+                                        .border_t_1()
+                                        .border_color(rgb(t.border))
+                                        .child(
+                                            div()
+                                                .id("pr-checks-open-github")
+                                                .cursor_pointer()
+                                                .px(px(8.0))
+                                                .py(px(3.0))
+                                                .rounded(px(4.0))
+                                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(t.text_secondary))
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation();
+                                                })
+                                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                                    open_url(&pr_url);
+                                                    this.hide_pr_checks(cx);
+                                                }))
+                                                .child("Open on GitHub \u{2197}"),
+                                        ),
+                                ),
+                        ),
             )
             .into_any_element()
     }

@@ -564,12 +564,15 @@ pub struct BranchStatusCallbacks {
     /// Called when the user clicks the branch chip. When `None` the chip is
     /// rendered as plain (non-clickable) text — used for read-only providers.
     pub on_branch_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>,
-    /// Called when the user clicks the PR badge. When `None` no PR badge is
-    /// rendered (in addition to being hidden when the status has no PR info).
+    /// Called when the user clicks the PR badge. When `None` the PR badge
+    /// stays informational only (still rendered, but not clickable).
     pub on_pr_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>,
     /// Called every layout pass with the on-screen bounds of the branch chip,
     /// so the caller can anchor a popover underneath it.
     pub on_branch_bounds: Option<Arc<dyn Fn(Bounds<Pixels>, &mut App)>>,
+    /// Same as `on_branch_bounds` but for the PR badge — used to anchor the
+    /// PR checks popover.
+    pub on_pr_bounds: Option<Arc<dyn Fn(Bounds<Pixels>, &mut App)>>,
 }
 
 /// Render the git branch status pill (branch chip + PR badge + CI status).
@@ -591,6 +594,7 @@ pub fn render_branch_status(
         on_branch_click,
         on_pr_click,
         on_branch_bounds,
+        on_pr_bounds,
     } = callbacks;
 
     let branch_clickable = on_branch_click.is_some();
@@ -658,6 +662,7 @@ pub fn render_branch_status(
         let badge_color = pr_state_color.unwrap_or(t.text_muted);
         let mut el = h_flex()
             .id("pr-badge")
+            .relative()
             .gap(px(3.0))
             .px(px(3.0))
             .rounded(px(3.0))
@@ -691,6 +696,18 @@ pub fn render_branch_status(
                         .tooltip(move |_window, cx| Tooltip::new(tooltip.clone()).build(_window, cx)),
                 )
             });
+        if let Some(bcb) = on_pr_bounds {
+            el = el.child(
+                canvas(
+                    move |bounds, _window, app| {
+                        bcb(bounds, app);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
+        }
         if let Some(cb) = on_pr_click {
             el = el.on_click(move |_, window, cx| {
                 cb(window, cx);

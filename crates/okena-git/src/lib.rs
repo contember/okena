@@ -100,6 +100,48 @@ impl CiStatus {
     }
 }
 
+/// A single CI check / status entry as returned by `gh pr checks`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CiCheck {
+    /// Display name (e.g. "Lint", "Test (ubuntu-latest)").
+    pub name: String,
+    /// Workflow name (e.g. "CI", "Vercel"). `None` for non-Actions checks
+    /// where `gh` doesn't expose a workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    /// Bucket-derived overall status (pass/fail/pending). Skipped checks
+    /// are represented by `Pending` and `is_skipped`.
+    pub status: CiStatus,
+    /// True for checks whose bucket is `"skipping"` — rendered with a
+    /// distinct icon and not counted toward pass/fail in the summary.
+    #[serde(default)]
+    pub is_skipped: bool,
+    /// Direct link to the run/check on GitHub (or provider).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// Human-readable description, when `gh` provides one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Elapsed time in milliseconds. `0` when unknown / still running.
+    #[serde(default)]
+    pub elapsed_ms: u64,
+}
+
+impl CiCheck {
+    /// Format `elapsed_ms` as compact "Xs" or "XmYs" (or "—" when 0).
+    pub fn elapsed_label(&self) -> String {
+        if self.elapsed_ms == 0 {
+            return "\u{2014}".to_string();
+        }
+        let secs = self.elapsed_ms / 1000;
+        if secs < 60 {
+            format!("{}s", secs)
+        } else {
+            format!("{}m{}s", secs / 60, secs % 60)
+        }
+    }
+}
+
 /// Summary of CI check results
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CiCheckSummary {
@@ -108,6 +150,10 @@ pub struct CiCheckSummary {
     pub failed: usize,
     pub pending: usize,
     pub total: usize,
+    /// Per-check details; empty when `gh pr checks` didn't return rich
+    /// info (e.g. on older `gh` versions).
+    #[serde(default)]
+    pub checks: Vec<CiCheck>,
 }
 
 impl CiCheckSummary {
@@ -358,19 +404,19 @@ mod tests {
 
     #[test]
     fn ci_tooltip_all_passed() {
-        let summary = CiCheckSummary { status: CiStatus::Success, passed: 4, failed: 0, pending: 0, total: 4 };
+        let summary = CiCheckSummary { status: CiStatus::Success, passed: 4, failed: 0, pending: 0, total: 4, checks: Vec::new() };
         assert_eq!(summary.tooltip_text(), "4/4 checks passed");
     }
 
     #[test]
     fn ci_tooltip_failure() {
-        let summary = CiCheckSummary { status: CiStatus::Failure, passed: 3, failed: 1, pending: 0, total: 4 };
+        let summary = CiCheckSummary { status: CiStatus::Failure, passed: 3, failed: 1, pending: 0, total: 4, checks: Vec::new() };
         assert_eq!(summary.tooltip_text(), "1 failed, 3 passed of 4 checks");
     }
 
     #[test]
     fn ci_tooltip_pending() {
-        let summary = CiCheckSummary { status: CiStatus::Pending, passed: 1, failed: 0, pending: 2, total: 3 };
+        let summary = CiCheckSummary { status: CiStatus::Pending, passed: 1, failed: 0, pending: 2, total: 3, checks: Vec::new() };
         assert_eq!(summary.tooltip_text(), "2 pending, 1 passed of 3 checks");
     }
 
