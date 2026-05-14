@@ -246,6 +246,7 @@ fn get_listening_port_pairs_windows() -> Vec<(u32, u16)> {
 // ---------------------------------------------------------------------------
 
 /// Parse `ss -tlnp` output into (pid, port) pairs.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn parse_ss_output(stdout: &str) -> Vec<(u32, u16)> {
     let mut pairs = Vec::new();
     for line in stdout.lines() {
@@ -259,6 +260,7 @@ pub(crate) fn parse_ss_output(stdout: &str) -> Vec<(u32, u16)> {
     pairs
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn extract_pids_from_ss_line(line: &str) -> Vec<u32> {
     let mut pids = Vec::new();
     let mut search = line;
@@ -273,6 +275,7 @@ fn extract_pids_from_ss_line(line: &str) -> Vec<u32> {
     pids
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn extract_port_from_ss_line(line: &str) -> Option<u16> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.len() < 5 {
