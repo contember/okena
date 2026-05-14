@@ -716,7 +716,7 @@ impl ProjectColumn {
 }
 
 impl Render for ProjectColumn {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.read(cx);
         let project = self.get_project(workspace).cloned();
@@ -805,7 +805,7 @@ impl Render for ProjectColumn {
                     // Branch picker popover (delegated to GitHeader entity)
                     .child({
                         self.git_header.update(cx, |gh, cx| {
-                            gh.render_branch_picker(&t, cx)
+                            gh.render_branch_picker(window, &t, cx)
                         })
                     })
                     // PR checks popover (delegated to GitHeader entity)

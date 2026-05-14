@@ -1225,9 +1225,28 @@ impl GitHeader {
 
     /// Render the branch switcher popover anchored under the branch chip.
     /// Returns a zero-size element when the popover is hidden.
-    pub fn render_branch_picker(&self, t: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_branch_picker(
+        &mut self,
+        window: &mut Window,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if !self.branch_picker_visible {
             return div().size_0().into_any_element();
+        }
+
+        // Keep the active input focused while the popover is open. This handles
+        // the first render after `show_branch_picker` (which can't observe its
+        // own popover) and any focus loss from re-rendering parents.
+        let active = if self.branch_picker_create_mode {
+            &self.branch_picker_create_name
+        } else {
+            &self.branch_picker_filter
+        };
+        let active_handle = active.read(cx).focus_handle(cx);
+        if !active_handle.is_focused(window) {
+            let active = active.clone();
+            active.update(cx, |inp, cx| inp.focus(window, cx));
         }
 
         let bounds = self.branch_picker_bounds;
