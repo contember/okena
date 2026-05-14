@@ -7,6 +7,7 @@
 use okena_git::{BranchList, FileDiffSummary, GraphRow};
 use okena_ui::simple_input::SimpleInputState;
 use okena_workspace::request_broker::RequestBroker;
+use okena_workspace::state::Workspace;
 
 use crate::diff_viewer::provider::GitProvider;
 
@@ -55,6 +56,7 @@ enum BranchKind {
 pub struct GitHeader {
     project_id: String,
     request_broker: Entity<RequestBroker>,
+    workspace: Entity<Workspace>,
     git_provider: Arc<dyn GitProvider>,
 
     /// Current branch from git watcher (updated externally before rendering).
@@ -101,6 +103,7 @@ impl GitHeader {
     pub fn new(
         project_id: String,
         request_broker: Entity<RequestBroker>,
+        workspace: Entity<Workspace>,
         git_provider: Arc<dyn GitProvider>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -115,6 +118,7 @@ impl GitHeader {
         Self {
             project_id,
             request_broker,
+            workspace,
             git_provider,
             current_branch: None,
             diff_popover_visible: false,

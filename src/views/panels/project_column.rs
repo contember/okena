@@ -70,7 +70,8 @@ impl ProjectColumn {
         let git_header = {
             let pid = project_id.clone();
             let rb = request_broker.clone();
-            cx.new(move |cx| GitHeader::new(pid, rb, git_provider, cx))
+            let ws = workspace.clone();
+            cx.new(move |cx| GitHeader::new(pid, rb, ws, git_provider, cx))
         };
         // Observe git_header so ProjectColumn re-renders when popovers change
         cx.observe(&git_header, |_, _, cx| cx.notify()).detach();

@@ -21,10 +21,12 @@ impl GitHeader {
     pub fn toggle_pr_checks(&mut self, cx: &mut Context<Self>) {
         self.pr_checks_visible = !self.pr_checks_visible;
         if self.pr_checks_visible {
-            // Hide siblings so they don't overlap.
+            // Hide siblings so they don't overlap. Route through hide_branch_picker
+            // so the modal focus context is restored — otherwise the previously
+            // focused terminal stays "stolen" by the picker.
             self.diff_popover_visible = false;
             self.commit_log_visible = false;
-            self.branch_picker_visible = false;
+            self.hide_branch_picker(cx);
         }
         cx.notify();
     }

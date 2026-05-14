@@ -31,6 +31,10 @@ impl GitHeader {
         self.commit_log_visible = false;
 
         self.branch_picker_visible = true;
+        // Enter modal context so the project's terminal pane stops re-grabbing
+        // window focus on each render (which would route keystrokes there
+        // even though the filter input still shows a blinking cursor).
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         // Clear stale list so the previous repo's branches don't flash before
         // the async load completes.
         self.branch_picker_list = BranchList::default();
@@ -67,6 +71,8 @@ impl GitHeader {
         self.branch_picker_visible = false;
         self.branch_picker_create_mode = false;
         self.branch_picker_status = BranchPickerStatus::Idle;
+        // Restore the previously-focused terminal so typing resumes there.
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();
     }
 
