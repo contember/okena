@@ -88,6 +88,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set the project column header density (Compact, Comfortable)
+    pub fn set_header_density(&mut self, value: crate::workspace::settings::HeaderDensity, cx: &mut Context<Self>) {
+        self.settings.header_density = value;
+        self.save_and_notify(cx);
+    }
+
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(set_show_focused_border, show_focused_border, bool);

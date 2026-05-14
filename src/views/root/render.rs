@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout, ShowBranchSwitcher};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
@@ -546,6 +546,24 @@ impl Render for RootView {
                         this.workspace.update(cx, |ws, cx| {
                             ws.set_focused_project(Some(project_id), cx);
                         });
+                    }
+                }
+            }))
+            // Handle show branch switcher action (cmd-shift-b)
+            .on_action(cx.listener(|this, _: &ShowBranchSwitcher, window, cx| {
+                // Resolve the project that owns the focused terminal (falls
+                // back to the explicitly-focused project for projects without
+                // any terminal yet).
+                let project_id = {
+                    let ws = this.workspace.read(cx);
+                    ws.focus_manager
+                        .focused_terminal_state()
+                        .map(|state| state.project_id)
+                        .or_else(|| ws.focus_manager.focused_project_id().map(String::from))
+                };
+                if let Some(project_id) = project_id {
+                    if let Some(col) = this.project_columns.get(&project_id).cloned() {
+                        col.update(cx, |col, cx| col.show_branch_picker(window, cx));
                     }
                 }
             }))

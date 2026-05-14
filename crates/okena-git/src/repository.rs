@@ -196,43 +196,8 @@ pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> GitR
 /// List all branches in a repository (local + remotes), deduplicating
 /// `origin/<name>` against local `<name>` and skipping `*/HEAD` symrefs.
 pub fn list_branches(path: &Path) -> Vec<String> {
-    let Some(repo) = crate::gix_helpers::open(path) else {
-        return vec![];
-    };
-
-    let Ok(refs) = repo.references() else {
-        return vec![];
-    };
-
-    let mut branches: Vec<String> = Vec::new();
-    let mut local_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    if let Ok(iter) = refs.local_branches() {
-        for r in iter.flatten() {
-            let name = r.name().shorten().to_string();
-            if !name.is_empty() {
-                local_names.insert(name.clone());
-                branches.push(name);
-            }
-        }
-    }
-
-    if let Ok(iter) = refs.remote_branches() {
-        for r in iter.flatten() {
-            let name = r.name().shorten().to_string();
-            if name.is_empty() || name.ends_with("/HEAD") {
-                continue;
-            }
-            if let Some(local) = name.strip_prefix("origin/") {
-                if local_names.contains(local) {
-                    continue;
-                }
-            }
-            branches.push(name);
-        }
-    }
-
-    branches
+    let list = list_branches_classified(path);
+    list.local.into_iter().chain(list.remote).collect()
 }
 
 /// Get branches that don't have a worktree yet
@@ -272,12 +237,18 @@ pub fn get_status(path: &Path) -> StatusFetch {
     let Some((lines_added, lines_removed)) = get_diff_stats(path) else {
         return StatusFetch::Transient;
     };
+    let (ahead, behind) = match count_ahead_behind(path) {
+        Some((a, b)) => (Some(a), Some(b)),
+        None => (None, None),
+    };
 
     StatusFetch::Status(GitStatus {
         branch,
         lines_added,
         lines_removed,
         pr_info: None,
+        ahead,
+        behind,
     })
 }
 
@@ -540,6 +511,177 @@ pub fn push_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
         .args(["-C", p, "push", "origin", "--", branch])
         .output()?;
     require_success(output)
+}
+
+/// Branch list classified into local and remote, with the current branch name
+/// (if HEAD points at a branch).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BranchList {
+    /// Local branch names.
+    pub local: Vec<String>,
+    /// Remote branch names that don't have a matching local branch (e.g.
+    /// `origin/release` when there's no local `release`). Always includes
+    /// the remote prefix.
+    pub remote: Vec<String>,
+    /// Current HEAD branch name (`None` if detached).
+    pub current: Option<String>,
+}
+
+/// List branches classified into local vs. remote.
+///
+/// Like [`list_branches`] but keeps the two sets separate so a UI can show
+/// "LOCAL" and "REMOTE" sections. Remote branches that have a matching local
+/// branch are dropped (the local one wins). `*/HEAD` symrefs are skipped.
+pub fn list_branches_classified(path: &Path) -> BranchList {
+    let Some(repo) = crate::gix_helpers::open(path) else {
+        return BranchList::default();
+    };
+
+    let Ok(refs) = repo.references() else {
+        return BranchList::default();
+    };
+
+    let mut local: Vec<String> = Vec::new();
+    let mut remote: Vec<String> = Vec::new();
+    let mut local_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Ok(iter) = refs.local_branches() {
+        for r in iter.flatten() {
+            let name = r.name().shorten().to_string();
+            if !name.is_empty() {
+                local_names.insert(name.clone());
+                local.push(name);
+            }
+        }
+    }
+
+    if let Ok(iter) = refs.remote_branches() {
+        for r in iter.flatten() {
+            let name = r.name().shorten().to_string();
+            if name.is_empty() || name.ends_with("/HEAD") {
+                continue;
+            }
+            // Skip remote refs that have a corresponding local branch
+            if let Some(stripped) = name.strip_prefix("origin/") {
+                if local_names.contains(stripped) {
+                    continue;
+                }
+            }
+            remote.push(name);
+        }
+    }
+
+    BranchList {
+        current: head_branch_short(&repo),
+        local,
+        remote,
+    }
+}
+
+/// Checkout an existing local branch (`git checkout <branch>`).
+///
+/// Branch name is validated to reject flag-like values, so we can safely
+/// pass it as a positional argument (git treats it as a ref, not a
+/// pathspec, when it matches a branch).
+pub fn checkout_local_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
+    crate::validate_git_ref(branch)?;
+    let p = path_str(repo_path)?;
+    let output = command("git")
+        .args(["-C", p, "checkout", branch])
+        .output()?;
+    require_success(output)
+}
+
+/// Checkout a remote branch, creating a local tracking branch. The new local
+/// branch name is the remote ref with its `<remote>/` prefix stripped, so
+/// `origin/feature` becomes local `feature`.
+pub fn checkout_remote_branch(repo_path: &Path, remote_branch: &str) -> GitResult<()> {
+    crate::validate_git_ref(remote_branch)?;
+    let p = path_str(repo_path)?;
+
+    // Strip the first path segment to derive the local branch name.
+    let local_name = remote_branch
+        .split_once('/')
+        .map(|(_, rest)| rest)
+        .unwrap_or(remote_branch);
+    crate::validate_git_ref(local_name)?;
+
+    // `git checkout --track <remote>/<branch>` creates a local branch and
+    // sets the upstream to the remote ref in one shot. If a local branch
+    // with that name already exists, fall back to plain checkout.
+    let output = command("git")
+        .args(["-C", p, "checkout", "--track", remote_branch])
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    checkout_local_branch(repo_path, local_name)
+}
+
+/// Create a new branch from the given start point (or HEAD if `None`) and
+/// check it out. Returns an error if the branch name already exists.
+pub fn create_and_checkout_branch(
+    repo_path: &Path,
+    new_name: &str,
+    start_point: Option<&str>,
+) -> GitResult<()> {
+    crate::validate_git_ref(new_name)?;
+    if let Some(sp) = start_point {
+        crate::validate_git_ref(sp)?;
+    }
+    let p = path_str(repo_path)?;
+
+    let mut args: Vec<&str> = vec!["-C", p, "checkout", "-b", new_name];
+    if let Some(sp) = start_point {
+        args.push(sp);
+    }
+
+    let output = command("git").args(&args).output()?;
+    require_success(output)
+}
+
+/// Count commits the local branch is ahead of / behind its upstream.
+/// Returns `None` if HEAD is detached or no upstream is configured.
+///
+/// Short-circuits via gix when no upstream is configured for the current
+/// branch, so the common "branch without remote tracking" case avoids the
+/// `git rev-list` subprocess entirely.
+pub fn count_ahead_behind(path: &Path) -> Option<(usize, usize)> {
+    let repo = crate::gix_helpers::open(path)?;
+    let branch = head_branch_short(&repo)?;
+
+    // Cheap upstream check via gix — most branches without an upstream
+    // hit this fast path and skip the spawn.
+    let has_upstream = repo
+        .find_reference(&format!("refs/heads/{}", branch))
+        .ok()
+        .and_then(|r| {
+            let head_ref: gix::refs::FullName = r.name().into();
+            repo.branch_remote_tracking_ref_name(head_ref.as_ref(), gix::remote::Direction::Fetch)
+                .and_then(|res| res.ok())
+        })
+        .is_some();
+    if !has_upstream {
+        return None;
+    }
+
+    // `git rev-list --left-right --count <upstream>...HEAD` prints
+    // "<behind>\t<ahead>".
+    let revspec = format!("{0}@{{upstream}}...{0}", branch);
+    let p = path_str(path).ok()?;
+    let output = command("git")
+        .args(["-C", p, "rev-list", "--left-right", "--count", &revspec])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts = stdout.split_whitespace();
+    let behind: usize = parts.next()?.parse().ok()?;
+    let ahead: usize = parts.next()?.parse().ok()?;
+    Some((ahead, behind))
 }
 
 /// Count commits that haven't been pushed to the branch's own remote.
@@ -1199,6 +1341,57 @@ mod tests {
         let mut branches = list_branches(&repo);
         branches.sort();
         assert_eq!(branches, vec!["feature/bar", "feature/foo", "main"]);
+    }
+
+    #[test]
+    fn list_branches_classified_separates_local_and_records_current() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["branch", "feature/foo"]);
+        git_in(&repo, &["branch", "feature/bar"]);
+
+        let mut list = list_branches_classified(&repo);
+        list.local.sort();
+        assert_eq!(list.local, vec!["feature/bar", "feature/foo", "main"]);
+        assert!(list.remote.is_empty());
+        assert_eq!(list.current.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn create_and_checkout_branch_switches_head() {
+        let (_tmp, repo) = init_temp_repo();
+        create_and_checkout_branch(&repo, "feat/header-redesign", None)
+            .expect("create branch");
+        assert_eq!(
+            get_current_branch(&repo).as_deref(),
+            Some("feat/header-redesign")
+        );
+    }
+
+    #[test]
+    fn checkout_local_branch_switches_back_to_main() {
+        let (_tmp, repo) = init_temp_repo();
+        create_and_checkout_branch(&repo, "feat/x", None).expect("create branch");
+        assert_eq!(get_current_branch(&repo).as_deref(), Some("feat/x"));
+
+        checkout_local_branch(&repo, "main").expect("checkout main");
+        assert_eq!(get_current_branch(&repo).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn create_and_checkout_branch_rejects_flag_like_names() {
+        let (_tmp, repo) = init_temp_repo();
+        let err = create_and_checkout_branch(&repo, "-rf", None);
+        assert!(err.is_err(), "expected rejection of flag-like ref name");
+        // No new branch should have been created.
+        let branches = list_branches(&repo);
+        assert!(!branches.iter().any(|b| b == "-rf"));
+    }
+
+    #[test]
+    fn count_ahead_behind_returns_none_without_upstream() {
+        let (_tmp, repo) = init_temp_repo();
+        // No remote, no upstream configured — must return None instead of (0,0).
+        assert!(count_ahead_behind(&repo).is_none());
     }
 
     #[test]

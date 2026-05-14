@@ -186,6 +186,12 @@ impl ProjectColumn {
         self.git_header.update(cx, |gh, cx| gh.set_git_provider(provider, cx));
     }
 
+    /// Open the branch switcher popover for this project's header.
+    /// No-op when the provider is read-only (remote-mirrored project).
+    pub fn show_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.git_header.update(cx, |gh, cx| gh.show_branch_picker(window, cx));
+    }
+
     /// Show a hook terminal in the hook panel.
     pub fn show_hook_terminal(&mut self, terminal_id: &str, cx: &mut Context<Self>) {
         let tid = terminal_id.to_string();
@@ -340,6 +346,9 @@ impl ProjectColumn {
         let project_id_for_hide = self.project_id.clone();
         let effective_color = self.workspace.read(cx).effective_folder_color(project);
         let folder_color = t.get_folder_color(effective_color);
+        let density = crate::settings::settings(cx).header_density;
+        let is_comfortable =
+            density == crate::workspace::settings::HeaderDensity::Comfortable;
 
         // Fetch git status once for both header badge and git status area
         let git_status = self.git_watcher.as_ref()
@@ -352,8 +361,244 @@ impl ProjectColumn {
                         lines_added: g.lines_added,
                         lines_removed: g.lines_removed,
                         pr_info: None,
+                        ahead: None,
+                        behind: None,
                     })
             });
+
+        // Worktree indicator: filled dot for normal project, ring for worktree.
+        let worktree_dot = if project.worktree_info.is_some() {
+            div()
+                .flex_shrink_0()
+                .w(px(8.0))
+                .h(px(8.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(rgb(folder_color))
+                .into_any_element()
+        } else {
+            div()
+                .flex_shrink_0()
+                .w(px(8.0))
+                .h(px(8.0))
+                .rounded(px(4.0))
+                .bg(rgb(folder_color))
+                .into_any_element()
+        };
+
+        let project_name_el = {
+            let display_name = if let Some(ref wt_info) = project.worktree_info {
+                let ws = self.workspace.read(cx);
+                ws.project(&wt_info.parent_project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| project.name.clone())
+            } else {
+                project.name.clone()
+            };
+            let path_for_tooltip = project.path.clone();
+            let project_id_for_click = self.project_id.clone();
+            let request_broker_for_click = self.request_broker.clone();
+            div()
+                .id("project-name")
+                .flex_shrink_0()
+                .text_size(ui_text_md(cx))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(t.text_primary))
+                .line_height(px(14.0))
+                .text_ellipsis()
+                .cursor_pointer()
+                .rounded(px(3.0))
+                .px(px(2.0))
+                .hover(|s| s.bg(rgb(t.bg_hover)))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .on_click(move |_, _, cx| {
+                    request_broker_for_click.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
+                            OverlayRequest::Project(ProjectOverlay {
+                                project_id: project_id_for_click.clone(),
+                                kind: ProjectOverlayKind::FileBrowser,
+                            }),
+                            cx,
+                        );
+                    });
+                })
+                .tooltip(move |_window, cx| {
+                    Tooltip::new(path_for_tooltip.clone()).build(_window, cx)
+                })
+                .child(display_name)
+                .into_any_element()
+        };
+
+        let right_controls = h_flex()
+            .gap(px(8.0))
+            .child(self.render_hidden_taskbar(project, t, cx))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .opacity(0.0)
+                    .group_hover("project-header", |s| s.opacity(1.0))
+                    .child(
+                        div()
+                            .id("hide-project-btn")
+                            .cursor_pointer()
+                            .w(px(24.0))
+                            .h(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(move |_, _window, cx| {
+                                cx.stop_propagation();
+                                workspace_for_hide.update(cx, |ws, cx| {
+                                    ws.toggle_project_overview_visibility(
+                                        &project_id_for_hide, cx,
+                                    );
+                                });
+                            })
+                            .child(
+                                svg()
+                                    .path("icons/eye-off.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.text_secondary)),
+                            )
+                            .tooltip(|_window, cx| {
+                                Tooltip::new("Hide Project").build(_window, cx)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("fullscreen-project-btn")
+                            .cursor_pointer()
+                            .w(px(24.0))
+                            .h(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(move |_, _window, cx| {
+                                cx.stop_propagation();
+                                workspace.update(cx, |ws, cx| {
+                                    ws.set_focused_project(Some(project_id.clone()), cx);
+                                });
+                            })
+                            .child(
+                                svg()
+                                    .path("icons/fullscreen.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.text_secondary)),
+                            )
+                            .tooltip(|_window, cx| {
+                                Tooltip::new("Focus Project").build(_window, cx)
+                            }),
+                    ),
+            )
+            .child({
+                self.hook_panel.update(cx, |hp, cx| {
+                    hp.render_hook_indicator(&t, cx)
+                })
+            })
+            .child({
+                self.service_panel.update(cx, |sp, cx| {
+                    sp.render_service_indicator(&t, cx)
+                })
+            });
+
+        let git_status_el = self.git_header.update(cx, |gh, cx| {
+            gh.render_git_status(git_status.clone(), &t, cx)
+        });
+        let has_git = git_status.as_ref().and_then(|g| g.branch.as_ref()).is_some();
+
+        let context_menu_handler = {
+            let request_broker = self.request_broker.clone();
+            let project_id = self.project_id.clone();
+            move |event: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
+                request_broker.update(cx, |broker, cx| {
+                    broker.push_overlay_request(
+                        OverlayRequest::Project(ProjectOverlay {
+                            project_id: project_id.clone(),
+                            kind: ProjectOverlayKind::ContextMenu {
+                                position: event.position,
+                            },
+                        }),
+                        cx,
+                    );
+                });
+            }
+        };
+
+        let header_body = if is_comfortable && has_git {
+            // Two-row comfortable layout.
+            v_flex()
+                .id("project-header")
+                .group("project-header")
+                .px(px(12.0))
+                .py(px(4.0))
+                .gap(px(2.0))
+                .bg(rgb(t.bg_header))
+                .border_b_1()
+                .border_color(rgb(t.border))
+                .on_mouse_down(MouseButton::Right, context_menu_handler)
+                // Row 1: name + right controls
+                .child(
+                    h_flex()
+                        .h(px(22.0))
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            h_flex()
+                                .gap(px(6.0))
+                                .overflow_hidden()
+                                .child(worktree_dot)
+                                .child(project_name_el),
+                        )
+                        .child(right_controls),
+                )
+                // Row 2: full git info row
+                .child(
+                    h_flex()
+                        .h(px(18.0))
+                        .pl(px(14.0))
+                        .items_center()
+                        .child(git_status_el),
+                )
+                .into_any_element()
+        } else {
+            // Compact single-row layout (current default).
+            div()
+                .id("project-header")
+                .group("project-header")
+                .h(px(34.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .bg(rgb(t.bg_header))
+                .border_b_1()
+                .border_color(rgb(t.border))
+                .on_mouse_down(MouseButton::Right, context_menu_handler)
+                .child(
+                    h_flex()
+                        .gap(px(6.0))
+                        .overflow_hidden()
+                        .child(worktree_dot)
+                        .child(project_name_el)
+                        .child(git_status_el),
+                )
+                .child(right_controls)
+                .into_any_element()
+        };
 
         v_flex()
             // Colored accent bar
@@ -362,192 +607,9 @@ impl ProjectColumn {
                     .h(px(1.0))
                     .w_full()
                     .flex_shrink_0()
-                    .bg(rgb(folder_color))
+                    .bg(rgb(folder_color)),
             )
-            .child(div()
-            .id("project-header")
-            .group("project-header")
-            .h(px(34.0))
-            .px(px(12.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .bg(rgb(t.bg_header))
-            .border_b_1()
-            .border_color(rgb(t.border))
-            .on_mouse_down(MouseButton::Right, {
-                let request_broker = self.request_broker.clone();
-                let project_id = self.project_id.clone();
-                move |event, _window, cx| {
-                    cx.stop_propagation();
-                    request_broker.update(cx, |broker, cx| {
-                        broker.push_overlay_request(
-                            OverlayRequest::Project(ProjectOverlay {
-                                project_id: project_id.clone(),
-                                kind: ProjectOverlayKind::ContextMenu { position: event.position },
-                            }),
-                            cx,
-                        );
-                    });
-                }
-            })
-            .child(
-                h_flex()
-                    .gap(px(6.0))
-                    .overflow_hidden()
-                    .child(
-                        if project.worktree_info.is_some() {
-                            div()
-                                .flex_shrink_0()
-                                .w(px(8.0))
-                                .h(px(8.0))
-                                .rounded(px(4.0))
-                                .border_1()
-                                .border_color(rgb(folder_color))
-                                .into_any_element()
-                        } else {
-                            div()
-                                .flex_shrink_0()
-                                .w(px(8.0))
-                                .h(px(8.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(folder_color))
-                                .into_any_element()
-                        }
-                    )
-                    .child({
-                        let display_name = if let Some(ref wt_info) = project.worktree_info {
-                            let ws = self.workspace.read(cx);
-                            ws.project(&wt_info.parent_project_id)
-                                .map(|p| p.name.clone())
-                                .unwrap_or_else(|| project.name.clone())
-                        } else {
-                            project.name.clone()
-                        };
-                        let path_for_tooltip = project.path.clone();
-                        let project_id_for_click = self.project_id.clone();
-                        let request_broker_for_click = self.request_broker.clone();
-                        div()
-                            .id("project-name")
-                            .flex_shrink_0()
-                            .text_size(ui_text_md(cx))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(t.text_primary))
-                            .line_height(px(14.0))
-                            .text_ellipsis()
-                            .cursor_pointer()
-                            .rounded(px(3.0))
-                            .px(px(2.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(move |_, _, cx| {
-                                request_broker_for_click.update(cx, |broker, cx| {
-                                    broker.push_overlay_request(
-                                        OverlayRequest::Project(ProjectOverlay {
-                                            project_id: project_id_for_click.clone(),
-                                            kind: ProjectOverlayKind::FileBrowser,
-                                        }),
-                                        cx,
-                                    );
-                                });
-                            })
-                            .tooltip(move |_window, cx| Tooltip::new(path_for_tooltip.clone()).build(_window, cx))
-                            .child(display_name)
-                    })
-                    // Git status (delegated to GitHeader entity)
-                    .child({
-                        self.git_header.update(cx, |gh, cx| {
-                            gh.render_git_status(
-                                git_status,
-                                &t,
-                                cx,
-                            )
-                        })
-                    }),
-            )
-            .child(
-                // Right side: minimized taskbar + controls
-                h_flex()
-                    .gap(px(8.0))
-                    .child(self.render_hidden_taskbar(project, t, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(2.0))
-                            .opacity(0.0)
-                            .group_hover("project-header", |s| s.opacity(1.0))
-                            .child(
-                                div()
-                                    .id("hide-project-btn")
-                                    .cursor_pointer()
-                                    .w(px(24.0))
-                                    .h(px(24.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click(move |_, _window, cx| {
-                                        cx.stop_propagation();
-                                        workspace_for_hide.update(cx, |ws, cx| {
-                                            ws.toggle_project_overview_visibility(&project_id_for_hide, cx);
-                                        });
-                                    })
-                                    .child(
-                                        svg()
-                                            .path("icons/eye-off.svg")
-                                            .size(px(14.0))
-                                            .text_color(rgb(t.text_secondary))
-                                    )
-                                    .tooltip(|_window, cx| Tooltip::new("Hide Project").build(_window, cx)),
-                            )
-                            .child(
-                                div()
-                                    .id("fullscreen-project-btn")
-                                    .cursor_pointer()
-                                    .w(px(24.0))
-                                    .h(px(24.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click(move |_, _window, cx| {
-                                        cx.stop_propagation();
-                                        workspace.update(cx, |ws, cx| {
-                                            ws.set_focused_project(Some(project_id.clone()), cx);
-                                        });
-                                    })
-                                    .child(
-                                        svg()
-                                            .path("icons/fullscreen.svg")
-                                            .size(px(14.0))
-                                            .text_color(rgb(t.text_secondary))
-                                    )
-                                    .tooltip(|_window, cx| Tooltip::new("Focus Project").build(_window, cx)),
-                            ),
-                    )
-                    // Hook indicator (delegated to HookPanel entity)
-                    .child({
-                        self.hook_panel.update(cx, |hp, cx| {
-                            hp.render_hook_indicator(&t, cx)
-                        })
-                    })
-                    // Service indicator (delegated to ServicePanel entity)
-                    .child({
-                        self.service_panel.update(cx, |sp, cx| {
-                            sp.render_service_indicator(&t, cx)
-                        })
-                    }),
-            ))
+            .child(header_body)
     }
 
     /// Render empty state for bookmark projects (no terminal)
@@ -738,6 +800,12 @@ impl Render for ProjectColumn {
                     .child({
                         self.git_header.update(cx, |gh, cx| {
                             gh.render_commit_log_popover(current_branch, &t, cx)
+                        })
+                    })
+                    // Branch picker popover (delegated to GitHeader entity)
+                    .child({
+                        self.git_header.update(cx, |gh, cx| {
+                            gh.render_branch_picker(&t, cx)
                         })
                     })
                     .into_any_element()

@@ -2,9 +2,10 @@ use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_md};
 use crate::views::components::simple_input::SimpleInput;
+use crate::workspace::settings::HeaderDensity;
 use gpui::*;
 use gpui::prelude::*;
-use gpui_component::v_flex;
+use gpui_component::{h_flex, v_flex};
 
 use super::components::*;
 use super::SettingsPanel;
@@ -23,6 +24,7 @@ impl SettingsPanel {
                 "color-tinted-bg", "Color Tinted Background", s.color_tinted_background, true,
                 |state, val, cx| state.set_color_tinted_background(val, cx), cx,
             ))
+            .child(self.render_header_density_row(s.header_density, cx))
             .child(self.render_toggle(
                 "detached-by-default", "Detached Overlays by Default", s.detached_overlays_by_default, true,
                 |state, val, cx| state.set_detached_overlays_by_default(val, cx), cx,
@@ -110,5 +112,55 @@ impl SettingsPanel {
                             ),
                     ),
             )
+    }
+
+    fn render_header_density_row(
+        &self,
+        current: HeaderDensity,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+
+        settings_row(
+            "header-density".to_string(),
+            "Project Header Density",
+            &t,
+            cx,
+            true,
+        )
+        .child(
+            h_flex()
+                .gap(px(2.0))
+                .rounded(px(4.0))
+                .bg(rgb(t.bg_secondary))
+                .p(px(2.0))
+                .children(HeaderDensity::all_variants().iter().map(|&density: &HeaderDensity| {
+                    let is_selected = density == current;
+                    let hover_bg = t.bg_hover;
+                    div()
+                        .id(ElementId::Name(
+                            format!("header-density-{:?}", density).into(),
+                        ))
+                        .cursor_pointer()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(3.0))
+                        .text_size(ui_text_md(cx))
+                        .when(is_selected, |el: Stateful<Div>| {
+                            el.bg(rgb(t.border_active))
+                                .text_color(rgb(t.text_primary))
+                        })
+                        .when(!is_selected, |el: Stateful<Div>| {
+                            el.text_color(rgb(t.text_muted))
+                                .hover(|s: StyleRefinement| s.bg(rgb(hover_bg)))
+                        })
+                        .child(density.display_name().to_string())
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
+                            settings_entity(cx).update(cx, |state, cx| {
+                                state.set_header_density(density, cx);
+                            });
+                        }))
+                })),
+        )
     }
 }

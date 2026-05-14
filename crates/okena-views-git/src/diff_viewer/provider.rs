@@ -1,21 +1,52 @@
 //! GitProvider trait and implementations for local and remote git operations.
 
-use okena_git::{DiffMode, DiffResult, FileDiffSummary, GraphRow};
+use okena_git::{BranchList, DiffMode, DiffResult, FileDiffSummary, GraphRow};
 
 /// Provides git data from either local git commands or a remote server.
 pub trait GitProvider: Send + Sync + 'static {
     fn is_git_repo(&self) -> bool;
+    /// True for providers that perform mutations on the local filesystem.
+    /// Used by UI to gate destructive actions (e.g. branch switching is
+    /// disabled when this is false).
+    fn supports_mutations(&self) -> bool {
+        true
+    }
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String>;
     fn get_file_contents(&self, file_path: &str, mode: DiffMode) -> (Option<String>, Option<String>);
     fn get_diff_file_summary(&self) -> Vec<FileDiffSummary>;
     fn get_commit_graph(&self, count: usize, branch: Option<&str>) -> Vec<GraphRow>;
     fn list_branches(&self) -> Vec<String>;
+    /// List branches split into local/remote with the current branch name.
+    /// Default implementation falls back to [`list_branches`] and classifies
+    /// remote refs as anything containing a `/`.
+    fn list_branches_classified(&self) -> BranchList {
+        let all = self.list_branches();
+        let (remote, local): (Vec<String>, Vec<String>) =
+            all.into_iter().partition(|n| n.contains('/'));
+        BranchList { local, remote, current: None }
+    }
 
     // ── Mutations (Phase 1: per-file) ──────────────────────────────────────
     fn stage_file(&self, file_path: &str) -> Result<(), String>;
     fn unstage_file(&self, file_path: &str) -> Result<(), String>;
     fn discard_file(&self, file_path: &str) -> Result<(), String>;
     fn delete_file(&self, file_path: &str) -> Result<(), String>;
+
+    // ── Mutations (Phase 2: branches) ──────────────────────────────────────
+    fn checkout_local_branch(&self, _branch: &str) -> Result<(), String> {
+        Err("Branch checkout is not supported by this provider".to_string())
+    }
+    fn checkout_remote_branch(&self, _remote_branch: &str) -> Result<(), String> {
+        Err("Branch checkout is not supported by this provider".to_string())
+    }
+    fn create_and_checkout_branch(
+        &self,
+        _new_name: &str,
+        _start_point: Option<&str>,
+    ) -> Result<(), String> {
+        Err("Branch creation is not supported by this provider".to_string())
+    }
+
     /// Absolute path of a file in the working tree, used for copy-absolute-path.
     /// Returns None when the provider can't resolve it (e.g. remote without
     /// a sensible local absolute path).
@@ -57,6 +88,33 @@ impl GitProvider for LocalGitProvider {
 
     fn list_branches(&self) -> Vec<String> {
         okena_git::list_branches(std::path::Path::new(&self.path))
+    }
+
+    fn list_branches_classified(&self) -> BranchList {
+        okena_git::list_branches_classified(std::path::Path::new(&self.path))
+    }
+
+    fn checkout_local_branch(&self, branch: &str) -> Result<(), String> {
+        okena_git::checkout_local_branch(std::path::Path::new(&self.path), branch)
+            .map_err(|e| e.to_string())
+    }
+
+    fn checkout_remote_branch(&self, remote_branch: &str) -> Result<(), String> {
+        okena_git::checkout_remote_branch(std::path::Path::new(&self.path), remote_branch)
+            .map_err(|e| e.to_string())
+    }
+
+    fn create_and_checkout_branch(
+        &self,
+        new_name: &str,
+        start_point: Option<&str>,
+    ) -> Result<(), String> {
+        okena_git::create_and_checkout_branch(
+            std::path::Path::new(&self.path),
+            new_name,
+            start_point,
+        )
+        .map_err(|e| e.to_string())
     }
 
     fn stage_file(&self, file_path: &str) -> Result<(), String> {
@@ -111,6 +169,10 @@ impl RemoteGitProvider {
 impl GitProvider for RemoteGitProvider {
     fn is_git_repo(&self) -> bool {
         true
+    }
+
+    fn supports_mutations(&self) -> bool {
+        false
     }
 
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String> {

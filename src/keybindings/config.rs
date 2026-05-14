@@ -304,6 +304,14 @@ impl KeybindingConfig {
             ],
         );
 
+        bindings.insert(
+            "ShowBranchSwitcher".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-b", None),
+                KeybindingEntry::new("ctrl-shift-b", None),
+            ],
+        );
+
         Self {
             version: 1,
             bindings,

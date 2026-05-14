@@ -9,6 +9,32 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
+/// Density of the project column header.
+///
+/// `Compact` (default) packs project name and git status on a single 34px row.
+/// `Comfortable` splits into two rows — name/actions on top, git info (branch
+/// dropdown, PR badge, diff stats, ahead/behind, worktree indicator) below.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HeaderDensity {
+    #[default]
+    Compact,
+    Comfortable,
+}
+
+impl HeaderDensity {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            HeaderDensity::Compact => "Compact",
+            HeaderDensity::Comfortable => "Comfortable",
+        }
+    }
+
+    pub fn all_variants() -> &'static [HeaderDensity] {
+        &[HeaderDensity::Compact, HeaderDensity::Comfortable]
+    }
+}
+
 /// Terminal cursor shape.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CursorShape {
@@ -308,6 +334,11 @@ pub struct AppSettings {
     /// the last-used state is also the default for future opens.
     #[serde(default)]
     pub file_finder: FileFinderSettings,
+
+    /// Project column header density: compact (single row) or comfortable
+    /// (two rows with extended git info).
+    #[serde(default)]
+    pub header_density: HeaderDensity,
 }
 
 impl Default for AppSettings {
@@ -350,6 +381,7 @@ impl Default for AppSettings {
             remote_connections: Vec::new(),
             terminal_ctrl_c_copies_selection: false,
             file_finder: FileFinderSettings::default(),
+            header_density: HeaderDensity::default(),
         }
     }
 }

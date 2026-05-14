@@ -11,7 +11,7 @@ use super::{
     ShowContentSearch, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
     ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
     StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide,
-    ZoomIn, ZoomOut, EqualizeLayout,
+    ZoomIn, ZoomOut, EqualizeLayout, ShowBranchSwitcher,
 };
 
 /// Get human-readable descriptions for all actions
@@ -519,6 +519,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Equalize columns and panes to match the focused one",
             category: "Layout",
             factory: || Box::new(EqualizeLayout),
+        },
+    );
+    map.insert(
+        "ShowBranchSwitcher",
+        ActionDescription {
+            name: "Switch Git Branch",
+            description: "Open the branch switcher for the focused project",
+            category: "Git",
+            factory: || Box::new(ShowBranchSwitcher),
         },
     );
 

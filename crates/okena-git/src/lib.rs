@@ -32,8 +32,14 @@ pub use repository::{
     delete_remote_branch,
     push_branch,
     count_unpushed_commits,
+    count_ahead_behind,
     get_commit_graph,
     list_branches,
+    list_branches_classified,
+    BranchList,
+    checkout_local_branch,
+    checkout_remote_branch,
+    create_and_checkout_branch,
 };
 
 /// Validate that a git ref (branch name, commit hash, revision) doesn't look
@@ -136,6 +142,14 @@ pub struct GitStatus {
     /// Pull request info for the current branch (if any)
     #[serde(default)]
     pub pr_info: Option<PrInfo>,
+    /// Number of commits the local branch is ahead of its upstream.
+    /// `None` when there is no upstream or HEAD is detached.
+    #[serde(default)]
+    pub ahead: Option<usize>,
+    /// Number of commits the local branch is behind its upstream.
+    /// `None` when there is no upstream or HEAD is detached.
+    #[serde(default)]
+    pub behind: Option<usize>,
 }
 
 /// Per-file diff summary for popover display
@@ -269,6 +283,8 @@ pub fn warm_branch_cache(path: &Path) {
             lines_added: 0,
             lines_removed: 0,
             pr_info: None,
+            ahead: None,
+            behind: None,
         }));
     });
 }
