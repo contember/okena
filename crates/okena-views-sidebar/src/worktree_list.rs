@@ -1,13 +1,13 @@
 //! Worktree list popover — standalone overlay entity.
 //!
 //! Shows all git worktrees for a project with checkboxes to toggle sidebar visibility.
-//! Rendered at RootView level via OverlayManager, like context menus.
+//! Rendered at WindowView level via OverlayManager, like context menus.
 
 use okena_ui::overlay::CloseEvent;
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_md};
 use okena_workspace::settings::HooksConfig;
-use okena_workspace::state::Workspace;
+use okena_workspace::state::{WindowId, Workspace};
 use gpui::*;
 use gpui::prelude::*;
 
@@ -27,6 +27,13 @@ impl EventEmitter<WorktreeListPopoverEvent> for WorktreeListPopover {}
 /// Standalone worktree list popover entity.
 pub struct WorktreeListPopover {
     workspace: Entity<Workspace>,
+    focus_manager: Entity<okena_workspace::focus::FocusManager>,
+    /// Spawning window for the multi-window new-project visibility rule
+    /// (PRD user story 14): a click that adds a discovered worktree
+    /// makes the new project visible in this window only, hidden in
+    /// every other window. Threaded from the originating `WindowView`
+    /// through `OverlayManager::show_worktree_list`.
+    window_id: WindowId,
     project_id: String,
     entries: Vec<(String, String)>,
     position: Point<Pixels>,
@@ -41,9 +48,11 @@ pub struct WorktreeListPopover {
 impl WorktreeListPopover {
     pub fn new(
         workspace: Entity<Workspace>,
+        focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         position: Point<Pixels>,
         hooks: HooksConfig,
+        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
         let project_path = workspace.read(cx).project(&project_id)
@@ -55,7 +64,7 @@ impl WorktreeListPopover {
         let norm_git_root = okena_git::repository::normalize_path(&git_root);
         let entries = okena_git::repository::list_git_worktrees(&git_root);
         let focus_handle = cx.focus_handle();
-        Self { workspace, project_id, entries, position, hooks, focus_handle, norm_git_root, subdir }
+        Self { workspace, focus_manager, window_id, project_id, entries, position, hooks, focus_handle, norm_git_root, subdir }
     }
 
     /// Find a tracked worktree project by its worktree root path.
@@ -156,16 +165,22 @@ impl Render for WorktreeListPopover {
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         if is_tracked {
                             if let Some(id) = this.find_tracked_project_id(&wt_path_clone, cx) {
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.delete_project(&id, &hooks, cx);
+                                let workspace = this.workspace.clone();
+                                this.focus_manager.update(cx, |fm, cx| {
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.delete_project(fm, &id, &hooks, cx);
+                                    });
+                                    cx.notify();
                                 });
                             }
                         } else {
+                            let window_id = this.window_id;
                             this.workspace.update(cx, |ws, cx| {
                                 if let Some(new_id) = ws.add_discovered_worktree(
                                     &wt_path_clone,
                                     &branch_clone,
                                     &project_id,
+                                    window_id,
                                 ) {
                                     ws.add_to_worktree_ids(&project_id, &new_id);
                                 }

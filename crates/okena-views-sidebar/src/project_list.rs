@@ -153,8 +153,12 @@ impl Sidebar {
                             this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
                         } else {
                             this.cursor_index = None;
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                            let workspace = this.workspace.clone();
+                            this.focus_manager.update(cx, |fm, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                                });
+                                cx.notify();
                             });
                         }
                         cx.stop_propagation();
@@ -190,11 +194,12 @@ impl Sidebar {
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
+                            let window_id = this.window_id;
                             this.workspace.update(cx, |ws, cx| {
                                 if is_worktree_style {
-                                    ws.toggle_worktree_visibility(&project_id, cx);
+                                    ws.toggle_worktree_visibility(window_id, &project_id, cx);
                                 } else {
-                                    ws.toggle_project_overview_visibility(&project_id, cx);
+                                    ws.toggle_project_overview_visibility(window_id, &project_id, cx);
                                 }
                             });
                             cx.stop_propagation();
@@ -258,8 +263,12 @@ impl Sidebar {
                 let project_id = project_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                        });
+                        cx.notify();
                     });
                 }
             }));
@@ -326,8 +335,12 @@ impl Sidebar {
                 let project_id = project_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                        });
+                        cx.notify();
                     });
                 }
             }));
@@ -384,7 +397,8 @@ impl Sidebar {
         // Check if this terminal is currently focused
         let is_focused = {
             let ws = self.workspace.read(cx);
-            ws.focus_manager.focused_terminal_state().map_or(false, |ft| {
+            let fm = self.focus_manager.read(cx);
+            fm.focused_terminal_state().map_or(false, |ft| {
                 if let Some(proj) = ws.project(&project_id) {
                     proj.layout.as_ref()
                         .and_then(|l| l.find_terminal_path(&terminal_id))
@@ -422,8 +436,12 @@ impl Sidebar {
                 let terminal_id = terminal_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.focus_terminal_by_id(fm, &project_id, &terminal_id, cx);
+                        });
+                        cx.notify();
                     });
                 }
             }))
@@ -489,8 +507,14 @@ impl Sidebar {
                                     this.start_rename(project_id.clone(), terminal_id.clone(), terminal_name.clone(), window, cx);
                                 } else {
                                     this.cursor_index = None;
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
+                                    let workspace = this.workspace.clone();
+                                    let pid = project_id.clone();
+                                    let tid = terminal_id.clone();
+                                    this.focus_manager.update(cx, |fm, cx| {
+                                        workspace.update(cx, |ws, cx| {
+                                            ws.focus_terminal_by_id(fm, &pid, &tid, cx);
+                                        });
+                                        cx.notify();
                                     });
                                 }
                                 cx.stop_propagation();
@@ -666,8 +690,12 @@ impl Sidebar {
                 let project_id = project_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(Some(project_id.clone()), cx);
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project(fm, Some(project_id.clone()), cx);
+                        });
+                        cx.notify();
                     });
                 }
             }))
@@ -720,8 +748,13 @@ impl Sidebar {
                                 this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
                             } else {
                                 this.cursor_index = None;
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project(Some(project_id.clone()), cx);
+                                let workspace = this.workspace.clone();
+                                let pid = project_id.clone();
+                                this.focus_manager.update(cx, |fm, cx| {
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.set_focused_project(fm, Some(pid), cx);
+                                    });
+                                    cx.notify();
                                 });
                             }
                             cx.stop_propagation();
@@ -767,8 +800,12 @@ impl Sidebar {
                 let project_id = project_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                        });
+                        cx.notify();
                     });
                 }
             }))

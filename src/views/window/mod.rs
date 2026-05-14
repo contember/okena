@@ -18,8 +18,9 @@ use crate::views::panels::status_bar::StatusBar;
 use crate::views::panels::toast::ToastOverlay;
 use crate::views::chrome::title_bar::TitleBar;
 use crate::settings::settings;
+use crate::workspace::focus::FocusManager;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::Workspace;
+use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, Workspace};
 use gpui::*;
 use parking_lot::Mutex;
 use std::cell::RefCell;
@@ -30,9 +31,12 @@ use std::sync::Arc;
 /// Shared terminals registry for PTY event routing (re-exported from okena-terminal)
 pub use okena_terminal::TerminalsRegistry;
 
-/// Registry mapping terminal_id → WeakEntity<TerminalContent> for direct
-/// dirty notification from PTY event loop (avoids per-pane polling).
-pub type ContentPaneRegistry = Arc<Mutex<HashMap<String, WeakEntity<super::layout::terminal_pane::TerminalContent>>>>;
+/// Registry mapping `terminal_id` to every `TerminalContent` weak handle that
+/// renders that terminal. With multiple windows, the same terminal can render
+/// in N project-column instances simultaneously (one per window whose visible
+/// set includes the host project), so the PTY notify path must fan out to
+/// every live entry. Dead weaks are pruned lazily on iteration.
+pub type ContentPaneRegistry = Arc<Mutex<HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>>>;
 
 /// Global content pane registry instance.
 static CONTENT_PANE_REGISTRY: std::sync::OnceLock<ContentPaneRegistry> = std::sync::OnceLock::new();
@@ -42,8 +46,85 @@ pub fn content_pane_registry() -> &'static ContentPaneRegistry {
     CONTENT_PANE_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-/// Root view of the application
-pub struct RootView {
+/// Notify every weak entity in `weaks` via `cx.notify()`; drop dead weaks in
+/// place. Returns `true` if at least one weak was alive (so callers can tell
+/// whether any UI update was actually triggered). Generic over the target
+/// type so the same helper services the multi-window terminal fan-out and is
+/// testable without standing up a `TerminalContent`.
+pub fn notify_pane_weaks<T: 'static>(
+    weaks: &mut Vec<WeakEntity<T>>,
+    cx: &mut App,
+) -> bool {
+    let mut any_alive = false;
+    weaks.retain(|w| match w.update(cx, |_, cx| cx.notify()) {
+        Ok(_) => {
+            any_alive = true;
+            true
+        }
+        Err(_) => false,
+    });
+    any_alive
+}
+
+fn apply_initial_remote_project_visibility(
+    ws: &mut Workspace,
+    connection_id: &str,
+    prefixed_id: &str,
+    name: &str,
+    path: &str,
+    show_in_overview: bool,
+) {
+    // Apply one-shot visibility for remote creates issued from a local
+    // window. The server assigns the ID, so the pending request is consumed
+    // when the project first appears in state sync.
+    //
+    // When a pending create matches, the wire `show_in_overview` flag is
+    // intentionally IGNORED: the local spawn intent ("visible in this
+    // window, hidden everywhere else") takes precedence over the server's
+    // initial sync value. The user explicitly created the project from one
+    // window; honouring a stale server-side hidden flag would surprise
+    // them on the very first sync.
+    if let Some(spawning_window) =
+        ws.take_pending_remote_project_visibility(connection_id, name, path)
+    {
+        ws.data.add_project_hide_in_other_windows(prefixed_id, spawning_window);
+        return;
+    }
+
+    // Otherwise translate the wire-format show_in_overview flag into
+    // per-window hidden state on initial sync. Subsequent syncs hit the
+    // existing-project branch and leave the local hidden set alone.
+    if !show_in_overview {
+        ws.data.hide_project_in_all_windows(prefixed_id);
+    }
+}
+
+/// Per-window view of the application: one instance per OS window.
+///
+/// Owns the per-window UI state (sidebar, overlays, toasts, scroll handles,
+/// drag state, project columns) and addresses window-scoped state on the
+/// shared `Workspace` via its own `window_id`. The single OS window opened
+/// today hosts a `WindowView` for `WindowId::Main`; slice 05 spawns extras
+/// that mint distinct `WindowId::Extra(uuid)`s.
+pub struct WindowView {
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// view addresses (folder filter, hidden set, widths, collapse, focus
+    /// zoom). Always `WindowId::Main` in single-window runtime; slice 05
+    /// spawns extras that mint distinct `WindowId::Extra(uuid)`s and thread
+    /// them in here so each `WindowView` sees only its own per-window state.
+    window_id: WindowId,
+    /// Per-window focus state: terminal focus stack, project zoom,
+    /// fullscreen, modal context. Slice 03 of the multi-window plan moves
+    /// this off the shared `Workspace` entity onto each `WindowView` so
+    /// every window can zoom and modal-stack independently. Wrapped in
+    /// `Entity<FocusManager>` so child views (sidebar, project column,
+    /// terminal pane, layout container) can hold a handle to the same
+    /// instance and update it through `Entity::update` without needing
+    /// to route through `WindowView` first. Workspace action methods that
+    /// touched focus state (`set_focused_terminal`, `set_focused_project`,
+    /// etc.) now take `focus_manager: &mut FocusManager` as a parameter
+    /// so the focus mutation stays scoped to the window driving the action.
+    focus_manager: Entity<FocusManager>,
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
     backend: Arc<dyn TerminalBackend>,
@@ -91,23 +172,55 @@ pub struct RootView {
     /// Last-known on-disk paths per local project, used to detect renames
     /// so we can refresh cached git providers / service paths.
     last_project_paths: HashMap<String, String>,
+    /// Last observed wholesale workspace data replacement epoch.
+    last_data_replacement_epoch: u64,
 }
 
-impl RootView {
+impl WindowView {
     pub fn new(
+        window_id: WindowId,
         workspace: Entity<Workspace>,
-        request_broker: Entity<RequestBroker>,
         pty_manager: Arc<PtyManager>,
+        terminals: TerminalsRegistry,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
 
-        // Create sidebar controller from current global settings
+        // Per-window UI request broker. Each window (slice 05 onward) owns its
+        // own queue so overlay/sidebar requests stay scoped to the window that
+        // produced them; closes slice 03 acceptance criterion that per-window
+        // UI entities are constructed inside `WindowView::new` rather than
+        // passed in from the `Okena` singleton.
+        let request_broker = cx.new(|_| RequestBroker::new());
+
+        // Per-window focus state: terminal focus stack, project zoom,
+        // fullscreen, modal context. Wrapped in Entity<FocusManager> so
+        // child views (sidebar, project column, terminal pane, layout
+        // container) can hold handles and update through Entity::update.
+        let focus_manager = cx.new(|_| FocusManager::new());
+
+        // Sidebar open/closed state is per-window (persisted on WindowState).
+        // Seed SidebarController from the calling window's persisted value;
+        // fall back to the global setting for the very first launch where
+        // no per-window value exists yet.
         let app_settings = settings(cx);
-        let sidebar_ctrl = SidebarController::new(&app_settings);
+        let mut sidebar_ctrl = SidebarController::new(&app_settings);
+        if let Some(window_state) = workspace.read(cx).data().window(window_id) {
+            // Override open-state with per-window persisted value. If the
+            // controller's open flag doesn't match, toggle to flip it AND
+            // snap `animation` to the matching endpoint — toggle() returns an
+            // animation target the caller is expected to drive, but at init
+            // we want no animation, just the right starting visual.
+            if let Some(sidebar_open) = window_state.sidebar_open
+                && sidebar_ctrl.is_open() != sidebar_open
+            {
+                sidebar_ctrl.toggle();
+                sidebar_ctrl.set_animation(if sidebar_open { 1.0 } else { 0.0 });
+            }
+        }
 
         // Create sidebar entity once to preserve state
-        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), request_broker.clone(), terminals.clone(), cx));
+        let sidebar = cx.new(|cx| Sidebar::new(window_id, workspace.clone(), focus_manager.clone(), request_broker.clone(), terminals.clone(), cx));
 
         // Create title bar entity (sync initial sidebar state)
         let sidebar_initially_open = sidebar_ctrl.is_open();
@@ -119,14 +232,15 @@ impl RootView {
 
         // Create status bar entity (sync initial sidebar state)
         let workspace_for_status = workspace.clone();
+        let focus_manager_for_status = focus_manager.clone();
         let status_bar = cx.new(|cx| {
-            let mut sb = StatusBar::new(workspace_for_status, cx);
+            let mut sb = StatusBar::new(workspace_for_status, focus_manager_for_status, cx);
             sb.set_sidebar_open(sidebar_initially_open, cx);
             sb
         });
 
         // Create overlay manager
-        let overlay_manager = cx.new(|_cx| OverlayManager::new(workspace.clone(), request_broker.clone()));
+        let overlay_manager = cx.new(|_cx| OverlayManager::new(window_id, workspace.clone(), focus_manager.clone(), request_broker.clone()));
 
         // Create toast overlay
         let toast_overlay = cx.new(ToastOverlay::new);
@@ -144,12 +258,15 @@ impl RootView {
         // Create focus handle for global keybindings
         let focus_handle = cx.focus_handle();
 
+        let last_data_replacement_epoch = workspace.read(cx).data_replacement_epoch();
+
         // Wrap PtyManager in LocalBackend for the TerminalBackend trait
         let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager));
 
         // Wire up sidebar callbacks
         {
             let workspace_for_dispatch = workspace.clone();
+            let focus_manager_for_dispatch = focus_manager.clone();
             let backend_for_dispatch = backend.clone();
             let terminals_for_dispatch = terminals.clone();
             sidebar.update(cx, |s, _cx| {
@@ -157,7 +274,9 @@ impl RootView {
                 s.set_dispatch_action(Box::new(move |project_id, action, cx| {
                     if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
                         project_id,
+                        window_id,
                         &workspace_for_dispatch,
+                        &focus_manager_for_dispatch,
                         &Some(backend_for_dispatch.clone()),
                         &terminals_for_dispatch,
                         &None, // service_manager - wired later
@@ -180,6 +299,8 @@ impl RootView {
         }
 
         let mut view = Self {
+            window_id,
+            focus_manager,
             workspace,
             request_broker,
             backend,
@@ -209,13 +330,42 @@ impl RootView {
             was_project_focused: false,
             pending_center_scroll: None,
             last_project_paths: HashMap::new(),
+            last_data_replacement_epoch,
         };
 
-        // Observe workspace to scroll focused project into view
-        cx.observe(&view.workspace, |this, workspace, cx| {
-            let ws = workspace.read(cx);
-            let is_project_focused = ws.focus_manager.focused_project_id().is_some();
-            let focused_terminal_project = ws.focus_manager
+        // Slice 07 cri 7: persist OS bounds back into this window's
+        // `WindowState.os_bounds` whenever GPUI reports a bounds change
+        // (move, resize, snap, monitor switch). The setter delegates to
+        // `data.set_os_bounds` which silently no-ops on an unknown extra id
+        // (close-race contract), so a debounced bounds-observer firing on
+        // a window that's just been closed is safe. The auto-save observer
+        // in `Okena::new` debounces persistence at 500ms; this observer
+        // just bumps `data_version` per bounds change and lets the save
+        // path coalesce. Conversion mirrors the inverse path in
+        // `src/app/extras.rs::open_extra_window` (gpui `Bounds<Pixels>` ->
+        // `PersistedWindowBounds` via four `f32::from(...)` calls).
+        cx.observe_window_bounds(window, |this, window, cx| {
+            let bounds = window.window_bounds().get_bounds();
+            let persisted = PersistedWindowBounds {
+                origin_x: f32::from(bounds.origin.x),
+                origin_y: f32::from(bounds.origin.y),
+                width: f32::from(bounds.size.width),
+                height: f32::from(bounds.size.height),
+            };
+            let window_id = this.window_id;
+            this.workspace.update(cx, |ws, cx| {
+                ws.set_os_bounds(window_id, Some(persisted), cx);
+            });
+        })
+        .detach();
+
+        // Observe focus_manager to scroll focused project into view.
+        // (Workspace observers no longer fire on focus changes since
+        // focus moved off the Workspace entity in slice 03.)
+        cx.observe(&view.focus_manager, |this, fm, cx| {
+            let fm = fm.read(cx);
+            let is_project_focused = fm.focused_project_id().is_some();
+            let focused_terminal_project = fm
                 .focused_terminal_state()
                 .map(|f| f.project_id.clone());
 
@@ -231,7 +381,23 @@ impl RootView {
             }
 
             this.was_project_focused = is_project_focused;
+            cx.notify();
+        }).detach();
 
+        // Observe workspace data changes so project path renames refresh
+        // cached git providers / service paths.
+        cx.observe(&view.workspace, |this, _workspace, cx| {
+            let data_replacement_epoch = this.workspace.read(cx).data_replacement_epoch();
+            if this.last_data_replacement_epoch != data_replacement_epoch {
+                this.last_data_replacement_epoch = data_replacement_epoch;
+                this.project_columns.clear();
+                this.last_project_paths.clear();
+                this.focus_manager.update(cx, |fm, cx| {
+                    fm.clear_all();
+                    cx.notify();
+                });
+                this.sync_project_columns(cx);
+            }
             this.refresh_for_project_path_changes(cx);
         }).detach();
 
@@ -249,6 +415,28 @@ impl RootView {
         &self.terminals
     }
 
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// view addresses. Always `WindowId::Main` today (single-window runtime);
+    /// slice 05 spawns extras that mint distinct `WindowId::Extra(uuid)`s.
+    /// Field is read directly within the impl via `self.window_id`; this
+    /// public getter exists for external callers (e.g. the slice 05 spawn
+    /// flow on `Okena`) that need to address window-scoped state on
+    /// `Workspace` in the same window this view inhabits.
+    #[allow(dead_code)]
+    pub fn window_id(&self) -> WindowId {
+        self.window_id
+    }
+
+    /// Per-window focus state, owned by this WindowView. Returned as an
+    /// `Entity<FocusManager>` handle so callers (children, sibling views)
+    /// can `update`/`read` it without going through `WindowView`. Workspace
+    /// action methods that mutate focus (`set_focused_terminal`,
+    /// `set_focused_project`, etc.) take `&mut FocusManager` as a parameter,
+    /// supplied via `focus_manager.update(cx, |fm, cx| ws.method(fm, ...))`.
+    pub fn focus_manager(&self) -> Entity<FocusManager> {
+        self.focus_manager.clone()
+    }
+
     /// Set the git watcher entity (called by Okena after creation).
     pub fn set_git_watcher(&mut self, watcher: Entity<GitStatusWatcher>, cx: &mut Context<Self>) {
         self.git_watcher = Some(watcher);
@@ -261,8 +449,16 @@ impl RootView {
     pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
         // Observe remote manager and sync remote projects into workspace
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
+        let window_id = self.window_id;
         cx.observe(&manager, move |this, rm, cx| {
-            Self::sync_remote_projects_into_workspace(&workspace, &rm, cx);
+            Self::sync_remote_projects_into_workspace(
+                window_id,
+                &workspace,
+                &focus_manager,
+                &rm,
+                cx,
+            );
             this.sync_project_columns(cx);
             cx.notify();
         }).detach();
@@ -342,15 +538,19 @@ impl RootView {
     /// Rebuild the sidebar dispatch action callback with current service/remote managers.
     fn rebuild_sidebar_dispatch(&self, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
         let backend = self.backend.clone();
         let terminals = self.terminals.clone();
         let service_manager = self.service_manager.clone();
         let remote_manager = self.remote_manager.clone();
+        let window_id = self.window_id;
         self.sidebar.update(cx, |s, _cx| {
             s.set_dispatch_action(Box::new(move |project_id, action, cx| {
                 if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
                     project_id,
+                    window_id,
                     &workspace,
+                    &focus_manager,
                     &Some(backend.clone()),
                     &terminals,
                     &service_manager,
@@ -365,7 +565,9 @@ impl RootView {
 
     /// Sync remote connection state into workspace as materialized ProjectData entries.
     fn sync_remote_projects_into_workspace(
+        window_id: WindowId,
         workspace: &Entity<Workspace>,
+        focus_manager: &Entity<FocusManager>,
         rm: &Entity<RemoteConnectionManager>,
         cx: &mut Context<Self>,
     ) {
@@ -392,17 +594,6 @@ impl RootView {
         let active_conn_ids: std::collections::HashSet<String> = snapshots.iter()
             .map(|s| s.config.id.clone()).collect();
 
-        // Collect old terminal IDs for projects pending focus, so we can detect new ones after sync.
-        let old_terminal_ids: std::collections::HashMap<String, Vec<String>> = workspace.update(cx, |ws, _cx| {
-            ws.remote_sync.pending_focus().iter().filter_map(|pid| {
-                let ids = ws.project(pid)
-                    .and_then(|p| p.layout.as_ref())
-                    .map(|l| l.collect_terminal_ids())
-                    .unwrap_or_default();
-                Some((pid.clone(), ids))
-            }).collect()
-        });
-
         for snap in &snapshots {
             let conn_id = &snap.config.id;
 
@@ -427,7 +618,6 @@ impl RootView {
                                 id: prefixed_folder_id.clone(),
                                 name: sf.name.clone(),
                                 project_ids: prefixed_project_ids,
-                                collapsed: false,
                                 folder_color: sf.folder_color,
                             });
                             remote_order.push(prefixed_folder_id);
@@ -494,8 +684,8 @@ impl RootView {
                             existing.worktree_ids = api_project.worktree_ids.iter()
                                 .map(|id| format!("remote:{}:{}", conn_id, id))
                                 .collect();
-                            // Don't overwrite show_in_overview — it's client-side state
-                            // (the user may have toggled visibility locally).
+                            // Don't overwrite the local hidden set — the
+                            // user may have toggled visibility locally.
                         } else {
                             let worktree_info = api_project.worktree_info.as_ref().map(|wt| {
                                 crate::workspace::state::WorktreeMetadata {
@@ -509,11 +699,18 @@ impl RootView {
                             let worktree_ids: Vec<String> = api_project.worktree_ids.iter()
                                 .map(|id| format!("remote:{}:{}", conn_id, id))
                                 .collect();
+                            apply_initial_remote_project_visibility(
+                                ws,
+                                conn_id,
+                                &prefixed_id,
+                                &api_project.name,
+                                &api_project.path,
+                                api_project.show_in_overview,
+                            );
                             ws.data.projects.push(ProjectData {
                                 id: prefixed_id.clone(),
                                 name: api_project.name.clone(),
                                 path: api_project.path.clone(),
-                                show_in_overview: api_project.show_in_overview,
                                 layout,
                                 terminal_names,
                                 hidden_terminals: std::collections::HashMap::new(),
@@ -539,6 +736,16 @@ impl RootView {
                 // Sync remote folders and project_order into workspace
                 let remote_prefix = format!("remote:{}:", conn_id);
                 workspace.update(cx, |ws, _cx| {
+                    let next_remote_folder_ids: std::collections::HashSet<String> =
+                        remote_folders.iter().map(|f| f.id.clone()).collect();
+                    let removed_folder_ids: Vec<String> = ws.data.folders.iter()
+                        .filter(|f| f.id.starts_with(&remote_prefix) && !next_remote_folder_ids.contains(&f.id))
+                        .map(|f| f.id.clone())
+                        .collect();
+                    for folder_id in removed_folder_ids {
+                        ws.data.delete_folder_scrub_all_windows(&folder_id);
+                    }
+
                     // Remove old remote folders for this connection
                     ws.data.folders.retain(|f| !f.id.starts_with(&remote_prefix));
                     // Remove old remote entries from project_order for this connection
@@ -546,7 +753,6 @@ impl RootView {
 
                     // Add new remote folders
                     for rf in remote_folders {
-                        // Preserve collapsed state from previous sync
                         ws.data.folders.push(rf);
                     }
 
@@ -557,6 +763,21 @@ impl RootView {
                 // No state (disconnected/connecting) — remove materialized projects and folders
                 let prefix = format!("remote:{}:", conn_id);
                 workspace.update(cx, |ws, _cx| {
+                    let removed_project_ids: Vec<String> = ws.data.projects.iter()
+                        .filter(|p| p.id.starts_with(&prefix))
+                        .map(|p| p.id.clone())
+                        .collect();
+                    let removed_folder_ids: Vec<String> = ws.data.folders.iter()
+                        .filter(|f| f.id.starts_with(&prefix))
+                        .map(|f| f.id.clone())
+                        .collect();
+                    for project_id in removed_project_ids {
+                        ws.data.delete_project_scrub_all_windows(&project_id);
+                    }
+                    for folder_id in removed_folder_ids {
+                        ws.data.delete_folder_scrub_all_windows(&folder_id);
+                    }
+
                     ws.data.projects.retain(|p| !p.id.starts_with(&prefix));
                     ws.data.folders.retain(|f| !f.id.starts_with(&prefix));
                     ws.data.project_order.retain(|id| !id.starts_with(&prefix));
@@ -566,6 +787,31 @@ impl RootView {
 
         // Remove stale remote projects/folders from connections that no longer exist
         workspace.update(cx, |ws, _cx| {
+            let removed_project_ids: Vec<String> = ws.data.projects.iter()
+                .filter(|p| p.is_remote && !expected_remote_ids.contains(&p.id))
+                .map(|p| p.id.clone())
+                .collect();
+            let removed_folder_ids: Vec<String> = ws.data.folders.iter()
+                .filter(|f| {
+                    if f.id.starts_with("remote:") {
+                        // Remote folder IDs are "remote:{conn_id}:{folder_id}"
+                        // Extract conn_id (second segment)
+                        let rest = f.id.strip_prefix("remote:").unwrap_or("");
+                        let conn_id = rest.split(':').next().unwrap_or("");
+                        !active_conn_ids.contains(conn_id)
+                    } else {
+                        false
+                    }
+                })
+                .map(|f| f.id.clone())
+                .collect();
+            for project_id in removed_project_ids {
+                ws.data.delete_project_scrub_all_windows(&project_id);
+            }
+            for folder_id in removed_folder_ids {
+                ws.data.delete_folder_scrub_all_windows(&folder_id);
+            }
+
             ws.data.projects.retain(|p| {
                 if p.is_remote {
                     expected_remote_ids.contains(&p.id)
@@ -591,32 +837,34 @@ impl RootView {
         });
 
         // Focus newly appeared terminals for projects that had a pending CreateTerminal.
-        if !old_terminal_ids.is_empty() {
+        focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| {
-                let pending: Vec<String> = ws.drain_pending_remote_focus();
-                for pid in pending {
-                    let old_ids = match old_terminal_ids.get(&pid) {
-                        Some(ids) => ids,
-                        None => continue,
-                    };
+                let pending = ws.drain_pending_remote_focus(window_id);
+                for pending_focus in pending {
+                    let pid = pending_focus.project_id;
                     let new_ids = match ws.project(&pid).and_then(|p| p.layout.as_ref()) {
                         Some(layout) => layout.collect_terminal_ids(),
                         None => continue,
                     };
-                    // Find the first terminal ID that wasn't in the old set
-                    let old_set: std::collections::HashSet<&str> =
-                        old_ids.iter().map(|s| s.as_str()).collect();
+                    // Find the first terminal ID that wasn't present when the
+                    // CreateTerminal action originated in this window.
+                    let old_set: std::collections::HashSet<&str> = pending_focus
+                        .old_terminal_ids
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect();
                     if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str())) {
                         if let Some(path) = ws.project(&pid)
                             .and_then(|p| p.layout.as_ref())
                             .and_then(|l| l.find_terminal_path(new_tid))
                         {
-                            ws.set_focused_terminal(pid.clone(), path, cx);
+                            ws.set_focused_terminal(fm, pid.clone(), path, cx);
                         }
                     }
                 }
             });
-        }
+            cx.notify();
+        });
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
         workspace.update(cx, |ws, cx| {
@@ -670,7 +918,8 @@ impl RootView {
     fn sync_project_columns(&mut self, cx: &mut Context<Self>) {
         let visible_projects: Vec<(String, bool, Option<String>)> = {
             let ws = self.workspace.read(cx);
-            ws.visible_projects().iter().map(|p| {
+            let fm = self.focus_manager.read(cx);
+            ws.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| {
                 (p.id.clone(), p.is_remote, p.connection_id.clone())
             }).collect()
         };
@@ -679,15 +928,7 @@ impl RootView {
         let visible_ids: std::collections::HashSet<&str> = visible_projects.iter()
             .map(|(id, _, _)| id.as_str())
             .collect();
-        self.project_columns.retain(|id, _| {
-            // Keep local project columns even when not visible (they may become visible again)
-            // But remove remote project columns that are gone
-            if id.starts_with("remote:") {
-                visible_ids.contains(id.as_str())
-            } else {
-                true
-            }
-        });
+        self.project_columns.retain(|id, _| visible_ids.contains(id.as_str()));
 
         // Create columns for new projects
         for (project_id, is_remote, connection_id) in &visible_projects {
@@ -716,16 +957,21 @@ impl RootView {
             .and_then(|rm| rm.read(cx).backend_for(conn_id))?;
 
         let workspace_clone = self.workspace.clone();
+        let focus_manager_clone = self.focus_manager.clone();
         let request_broker_clone = self.request_broker.clone();
         let terminals_clone = self.terminals.clone();
         let active_drag_clone = self.active_drag.clone();
         let id = project_id.to_string();
         let workspace_for_dispatch = self.workspace.clone();
+        let focus_manager_for_dispatch = self.focus_manager.clone();
+        let window_id = self.window_id;
         let action_dispatcher = self.remote_manager.as_ref().map(|rm| {
             crate::action_dispatch::ActionDispatcher::Remote {
                 connection_id: conn_id.to_string(),
                 manager: rm.clone(),
                 workspace: workspace_for_dispatch,
+                focus_manager: focus_manager_for_dispatch,
+                window_id,
             }
         });
         let ws_for_observe = self.workspace.clone();
@@ -734,7 +980,9 @@ impl RootView {
 
         Some(cx.new(move |cx| {
             let mut col = ProjectColumn::new(
+                window_id,
                 workspace_clone,
+                focus_manager_clone,
                 request_broker_clone,
                 id,
                 backend,
@@ -759,12 +1007,14 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Entity<ProjectColumn> {
         let workspace_clone = self.workspace.clone();
+        let focus_manager_clone = self.focus_manager.clone();
         let request_broker_clone = self.request_broker.clone();
         let terminals_clone = self.terminals.clone();
         let active_drag_clone = self.active_drag.clone();
         let id = project_id.to_string();
         let backend_clone = self.backend.clone();
         let workspace_for_dispatch = self.workspace.clone();
+        let focus_manager_for_dispatch = self.focus_manager.clone();
         let backend_for_dispatch = self.backend.clone();
         let terminals_for_dispatch = self.terminals.clone();
         let git_watcher = self.git_watcher.clone();
@@ -780,9 +1030,12 @@ impl RootView {
             }
         };
 
+        let window_id = self.window_id;
         let entity = cx.new(move |cx| {
             let mut col = ProjectColumn::new(
+                window_id,
                 workspace_clone,
+                focus_manager_clone,
                 request_broker_clone,
                 id,
                 backend_clone,
@@ -795,9 +1048,11 @@ impl RootView {
             col.set_action_dispatcher(Some(
                 crate::action_dispatch::ActionDispatcher::Local {
                     workspace: workspace_for_dispatch,
+                    focus_manager: focus_manager_for_dispatch,
                     backend: backend_for_dispatch,
                     terminals: terminals_for_dispatch,
                     service_manager: None, // set later via set_service_manager
+                    window_id,
                 },
             ));
             col
@@ -809,4 +1064,127 @@ impl RootView {
     }
 }
 
-impl_focusable!(RootView);
+impl_focusable!(WindowView);
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_initial_remote_project_visibility, notify_pane_weaks};
+    use crate::workspace::state::{WindowId, WindowState, Workspace, WorkspaceData};
+    use gpui::AppContext as _;
+    use std::collections::HashMap;
+
+    struct Stub;
+
+    fn make_workspace() -> Workspace {
+        Workspace::new(WorkspaceData {
+            version: 1,
+            projects: Vec::new(),
+            project_order: Vec::new(),
+            folders: Vec::new(),
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        })
+    }
+
+    #[gpui::test]
+    fn fans_out_to_every_alive_weak_and_prunes_dead(cx: &mut gpui::TestAppContext) {
+        let (a, b, mut weaks) = cx.update(|cx| {
+            let a = cx.new(|_| Stub);
+            let b = cx.new(|_| Stub);
+            let weaks = vec![a.downgrade(), b.downgrade()];
+            (a, b, weaks)
+        });
+
+        cx.update(|cx| {
+            assert!(notify_pane_weaks(&mut weaks, cx));
+            assert_eq!(weaks.len(), 2, "both alive entries kept");
+        });
+
+        drop(b);
+
+        cx.update(|cx| {
+            assert!(notify_pane_weaks(&mut weaks, cx));
+            assert_eq!(weaks.len(), 1, "dead entry pruned, live entry kept");
+        });
+
+        drop(a);
+
+        cx.update(|cx| {
+            assert!(!notify_pane_weaks(&mut weaks, cx));
+            assert!(weaks.is_empty(), "all dead entries pruned");
+        });
+    }
+
+    #[test]
+    fn remote_project_initial_visibility_consumes_pending_create_window() {
+        let mut ws = make_workspace();
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        ws.data.extra_windows = vec![extra_a, extra_b];
+
+        ws.queue_pending_remote_project_visibility(
+            WindowId::Extra(extra_a_id),
+            "conn",
+            "Project",
+            Some("/repo/project"),
+        );
+        apply_initial_remote_project_visibility(
+            &mut ws,
+            "conn",
+            "remote:conn:p1",
+            "Project",
+            "/repo/project",
+            true,
+        );
+
+        assert!(ws.data.main_window.hidden_project_ids.contains("remote:conn:p1"));
+        assert!(
+            !ws.data
+                .window(WindowId::Extra(extra_a_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:conn:p1")
+        );
+        assert!(
+            ws.data
+                .window(WindowId::Extra(extra_b_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:conn:p1")
+        );
+        assert_eq!(
+            ws.take_pending_remote_project_visibility("conn", "Project", "/repo/project"),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_project_initial_visibility_without_pending_uses_wire_hidden_flag() {
+        let mut ws = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        ws.data.extra_windows = vec![extra];
+
+        apply_initial_remote_project_visibility(
+            &mut ws,
+            "conn",
+            "remote:conn:p1",
+            "Project",
+            "/repo/project",
+            false,
+        );
+
+        assert!(ws.data.main_window.hidden_project_ids.contains("remote:conn:p1"));
+        assert!(
+            ws.data
+                .window(WindowId::Extra(extra_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:conn:p1")
+        );
+    }
+}

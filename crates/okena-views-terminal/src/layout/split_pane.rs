@@ -1,7 +1,7 @@
 use crate::ActionDispatch;
 use crate::elements::resize_handle::ResizeHandle;
 use okena_files::theme::theme;
-use okena_workspace::state::{SplitDirection, Workspace};
+use okena_workspace::state::{SplitDirection, WindowId, Workspace};
 use gpui::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -76,8 +76,16 @@ pub fn new_active_drag() -> ActiveDrag {
     Rc::new(RefCell::new(None))
 }
 
-/// Helper to compute and apply resize based on mouse position
+/// Helper to compute and apply resize based on mouse position.
+///
+/// The `window_id` parameter selects which window's `project_widths` slot
+/// receives the dragged column widths in the `DragState::ProjectColumn`
+/// arm. Mirrors `render_project_divider`'s parameter-threaded shape: the
+/// caller (today `WindowView`'s mouse-move listener) passes its own
+/// `WindowView::window_id` so a drag in window N writes back to window
+/// N's per-column widths.
 pub fn compute_resize(
+    window_id: WindowId,
     mouse_pos: Point<Pixels>,
     drag_state: &DragState,
     workspace: &Entity<Workspace>,
@@ -169,11 +177,11 @@ pub fn compute_resize(
             new_widths.insert(right_id.clone(), right_new);
 
             workspace.update(cx, |ws, cx| {
-                ws.update_project_widths(new_widths, cx);
+                ws.update_project_widths(window_id, new_widths, cx);
             });
         }
         DragState::Sidebar | DragState::ServicePanel { .. } | DragState::HookPanel { .. } => {
-            // Handled directly in RootView's on_mouse_move
+            // Handled directly in WindowView's on_mouse_move
         }
     }
 }
@@ -235,8 +243,15 @@ pub fn render_split_divider<D: ActionDispatch + Send + Sync>(
     )
 }
 
-/// Render a project column divider
+/// Render a project column divider.
+///
+/// The `window_id` parameter selects which window's `project_widths` slot supplies
+/// the per-column starting widths for the drag. Today every caller passes
+/// `WindowId::Main` because the runtime is single-window; once extras land
+/// (slice 05) each caller will pass its own `WindowView::window_id` so that a
+/// drag on column N starts from the same width the user sees in that window.
 pub fn render_project_divider(
+    window_id: WindowId,
     workspace: Entity<Workspace>,
     divider_index: usize,
     project_ids: Vec<String>,
@@ -262,7 +277,7 @@ pub fn render_project_divider(
 
             let ws = workspace.read(cx);
             let initial_widths: HashMap<String, f32> = project_ids.iter()
-                .map(|id| (id.clone(), ws.get_project_width(id, num_projects)))
+                .map(|id| (id.clone(), ws.get_project_width(window_id, id, num_projects)))
                 .collect();
 
             *active_drag.borrow_mut() = Some(DragState::ProjectColumn {

@@ -24,17 +24,20 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
 
         // Refresh search results if terminal content changed (scroll, new output)
         self.search_bar.update(cx, |bar, cx| bar.refresh_if_needed(cx));
+        if self.minimized || self.detached {
+            self.deregister_resize_viewer(cx);
+        }
 
         let focus_handle = self.focus_handle.clone();
         let id_suffix = self.id_suffix();
 
         let is_modal = {
-            let ws = self.workspace.read(cx);
-            let is_modal = ws.focus_manager.is_modal();
+            let fm = self.focus_manager.read(cx);
+            let is_modal = fm.is_modal();
             let search_active = self.search_bar.read(cx).is_active();
 
             if !search_active && !is_modal {
-                if let Some(focused) = ws.focus_manager.focused_terminal_state() {
+                if let Some(focused) = fm.focused_terminal_state() {
                     if focused.project_id == self.project_id
                         && focused.layout_path == self.layout_path
                         && !focus_handle.is_focused(window)
@@ -44,7 +47,7 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                 }
 
                 if let Some(ref tid) = self.terminal_id {
-                    if ws.focus_manager.is_terminal_fullscreened(&self.project_id, tid)
+                    if fm.is_terminal_fullscreened(&self.project_id, tid)
                         && !focus_handle.is_focused(window)
                     {
                         self.pending_focus = true;
@@ -115,8 +118,14 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_terminal(this.project_id.clone(), this.layout_path.clone(), cx);
+                    let project_id = this.project_id.clone();
+                    let layout_path = this.layout_path.clone();
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_terminal(fm, project_id, layout_path, cx);
+                        });
+                        cx.notify();
                     });
                 }),
             )
@@ -162,7 +171,7 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                 this.workspace.update(cx, |ws, cx| { ws.set_terminal_zoom(&project_id, &layout_path, 1.0, cx); });
             }))
             .on_action(cx.listener(|this, _: &ToggleFullscreen, _window, cx| {
-                let is_fullscreen = this.workspace.read(cx).focus_manager.has_fullscreen();
+                let is_fullscreen = this.focus_manager.read(cx).has_fullscreen();
                 if is_fullscreen {
                     let action = ActionRequest::SetFullscreen { project_id: this.project_id.clone(), terminal_id: None };
                     if let Some(ref dispatcher) = this.action_dispatcher { dispatcher.dispatch(action, cx); }
@@ -175,7 +184,15 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| { this.handle_key(event, cx); }))
             .on_click(cx.listener(|this, _, window, cx| {
                 window.focus(&this.focus_handle, cx);
-                this.workspace.update(cx, |ws, cx| { ws.set_focused_terminal(this.project_id.clone(), this.layout_path.clone(), cx); });
+                let project_id = this.project_id.clone();
+                let layout_path = this.layout_path.clone();
+                let workspace = this.workspace.clone();
+                this.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.set_focused_terminal(fm, project_id, layout_path, cx);
+                    });
+                    cx.notify();
+                });
             }))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| { this.handle_file_drop(paths, cx); }))
             .flex()

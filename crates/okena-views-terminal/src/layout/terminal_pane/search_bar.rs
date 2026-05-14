@@ -7,6 +7,7 @@ use okena_files::theme::theme;
 use okena_ui::tokens::ui_text_md;
 use crate::simple_input::{SimpleInput, SimpleInputState};
 use okena_ui::simple_input::InputChangedEvent;
+use okena_workspace::focus::FocusManager;
 use okena_workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -23,6 +24,7 @@ impl EventEmitter<SearchBarEvent> for SearchBar {}
 
 pub struct SearchBar {
     workspace: Entity<Workspace>,
+    focus_manager: Entity<FocusManager>,
     terminal: Option<Arc<Terminal>>,
     input: Option<Entity<SimpleInputState>>,
     matches: Arc<Vec<SearchMatch>>,
@@ -34,9 +36,10 @@ pub struct SearchBar {
 }
 
 impl SearchBar {
-    pub fn new(workspace: Entity<Workspace>, _cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, focus_manager: Entity<FocusManager>, _cx: &mut Context<Self>) -> Self {
         Self {
             workspace,
+            focus_manager,
             terminal: None,
             input: None,
             matches: Arc::new(Vec::new()),
@@ -73,8 +76,10 @@ impl SearchBar {
         self.matches = Arc::new(Vec::new());
         self.current_match_index = None;
 
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_focused_terminal(cx);
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
         });
         cx.notify();
     }
@@ -85,8 +90,10 @@ impl SearchBar {
         self.matches = Arc::new(Vec::new());
         self.current_match_index = None;
 
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+            cx.notify();
         });
 
         cx.emit(SearchBarEvent::Closed);

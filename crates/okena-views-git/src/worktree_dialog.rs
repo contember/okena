@@ -8,7 +8,7 @@ use okena_ui::input::input_container;
 use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_xl};
 use crate::simple_input::{SimpleInput, SimpleInputState};
 use okena_workspace::settings::{HooksConfig, WorktreeConfig};
-use okena_workspace::state::Workspace;
+use okena_workspace::state::{WindowId, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -35,6 +35,11 @@ impl EventEmitter<WorktreeDialogEvent> for WorktreeDialog {}
 /// Dialog for creating a new worktree from a project
 pub struct WorktreeDialog {
     workspace: Entity<Workspace>,
+    /// Spawning window for the multi-window new-project visibility rule
+    /// (PRD user story 14): the new worktree is visible in this window
+    /// only, hidden in every other window. Threaded from the originating
+    /// `WindowView` through `OverlayManager::show_worktree_dialog`.
+    window_id: WindowId,
     project_id: String,
     project_path: String,
     /// The git repository root (may differ from project_path in monorepos)
@@ -66,6 +71,7 @@ impl WorktreeDialog {
         project_path: String,
         worktree_config: WorktreeConfig,
         hooks_config: HooksConfig,
+        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
         // Determine git repo root: if parent is already a worktree, use its
@@ -104,6 +110,7 @@ impl WorktreeDialog {
 
         Self {
             workspace,
+            window_id,
             project_id,
             project_path,
             git_root,
@@ -209,8 +216,9 @@ impl WorktreeDialog {
         let hooks_config = self.hooks_config.clone();
 
         // Create the worktree project
+        let window_id = self.window_id;
         let result = self.workspace.update(cx, |ws, cx| {
-            ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &project_path, create_branch, &hooks_config, cx)
+            ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &project_path, create_branch, &hooks_config, window_id, cx)
         });
 
         match result {

@@ -53,12 +53,12 @@ impl Sidebar {
         let t = theme(cx);
         let folder_id = folder.id.clone();
         let folder_name = folder.name.clone();
-        let is_collapsed = folder.collapsed;
 
         let is_renaming = is_renaming(&self.folder_rename, &folder.id);
         let ws = self.workspace.read(cx);
-        let is_active_filter = ws.active_folder_filter() == Some(&folder.id)
-            && ws.focused_project_id().is_none();
+        let is_collapsed = ws.is_folder_collapsed(self.window_id, &folder.id);
+        let is_active_filter = ws.active_folder_filter(self.window_id) == Some(&folder.id)
+            && self.focus_manager.read(cx).focused_project_id().is_none();
 
         // Folder header row
         div()
@@ -125,8 +125,13 @@ impl Sidebar {
                 let folder_id = folder_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.toggle_folder_focus(&folder_id, cx);
+                    let window_id = this.window_id;
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.toggle_folder_focus(fm, window_id, &folder_id, cx);
+                        });
+                        cx.notify();
                     });
                 }
             }))
@@ -139,8 +144,9 @@ impl Sidebar {
                 .on_click(cx.listener({
                     let folder_id = folder_id.clone();
                     move |this, _, _window, cx| {
+                        let window_id = this.window_id;
                         this.workspace.update(cx, |ws, cx| {
-                            ws.toggle_folder_collapsed(&folder_id, cx);
+                            ws.toggle_folder_collapsed(window_id, &folder_id, cx);
                         });
                         cx.stop_propagation();
                     }
@@ -184,8 +190,14 @@ impl Sidebar {
                                 this.start_folder_rename(folder_id.clone(), folder_name.clone(), window, cx);
                             } else {
                                 this.cursor_index = None;
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.toggle_folder_focus(&folder_id, cx);
+                                let window_id = this.window_id;
+                                let workspace = this.workspace.clone();
+                                let fid = folder_id.clone();
+                                this.focus_manager.update(cx, |fm, cx| {
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.toggle_folder_focus(fm, window_id, &fid, cx);
+                                    });
+                                    cx.notify();
                                 });
                             }
                             cx.stop_propagation();
@@ -317,8 +329,12 @@ impl Sidebar {
                 let project_id = project_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                        });
+                        cx.notify();
                     });
                 }
             }))
@@ -377,8 +393,13 @@ impl Sidebar {
                                 this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
                             } else {
                                 this.cursor_index = None;
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                                let workspace = this.workspace.clone();
+                                let pid = project_id.clone();
+                                this.focus_manager.update(cx, |fm, cx| {
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.set_focused_project_individual(fm, Some(pid), cx);
+                                    });
+                                    cx.notify();
                                 });
                             }
                             cx.stop_propagation();
@@ -399,8 +420,9 @@ impl Sidebar {
                 .on_click(cx.listener({
                     let project_id = project_id.clone();
                     move |this, _, _window, cx| {
+                        let window_id = this.window_id;
                         this.workspace.update(cx, |ws, cx| {
-                            ws.toggle_project_overview_visibility(&project_id, cx);
+                            ws.toggle_project_overview_visibility(window_id, &project_id, cx);
                         });
                         cx.stop_propagation();
                     }

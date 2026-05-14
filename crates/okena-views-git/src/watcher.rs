@@ -94,12 +94,20 @@ impl GitStatusWatcher {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut cycle: u64 = 0;
             loop {
-                // Collect locally visible + remotely subscribed non-remote projects
+                // Collect locally visible + remotely subscribed non-remote projects.
+                //
+                // Multi-window: previously we restricted to main's visible set,
+                // but a project may be shown ONLY in an extra (per PRD rule
+                // 3b-ii, new projects added from window N are hidden in all
+                // other windows including main). Polling only main's visible
+                // projects left those extras without branch / diff-stat data.
+                // Poll the full local project list — git status is fast and
+                // bounded, and any window that ever surfaces a project gets
+                // its data.
                 let projects: Vec<(String, String)> = cx.update(|cx| {
                     let ws = workspace.read(cx);
 
-                    // Start with locally visible projects
-                    let mut project_ids: HashSet<String> = ws.visible_projects()
+                    let mut project_ids: HashSet<String> = ws.projects()
                         .iter()
                         .filter(|p| !p.is_remote)
                         .map(|p| p.id.clone())

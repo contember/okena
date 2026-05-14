@@ -1,5 +1,6 @@
 //! Terminal and tab close operations.
 
+use crate::focus::FocusManager;
 use crate::state::{LayoutNode, Workspace};
 use gpui::*;
 
@@ -64,12 +65,12 @@ impl Workspace {
 
     /// Close a terminal and focus its sibling (reverse of splitting).
     /// Returns the terminal IDs that were removed from the layout.
-    pub fn close_terminal_and_focus_sibling(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) -> Vec<String> {
+    pub fn close_terminal_and_focus_sibling(&mut self, focus_manager: &mut FocusManager, project_id: &str, path: &[usize], cx: &mut Context<Self>) -> Vec<String> {
         if path.is_empty() {
             // Closing root - remove layout (project becomes bookmark)
             let removed = self.close_terminal(project_id, path, cx);
             // Clear focused terminal since there's nothing to focus
-            self.focus_manager.clear_focus();
+            focus_manager.clear_focus();
             return removed;
         }
 
@@ -130,7 +131,7 @@ impl Workspace {
 
         // Focus the sibling
         if let Some(focus_path) = focus_path {
-            self.set_focused_terminal(project_id.to_string(), focus_path, cx);
+            self.set_focused_terminal(focus_manager, project_id.to_string(), focus_path, cx);
         }
 
         removed

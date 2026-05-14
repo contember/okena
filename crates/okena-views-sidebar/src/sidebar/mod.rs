@@ -12,6 +12,9 @@ mod render;
 mod renames;
 mod worktree;
 
+#[cfg(test)]
+mod from_project_test;
+
 use okena_core::api::ActionRequest;
 use okena_core::client::{ConnectionStatus, RemoteConnectionConfig};
 use okena_core::theme::FolderColor;
@@ -22,7 +25,7 @@ use okena_ui::rename_state::RenameState;
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_xl};
 use okena_workspace::request_broker::RequestBroker;
-use okena_workspace::state::{FolderData, ProjectData, Workspace};
+use okena_workspace::state::{FolderData, ProjectData, WindowId, Workspace};
 use gpui::*;
 use gpui_component::h_flex;
 use std::collections::{HashMap, HashSet};
@@ -95,7 +98,18 @@ pub enum SidebarCursorItem {
 
 /// Sidebar view with project and terminal list
 pub struct Sidebar {
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// sidebar addresses (folder filter, hidden set, widths, collapse, focus
+    /// zoom). Today every reader of window-scoped state inside this entity's
+    /// impl still passes the literal `WindowId::Main` at the call site;
+    /// subsequent slice 03 commits migrate those readers (cursor.rs, mod.rs,
+    /// folder_list.rs, project_list.rs -- all `impl Sidebar`) to route
+    /// through `self.window_id`. Slice 05 then spawns extra windows that
+    /// mint `WindowId::Extra(uuid)` and thread it in here so each `Sidebar`
+    /// sees only its own per-window state.
+    pub(crate) window_id: WindowId,
     pub(crate) workspace: Entity<Workspace>,
+    pub(crate) focus_manager: Entity<okena_workspace::focus::FocusManager>,
     pub request_broker: Entity<RequestBroker>,
     pub(crate) expanded_projects: HashSet<String>,
     /// Projects whose worktree children list is collapsed.
@@ -147,7 +161,7 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    pub fn new(workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
+    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, focus_manager: Entity<okena_workspace::focus::FocusManager>, request_broker: Entity<RequestBroker>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
         // Observe RequestBroker to drain sidebar requests outside of render().
         // Requests are stored in pending_sidebar_requests and applied in render()
         // where Window access is available (needed for focus/rename).
@@ -166,7 +180,9 @@ impl Sidebar {
         // longer auto-expand the sidebar project when hooks appear.
 
         Self {
+            window_id,
             workspace,
+            focus_manager,
             request_broker,
             expanded_projects: HashSet::new(),
             collapsed_worktrees: HashSet::new(),
@@ -192,6 +208,22 @@ impl Sidebar {
             send_remote_action: None,
             get_remote_folder: None,
         }
+    }
+
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// sidebar addresses. Always `WindowId::Main` today (single-window
+    /// runtime); slice 05 spawns extras that mint distinct
+    /// `WindowId::Extra(uuid)`s. Field is read directly within the impl via
+    /// `self.window_id`; this public getter exists for external callers
+    /// (e.g. the slice 05 spawn flow on `Okena`) that need to address
+    /// window-scoped state on `Workspace` in the same window this sidebar
+    /// inhabits. Note: the dead_code lint tracks fields and methods as
+    /// separate items, so a future runtime read of `self.window_id` does
+    /// NOT mark this getter as used; the attribute stays until an external
+    /// caller of the getter lands.
+    #[allow(dead_code)]
+    pub fn window_id(&self) -> WindowId {
+        self.window_id
     }
 
     /// Set the dispatch action callback.
@@ -294,7 +326,7 @@ impl Sidebar {
         self.folder_click_detector.check(folder_id.to_string())
     }
 
-    /// Public accessor for the focus handle (used by RootView for FocusSidebar)
+    /// Public accessor for the focus handle (used by WindowView for FocusSidebar)
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
     }
@@ -394,6 +426,8 @@ impl Sidebar {
     pub(super) fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace_entity = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
+        let window_id = self.window_id;
 
         div()
             .h(px(28.0))
@@ -405,9 +439,12 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .id("projects-header")
             .on_click(move |_, _window, cx| {
-                workspace_entity.update(cx, |ws, cx| {
-                    ws.set_focused_project(None, cx);
-                    ws.set_folder_filter(None, cx);
+                focus_manager.update(cx, |fm, cx| {
+                    workspace_entity.update(cx, |ws, cx| {
+                        ws.set_focused_project(fm, None, cx);
+                        ws.set_folder_filter(window_id, None, cx);
+                    });
+                    cx.notify();
                 });
             })
             .child(
@@ -476,7 +513,14 @@ pub struct SidebarProjectInfo {
 }
 
 impl SidebarProjectInfo {
-    pub(crate) fn from_project(project: &ProjectData) -> Self {
+    /// Build a sidebar projection of a project.
+    ///
+    /// `show_in_overview` on the projection is derived from
+    /// `workspace.is_project_hidden(window_id, &project.id)` (the per-window
+    /// viewport model — each window has its own `hidden_project_ids`). The
+    /// `window_id` is the id of the window that owns the sidebar instance
+    /// rendering this projection.
+    pub(crate) fn from_project(project: &ProjectData, workspace: &Workspace, window_id: WindowId) -> Self {
         let layout = project.layout.as_ref();
         // For worktree projects, show the git branch instead of the stored name.
         let name = if project.worktree_info.is_some() {
@@ -489,7 +533,7 @@ impl SidebarProjectInfo {
         Self {
             id: project.id.clone(),
             name,
-            show_in_overview: project.show_in_overview,
+            show_in_overview: !workspace.is_project_hidden(window_id, &project.id),
             folder_color: project.folder_color,
             has_layout: layout.is_some(),
             terminal_ids: layout

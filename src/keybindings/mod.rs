@@ -13,7 +13,7 @@ pub use descriptions::get_action_descriptions;
 #[allow(unused_imports)]
 pub use types::{ActionDescription, KeybindingConflict, KeybindingEntry};
 
-// App-level actions (handled by root view, overlay manager, sidebar)
+// App-level actions (handled by window view, overlay manager, sidebar)
 actions!(
     okena,
     [
@@ -26,6 +26,7 @@ actions!(
         NewProject,
         CreateWorktree,
         ClearFocus,
+        CloseWindow,
         FocusActiveProject,
         ScrollUp,
         ScrollDown,
@@ -48,6 +49,7 @@ actions!(
         StopAllServices,
         ShowHookLog,
         EqualizeLayout,
+        NewWindow,
     ]
 );
 
@@ -320,6 +322,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "StartAllServices" => Some(KeyBinding::new(keystroke, StartAllServices, context)),
         "StopAllServices" => Some(KeyBinding::new(keystroke, StopAllServices, context)),
         "EqualizeLayout" => Some(KeyBinding::new(keystroke, EqualizeLayout, context)),
+        "NewWindow" => Some(KeyBinding::new(keystroke, NewWindow, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

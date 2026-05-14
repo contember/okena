@@ -16,7 +16,7 @@ impl Sidebar {
             return;
         }
         // Try to place cursor on the focused project
-        let focused_id = self.workspace.read(cx).focused_project_id().cloned();
+        let focused_id = self.focus_manager.read(cx).focused_project_id().cloned();
         if let Some(ref focused_id) = focused_id {
             if let Some(pos) = items.iter().position(|item| match item {
                 SidebarCursorItem::Project { project_id } |
@@ -90,7 +90,7 @@ impl Sidebar {
             if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
                 cursor_items.push(SidebarCursorItem::Folder { folder_id: folder.id.clone() });
 
-                if !folder.collapsed {
+                if !workspace.is_folder_collapsed(self.window_id, &folder.id) {
                     for pid in &folder.project_ids {
                         if let Some(&project) = all_projects.get(pid.as_str()) {
                             // Skip worktree children that have a parent in the project list
@@ -299,13 +299,20 @@ impl Sidebar {
             SidebarCursorItem::Project { project_id } => {
                 // Project may be a group header (has worktrees) → non-individual focus
                 let has_worktrees = !self.workspace.read(cx).worktree_child_ids(&project_id).is_empty();
+                let workspace = self.workspace.clone();
                 if has_worktrees {
-                    self.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(Some(project_id.clone()), cx);
+                    self.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project(fm, Some(project_id.clone()), cx);
+                        });
+                        cx.notify();
                     });
                 } else {
-                    self.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                    self.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                        });
+                        cx.notify();
                     });
                 }
                 self.cursor_index = None;
@@ -315,8 +322,12 @@ impl Sidebar {
                 self.saved_focus = None;
             }
             SidebarCursorItem::WorktreeProject { project_id } => {
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                let workspace = self.workspace.clone();
+                self.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                    });
+                    cx.notify();
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -325,8 +336,12 @@ impl Sidebar {
                 self.saved_focus = None;
             }
             SidebarCursorItem::Terminal { project_id, terminal_id } => {
-                self.workspace.update(cx, |ws, cx| {
-                    ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
+                let workspace = self.workspace.clone();
+                self.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.focus_terminal_by_id(fm, &project_id, &terminal_id, cx);
+                    });
+                    cx.notify();
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -335,8 +350,9 @@ impl Sidebar {
                 self.saved_focus = None;
             }
             SidebarCursorItem::Folder { folder_id } => {
+                let window_id = self.window_id;
                 self.workspace.update(cx, |ws, cx| {
-                    ws.toggle_folder_collapsed(&folder_id, cx);
+                    ws.toggle_folder_collapsed(window_id, &folder_id, cx);
                 });
             }
             SidebarCursorItem::GroupHeader { project_id, group } => {
@@ -370,8 +386,12 @@ impl Sidebar {
             }
             SidebarCursorItem::RemoteProject { project_id, .. } => {
                 // Remote projects are now materialized in workspace, use unified focus
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                let workspace = self.workspace.clone();
+                self.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                    });
+                    cx.notify();
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -380,8 +400,12 @@ impl Sidebar {
                 self.saved_focus = None;
             }
             SidebarCursorItem::Hook { project_id, terminal_id } => {
-                self.workspace.update(cx, |ws, cx| {
-                    ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
+                let workspace = self.workspace.clone();
+                self.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.focus_terminal_by_id(fm, &project_id, &terminal_id, cx);
+                    });
+                    cx.notify();
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -401,8 +425,9 @@ impl Sidebar {
 
         match item.clone() {
             SidebarCursorItem::Folder { folder_id } => {
+                let window_id = self.window_id;
                 self.workspace.update(cx, |ws, cx| {
-                    ws.toggle_folder_collapsed(&folder_id, cx);
+                    ws.toggle_folder_collapsed(window_id, &folder_id, cx);
                 });
             }
             SidebarCursorItem::Project { project_id } => {

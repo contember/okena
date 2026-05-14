@@ -8,9 +8,9 @@ use super::observe_project_services;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
-use crate::views::root::TerminalsRegistry;
+use crate::views::window::TerminalsRegistry;
 use crate::workspace::persistence;
-use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
+use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
 use okena_core::api::ApiGitStatus;
@@ -23,7 +23,7 @@ use tokio::sync::watch as tokio_watch;
 
 use crate::terminal::backend::LocalBackend;
 
-use super::remote_commands::remote_command_loop;
+use super::remote_commands::{remote_command_loop, FocusManagerResolver};
 
 /// Headless application entity — runs workspace, PTY management, and remote
 /// server without any GUI windows. Used when running over SSH or on machines
@@ -86,13 +86,20 @@ impl HeadlessApp {
 
                 if save_pending.swap(false, Ordering::Relaxed) {
                     let (data, version) = cx.update(|cx| {
+                        let _slow = okena_core::timing::SlowGuard::new("workspace_save_clone");
                         let ws = workspace.read(cx);
                         (ws.data().clone(), ws.data_version())
                     });
-                    if let Err(e) = smol::unblock(move || persistence::save_workspace(&data)).await {
-                        log::error!("Failed to save workspace: {}", e);
+                    let save_result =
+                        smol::unblock(move || persistence::save_workspace(&data)).await;
+                    match save_result {
+                        Ok(()) => {
+                            last_saved.store(version, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to save workspace: {}", e);
+                        }
                     }
-                    last_saved.store(version, Ordering::Relaxed);
                 }
             })
             .detach();
@@ -201,6 +208,18 @@ impl HeadlessApp {
         // Start remote command bridge loop (shared with GUI)
         let local_backend: Arc<dyn TerminalBackend> =
             Arc::new(LocalBackend::new(pty_manager));
+        // Headless mode has no GUI window. Provide a standalone FocusManager
+        // so remote action methods that take `&mut FocusManager` still
+        // compile -- in headless the focus state never drives a render so it
+        // is effectively dormant. The bridge loop's resolver is constant in
+        // headless: there's no focused window to consult, so it always
+        // returns the same dormant FocusManager paired with WindowId::Main
+        // (per-window data mutations land on the always-present main slot).
+        let focus_manager = cx.new(|_| crate::workspace::focus::FocusManager::new());
+        let focus_manager_for_resolver = focus_manager.clone();
+        let focus_manager_resolver: FocusManagerResolver = Arc::new(move |_cx: &gpui::App| {
+            (WindowId::Main, focus_manager_for_resolver.clone())
+        });
         cx.spawn({
             let workspace = workspace.clone();
             let terminals = terminals.clone();
@@ -209,7 +228,7 @@ impl HeadlessApp {
             let service_manager = service_manager.clone();
             async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
                 remote_command_loop(
-                    bridge_rx, local_backend, workspace, terminals,
+                    bridge_rx, local_backend, workspace, focus_manager_resolver, terminals,
                     state_version, git_status_tx, service_manager, cx,
                 ).await;
             }

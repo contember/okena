@@ -13,12 +13,13 @@ use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
     modal_header, search_input_area, ListOverlayAction, ListOverlayConfig, ListOverlayState,
 };
-use crate::workspace::state::{ProjectData, Workspace};
+use crate::workspace::state::{ProjectData, WindowId, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use okena_ui::empty_state::empty_state;
 use okena_ui::selectable_list::selectable_list_item;
+use std::collections::HashSet;
 
 /// Events emitted by the ProjectSwitcher overlay.
 #[derive(Clone)]
@@ -37,10 +38,13 @@ impl EventEmitter<ProjectSwitcherEvent> for ProjectSwitcher {}
 pub struct ProjectSwitcher {
     focus_handle: FocusHandle,
     state: ListOverlayState<ProjectData>,
+    /// Snapshot of `main_window.hidden_project_ids` taken at construction
+    /// time. The visibility eye-icon derives from membership here.
+    hidden_project_ids: HashSet<String>,
 }
 
 impl ProjectSwitcher {
-    pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         // Get all projects from workspace, sorted by recency, with effective colors resolved
         let ws = workspace.read(cx);
         let projects: Vec<ProjectData> = ws
@@ -52,6 +56,15 @@ impl ProjectSwitcher {
                 p
             })
             .collect();
+        // Snapshot the calling window's hidden set (falling back to main if the
+        // targeted extra has been dropped). The eye-icon in the row reflects
+        // visibility in THIS window, not main.
+        let hidden_project_ids = ws
+            .data()
+            .window(window_id)
+            .unwrap_or(&ws.data().main_window)
+            .hidden_project_ids
+            .clone();
 
         let config = ListOverlayConfig::new("Switch Project")
             .subtitle("Type to search, Enter to focus, Space to toggle visibility")
@@ -71,6 +84,7 @@ impl ProjectSwitcher {
         Self {
             focus_handle,
             state,
+            hidden_project_ids,
         }
     }
 
@@ -106,7 +120,7 @@ impl ProjectSwitcher {
         let is_selected = display_index == self.state.selected_index;
         let name = project.name.clone();
         let path = project.path.clone();
-        let show_in_overview = project.show_in_overview;
+        let show_in_overview = project_visibility(project, &self.hidden_project_ids);
         let is_worktree = project.worktree_info.is_some();
         let folder_color = t.get_folder_color(project.folder_color);
         let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
@@ -240,6 +254,12 @@ fn ranked_project_filter(items: &[ProjectData], query: &str) -> Vec<FilterResult
         .into_iter()
         .map(|(index, _)| FilterResult::new(index))
         .collect()
+}
+
+/// Pure visibility projection for the eye-icon column. A project is
+/// "shown in overview" iff it is absent from the per-window hidden set.
+fn project_visibility(project: &ProjectData, hidden_project_ids: &HashSet<String>) -> bool {
+    !hidden_project_ids.contains(&project.id)
 }
 
 fn project_match_score(project: &ProjectData, query: &str) -> Option<i32> {
@@ -411,19 +431,18 @@ impl_focusable!(ProjectSwitcher);
 
 #[cfg(test)]
 mod tests {
-    use super::{project_match_score, ranked_project_filter};
+    use super::{project_match_score, project_visibility, ranked_project_filter};
     use crate::terminal::shell_config::ShellType;
     use crate::theme::FolderColor;
     use crate::workspace::settings::HooksConfig;
     use crate::workspace::state::{HookTerminalEntry, LayoutNode, ProjectData, WorktreeMetadata};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn make_project(name: &str, path: &str) -> ProjectData {
         ProjectData {
             id: name.to_string(),
             name: name.to_string(),
             path: path.to_string(),
-            show_in_overview: true,
             layout: None::<LayoutNode>,
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -459,6 +478,25 @@ mod tests {
         let shallow_score = project_match_score(&shallow, "roj").unwrap();
 
         assert!(nested_score > shallow_score);
+    }
+
+    /// Regression: visibility indicator must derive from the per-window
+    /// hidden set. With the legacy `ProjectData.show_in_overview` field
+    /// removed entirely, this test pins the post-deletion contract.
+    #[test]
+    fn project_visibility_reads_from_hidden_set() {
+        let project = make_project("p1", "/p1");
+        let hidden: HashSet<String> = ["p1".to_string()].into_iter().collect();
+        assert!(
+            !project_visibility(&project, &hidden),
+            "membership in hidden set must read as not-visible",
+        );
+
+        let other = make_project("p2", "/p2");
+        assert!(
+            project_visibility(&other, &hidden),
+            "absent from hidden set must read as visible",
+        );
     }
 
     #[test]

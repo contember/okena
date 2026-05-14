@@ -1,10 +1,11 @@
 use crate::theme::theme;
 use crate::views::layout::navigation::PaneMap;
+use crate::workspace::focus::FocusManager;
 use crate::workspace::state::Workspace;
 use crate::ui::tokens::ui_text;
 use gpui::*;
 
-use super::RootView;
+use super::WindowView;
 
 /// Labels for pane indices: 0-9 then a-z (up to 36 panes).
 const PANE_LABELS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
@@ -34,12 +35,13 @@ fn pane_label(index: usize) -> String {
 pub(super) struct PaneSwitcher {
     focus_handle: FocusHandle,
     workspace: Entity<Workspace>,
+    focus_manager: Entity<FocusManager>,
     /// Pane info: (project_id, layout_path, bounds) sorted by reading order
     panes: Vec<(String, Vec<usize>, Bounds<Pixels>)>,
 }
 
 impl PaneSwitcher {
-    pub fn new(workspace: Entity<Workspace>, pane_map: &PaneMap, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, focus_manager: Entity<FocusManager>, pane_map: &PaneMap, cx: &mut Context<Self>) -> Self {
         let panes = pane_map
             .sorted_by_reading_order()
             .into_iter()
@@ -50,6 +52,7 @@ impl PaneSwitcher {
         Self {
             focus_handle: cx.focus_handle(),
             workspace,
+            focus_manager,
             panes,
         }
     }
@@ -112,12 +115,14 @@ impl Render for PaneSwitcher {
                 // Try to map key to pane index (0-9, a-z)
                 if let Some(index) = key_to_pane_index(key) {
                     if let Some((project_id, layout_path, _)) = this.panes.get(index) {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.set_focused_terminal(
-                                project_id.clone(),
-                                layout_path.clone(),
-                                cx,
-                            );
+                        let pid = project_id.clone();
+                        let lp = layout_path.clone();
+                        let workspace = this.workspace.clone();
+                        this.focus_manager.update(cx, |fm, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.set_focused_terminal(fm, pid, lp, cx);
+                            });
+                            cx.notify();
                         });
                         cx.emit(PaneSwitcherEvent::Close);
                         return;
@@ -143,23 +148,32 @@ pub(super) enum PaneSwitcherEvent {
 
 impl EventEmitter<PaneSwitcherEvent> for PaneSwitcher {}
 
-// === RootView integration ===
+// === WindowView integration ===
 
-impl RootView {
+impl WindowView {
     /// Create and show the pane switcher overlay entity.
     pub(super) fn show_pane_switcher(&mut self, pane_map: PaneMap, cx: &mut Context<Self>) {
         // Clear terminal focus so TerminalPane doesn't steal focus from the overlay
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
+        });
 
         let workspace = self.workspace.clone();
-        let entity = cx.new(|cx| PaneSwitcher::new(workspace, &pane_map, cx));
+        let focus_manager = self.focus_manager.clone();
+        let entity = cx.new(|cx| PaneSwitcher::new(workspace, focus_manager, &pane_map, cx));
 
         cx.subscribe(&entity, |this, _, event: &PaneSwitcherEvent, cx| {
             match event {
                 PaneSwitcherEvent::Close => {
                     this.pane_switch_active = false;
                     this.pane_switcher_entity = None;
-                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+                        cx.notify();
+                    });
                     cx.notify();
                 }
             }

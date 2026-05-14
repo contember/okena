@@ -1,5 +1,6 @@
 mod detached_overlays;
 mod detached_terminals;
+mod extras;
 pub mod headless;
 mod remote_commands;
 
@@ -18,10 +19,9 @@ use crate::settings::{GlobalSettings, settings};
 use crate::views::panels::toast::ToastManager;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_ext_claude::resolve_claude_dir;
-use crate::views::root::{RootView, TerminalsRegistry};
+use crate::views::window::{TerminalsRegistry, WindowView};
 use crate::workspace::persistence;
-use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
+use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
 use okena_core::api::ApiGitStatus;
@@ -107,10 +107,26 @@ fn sync_services(
 
 /// Main application state and view
 pub struct Okena {
-    root_view: Entity<RootView>,
+    /// The single, always-present main window. Closing it quits the app
+    /// (per the multi-window PRD's main-is-special invariant).
+    main_window: Entity<WindowView>,
+    /// OS window handle of the main window. Captured from `window.window_handle()`
+    /// in `Okena::new`'s `cx.open_window` build closure (see main.rs). Used by
+    /// the remote-bridge command loop to resolve actions to the focused
+    /// window's per-window `FocusManager` per PRD cri 13.
+    pub(super) main_window_handle: AnyWindowHandle,
+    /// Ephemeral extras spawned at runtime, keyed by `WindowId::Extra(uuid)`.
+    /// Populated by the workspace observer in `handle_extra_windows_changed`
+    /// when `WorkspaceData.extra_windows` gains a new entry; the matching
+    /// `Entity<WindowView>` is created and inserted as part of the
+    /// `cx.open_window` build closure (see `extras.rs`).
+    extra_windows: HashMap<WindowId, Entity<WindowView>>,
+    /// OS window handles for extras, keyed by `WindowId::Extra(uuid)`. Populated
+    /// alongside `extra_windows` in `extras.rs::open_extra_window`. Same
+    /// purpose as `main_window_handle` — focused-window resolution at the
+    /// remote-bridge boundary (PRD cri 13).
+    pub(super) extra_window_handles: HashMap<WindowId, AnyWindowHandle>,
     pub(crate) workspace: Entity<Workspace>,
-    #[allow(dead_code)]
-    request_broker: Entity<RequestBroker>,
     pub(crate) pty_manager: Arc<PtyManager>,
     pub(crate) terminals: TerminalsRegistry,
     /// Track which detached windows we've already opened
@@ -139,6 +155,10 @@ pub struct Okena {
     force_remote: bool,
     /// Service manager for project-scoped background processes
     service_manager: Entity<ServiceManager>,
+    /// Remote connection manager. Held so extras spawned at runtime can
+    /// be wired with the same singleton main was wired with at startup
+    /// (`open_extra_window` calls `set_remote_manager` on the new view).
+    remote_manager: Entity<RemoteConnectionManager>,
 }
 
 impl Okena {
@@ -159,9 +179,6 @@ impl Okena {
         // Create workspace entity
         let workspace = cx.new(|_cx| Workspace::new(workspace_data));
         cx.set_global(GlobalWorkspace(workspace.clone()));
-
-        // Create request broker entity (decoupled UI request routing)
-        let request_broker = cx.new(|_| RequestBroker::new());
 
         // Shared flag for debounced save
         let save_pending = Arc::new(AtomicBool::new(false));
@@ -214,15 +231,21 @@ impl Okena {
         })
         .detach();
 
-        // Create root view (get terminals registry from it)
-        let pty_manager_clone = pty_manager.clone();
-        let request_broker_clone = request_broker.clone();
-        let root_view = cx.new(|cx| {
-            RootView::new(workspace.clone(), request_broker_clone, pty_manager_clone, cx)
-        });
+        // Shared terminals registry — one per Okena instance, threaded into
+        // every WindowView (main + extras). Each TerminalPane looks up the
+        // existing Arc<Terminal> for its terminal_id from this registry; if
+        // each window had its own registry, an extra rendering a project
+        // already shown in main would create a NEW Terminal model and PTY
+        // bytes (which feed the original Arc<Terminal>) would never reach
+        // the extra's content pane.
+        let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
 
-        // Get terminals registry from root view
-        let terminals = root_view.read(cx).terminals().clone();
+        // Create the main window's per-window view, sharing the registry.
+        let pty_manager_clone = pty_manager.clone();
+        let terminals_for_main = terminals.clone();
+        let main_window = cx.new(|cx| {
+            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, terminals_for_main, window, cx)
+        });
 
         // Create service manager for project-scoped background processes
         let local_backend_for_services: Arc<dyn crate::terminal::backend::TerminalBackend> =
@@ -230,7 +253,7 @@ impl Okena {
         let service_manager = cx.new(|_cx| {
             ServiceManager::new(local_backend_for_services.clone(), terminals.clone())
         });
-        root_view.update(cx, |rv, cx| {
+        main_window.update(cx, |rv, cx| {
             rv.set_service_manager(service_manager.clone(), cx);
         });
 
@@ -240,11 +263,11 @@ impl Okena {
             terminals.clone(),
         ));
 
-        // Create remote connection manager and wire to root view
+        // Create remote connection manager and wire to main window
         let remote_manager = cx.new(|cx| {
             RemoteConnectionManager::new(terminals.clone(), cx)
         });
-        root_view.update(cx, |rv, cx| {
+        main_window.update(cx, |rv, cx| {
             rv.set_remote_manager(remote_manager.clone(), cx);
         });
         // Auto-connect to saved connections with valid tokens
@@ -278,8 +301,8 @@ impl Okena {
             |cx| WorktreeSyncWatcher::new(workspace, cx)
         });
 
-        // Pass git_watcher to root view so ProjectColumns can observe it
-        root_view.update(cx, |rv, cx| {
+        // Pass git_watcher to main window so ProjectColumns can observe it
+        main_window.update(cx, |rv, cx| {
             rv.set_git_watcher(git_watcher.clone(), cx);
         });
 
@@ -303,10 +326,14 @@ impl Okena {
         // Create bridge channel and start command loop
         let (bridge_tx, bridge_rx) = bridge::bridge_channel();
 
+        let main_window_handle = window.window_handle();
+
         let mut manager = Self {
-            root_view,
+            main_window,
+            main_window_handle,
+            extra_windows: HashMap::new(),
+            extra_window_handles: HashMap::new(),
             workspace: workspace.clone(),
-            request_broker,
             pty_manager,
             terminals,
             opened_detached_windows: HashSet::new(),
@@ -324,6 +351,7 @@ impl Okena {
             listen_addr,
             force_remote,
             service_manager: service_manager.clone(),
+            remote_manager: remote_manager.clone(),
         };
 
         // Propagate claude config dir to spawned PTYs so `claude` CLI invocations inside
@@ -359,6 +387,59 @@ impl Okena {
         // Set up observer for detached terminals
         cx.observe(&workspace, move |this, workspace, cx| {
             this.handle_detached_terminals_changed(workspace, cx);
+        })
+        .detach();
+
+        // Open an OS window per fresh `WorkspaceData.extra_windows` entry —
+        // slice 05 keystone. The data-layer `Workspace::spawn_extra_window`
+        // mutation push fires this observer; the diff against
+        // `Okena.extra_windows` is the spawn signal.
+        cx.observe(&workspace, |this, _workspace, cx| {
+            this.handle_extra_windows_changed(cx);
+        })
+        .detach();
+
+        // Scrub stale focus across every window's FocusManager on each
+        // workspace change. Deleting a project from one window can leave
+        // another window's focus pointing at a now-gone project; without
+        // this, the orphaned window renders a ghost zoom of the deleted
+        // project (or worse, panics on missing data).
+        cx.observe(&workspace, |this, workspace, cx| {
+            let valid_ids: HashSet<String> = workspace
+                .read(cx)
+                .projects()
+                .iter()
+                .map(|p| p.id.clone())
+                .collect();
+            let mut fms: Vec<Entity<crate::workspace::focus::FocusManager>> = Vec::with_capacity(1 + this.extra_windows.len());
+            fms.push(this.main_window.read(cx).focus_manager());
+            for view in this.extra_windows.values() {
+                fms.push(view.read(cx).focus_manager());
+            }
+            for fm in fms {
+                fm.update(cx, |fm, cx| {
+                    if fm.clear_stale_focus(|id| valid_ids.contains(id)) {
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+
+        // Slice 07 cri 1: kick the extras observer once so persisted
+        // `WorkspaceData.extra_windows` entries reopen at launch. The observer
+        // above only fires when `workspace` notifies, but `Workspace::new` does
+        // not notify on construction — without an explicit kick, persisted
+        // extras would stay invisible until the user mutates the workspace.
+        // Deferred via `cx.spawn` because `open_extra_window` captures
+        // `cx.entity()` and calls `okena.update` inside `cx.open_window`'s
+        // build closure; running synchronously inside `Okena::new` would touch
+        // a half-constructed entity. By the time the spawned task body runs,
+        // the entity is fully wrapped and `update` is safe.
+        cx.spawn(async move |this: WeakEntity<Okena>, cx| {
+            let _ = this.update(cx, |this, cx| {
+                this.handle_extra_windows_changed(cx);
+            });
         })
         .detach();
 
@@ -614,24 +695,33 @@ impl Okena {
                     }
                     // Notify dirty terminal content panes directly (batched in one update).
                     // All notifications happen in the same GPUI update → single layout pass.
+                    // Each terminal_id may be rendered by multiple panes (one per window
+                    // whose visible set includes its host project), so iterate the vec
+                    // and prune dead weaks lazily.
                     if !dirty_terminal_ids.is_empty() {
                         dirty_terminal_ids.dedup();
-                        let registry = crate::views::root::content_pane_registry().lock();
+                        let mut registry = crate::views::window::content_pane_registry().lock();
                         let mut any_local_pane = false;
                         for tid in &dirty_terminal_ids {
-                            if let Some(weak_content) = registry.get(tid) {
-                                let _ = weak_content.update(cx, |_content, cx| {
-                                    cx.notify();
-                                });
-                                any_local_pane = true;
+                            let now_empty = if let Some(weaks) = registry.get_mut(tid) {
+                                if crate::views::window::notify_pane_weaks(weaks, cx) {
+                                    any_local_pane = true;
+                                }
+                                weaks.is_empty()
+                            } else {
+                                false
+                            };
+                            if now_empty {
+                                registry.remove(tid);
                             }
                         }
+                        drop(registry);
                         // Remote-only terminals have no local content pane. Without
                         // cx.notify(), GPUI's draw cycle won't run and the event loop
-                        // effectively stalls. Notify root_view to keep GPUI responsive
+                        // effectively stalls. Notify main_window to keep GPUI responsive
                         // for bridge commands, state queries, and other remote work.
                         if !any_local_pane {
-                            this.root_view.update(cx, |_, cx| cx.notify());
+                            this.main_window.update(cx, |_, cx| cx.notify());
                         }
                     }
 
@@ -672,7 +762,13 @@ impl Okena {
                     }
 
                     if !exit_events.is_empty() {
-                        this.root_view.update(cx, |_, cx| cx.notify());
+                        // A terminal exited — every window rendering its
+                        // project column needs to re-render so the layout
+                        // reflects the removal. Fan out to all live windows.
+                        this.main_window.update(cx, |_, cx| cx.notify());
+                        for view in this.extra_windows.values() {
+                            view.update(cx, |_, cx| cx.notify());
+                        }
                     }
                 });
             }
@@ -713,34 +809,41 @@ impl Okena {
             }
 
             // Single workspace.update: set hook status, then handle pending close atomically.
-            let pending_data = self.workspace.update(cx, |ws, cx| {
-                // Update hook terminal status
-                let status = if success {
-                    crate::workspace::state::HookTerminalStatus::Succeeded
-                } else {
-                    let code = exit_code.map(|c| c as i32).unwrap_or(-1);
-                    crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }
-                };
-                ws.update_hook_terminal_status(&tid, status, cx);
+            // Pull the focus_manager from main_window so the delete_project call
+            // scrubs focus state on the main window's per-window manager.
+            let focus_manager = self.main_window.read(cx).focus_manager();
+            let pending_data = focus_manager.update(cx, |fm, cx| {
+                let pending_data = self.workspace.update(cx, |ws, cx| {
+                    // Update hook terminal status
+                    let status = if success {
+                        crate::workspace::state::HookTerminalStatus::Succeeded
+                    } else {
+                        let code = exit_code.map(|c| c as i32).unwrap_or(-1);
+                        crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }
+                    };
+                    ws.update_hook_terminal_status(&tid, status, cx);
 
-                // Check for pending worktree close tied to this hook terminal
-                let pending = ws.take_pending_worktree_close(&tid)?;
-                let folder = ws.folder_for_project_or_parent(&pending.project_id);
-                let hook_folder_id = folder.map(|f| f.id.clone());
-                let hook_folder_name = folder.map(|f| f.name.clone());
-                let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
-                    .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
-                    .unwrap_or((None, None));
-                if success {
-                    ws.remove_hook_terminal(&tid, cx);
-                    // Collect remaining hook terminal IDs before deleting the project
-                    let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
-                    ws.delete_project(&pending.project_id, &settings(cx).hooks, cx);
-                    Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
-                } else {
-                    ws.finish_closing_project(&pending.project_id);
-                    None
-                }
+                    // Check for pending worktree close tied to this hook terminal
+                    let pending = ws.take_pending_worktree_close(&tid)?;
+                    let folder = ws.folder_for_project_or_parent(&pending.project_id);
+                    let hook_folder_id = folder.map(|f| f.id.clone());
+                    let hook_folder_name = folder.map(|f| f.name.clone());
+                    let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
+                        .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
+                        .unwrap_or((None, None));
+                    if success {
+                        ws.remove_hook_terminal(&tid, cx);
+                        // Collect remaining hook terminal IDs before deleting the project
+                        let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
+                        ws.delete_project(fm, &pending.project_id, &settings(cx).hooks, cx);
+                        Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
+                    } else {
+                        ws.finish_closing_project(&pending.project_id);
+                        None
+                    }
+                });
+                cx.notify();
+                pending_data
             });
 
             if let Some((pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name)) = pending_data {
@@ -840,7 +943,6 @@ impl Okena {
 
 impl Render for Okena {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.root_view.clone())
+        div().size_full().child(self.main_window.clone())
     }
 }
-

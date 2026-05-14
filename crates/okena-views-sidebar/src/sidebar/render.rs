@@ -161,7 +161,7 @@ impl Render for Sidebar {
                 let mut children = Vec::new();
                 for wt_id in &parent.worktree_ids {
                     if let Some(&p) = all_projects.get(wt_id.as_str()) {
-                        let mut info = SidebarProjectInfo::from_project(p);
+                        let mut info = SidebarProjectInfo::from_project(p, workspace, self.window_id);
                         info.is_closing = workspace.is_project_closing(&p.id);
                         info.is_creating = workspace.is_creating_project(&p.id);
                         // Inherit parent project's color for visual association
@@ -230,7 +230,7 @@ impl Render for Sidebar {
                         p.worktree_info.as_ref().map(|w| w.parent_project_id.as_str()).unwrap_or("")
                     ))
                     .map(|p| {
-                        let mut info = SidebarProjectInfo::from_project(p);
+                        let mut info = SidebarProjectInfo::from_project(p, workspace, self.window_id);
                         info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
@@ -272,7 +272,7 @@ impl Render for Sidebar {
                     }
                 }
                 let mut wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
-                let mut project_info = SidebarProjectInfo::from_project(project);
+                let mut project_info = SidebarProjectInfo::from_project(project, workspace, self.window_id);
                 project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
@@ -301,6 +301,16 @@ impl Render for Sidebar {
         // Index for trailing drop zone — must be project_order.len() to place after everything
         let end_index = workspace.data().project_order.len();
 
+        // Snapshot per-window folder collapse state so the for-loop body below
+        // does not hold the workspace immutable borrow across mutable
+        // self.render_*(.., cx) calls.
+        let folder_collapsed_map: HashMap<String, bool> = workspace
+            .data()
+            .window(self.window_id)
+            .unwrap_or(&workspace.data().main_window)
+            .folder_collapsed
+            .clone();
+
         // Build cursor items and validate cursor position
         let cursor_items = self.build_cursor_items(cx);
         self.validate_cursor(cursor_items.len());
@@ -308,8 +318,8 @@ impl Render for Sidebar {
 
         // Determine which project is focused — only highlight when explicitly focused via sidebar click
         let (focused_project_id, focus_individual) = {
-            let ws = self.workspace.read(cx);
-            (ws.focus_manager.focused_project_id().cloned(), ws.focus_manager.is_focus_individual())
+            let fm = self.focus_manager.read(cx);
+            (fm.focused_project_id().cloned(), fm.is_focus_individual())
         };
 
         // Build flat elements with cursor tracking
@@ -408,7 +418,11 @@ impl Render for Sidebar {
                 }
                 SidebarItem::Folder { folder, index, projects, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
-                    let idle_terminal_count = if folder.collapsed {
+                    let folder_collapsed = folder_collapsed_map
+                        .get(&folder.id)
+                        .copied()
+                        .unwrap_or(false);
+                    let idle_terminal_count = if folder_collapsed {
                         let terminals = self.terminals.lock();
                         projects.iter()
                             .flat_map(|p| p.terminal_ids.iter())
@@ -424,7 +438,7 @@ impl Render for Sidebar {
                     flat_idx += 1;
 
                     // Folder children when not collapsed
-                    if !folder.collapsed {
+                    if !folder_collapsed {
                         for fp in &projects {
                             let fp_wt_children = worktree_children.get(&fp.id);
                             let has_worktrees = fp_wt_children.map_or(false, |c| !c.is_empty());

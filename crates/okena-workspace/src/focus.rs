@@ -333,6 +333,58 @@ impl FocusManager {
         self.context = FocusContext::Terminal;
     }
 
+    /// Scrub any references to project IDs that no longer exist in
+    /// `valid_project_ids`. Called by the Okena workspace observer after
+    /// a delete so every window's focus manager — not just the one that
+    /// invoked the delete — drops stale references. Without this, an
+    /// extra that was zoomed on a project deleted via main (or vice
+    /// versa) keeps a ghost focus_project_id and renders a missing
+    /// project's column.
+    ///
+    /// Returns `true` if anything was cleared (caller can decide whether
+    /// to notify).
+    pub fn clear_stale_focus<F>(&mut self, project_exists: F) -> bool
+    where
+        F: Fn(&str) -> bool + Copy,
+    {
+        let mut changed = false;
+        if let Some(id) = self.focused_project_id.as_deref() {
+            if !project_exists(id) {
+                self.focused_project_id = None;
+                changed = true;
+            }
+        }
+        if let Some(ref target) = self.current_focus {
+            if !project_exists(&target.project_id) {
+                self.current_focus = None;
+                self.context = FocusContext::Terminal;
+                changed = true;
+            }
+        }
+        if let Some(ref target) = self.pre_zoom_focus {
+            if !project_exists(&target.project_id) {
+                self.pre_zoom_focus = None;
+                changed = true;
+            }
+        }
+        let before = self.focus_stack.len();
+        self.focus_stack.retain(|entry| {
+            let target_alive = entry
+                .target
+                .as_ref()
+                .map_or(true, |t| project_exists(&t.project_id));
+            let project_alive = entry
+                .focused_project_id
+                .as_deref()
+                .map_or(true, project_exists);
+            target_alive && project_alive
+        });
+        if self.focus_stack.len() != before {
+            changed = true;
+        }
+        changed
+    }
+
     /// Clear all focus state: current focus, focused_project_id, and stack.
     ///
     /// Used when switching workspaces to reset everything.
@@ -527,5 +579,55 @@ mod tests {
         fm.set_focused_project_id(None);
         let state = fm.focused_terminal_state().unwrap();
         assert_eq!(state.project_id, "proj1");
+    }
+
+    /// Slice 03 of the multi-window plan moves `FocusManager` from a single
+    /// field on `Workspace` to one-per-`WindowView`. This pins the contract
+    /// the new ownership relies on: two independently-constructed instances
+    /// are mutually isolated -- no static, shared, or interior-mutable state
+    /// links them. Push/pop on every state-bearing surface (terminal focus,
+    /// project zoom, fullscreen stack, modal stack) on one instance never
+    /// leaks into the other's observable surface. A regression that
+    /// introduced any shared state (e.g. a global focus counter, a shared
+    /// stack arena) would surface here before the per-window refactor lands.
+    #[test]
+    fn two_instances_are_independent() {
+        let mut a = FocusManager::new();
+        let mut b = FocusManager::new();
+
+        // Mutate A across every state-bearing surface.
+        a.focus_terminal("p1".to_string(), vec![0]);
+        a.set_focused_project_id(Some("p1".to_string()));
+        a.enter_fullscreen("p1".to_string(), vec![0], "t1".to_string());
+        a.enter_modal();
+
+        // B is untouched on every observable surface.
+        assert!(b.focused_terminal_state().is_none());
+        assert_eq!(b.focused_project_id(), None);
+        assert!(!b.has_fullscreen());
+        assert!(!b.is_modal());
+        assert_eq!(*b.context(), FocusContext::Terminal);
+
+        // Unwind A's stack fully and clear it.
+        let _ = a.exit_modal();
+        let _ = a.exit_fullscreen();
+        a.set_focused_project_id(None);
+        a.clear_focus();
+
+        // Mutate B; A must not silently flip back into a populated state.
+        b.focus_terminal("p2".to_string(), vec![1, 2]);
+        b.enter_fullscreen("p2".to_string(), vec![1, 2], "t2".to_string());
+
+        // A is still cleared on every surface.
+        assert!(a.focused_terminal_state().is_none());
+        assert_eq!(a.focused_project_id(), None);
+        assert!(!a.has_fullscreen());
+        assert!(!a.is_modal());
+        assert_eq!(*a.context(), FocusContext::Terminal);
+
+        // B carries its own populated state, untainted by A's prior history.
+        assert!(b.has_fullscreen());
+        assert!(b.is_terminal_fullscreened("p2", "t2"));
+        assert_eq!(b.focused_project_id(), Some(&"p2".to_string()));
     }
 }

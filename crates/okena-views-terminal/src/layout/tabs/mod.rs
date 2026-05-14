@@ -216,6 +216,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             let mut child_path = self.layout_path.clone();
             child_path.push(zoomed_idx);
 
+            let visible_paths = HashSet::from([child_path.clone()]);
+            self.deregister_child_resize_viewers_except(&visible_paths, cx);
+
             let container = self
                 .child_containers
                 .entry(child_path.clone())
@@ -223,7 +226,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     cx.new(|_cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
+                            self.focus_manager.clone(),
                             self.request_broker.clone(),
+                            self.window_id,
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
@@ -251,6 +256,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 path
             })
             .collect();
+        let active_path = {
+            let mut path = self.layout_path.clone();
+            path.push(active_tab);
+            path
+        };
+        let visible_paths = HashSet::from([active_path]);
+        self.deregister_child_resize_viewers_except(&visible_paths, cx);
         self.child_containers.retain(|path, _| valid_paths.contains(path));
 
         let container_bounds_ref = self.container_bounds_ref.clone();
@@ -279,7 +291,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             cx.new(|_cx| {
                                 LayoutContainer::new(
                                     self.workspace.clone(),
+                                    self.focus_manager.clone(),
                                     self.request_broker.clone(),
+                                    self.window_id,
                                     self.project_id.clone(),
                                     self.project_path.clone(),
                                     child_path.clone(),
@@ -335,7 +349,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let project = workspace_reader.project(&self.project_id);
         let project_for_names = project.cloned();
 
-        let is_pane_focused = workspace_reader.focus_manager
+        let is_pane_focused = self.focus_manager.read(cx)
             .focused_terminal_state()
             .map_or(false, |f| {
                 f.project_id == self.project_id
@@ -622,8 +636,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 p.push(i);
                                 p
                             };
-                            workspace.update(cx, |ws, cx| {
-                                ws.set_focused_terminal(project_id.clone(), terminal_path, cx);
+                            let workspace_clone = workspace.clone();
+                            let pid = project_id.clone();
+                            this.focus_manager.update(cx, |fm, cx| {
+                                workspace_clone.update(cx, |ws, cx| {
+                                    ws.set_focused_terminal(fm, pid, terminal_path, cx);
+                                });
+                                cx.notify();
                             });
                         }
 

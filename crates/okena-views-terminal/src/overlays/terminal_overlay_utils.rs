@@ -78,6 +78,7 @@ pub fn create_terminal_content<V: 'static>(
     cx.new(|cx| {
         let mut content = TerminalContent::new(
             focus_handle,
+            None,
             project_id,
             layout_path,
             workspace,

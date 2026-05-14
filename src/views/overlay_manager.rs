@@ -38,7 +38,7 @@ use crate::remote::GlobalRemoteInfo;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, ProjectOverlay, ProjectOverlayKind, SidebarRequest};
-use crate::workspace::state::{Workspace, WorkspaceData};
+use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
 
 // Re-export generic overlay utilities from okena-ui
 pub use okena_ui::overlay::{CloseEvent, OverlaySlot};
@@ -69,10 +69,10 @@ impl CloseEvent for PairingDialogEvent {
 // OverlayManager Entity
 // ============================================================================
 
-/// Events emitted by OverlayManager that require handling by RootView.
+/// Events emitted by OverlayManager that require handling by WindowView.
 ///
 /// These events are forwarded from individual overlays when they require
-/// actions that need access to RootView's state (terminals, PTY manager, etc.)
+/// actions that need access to WindowView's state (terminals, PTY manager, etc.)
 #[derive(Clone)]
 pub enum OverlayManagerEvent {
     /// Session manager requested workspace switch
@@ -176,7 +176,20 @@ type DetachFn = Box<dyn Fn(&mut OverlayManager, &mut Context<OverlayManager>) + 
 /// only one modal can be open at a time. Context menus remain as
 /// separate slots since they are positioned popups, not full-screen modals.
 pub struct OverlayManager {
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// overlay manager addresses. Always `WindowId::Main` today (single-window
+    /// runtime); slice 05 spawns extras that mint distinct
+    /// `WindowId::Extra(uuid)`s. Read in-impl via `self.window_id` (hoisted
+    /// to a local before any `self.workspace.update` closure to avoid the
+    /// implicit borrow conflict between `&mut self.workspace` and reads
+    /// through `self.`); also threaded as the first arg to
+    /// `FolderContextMenu::new` in `show_folder_context_menu` and
+    /// `ContextMenu::new` in `show_context_menu` (each hoisted to a local
+    /// for the same `cx.new` capture reason that af0e312 pinned for the
+    /// `WindowView::new` -> `OverlayManager::new` call site).
+    pub(crate) window_id: WindowId,
     workspace: Entity<Workspace>,
+    pub(crate) focus_manager: Entity<crate::workspace::focus::FocusManager>,
     request_broker: Entity<RequestBroker>,
 
     /// The single active modal overlay (only one can be open at a time).
@@ -195,7 +208,7 @@ pub struct OverlayManager {
     terminal_context_menu: OverlaySlot<TerminalContextMenu>,
     tab_context_menu: OverlaySlot<TabContextMenu>,
 
-    // Positioned popovers (like context menus, rendered at RootView level)
+    // Positioned popovers (like context menus, rendered at WindowView level)
     worktree_list: OverlaySlot<WorktreeListPopover>,
     color_picker: OverlaySlot<ColorPickerPopover>,
 
@@ -205,9 +218,11 @@ pub struct OverlayManager {
 
 impl OverlayManager {
     /// Create a new OverlayManager.
-    pub fn new(workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>) -> Self {
+    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, focus_manager: Entity<crate::workspace::focus::FocusManager>, request_broker: Entity<RequestBroker>) -> Self {
         Self {
+            window_id,
             workspace,
+            focus_manager,
             request_broker,
             active_modal: None,
             modal_type_id: None,
@@ -223,6 +238,21 @@ impl OverlayManager {
         }
     }
 
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// overlay manager addresses. Always `WindowId::Main` today (single-window
+    /// runtime); slice 05 spawns extras that mint distinct `WindowId::Extra(uuid)`s.
+    /// Field is read directly within the impl via `self.window_id` once readers
+    /// land; this public getter exists for external callers (e.g. the slice 05
+    /// spawn flow on `Okena`) that need to address window-scoped state on
+    /// `Workspace` in the same window this overlay manager inhabits.
+    /// `#[allow(dead_code)]` because no caller reads it yet -- rustc tracks
+    /// fields and methods separately, so the field being used by the ctor does
+    /// NOT mark the getter as used.
+    #[allow(dead_code)]
+    pub fn window_id(&self) -> WindowId {
+        self.window_id
+    }
+
     // ========================================================================
     // Modal management helpers
     // ========================================================================
@@ -233,7 +263,11 @@ impl OverlayManager {
             self.active_modal = None;
             self.modal_type_id = None;
             self.detach_active_modal_fn = None;
-            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+            let workspace = self.workspace.clone();
+            self.focus_manager.update(cx, |fm, cx| {
+                workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+                cx.notify();
+            });
             cx.notify();
         }
     }
@@ -244,7 +278,11 @@ impl OverlayManager {
             self.active_modal = None;
             self.modal_type_id = None;
             self.detach_active_modal_fn = None;
-            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+            let workspace = self.workspace.clone();
+            self.focus_manager.update(cx, |fm, cx| {
+                workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+                cx.notify();
+            });
             cx.notify();
         }
     }
@@ -261,7 +299,11 @@ impl OverlayManager {
         self.close_modal(cx);
         self.active_modal = Some(entity.into());
         self.modal_type_id = Some(std::any::TypeId::of::<T>());
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -294,7 +336,11 @@ impl OverlayManager {
                 this.active_modal = None;
                 this.modal_type_id = None;
                 this.detach_active_modal_fn = None;
-                this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                let workspace = this.workspace.clone();
+                this.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+                    cx.notify();
+                });
                 crate::app::open_detached_overlay::<T, E>(
                     title.clone(),
                     entity_for_detach.clone(),
@@ -304,7 +350,11 @@ impl OverlayManager {
             },
         ));
 
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
 
         // If the user prefers detached-by-default, immediately move the modal
@@ -375,7 +425,8 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
-            let entity = cx.new(|cx| AddProjectDialog::new(workspace, remote_manager, cx));
+            let window_id = self.window_id;
+            let entity = cx.new(|cx| AddProjectDialog::new(workspace, remote_manager, window_id, cx));
             cx.subscribe(&entity, |this, _, event: &AddProjectDialogEvent, cx| {
                 if event.is_close() {
                     this.close_modal(cx);
@@ -418,7 +469,9 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let ws = self.workspace.clone();
-            let entity = cx.new(|cx| CommandPalette::new(ws, cx));
+            let fm = self.focus_manager.clone();
+            let window_id = self.window_id;
+            let entity = cx.new(|cx| CommandPalette::new(ws, fm, window_id, cx));
             cx.subscribe(&entity, |this, _, event: &CommandPaletteEvent, cx| {
                 if event.is_close() {
                     this.close_modal(cx);
@@ -491,7 +544,8 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
-            let entity = cx.new(|cx| ProjectSwitcher::new(workspace, cx));
+            let window_id = self.window_id;
+            let entity = cx.new(|cx| ProjectSwitcher::new(window_id, workspace, cx));
             cx.subscribe(&entity, |this, _, event: &ProjectSwitcherEvent, cx| {
                 match event {
                     ProjectSwitcherEvent::Close => {
@@ -588,9 +642,10 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
+        let window_id = self.window_id;
         let app_settings = crate::settings::settings(cx);
         let dialog = cx.new(|cx| {
-            WorktreeDialog::new(workspace, project_id, project_path, app_settings.worktree, app_settings.hooks, cx)
+            WorktreeDialog::new(workspace, project_id, project_path, app_settings.worktree, app_settings.hooks, window_id, cx)
         });
         cx.subscribe(&dialog, |this, _, event: &WorktreeDialogEvent, cx| {
             match event {
@@ -619,9 +674,10 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
         let app_settings = crate::settings::settings(cx);
         let dialog = cx.new(|cx| {
-            CloseWorktreeDialog::new(workspace, project_id, app_settings.worktree, app_settings.hooks, cx)
+            CloseWorktreeDialog::new(workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
         });
         cx.subscribe(&dialog, |this, _, event: &CloseWorktreeDialogEvent, cx| {
             if event.is_close() {
@@ -668,7 +724,8 @@ impl OverlayManager {
         self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
-        let menu = cx.new(|cx| ContextMenu::new(workspace.clone(), request, cx));
+        let window_id = self.window_id;
+        let menu = cx.new(|cx| ContextMenu::new(window_id, workspace.clone(), request, cx));
 
         cx.subscribe(&menu, |this, _, event: &ContextMenuEvent, cx| {
             match event {
@@ -804,7 +861,8 @@ impl OverlayManager {
         self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
-        let menu = cx.new(|cx| FolderContextMenu::new(workspace.clone(), request, cx));
+        let window_id = self.window_id;
+        let menu = cx.new(|cx| FolderContextMenu::new(window_id, workspace.clone(), request, cx));
 
         cx.subscribe(&menu, |this, _, event: &FolderContextMenuEvent, cx| {
             match event {
@@ -828,8 +886,14 @@ impl OverlayManager {
                 }
                 FolderContextMenuEvent::FilterToFolder { folder_id } => {
                     this.hide_folder_context_menu(cx);
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.toggle_folder_focus(folder_id, cx);
+                    let window_id = this.window_id;
+                    let workspace = this.workspace.clone();
+                    let fid = folder_id.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.toggle_folder_focus(fm, window_id, &fid, cx);
+                        });
+                        cx.notify();
                     });
                 }
             }
@@ -1083,8 +1147,10 @@ impl OverlayManager {
         self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
+        let window_id = self.window_id;
         let hooks = crate::settings::settings(cx).hooks.clone();
-        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, project_id, position, hooks, cx));
+        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, focus_manager, project_id, position, hooks, window_id, cx));
 
         cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
             if event.is_close() {

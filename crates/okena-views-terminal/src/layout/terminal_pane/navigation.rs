@@ -14,7 +14,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane_map = get_pane_map();
+        let pane_map = get_pane_map(self.window_id);
 
         let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
             Some(pane) => pane.clone(),
@@ -32,7 +32,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane_map = get_pane_map();
+        let pane_map = get_pane_map(self.window_id);
 
         let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
             Some(pane) => pane.clone(),
@@ -54,8 +54,14 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         if let Some(ref fh) = target.focus_handle {
             window.focus(fh, cx);
         }
-        self.workspace.update(cx, |ws, cx| {
-            ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
+        let target_project = target.project_id.clone();
+        let target_path = target.layout_path.clone();
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.set_focused_terminal(fm, target_project, target_path, cx);
+            });
+            cx.notify();
         });
     }
 

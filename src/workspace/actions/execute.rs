@@ -20,7 +20,7 @@ use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::workspace::state::DropZone;
 use okena_terminal::TerminalsRegistry;
 use crate::workspace::hooks;
-use crate::workspace::state::{LayoutNode, Workspace};
+use crate::workspace::state::{LayoutNode, WindowId, Workspace};
 use gpui::*;
 use std::sync::Arc;
 
@@ -45,16 +45,26 @@ impl ActionResult {
 ///
 /// This is the single source of truth for all client-facing actions.
 /// Both desktop UI handlers and the remote API delegate here.
+///
+/// `window_id` identifies which window's per-window state any per-window
+/// mutation should target (currently only `SetProjectShowInOverview`). For
+/// local UI invocations the caller passes the originating `WindowView`'s
+/// `window_id`; for remote-bridge invocations the caller passes the focused
+/// window resolved via `Okena::focus_manager_for_active_window` per PRD
+/// user story 27 / slice 05 cri 13. Actions that don't touch per-window
+/// state ignore the parameter.
 pub fn execute_action(
     action: ActionRequest,
     ws: &mut Workspace,
+    window_id: WindowId,
+    focus_manager: &mut crate::workspace::focus::FocusManager,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     cx: &mut Context<Workspace>,
 ) -> ActionResult {
     match action {
         ActionRequest::CreateTerminal { project_id } => {
-            ws.add_terminal(&project_id, cx);
+            ws.add_terminal(focus_manager, &project_id, cx);
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
         ActionRequest::SplitTerminal {
@@ -62,7 +72,7 @@ pub fn execute_action(
             path,
             direction,
         } => {
-            ws.split_terminal(&project_id, &path, direction, cx);
+            ws.split_terminal(focus_manager, &project_id, &path, direction, cx);
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
         ActionRequest::CloseTerminal {
@@ -74,7 +84,7 @@ pub fn execute_action(
                 Some(path) => {
                     backend.kill(&terminal_id);
                     terminals.lock().remove(&terminal_id);
-                    ws.close_terminal_and_focus_sibling(&project_id, &path, cx);
+                    ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);
                     ActionResult::Ok(None)
                 }
                 None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
@@ -91,7 +101,7 @@ pub fn execute_action(
                     Some(path) => {
                         backend.kill(terminal_id);
                         terminals.lock().remove(terminal_id);
-                        ws.close_terminal_and_focus_sibling(&project_id, &path, cx);
+                        ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);
                     }
                     None => {
                         last_err = Some(format!("terminal not found: {}", terminal_id));
@@ -110,7 +120,7 @@ pub fn execute_action(
             let path = find_terminal_path(ws, &project_id, &terminal_id);
             match path {
                 Some(path) => {
-                    ws.set_focused_terminal(project_id, path, cx);
+                    ws.set_focused_terminal(focus_manager, project_id, path, cx);
                     ActionResult::Ok(None)
                 }
                 None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
@@ -185,8 +195,8 @@ pub fn execute_action(
             terminal_id,
         } => {
             match terminal_id {
-                Some(tid) => ws.set_fullscreen_terminal(project_id, tid, cx),
-                None => ws.exit_fullscreen(cx),
+                Some(tid) => ws.set_fullscreen_terminal(focus_manager, project_id, tid, cx),
+                None => ws.exit_fullscreen(focus_manager, cx),
             }
             ActionResult::Ok(None)
         }
@@ -204,9 +214,9 @@ pub fn execute_action(
             in_group,
         } => {
             if in_group {
-                ws.add_tab_to_group(&project_id, &path, cx);
+                ws.add_tab_to_group(focus_manager, &project_id, &path, cx);
             } else {
-                ws.add_tab(&project_id, &path, cx);
+                ws.add_tab(focus_manager, &project_id, &path, cx);
             }
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
@@ -235,7 +245,7 @@ pub fn execute_action(
             target_project_id,
         } => {
             let target_pid = target_project_id.as_deref().unwrap_or(&project_id);
-            ws.move_terminal_to_tab_group(&project_id, &terminal_id, target_pid, &target_path, position, cx);
+            ws.move_terminal_to_tab_group(focus_manager, &project_id, &terminal_id, target_pid, &target_path, position, cx);
             ActionResult::Ok(None)
         }
         ActionRequest::MovePaneTo {
@@ -253,7 +263,7 @@ pub fn execute_action(
                 "center" => DropZone::Center,
                 _ => return ActionResult::Err(format!("invalid drop zone: {}", zone)),
             };
-            ws.move_pane(&project_id, &terminal_id, &target_project_id, &target_terminal_id, drop_zone, cx);
+            ws.move_pane(focus_manager, &project_id, &terminal_id, &target_project_id, &target_terminal_id, drop_zone, cx);
             ActionResult::Ok(None)
         }
         ActionRequest::GitStatus { project_id } => {
@@ -454,7 +464,7 @@ pub fn execute_action(
             }
         }
         ActionRequest::AddProject { name, path } => {
-            let project_id = ws.add_project(name, path, true, &settings(cx).hooks, cx);
+            let project_id = ws.add_project(name, path, true, &settings(cx).hooks, window_id, cx);
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
         ActionRequest::ReorderProjectInFolder {
@@ -633,25 +643,18 @@ pub fn execute_action(
                 return ActionResult::Err(format!("project not found: {}", project_id));
             }
             let global_hooks = settings(cx).hooks.clone();
-            ws.delete_project(&project_id, &global_hooks, cx);
+            ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
             ActionResult::Ok(None)
         }
         ActionRequest::SetProjectShowInOverview { project_id, show } => {
-            let current = match ws.project(&project_id) {
-                Some(p) => p.show_in_overview,
-                None => return ActionResult::Err(format!("project not found: {}", project_id)),
-            };
-            if current != show {
-                ws.toggle_project_overview_visibility(&project_id, cx);
-            }
-            ActionResult::Ok(None)
+            apply_set_project_show_in_overview(ws, window_id, &project_id, show, cx)
         }
         ActionRequest::RemoveWorktreeProject { project_id, force } => {
             if ws.project(&project_id).is_none() {
                 return ActionResult::Err(format!("project not found: {}", project_id));
             }
             let global_hooks = settings(cx).hooks.clone();
-            match ws.remove_worktree_project(&project_id, force, &global_hooks, cx) {
+            match ws.remove_worktree_project(focus_manager, &project_id, force, &global_hooks, cx) {
                 Ok(()) => ActionResult::Ok(None),
                 Err(e) => ActionResult::Err(e),
             }
@@ -693,7 +696,7 @@ pub fn execute_action(
             let (worktree_path, wt_project_path) = okena_git::compute_target_paths(&git_root, &subdir, &path_template, &branch);
             let global_hooks = settings(cx).hooks.clone();
 
-            match ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &wt_project_path, create_branch, &global_hooks, cx) {
+            match ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &wt_project_path, create_branch, &global_hooks, window_id, cx) {
                 Ok(new_project_id) => {
                     let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, cx);
                     let terminal_id = ws.project(&new_project_id)
@@ -919,6 +922,38 @@ fn resolve_new_project_file(project_path: &str, relative_path: &str) -> Result<s
     Ok(parent_canonical.join(file_name))
 }
 
+/// Apply the `SetProjectShowInOverview` action against the targeted window.
+///
+/// Reads the targeted window's `hidden_project_ids` to compute current
+/// visibility, then toggles only when the desired and current states differ.
+/// `window_id` carries through from `execute_action` so that remote-bridge
+/// invocations land on whichever window currently has OS focus (PRD user
+/// story 27 / slice 05 cri 13). For unknown extras (close-race), the read
+/// returns `None`; we treat the project as visible (mirrors
+/// `Workspace::data().window(...)` returning None == nothing tracked) and
+/// the toggle delegates to the silent-no-op path on the data-layer setter.
+fn apply_set_project_show_in_overview(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    project_id: &str,
+    show: bool,
+    cx: &mut Context<Workspace>,
+) -> ActionResult {
+    if ws.project(project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    let current_hidden = ws
+        .data()
+        .window(window_id)
+        .map(|w| w.hidden_project_ids.contains(project_id))
+        .unwrap_or(false);
+    let current_visible = !current_hidden;
+    if current_visible != show {
+        ws.toggle_project_overview_visibility(window_id, project_id, cx);
+    }
+    ActionResult::Ok(None)
+}
+
 /// Reject names that would escape a directory or traverse paths.
 fn validate_leaf_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -1001,6 +1036,166 @@ mod path_guard_tests {
         assert!(validate_leaf_name("..").is_err());
         assert!(validate_leaf_name("a/b").is_err());
         assert!(validate_leaf_name("a\\b").is_err());
+    }
+}
+
+#[cfg(test)]
+mod set_show_in_overview_tests {
+    use super::{apply_set_project_show_in_overview, ActionResult};
+    use crate::workspace::state::{ProjectData, Workspace, WindowId, WindowState, WorkspaceData};
+    use crate::workspace::settings::HooksConfig;
+    use gpui::AppContext as _;
+    use okena_core::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn make_workspace_data() -> WorkspaceData {
+        WorkspaceData {
+            version: 1,
+            projects: vec![],
+            project_order: vec![],
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            folders: vec![],
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
+    fn make_project(id: &str) -> ProjectData {
+        ProjectData {
+            id: id.to_string(),
+            name: format!("Project {}", id),
+            path: "/tmp/test".to_string(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn apply_set_project_show_in_overview_reads_hidden_set(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The action's visibility decision must read from the targeted
+        // window's hidden_project_ids. This fixture starts with p1 hidden in
+        // main; the action says `show: true`, so the helper toggles,
+        // clearing main's hidden set.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let result = apply_set_project_show_in_overview(ws, WindowId::Main, "p1", true, cx);
+            assert!(matches!(result, ActionResult::Ok(_)));
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(
+                !ws.data().main_window.hidden_project_ids.contains("p1"),
+                "action should have toggled main's hidden set off"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn apply_set_project_show_in_overview_unknown_project_errs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let result = apply_set_project_show_in_overview(ws, WindowId::Main, "missing", true, cx);
+            assert!(matches!(result, ActionResult::Err(_)));
+        });
+    }
+
+    #[gpui::test]
+    fn apply_set_project_show_in_overview_targets_extra_when_window_id_extra(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // PRD user story 27 / slice 05 cri 13: a remote-bridge action issued
+        // while an extra window has OS focus must mutate that extra's
+        // per-window hidden set, not main's. The extra starts with p1 hidden
+        // (mirrors the spawn snapshot semantic where every project is hidden
+        // in a fresh extra); the action says `show: true`, so the helper
+        // toggles only on the extra. Main's hidden set must remain empty.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let mut extra = WindowState::default();
+        extra.hidden_project_ids.insert("p1".to_string());
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let result = apply_set_project_show_in_overview(
+                ws,
+                WindowId::Extra(extra_id),
+                "p1",
+                true,
+                cx,
+            );
+            assert!(matches!(result, ActionResult::Ok(_)));
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let extra_state = ws
+                .data()
+                .window(WindowId::Extra(extra_id))
+                .expect("extra still tracked");
+            assert!(
+                !extra_state.hidden_project_ids.contains("p1"),
+                "action should have toggled the targeted extra's hidden set off",
+            );
+            assert!(
+                ws.data().main_window.hidden_project_ids.is_empty(),
+                "main's hidden set must stay untouched when routing to an extra",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn apply_set_project_show_in_overview_extra_hide_inserts_only_on_extra(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The reverse direction: project visible in both main + extra,
+        // action says `show: false` against the extra. Extra's hidden set
+        // gains p1; main stays unchanged.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let result = apply_set_project_show_in_overview(
+                ws,
+                WindowId::Extra(extra_id),
+                "p1",
+                false,
+                cx,
+            );
+            assert!(matches!(result, ActionResult::Ok(_)));
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let extra_state = ws.data().window(WindowId::Extra(extra_id)).unwrap();
+            assert!(extra_state.hidden_project_ids.contains("p1"));
+            assert!(ws.data().main_window.hidden_project_ids.is_empty());
+        });
     }
 }
 

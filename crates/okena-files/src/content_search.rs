@@ -522,3 +522,59 @@ fn escape_regex(s: &str) -> String {
     }
     escaped
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "okena-content-search-{}-{}",
+                std::process::id(),
+                now
+            ));
+            fs::create_dir(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn search_content_skips_files_larger_than_cap() {
+        let dir = TempDir::new();
+        fs::write(dir.path.join("small.txt"), "needle\n").unwrap();
+        let mut big = b"needle\n".to_vec();
+        big.resize(MAX_FILE_SIZE as usize + 1, b'a');
+        fs::write(dir.path.join("big.log"), big).unwrap();
+
+        let cancelled = AtomicBool::new(false);
+        let config = ContentSearchConfig::default();
+        let mut results: Vec<String> = Vec::new();
+        let mut on_result = |result: FileSearchResult| {
+            results.push(result.relative_path);
+        };
+
+        search_content(&dir.path, "needle", &config, &cancelled, &mut on_result);
+
+        assert!(results.iter().any(|path| path == "small.txt"));
+        assert!(!results.iter().any(|path| path == "big.log"));
+    }
+}

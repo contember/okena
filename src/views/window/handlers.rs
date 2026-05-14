@@ -10,9 +10,9 @@ use gpui::*;
 
 use okena_core::api::ActionRequest;
 
-use super::RootView;
+use super::WindowView;
 
-impl RootView {
+impl WindowView {
     /// Build an ActionDispatcher for the given project.
     /// Returns Remote variant if the project is a remote project,
     /// otherwise returns Local variant.
@@ -20,7 +20,9 @@ impl RootView {
         let backend = Some(self.backend.clone());
         crate::action_dispatch::dispatcher_for_project(
             project_id,
+            self.window_id,
             &self.workspace,
+            &self.focus_manager,
             &backend,
             &self.terminals,
             &self.service_manager,
@@ -28,9 +30,11 @@ impl RootView {
             cx,
         ).unwrap_or_else(|| ActionDispatcher::Local {
             workspace: self.workspace.clone(),
+            focus_manager: self.focus_manager.clone(),
             backend: self.backend.clone(),
             terminals: self.terminals.clone(),
             service_manager: self.service_manager.clone(),
+            window_id: self.window_id,
         })
     }
 
@@ -90,8 +94,8 @@ impl RootView {
     }
 }
 
-impl RootView {
-    /// Handle events from the OverlayManager that require RootView access.
+impl WindowView {
+    /// Handle events from the OverlayManager that require WindowView access.
     pub(super) fn handle_overlay_manager_event(
         &mut self,
         _: Entity<OverlayManager>,
@@ -140,8 +144,13 @@ impl RootView {
             OverlayManagerEvent::DeleteProject { project_id } => {
                 // Collect hook terminal IDs before deleting so we can clean them from the registry
                 let hook_tids = self.workspace.read(cx).hook_terminal_ids_for_project(project_id);
-                self.workspace.update(cx, |ws, cx| {
-                    ws.delete_project(project_id, &settings(cx).hooks, cx);
+                let workspace = self.workspace.clone();
+                let pid = project_id.clone();
+                self.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.delete_project(fm, &pid, &settings(cx).hooks, cx);
+                    });
+                    cx.notify();
                 });
                 for tid in hook_tids {
                     self.terminals.lock().remove(&tid);
@@ -177,19 +186,29 @@ impl RootView {
                     .map(|wt| wt.parent_project_id.clone());
 
                 if let Some(parent_id) = parent_id {
-                    self.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(Some(parent_id), cx);
+                    let workspace = self.workspace.clone();
+                    self.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project(fm, Some(parent_id), cx);
+                        });
+                        cx.notify();
                     });
                 }
             }
             OverlayManagerEvent::FocusProject(project_id) => {
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_focused_project(Some(project_id.clone()), cx);
+                let workspace = self.workspace.clone();
+                let pid = project_id.clone();
+                self.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.set_focused_project(fm, Some(pid), cx);
+                    });
+                    cx.notify();
                 });
             }
             OverlayManagerEvent::ToggleProjectVisibility(project_id) => {
+                let window_id = self.window_id;
                 self.workspace.update(cx, |ws, cx| {
-                    ws.toggle_project_overview_visibility(project_id, cx);
+                    ws.toggle_project_overview_visibility(window_id, project_id, cx);
                 });
             }
             OverlayManagerEvent::RemoteReconnect { connection_id } => {
@@ -335,8 +354,12 @@ impl RootView {
         self.project_columns.clear();
 
         // Update workspace with new data
-        self.workspace.update(cx, |ws, cx| {
-            ws.replace_data(data, cx);
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.replace_data(fm, data, cx);
+            });
+            cx.notify();
         });
 
         // Sync project columns for new data
@@ -505,7 +528,7 @@ fn collect_tab_terminal_ids(
     workspace: &Entity<Workspace>,
     project_id: &str,
     layout_path: &[usize],
-    cx: &Context<RootView>,
+    cx: &Context<WindowView>,
 ) -> Vec<String> {
     let ws = workspace.read(cx);
     let Some(project) = ws.project(project_id) else {

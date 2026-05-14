@@ -70,6 +70,7 @@ impl SystemInfoCache {
 /// Status bar component showing system info and time
 pub struct StatusBar {
     workspace: Entity<Workspace>,
+    focus_manager: Entity<crate::workspace::focus::FocusManager>,
     cache: Arc<Mutex<SystemInfoCache>>,
     /// Activate functions cloned from registry (keyed by extension ID).
     activate_fns: Vec<(String, okena_extensions::ActivateFn)>,
@@ -80,7 +81,7 @@ pub struct StatusBar {
 }
 
 impl StatusBar {
-    pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, focus_manager: Entity<crate::workspace::focus::FocusManager>, cx: &mut Context<Self>) -> Self {
         let cache = Arc::new(Mutex::new(SystemInfoCache::new()));
 
         // Initial refresh
@@ -128,9 +129,11 @@ impl StatusBar {
 
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
+        // Also re-render when focus state changes (focus_manager moved off Workspace in slice 03)
+        cx.observe(&focus_manager, |_, _, cx| cx.notify()).detach();
 
         Self {
-            workspace, cache, activate_fns, active_extensions, sidebar_open: true,
+            workspace, focus_manager, cache, activate_fns, active_extensions, sidebar_open: true,
         }
     }
 
@@ -354,13 +357,15 @@ impl Render for StatusBar {
                 // Focused project indicator
                 let focused_project = {
                     let ws = self.workspace.read(cx);
-                    ws.focused_project_id()
+                    let fm = self.focus_manager.read(cx);
+                    fm.focused_project_id()
                         .and_then(|id| ws.project(id))
                         .map(|p| p.name.clone())
                 };
 
                 if let Some(name) = focused_project {
                     let workspace = self.workspace.clone();
+                    let focus_manager = self.focus_manager.clone();
                     right = right.child(
                         h_flex()
                             .gap(px(4.0))
@@ -391,8 +396,11 @@ impl Render for StatusBar {
                                     .child("✕")
                                     .id("clear-focus-btn")
                                     .on_click(move |_, _window, cx| {
-                                        workspace.update(cx, |ws, cx| {
-                                            ws.set_focused_project(None, cx);
+                                        focus_manager.update(cx, |fm, cx| {
+                                            workspace.update(cx, |ws, cx| {
+                                                ws.set_focused_project(fm, None, cx);
+                                            });
+                                            cx.notify();
                                         });
                                     }),
                             )

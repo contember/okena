@@ -36,7 +36,7 @@ imports keep working. Same for `crate::settings::HooksConfig`,
 
 ## Key Patterns
 
-- **RequestBroker**: Decouples workspace actions from UI. Code that needs to show an overlay pushes a request; RootView observer picks it up. Avoids circular entity dependencies.
+- **RequestBroker**: Decouples workspace actions from UI. Code that needs to show an overlay pushes a request; WindowView observer picks it up. Avoids circular entity dependencies.
 - **Folder model**: Folder IDs go into `project_order` alongside project IDs. Projects inside a folder live in `folder.project_ids`, NOT duplicated in `project_order`.
 - **`#[serde(default)]`**: Used on new fields for backward-compatible workspace.json migration.
 - **LayoutNode tree**: Recursive tree navigated via `Vec<usize>` path. Actions in `actions/layout.rs` for split, close, move, reorder.

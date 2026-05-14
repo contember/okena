@@ -57,7 +57,7 @@ impl std::io::Write for TeeWriter {
 use crate::app::Okena;
 use crate::app::headless::HeadlessApp;
 use crate::assets::{Assets, embedded_fonts};
-use crate::keybindings::{About, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings};
+use crate::keybindings::{About, NewWindow, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings};
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme, ThemeMode};
@@ -233,6 +233,13 @@ fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Select Theme", ShowThemeSelector),
                 MenuItem::separator(),
                 MenuItem::action("Keyboard Shortcuts", ShowKeybindings),
+            ],
+        },
+        Menu {
+            name: "Window".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("New Window", NewWindow),
             ],
         },
     ]);
@@ -517,6 +524,7 @@ fn main() {
         let settings_entity = settings::init_settings(cx);
         let app_settings = settings_entity.read(cx).get().clone();
 
+
         // Load or create workspace
         let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
             log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
@@ -586,10 +594,24 @@ fn main() {
                         ..Default::default()
                     })
                 },
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: Point::default(),
-                    size: size(px(1200.0), px(800.0)),
-                })),
+                window_bounds: Some({
+                    // Restore main window's last-known OS bounds so position
+                    // (including which monitor) survives relaunch. Falls back
+                    // to a default 1200x800 at origin (0,0) on first launch
+                    // or if the persisted bounds are absent.
+                    let persisted = workspace_data.main_window.os_bounds;
+                    if let Some(b) = persisted {
+                        WindowBounds::Windowed(Bounds {
+                            origin: Point { x: px(b.origin_x), y: px(b.origin_y) },
+                            size: Size { width: px(b.width), height: px(b.height) },
+                        })
+                    } else {
+                        WindowBounds::Windowed(Bounds {
+                            origin: Point::default(),
+                            size: size(px(1200.0), px(800.0)),
+                        })
+                    }
+                }),
                 is_resizable: true,
                 // On Windows, use client-side decorations for custom window controls
                 window_decorations: Some(if cfg!(target_os = "windows") {
@@ -637,9 +659,33 @@ fn main() {
                     })
                     .detach();
 
+                // Main owns the Okena coordinator. If it closes while extras
+                // are still open, LastWindowClosed would otherwise leave
+                // orphaned WindowViews running without the app root.
+                window.on_window_should_close(cx, |_window, cx| {
+                    cx.quit();
+                    true
+                });
+
                 // Wire up content pane registration so PTY events can notify terminal views
                 okena_views_terminal::set_register_content_pane_fn(Box::new(|terminal_id, weak_content| {
-                    crate::views::root::content_pane_registry().lock().insert(terminal_id, weak_content);
+                    crate::views::window::content_pane_registry()
+                        .lock()
+                        .entry(terminal_id)
+                        .or_default()
+                        .push(weak_content);
+                }));
+
+                // Wire up viewer-count lookup so the terminal-element resize
+                // path can detect "this terminal is rendered in N>1 windows"
+                // and gate resize() to "shrinks only" — prevents ping-pong
+                // between windows of differing bounds.
+                okena_views_terminal::set_viewer_count_fn(Box::new(|terminal_id| {
+                    let registry = crate::views::window::content_pane_registry().lock();
+                    registry
+                        .get(terminal_id)
+                        .map(|weaks| weaks.iter().filter(|w| w.upgrade().is_some()).count())
+                        .unwrap_or(0)
                 }));
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)

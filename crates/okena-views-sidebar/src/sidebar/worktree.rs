@@ -16,8 +16,12 @@ impl Sidebar {
         }
 
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
         let parent_id = project_id.to_string();
         let parent_id_for_cleanup = parent_id.clone();
+        // Multi-window new-project visibility rule (PRD user story 14): the
+        // quick-created worktree lands visible in this sidebar's window only.
+        let window_id = self.window_id;
 
         // Collect data from workspace and settings (non-blocking reads)
         let prep = self.workspace.read(cx).prepare_quick_create(project_id);
@@ -86,7 +90,7 @@ impl Sidebar {
                 workspace.update(cx, |ws, cx| {
                     let id = ws.register_worktree_project_deferred_hooks(
                         &parent_id, &branch, &git_root,
-                        &worktree_path, &project_path, &hooks_for_register, cx,
+                        &worktree_path, &project_path, &hooks_for_register, window_id, cx,
                     );
                     if let Ok(ref id) = id {
                         ws.mark_creating_project(id);
@@ -145,9 +149,12 @@ impl Sidebar {
                     log::error!("Quick worktree git operation failed: {}", e);
                     // Remove the optimistically-added project since git worktree add failed
                     let _ = cx.update(|cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.finish_creating_project(&project_id);
-                            ws.delete_project(&project_id, &hooks_for_error, cx);
+                        focus_manager.update(cx, |fm, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.finish_creating_project(&project_id);
+                                ws.delete_project(fm, &project_id, &hooks_for_error, cx);
+                            });
+                            cx.notify();
                         });
                     });
                 }

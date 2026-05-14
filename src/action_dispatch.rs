@@ -6,9 +6,10 @@
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
-use crate::views::root::TerminalsRegistry;
+use crate::views::window::TerminalsRegistry;
 use crate::workspace::actions::execute::execute_action;
-use crate::workspace::state::Workspace;
+use crate::workspace::focus::FocusManager;
+use crate::workspace::state::{WindowId, Workspace};
 
 use okena_core::api::ActionRequest;
 use okena_core::client::strip_prefix;
@@ -20,9 +21,18 @@ use std::sync::Arc;
 ///
 /// Returns `Remote` variant for remote projects, `Local` for local ones.
 /// Returns `None` if required dependencies (backend, remote manager) are unavailable.
+///
+/// `window_id` carries the originating `WindowView`'s window id so per-window
+/// state mutations triggered by local UI actions (e.g. hide/show via the
+/// sidebar context menu routed through `SetProjectShowInOverview`) land on
+/// the right window's slot. Remote projects also carry `window_id` so a UI
+/// action issued in W2 against a remote project mutates W2's per-window
+/// state on the local mirror, not main's.
 pub fn dispatcher_for_project(
     project_id: &str,
+    window_id: WindowId,
     workspace: &Entity<Workspace>,
+    focus_manager: &Entity<FocusManager>,
     backend: &Option<Arc<dyn TerminalBackend>>,
     terminals: &TerminalsRegistry,
     service_manager: &Option<Entity<ServiceManager>>,
@@ -38,14 +48,18 @@ pub fn dispatcher_for_project(
             connection_id: connection_id.clone(),
             manager: manager.clone(),
             workspace: workspace.clone(),
+            focus_manager: focus_manager.clone(),
+            window_id,
         })
     } else {
         let backend = backend.as_ref()?;
         Some(ActionDispatcher::Local {
             workspace: workspace.clone(),
+            focus_manager: focus_manager.clone(),
             backend: backend.clone(),
             terminals: terminals.clone(),
             service_manager: service_manager.clone(),
+            window_id,
         })
     }
 }
@@ -60,18 +74,26 @@ pub enum ActionDispatcher {
     /// Local project — execute actions directly in the workspace.
     Local {
         workspace: Entity<Workspace>,
+        focus_manager: Entity<FocusManager>,
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         service_manager: Option<Entity<ServiceManager>>,
+        /// Originating window's id (PRD cri 13). Per-window state mutations
+        /// inside `execute_action` (e.g. `SetProjectShowInOverview`) target
+        /// this slot.
+        window_id: WindowId,
     },
     /// Remote project — send actions via HTTP to the remote server.
     /// Visual/presentation actions (split sizes, minimize, fullscreen, active tab, focus)
     /// are executed locally on the client workspace to avoid server round-trips
-    /// and to survive state syncs.
+    /// and to survive state syncs. `window_id` carries the originating window
+    /// for deferred focus after remote terminal creation.
     Remote {
         connection_id: String,
         manager: Entity<RemoteConnectionManager>,
         workspace: Entity<Workspace>,
+        focus_manager: Entity<FocusManager>,
+        window_id: WindowId,
     },
 }
 
@@ -86,9 +108,11 @@ impl ActionDispatcher {
         match self {
             Self::Local {
                 workspace,
+                focus_manager,
                 backend,
                 terminals,
                 service_manager,
+                window_id,
             } => {
                 // Intercept service actions — these need ServiceManager, not execute_action
                 if let Some(sm) = service_manager {
@@ -139,14 +163,21 @@ impl ActionDispatcher {
 
                 let backend = backend.clone();
                 let terminals = terminals.clone();
-                workspace.update(cx, |ws, cx| {
-                    execute_action(action, ws, &*backend, &terminals, cx);
+                let focus_manager = focus_manager.clone();
+                let window_id = *window_id;
+                focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        execute_action(action, ws, window_id, fm, &*backend, &terminals, cx);
+                    });
+                    cx.notify();
                 });
             }
             Self::Remote {
                 connection_id,
                 manager,
                 workspace,
+                focus_manager,
+                window_id,
             } => {
                 // Visual/presentation actions are executed locally on the client
                 // workspace. They never reach the server, so each client has
@@ -174,11 +205,15 @@ impl ActionDispatcher {
                     ActionRequest::SetFullscreen { project_id, terminal_id } => {
                         let pid = project_id.clone();
                         let tid = terminal_id.clone();
-                        workspace.update(cx, |ws, cx| {
-                            match tid {
-                                Some(tid) => ws.set_fullscreen_terminal(pid, tid, cx),
-                                None => ws.exit_fullscreen(cx),
-                            }
+                        let focus_manager = focus_manager.clone();
+                        focus_manager.update(cx, |fm, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                match tid {
+                                    Some(tid) => ws.set_fullscreen_terminal(fm, pid, tid, cx),
+                                    None => ws.exit_fullscreen(fm, cx),
+                                }
+                            });
+                            cx.notify();
                         });
                         return;
                     }
@@ -194,14 +229,18 @@ impl ActionDispatcher {
                     ActionRequest::FocusTerminal { project_id, terminal_id } => {
                         let pid = project_id.clone();
                         let tid = terminal_id.clone();
-                        workspace.update(cx, |ws, cx| {
-                            if let Some(project) = ws.project(&pid) {
-                                if let Some(ref layout) = project.layout {
-                                    if let Some(path) = layout.find_terminal_path(&tid) {
-                                        ws.set_focused_terminal(pid, path, cx);
+                        let focus_manager = focus_manager.clone();
+                        focus_manager.update(cx, |fm, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                if let Some(project) = ws.project(&pid) {
+                                    if let Some(ref layout) = project.layout {
+                                        if let Some(path) = layout.find_terminal_path(&tid) {
+                                            ws.set_focused_terminal(fm, pid, path, cx);
+                                        }
                                     }
                                 }
-                            }
+                            });
+                            cx.notify();
                         });
                         return;
                     }
@@ -210,8 +249,32 @@ impl ActionDispatcher {
                         // the next state sync brings the new terminal into the
                         // client's layout (see sync_remote_projects_into_workspace).
                         let pid = project_id.clone();
+                        let window_id = *window_id;
                         workspace.update(cx, |ws, _cx| {
-                            ws.queue_pending_remote_focus(&pid);
+                            let old_terminal_ids = ws
+                                .project(&pid)
+                                .and_then(|p| p.layout.as_ref())
+                                .map(|layout| layout.collect_terminal_ids())
+                                .unwrap_or_default();
+                            ws.queue_pending_remote_focus(window_id, &pid, old_terminal_ids);
+                        });
+                        // Don't return — action proceeds to be sent to server below
+                    }
+                    ActionRequest::CreateWorktree { branch, .. } => {
+                        // Record pending project visibility — the server assigns
+                        // the new worktree project ID, so the next state sync
+                        // applies the spawning-window rule when the branch-named
+                        // project first appears.
+                        let window_id = *window_id;
+                        let cid = connection_id.clone();
+                        let branch = branch.clone();
+                        workspace.update(cx, |ws, _cx| {
+                            ws.queue_pending_remote_project_visibility(
+                                window_id,
+                                &cid,
+                                &branch,
+                                None,
+                            );
                         });
                         // Don't return — action proceeds to be sent to server below
                     }
@@ -241,11 +304,15 @@ impl ActionDispatcher {
         cx: &mut impl AppContext,
     ) {
         match self {
-            Self::Local { workspace, .. } => {
+            Self::Local { workspace, focus_manager, .. } => {
                 let pid = project_id.to_string();
                 let lp = layout_path.to_vec();
-                workspace.update(cx, |ws, cx| {
-                    ws.split_terminal(&pid, &lp, direction, cx);
+                let focus_manager = focus_manager.clone();
+                focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.split_terminal(fm, &pid, &lp, direction, cx);
+                    });
+                    cx.notify();
                 });
             }
             Self::Remote { .. } => {
@@ -270,15 +337,19 @@ impl ActionDispatcher {
         cx: &mut impl AppContext,
     ) {
         match self {
-            Self::Local { workspace, .. } => {
+            Self::Local { workspace, focus_manager, .. } => {
                 let pid = project_id.to_string();
                 let lp = layout_path.to_vec();
-                workspace.update(cx, |ws, cx| {
-                    if in_group {
-                        ws.add_tab_to_group(&pid, &lp, cx);
-                    } else {
-                        ws.add_tab(&pid, &lp, cx);
-                    }
+                let focus_manager = focus_manager.clone();
+                focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        if in_group {
+                            ws.add_tab_to_group(fm, &pid, &lp, cx);
+                        } else {
+                            ws.add_tab(fm, &pid, &lp, cx);
+                        }
+                    });
+                    cx.notify();
                 });
             }
             Self::Remote { .. } => {

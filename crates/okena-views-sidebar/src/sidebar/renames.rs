@@ -17,7 +17,11 @@ impl Sidebar {
             window,
             cx,
         ));
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -29,13 +33,21 @@ impl Sidebar {
                 name: new_name,
             }, cx);
         }
-        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
     pub fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         cancel_rename(&mut self.terminal_rename);
-        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -48,7 +60,11 @@ impl Sidebar {
             window,
             cx,
         ));
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -58,13 +74,21 @@ impl Sidebar {
                 ws.rename_project(&project_id, new_name, cx);
             });
         }
-        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
     pub fn cancel_project_rename(&mut self, cx: &mut Context<Self>) {
         cancel_rename(&mut self.project_rename);
-        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -113,7 +137,11 @@ impl Sidebar {
             window,
             cx,
         ));
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -123,13 +151,21 @@ impl Sidebar {
                 ws.rename_folder(&folder_id, new_name, cx);
             });
         }
-        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
     pub fn cancel_folder_rename(&mut self, cx: &mut Context<Self>) {
         cancel_rename(&mut self.folder_rename);
-        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
