@@ -73,12 +73,16 @@ impl CodexStatus {
                         .json()
                         .ok()?;
 
-                    // Find the Codex component and its ID
+                    // Find the Codex component and its ID. OpenAI renamed the
+                    // component from "Codex" to "Codex API" (2026), so match
+                    // on a `Codex`-prefix: future renames like "Codex Cloud"
+                    // would still resolve without another code change.
                     let components = resp["components"].as_array()?;
                     let mut component_status = None;
                     let mut component_id = None;
                     for component in components {
-                        if component["name"].as_str() == Some("Codex") {
+                        let name = component["name"].as_str().unwrap_or("");
+                        if name == "Codex" || name.starts_with("Codex ") {
                             component_status =
                                 component["status"].as_str().map(|s| s.to_string());
                             component_id = component["id"].as_str().map(|s| s.to_string());
