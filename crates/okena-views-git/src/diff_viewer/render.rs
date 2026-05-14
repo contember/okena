@@ -1,9 +1,14 @@
-//! Render helper methods for the diff viewer.
+//! Render trait impl and helper methods for the diff viewer.
 
 use super::types::{DiffViewMode, FileTreeNode};
-use super::{DiffViewer, SIDEBAR_WIDTH};
+use super::{Cancel, DiffViewer, SIDEBAR_WIDTH};
 use okena_core::theme::ThemeColors;
-use okena_ui::modal::{window_drag_spacer, window_min_max_controls};
+use okena_files::selection::Selection2DNonEmpty;
+use okena_files::theme::theme;
+use okena_ui::modal::{
+    detached_needs_controls, fullscreen_overlay, fullscreen_panel, window_drag_spacer,
+    window_min_max_controls,
+};
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl, ui_text};
 use okena_git::DiffMode;
@@ -899,5 +904,153 @@ impl DiffViewer {
         }
 
         elements
+    }
+}
+
+impl Render for DiffViewer {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Measure actual monospace character width from font metrics
+        let font = Font {
+            family: "monospace".into(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            ..Default::default()
+        };
+        let text_system = window.text_system();
+        let font_id = text_system.resolve_font(&font);
+        self.measured_char_width = text_system
+            .advance(font_id, px(self.file_font_size), 'm')
+            .map(|size| f32::from(size.width))
+            .unwrap_or(self.file_font_size * 0.6);
+
+        let t = theme(cx);
+        let focus_handle = self.focus_handle.clone();
+        let has_error = self.error_message.is_some();
+        let error_message = self.error_message.clone();
+        let diff_mode = self.diff_mode.clone();
+        let has_files = !self.file_stats.is_empty();
+        // Gutter: two number columns + separator, matching render_line layout
+        let char_width = self.char_width();
+        let num_col_width = (self.line_num_width as f32) * char_width + 12.0;
+        let gutter_width = 2.0 * num_col_width + 1.0;
+
+        let current_stats = self.file_stats.get(self.selected_file_index);
+        let file_path = current_stats.map(|f| f.path.clone()).unwrap_or_default();
+        let is_binary = current_stats.map(|f| f.is_binary).unwrap_or(false);
+        let line_count = self.current_file.as_ref().map(|f| f.items.len()).unwrap_or(0);
+
+        let tree_elements = if has_files {
+            self.render_tree_node(&self.file_tree.clone(), 0, "", &t, cx)
+        } else {
+            Vec::new()
+        };
+
+        let total_added: usize = self.file_stats.iter().map(|f| f.added).sum();
+        let total_removed: usize = self.file_stats.iter().map(|f| f.removed).sum();
+
+        let theme_colors = Arc::new(t.clone());
+
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
+
+        let outer = if self.is_detached {
+            fullscreen_panel("diff-viewer", &t)
+                .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |d| {
+                    d.pt(px(28.0))
+                })
+        } else {
+            fullscreen_overlay("diff-viewer", &t)
+                .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |d| {
+                    d.top(px(28.0))
+                })
+        };
+        outer
+            .track_focus(&focus_handle)
+            .key_context("DiffViewer")
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                if this.dismiss_transient_ui(cx) {
+                    return;
+                }
+                if this.selection.normalized_non_empty().is_some() {
+                    this.selection.clear();
+                    this.selection_side = None;
+                    cx.notify();
+                } else {
+                    this.close(cx);
+                }
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                let key = event.keystroke.key.as_str();
+                let modifiers = &event.keystroke.modifiers;
+
+                match key {
+                    "tab" => this.toggle_mode(cx),
+                    "s" => this.toggle_view_mode(cx),
+                    "w" => this.toggle_ignore_whitespace(cx),
+                    "up" => this.prev_file(cx),
+                    "down" => this.next_file(cx),
+                    "left" => {
+                        this.scroll_x = (this.scroll_x - 40.0).max(0.0);
+                        cx.notify();
+                    }
+                    "right" => {
+                        let max = this.max_scroll_x();
+                        this.scroll_x = (this.scroll_x + 40.0).min(max);
+                        cx.notify();
+                    }
+                    "[" => this.prev_commit(cx),
+                    "]" => this.next_commit(cx),
+                    "c" if modifiers.platform || modifiers.control => this.copy_selection(cx),
+                    "a" if modifiers.platform || modifiers.control => this.select_all(cx),
+                    _ => {}
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.scrollbar_drag.is_some() {
+                    let y = f32::from(event.position.y);
+                    this.update_scrollbar_drag(y, cx);
+                }
+                if let Some(drag) = this.h_scrollbar_drag {
+                    let x = f32::from(event.position.x);
+                    let delta_x = x - drag.start_x;
+                    let max = this.max_scroll_x();
+                    let text_w = this.max_text_width();
+                    let avail_w = this.available_text_width();
+                    let scale = if avail_w > 0.0 { text_w / avail_w } else { 1.0 };
+                    this.scroll_x = (drag.start_scroll_x + delta_x * scale).clamp(0.0, max);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    if this.scrollbar_drag.is_some() {
+                        this.end_scrollbar_drag(cx);
+                    }
+                    if this.h_scrollbar_drag.is_some() {
+                        this.h_scrollbar_drag = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .child({
+                let needs_controls = self.is_detached && detached_needs_controls(window);
+                let is_maximized = window.is_maximized();
+                self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, &diff_mode, self.ignore_whitespace, self.commit_message.as_deref(), needs_controls, is_maximized, cx)
+            })
+            // Commit info bar (when viewing a commit with navigation)
+            .when(self.has_commits(), |d| {
+                d.child(self.render_commit_info_bar(&t, cx))
+            })
+            .child(self.render_content(&t, self.loading, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
+            .child(self.render_footer(&t, cx))
+            .children(self.render_context_overlays(&t, cx))
+    }
+}
+
+impl Focusable for DiffViewer {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
