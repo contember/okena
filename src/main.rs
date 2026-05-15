@@ -715,6 +715,10 @@ fn main() {
         )
         .expect("Failed to create main window");
 
+        if std::env::var("OKENA_ACTIVATE").is_ok() {
+            cx.activate(true);
+        }
+
         // Flush pending saves on ALL quit paths (including window X button).
         // The Quit action handler only runs for Ctrl+Q / menu quit, not for
         // QuitMode::LastWindowClosed. on_app_quit fires for every exit path.

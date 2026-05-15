@@ -375,6 +375,7 @@ impl RootView {
                     .args(&args)
                     .arg("--profile")
                     .arg(&id)
+                    .env("OKENA_ACTIVATE", "1")
                     .spawn();
             }
             Err(e) => {
