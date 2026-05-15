@@ -38,7 +38,8 @@ impl GitHeader {
 
                 h_flex()
                     .flex_shrink_0()
-                    .gap(px(6.0))
+                    .items_center()
+                    .gap(px(4.0))
                     .text_size(ui_text_sm(cx))
                     .line_height(px(12.0))
                     .child({
@@ -153,6 +154,7 @@ impl GitHeader {
                                 .id(ElementId::Name(format!("git-diff-stats-{}", project_id).into()))
                                 .relative()
                                 .cursor_pointer()
+                                .rounded(px(3.0))
                                 .hover(|s| s.bg(rgb(t.bg_hover)))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();

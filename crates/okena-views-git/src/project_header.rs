@@ -11,6 +11,7 @@ use okena_git::{CiStatus, PrState};
 
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 
 mod branch_status;
 mod commit_log;
@@ -58,45 +59,82 @@ impl CiStatusColor for CiStatus {
     }
 }
 
+// ── Color helpers ───────────────────────────────────────────────────────────
+
+/// Convert a packed `0xRRGGBB` color into an `Rgba` with the given alpha.
+/// Handy for subtle tinted backgrounds derived from theme colors.
+pub(crate) fn tint(color: u32, alpha: f32) -> Rgba {
+    let r = ((color >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((color >> 8) & 0xFF) as f32 / 255.0;
+    let b = (color & 0xFF) as f32 / 255.0;
+    Rgba { r, g, b, a: alpha }
+}
+
 // ── Standalone badges ───────────────────────────────────────────────────────
 
-/// Render an ahead/behind badge (`↑N ↓M`). Returns `None` when both counts
-/// are zero or unavailable — caller can `.when_some(...)` on the result.
+/// Tooltip text describing ahead/behind counts; `None` when both zero.
+pub fn ahead_behind_tooltip(counts: (Option<usize>, Option<usize>)) -> Option<String> {
+    let ahead = counts.0.unwrap_or(0);
+    let behind = counts.1.unwrap_or(0);
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    match (ahead, behind) {
+        (0, 0) => None,
+        (a, 0) => Some(format!("{a} commit{} to push", plural(a))),
+        (0, b) => Some(format!("{b} commit{} to pull", plural(b))),
+        (a, b) => Some(format!("{a} to push, {b} to pull")),
+    }
+}
+
+/// Render a single "<sign> <count>" pair where the sign character is rendered
+/// in a muted tone of the color and the number itself gets full color +
+/// medium weight. Used for both diff stats and ahead/behind so the row reads
+/// as typography rather than CLI output.
+fn render_sign_count(sign: &str, count: usize, color: u32, alpha: f32) -> Div {
+    div()
+        .flex()
+        .items_baseline()
+        .gap(px(1.0))
+        .child(div().text_color(tint(color, alpha)).child(sign.to_string()))
+        .child(
+            div()
+                .text_color(rgb(color))
+                .font_weight(FontWeight::MEDIUM)
+                .child(format!("{count}")),
+        )
+}
+
+/// Render an ahead/behind indicator (`↑N ↓M`). Zero-count sides are hidden so
+/// `↑10 ↓0` becomes just `↑10`. Returns `None` when both counts are zero.
 pub fn render_ahead_behind_badge(
     counts: (Option<usize>, Option<usize>),
     t: &ThemeColors,
-) -> Option<Div> {
+) -> Option<AnyElement> {
+    let tooltip_text = ahead_behind_tooltip(counts)?;
     let ahead = counts.0.unwrap_or(0);
     let behind = counts.1.unwrap_or(0);
-    if ahead == 0 && behind == 0 {
-        return None;
-    }
+
     Some(
         div()
+            .id("ahead-behind-badge")
             .flex()
             .items_center()
-            .gap(px(4.0))
-            .px(px(4.0))
-            .py(px(1.0))
-            .rounded(px(3.0))
+            .gap(px(5.0))
+            .px(px(3.0))
             .when(ahead > 0, |d| {
-                d.child(
-                    div()
-                        .text_color(rgb(t.term_green))
-                        .child(format!("\u{2191}{}", ahead)),
-                )
+                d.child(render_sign_count("\u{2191}", ahead, t.term_green, 0.7))
             })
             .when(behind > 0, |d| {
-                d.child(
-                    div()
-                        .text_color(rgb(t.term_yellow))
-                        .child(format!("\u{2193}{}", behind)),
-                )
-            }),
+                d.child(render_sign_count("\u{2193}", behind, t.term_yellow, 0.7))
+            })
+            .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+            .into_any_element(),
     )
 }
 
-/// Render the diff stats badge (`+N / -M`).
+/// Render the diff stats badge as `+N −M` (typographic minus, no slash).
+/// Zero sides are hidden so a pure-additions diff reads as just `+495`. The
+/// sign glyph is muted; the number gets full color + medium weight to make
+/// the count the primary glyph.
 ///
 /// Returns a `Div` (not yet stateful). The caller should:
 /// - Assign an `id(...)` and attach hover/click handlers
@@ -105,19 +143,13 @@ pub fn render_diff_stats_badge(lines_added: usize, lines_removed: usize, t: &The
     div()
         .flex()
         .items_center()
-        .gap(px(3.0))
+        .gap(px(5.0))
         .px(px(4.0))
         .py(px(1.0))
-        .rounded(px(3.0))
-        .child(
-            div()
-                .text_color(rgb(t.term_green))
-                .child(format!("+{}", lines_added)),
-        )
-        .child(div().text_color(rgb(t.text_muted)).child("/"))
-        .child(
-            div()
-                .text_color(rgb(t.term_red))
-                .child(format!("-{}", lines_removed)),
-        )
+        .when(lines_added > 0, |d| {
+            d.child(render_sign_count("+", lines_added, t.term_green, 0.7))
+        })
+        .when(lines_removed > 0, |d| {
+            d.child(render_sign_count("\u{2212}", lines_removed, t.term_red, 0.7))
+        })
 }
