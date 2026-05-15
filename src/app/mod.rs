@@ -32,18 +32,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch as tokio_watch;
 
 /// Push the resolved Claude config directory into the PTY manager as CLAUDE_CONFIG_DIR,
-/// so `claude` invocations inside Okena terminals read the same install as the status-bar widget.
-/// Only set when the resolved dir differs from the CLI default (~/.claude).
+/// so `claude` invocations inside Okena terminals always read the per-profile account.
+/// Always set unconditionally — per-profile isolation must override any inherited env.
 fn sync_claude_pty_env(pty_manager: &Arc<PtyManager>, cx: &App) {
     let claude_dir = resolve_claude_dir(cx);
-    let default_dir = dirs::home_dir().map(|h| h.join(".claude")).unwrap_or_default();
-    if claude_dir != default_dir {
-        pty_manager.set_extra_env(vec![
-            ("CLAUDE_CONFIG_DIR".to_string(), claude_dir.to_string_lossy().into_owned()),
-        ]);
-    } else {
-        pty_manager.set_extra_env(vec![]);
-    }
+    pty_manager.set_extra_env(vec![
+        ("CLAUDE_CONFIG_DIR".to_string(), claude_dir.to_string_lossy().into_owned()),
+    ]);
 }
 
 /// Set up an observer that loads/unloads service configs when projects change.

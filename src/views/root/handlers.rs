@@ -1,11 +1,12 @@
 use crate::action_dispatch::ActionDispatcher;
-use crate::settings::settings;
+use crate::settings::{settings, GlobalSettings};
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
+use crate::workspace::persistence;
 use crate::workspace::requests::{
     FolderOverlay, FolderOverlayKind, OverlayRequest, ProjectOverlay, ProjectOverlayKind,
     SidebarRequest,
 };
-use crate::workspace::state::{LayoutNode, Workspace};
+use crate::workspace::state::{GlobalWorkspace, LayoutNode, Workspace};
 use gpui::*;
 
 use okena_core::api::ActionRequest;
@@ -299,6 +300,9 @@ impl RootView {
                     }, cx);
                 }
             }
+            OverlayManagerEvent::SwitchProfile(id) => {
+                self.handle_switch_profile(id.clone(), cx);
+            }
             OverlayManagerEvent::RemoteConnected { config } => {
                 if let Some(ref rm) = self.remote_manager {
                     let config_clone = config.clone();
@@ -343,6 +347,43 @@ impl RootView {
         self.sync_project_columns(cx);
 
         cx.notify();
+    }
+
+    /// Flush pending saves, spawn a new Okena process for `id`, then quit.
+    /// The spawned child is dropped immediately and survives as an orphan (Unix)
+    /// or independent process (Windows) — same pattern as the updater's restart_app.
+    pub(super) fn handle_switch_profile(&self, id: String, cx: &mut Context<Self>) {
+        // 1. Flush settings
+        if let Some(gs) = cx.try_global::<GlobalSettings>() {
+            gs.0.read(cx).flush_pending_save();
+        }
+
+        // 2. Flush workspace
+        if let Some(gw) = cx.try_global::<GlobalWorkspace>() {
+            if let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
+                log::error!("Failed to flush workspace before profile switch: {e}");
+            }
+        }
+
+        // 3. Spawn current_exe with --profile <id>. Strip any existing --profile arg
+        //    so we don't double-pass it.
+        match std::env::current_exe() {
+            Ok(exe) => {
+                let mut args: Vec<String> = std::env::args().skip(1).collect();
+                strip_profile_args(&mut args);
+                let _ = std::process::Command::new(&exe)
+                    .args(&args)
+                    .arg("--profile")
+                    .arg(&id)
+                    .env("OKENA_ACTIVATE", "1")
+                    .spawn();
+            }
+            Err(e) => {
+                log::error!("profile switch: could not resolve current_exe, relaunch aborted: {e}");
+            }
+        }
+
+        cx.quit();
     }
 
     /// Process pending overlay requests from workspace state.
@@ -529,5 +570,22 @@ fn collect_tab_terminal_ids(
             terminal_id.iter().cloned().collect()
         }
         _ => Vec::new(),
+    }
+}
+
+/// Remove `--profile <value>` and `--profile=<value>` from an args list.
+fn strip_profile_args(args: &mut Vec<String>) {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--profile" {
+            args.remove(i);
+            if i < args.len() {
+                args.remove(i);
+            }
+        } else if args[i].starts_with("--profile=") {
+            args.remove(i);
+        } else {
+            i += 1;
+        }
     }
 }

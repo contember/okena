@@ -1510,7 +1510,7 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
 
         let root = get_repo_root(&sub).expect("should resolve repo root");
-        assert_eq!(root, repo.canonicalize().unwrap());
+        assert_eq!(root.canonicalize().unwrap(), repo.canonicalize().unwrap());
     }
 
     #[test]
@@ -1532,7 +1532,7 @@ mod tests {
         // get_repo_root from the nested subdir should return the worktree root,
         // NOT the main repo — this is the path `git worktree remove` needs.
         let root = get_repo_root(&nested).expect("should resolve worktree root");
-        assert_eq!(root, wt_path.canonicalize().unwrap());
+        assert_eq!(root.canonicalize().unwrap(), wt_path.canonicalize().unwrap());
     }
 
     // ─── CI check parsing tests ────────────────────────────────────────

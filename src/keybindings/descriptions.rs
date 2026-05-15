@@ -11,7 +11,7 @@ use super::{
     ShowContentSearch, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
     ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
     StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide,
-    ZoomIn, ZoomOut, EqualizeLayout, ShowBranchSwitcher,
+ZoomIn, ZoomOut, EqualizeLayout, ShowBranchSwitcher, ShowProfileManager,
 };
 
 /// Get human-readable descriptions for all actions
@@ -369,6 +369,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Open session manager to save/load workspaces",
             category: "Global",
             factory: || Box::new(ShowSessionManager),
+        },
+    );
+    map.insert(
+        "ShowProfileManager",
+        ActionDescription {
+            name: "Profile Manager",
+            description: "Open profile manager to switch, create, or delete profiles",
+            category: "Global",
+            factory: || Box::new(ShowProfileManager),
         },
     );
     map.insert(

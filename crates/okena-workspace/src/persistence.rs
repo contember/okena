@@ -33,11 +33,16 @@ pub use super::sessions::{
 /// Current workspace schema version - increment when making breaking changes
 pub const WORKSPACE_VERSION: u32 = 1;
 
-/// Get the config directory path
+/// Get the config directory for the active profile.
+///
+/// Falls back to the legacy flat layout path if profiles are not yet initialized
+/// (e.g. during early CLI dispatch before `init_profile` is called).
 pub fn get_config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("okena")
+    if let Some(p) = okena_core::profiles::try_current() {
+        p.root.clone()
+    } else {
+        okena_core::profiles::config_root()
+    }
 }
 
 /// Alias for `get_config_dir` (used by remote/auth, remote/server, session manager UI)
@@ -47,7 +52,11 @@ pub fn config_dir() -> PathBuf {
 
 /// Get the workspace file path
 pub fn get_workspace_path() -> PathBuf {
-    get_config_dir().join("workspace.json")
+    if let Some(p) = okena_core::profiles::try_current() {
+        p.workspace_json()
+    } else {
+        get_config_dir().join("workspace.json")
+    }
 }
 
 /// Acquire a lock file to prevent multiple instances from running simultaneously.
@@ -55,7 +64,9 @@ pub fn get_workspace_path() -> PathBuf {
 /// If another instance is already running, returns an error with its PID.
 pub fn acquire_instance_lock() -> Result<LockGuard> {
     let _slow = okena_core::timing::SlowGuard::new("acquire_instance_lock");
-    let lock_path = get_config_dir().join("okena.lock");
+    let lock_path = okena_core::profiles::try_current()
+        .map(|p| p.lock_path())
+        .unwrap_or_else(|| get_config_dir().join("okena.lock"));
 
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;

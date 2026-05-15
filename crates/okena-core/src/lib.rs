@@ -7,6 +7,7 @@ pub mod client;
 pub mod remote_action;
 pub mod keys;
 pub mod process;
+pub mod profiles;
 pub mod selection;
 pub mod theme;
 pub mod timing;
