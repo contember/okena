@@ -147,16 +147,22 @@ impl DiffViewer {
     ) -> Stateful<Div> {
         let line_height = self.line_height();
         let font_size = self.file_font_size;
+        let char_width = self.char_width();
         let hidden = expander.hidden_count();
 
         let old_range = expander.old_range;
         let new_range = expander.new_range;
 
         let label = if hidden == 1 {
-            "1 hidden line".to_string()
+            "Expand 1 hidden line".to_string()
         } else {
-            format!("{} hidden lines", hidden)
+            format!("Expand {} hidden lines", hidden)
         };
+
+        // Match the gutter width of regular diff lines so the icon aligns with
+        // the line-number column instead of floating in the middle.
+        let num_col_width = (self.line_num_width as f32) * char_width + 12.0;
+        let gutter_width = ACCENT_WIDTH + num_col_width * 2.0;
 
         div()
             .id(ElementId::Name(format!("expander-{}", idx).into()))
@@ -164,20 +170,37 @@ impl DiffViewer {
             .h(px(line_height))
             .flex()
             .items_center()
-            .justify_center()
             .font_family("monospace")
-            .bg(rgba(t.diff_hunk_header_bg, 0.15))
-            .border_t_1()
-            .border_color(rgba(t.border, 0.3))
+            .text_size(px(font_size))
+            .bg(rgba(t.diff_hunk_header_bg, 0.55))
+            .border_y_1()
+            .border_color(rgba(t.diff_hunk_header_fg, 0.25))
             .cursor_pointer()
-            .hover(|s| s.bg(rgba(t.bg_hover, 0.6)))
+            .hover(|s| s.bg(rgba(t.diff_hunk_header_bg, 0.9)))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.expand_context_by_range(old_range, new_range, cx);
             }))
+            // Left gutter — accent-tinted column with the unfold icon,
+            // aligned with the line-number gutter of regular rows.
+            .child(
+                h_flex()
+                    .w(px(gutter_width))
+                    .h_full()
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink_0()
+                    .bg(rgba(t.diff_hunk_header_fg, 0.18))
+                    .child(
+                        svg()
+                            .path("icons/unfold-vertical.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(t.diff_hunk_header_fg)),
+                    ),
+            )
             .child(
                 div()
-                    .text_size(px(font_size * 0.8))
-                    .text_color(rgba(t.text_muted, 0.6))
+                    .pl(px(CONTENT_PADDING))
+                    .text_color(rgb(t.diff_hunk_header_fg))
                     .child(label),
             )
     }
