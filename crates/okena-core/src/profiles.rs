@@ -59,8 +59,6 @@ pub struct ProfileEntry {
     pub display_name: String,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub claude_config_dir: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
@@ -224,8 +222,6 @@ pub fn create_profile(display_name: &str) -> Result<String> {
         id: id.clone(),
         display_name: display_name.to_string(),
         created_at: now_iso8601(),
-        // New profiles get their own claude dir; user can override via settings.json
-        claude_config_dir: Some(claude_dir.clone()),
         icon: None,
         color: None,
     };
@@ -416,7 +412,6 @@ fn bootstrap_default_profile(config_root: &Path) -> Result<ProfileIndex> {
         id: "default".to_string(),
         display_name: "Default".to_string(),
         created_at: now_iso8601(),
-        claude_config_dir: None, // use ~/.claude (silent for existing users)
         icon: None,
         color: None,
     };
@@ -539,7 +534,6 @@ mod tests {
                 id: "default".to_string(),
                 display_name: "Default".to_string(),
                 created_at: "2024-01-01T00:00:00Z".to_string(),
-                claude_config_dir: None,
                 icon: None,
                 color: None,
             }],
@@ -567,7 +561,6 @@ mod tests {
             id: "work".to_string(),
             display_name: "Work".to_string(),
             created_at: "".to_string(),
-            claude_config_dir: None,
             icon: None,
             color: None,
         });
@@ -588,7 +581,6 @@ mod tests {
                 id: "default".into(),
                 display_name: "Default".into(),
                 created_at: "".into(),
-                claude_config_dir: None,
                 icon: None,
                 color: None,
             }],
@@ -637,8 +629,8 @@ mod tests {
         let idx = ProfileIndex {
             version: 1,
             profiles: vec![
-                ProfileEntry { id: "default".into(), display_name: "Default".into(), created_at: "".into(), claude_config_dir: None, icon: None, color: None },
-                ProfileEntry { id: "work".into(), display_name: "Work".into(), created_at: "".into(), claude_config_dir: None, icon: None, color: None },
+                ProfileEntry { id: "default".into(), display_name: "Default".into(), created_at: "".into(), icon: None, color: None },
+                ProfileEntry { id: "work".into(), display_name: "Work".into(), created_at: "".into(), icon: None, color: None },
             ],
             last_used: Some("work".into()),
             default_profile: "default".into(),
