@@ -217,9 +217,9 @@ pub fn create_profile(display_name: &str) -> Result<String> {
     });
 
     let id = unique_id(display_name, &index);
-    let claude_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(format!(".claude-{id}"));
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot create profile: home directory not found"))?;
+    let claude_dir = home.join(format!(".claude-{id}"));
     let entry = ProfileEntry {
         id: id.clone(),
         display_name: display_name.to_string(),
