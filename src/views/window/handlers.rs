@@ -141,6 +141,30 @@ impl WindowView {
         }
     }
 
+    /// Evict cached file viewers for projects that no longer exist.
+    ///
+    /// Rebuilds the set of `ProjectFs::project_id()` keys from the current
+    /// workspace projects (using the same `build_project_fs` path that seeds
+    /// the cache, so keys match exactly) and hands it to the OverlayManager,
+    /// which drops any cached viewer whose project is gone. Called from the
+    /// workspace observer so closing a project releases its FileViewer.
+    pub(super) fn prune_file_viewer_cache(&self, cx: &mut Context<Self>) {
+        let project_ids: Vec<String> = self
+            .workspace
+            .read(cx)
+            .projects()
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+        let valid_keys: std::collections::HashSet<String> = project_ids
+            .iter()
+            .filter_map(|id| self.build_project_fs(id, cx).map(|fs| fs.project_id()))
+            .collect();
+        self.overlay_manager.update(cx, |om, _cx| {
+            om.prune_file_viewer_cache(&valid_keys);
+        });
+    }
+
     /// Build a BlameProvider for the given project (local or remote). Returns
     /// `None` only when project lookup fails — the provider itself surfaces
     /// non-git / not-tracked errors at call time.

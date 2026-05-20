@@ -406,6 +406,7 @@ impl WindowView {
                 this.sync_project_columns(cx);
             }
             this.refresh_for_project_path_changes(cx);
+            this.prune_file_viewer_cache(cx);
         }).detach();
 
         // Initialize project columns

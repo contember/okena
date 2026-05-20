@@ -1436,6 +1436,26 @@ impl OverlayManager {
         cx.notify();
     }
 
+    /// Drop cached file viewers whose project is no longer present.
+    ///
+    /// `valid_keys` is the set of `ProjectFs::project_id()` keys for the
+    /// currently-known projects (the same keys used when inserting into the
+    /// cache). Any cached viewer whose key is absent belongs to a closed
+    /// project and is evicted, releasing its `ProjectFs` / blame-provider
+    /// `Arc`s.
+    ///
+    /// This only drops the cache's clone of the viewer. If a closed project's
+    /// viewer happens to be the active modal, the `active_modal` slot keeps it
+    /// alive (so the open UI is never yanked out from under the user); it is
+    /// released when that modal is next closed.
+    pub fn prune_file_viewer_cache(
+        &mut self,
+        valid_keys: &std::collections::HashSet<String>,
+    ) {
+        self.cached_file_viewers
+            .retain(|key, _| valid_keys.contains(key));
+    }
+
     /// Subscribe to a FileViewer's events: Close hides modal (keeps cache),
     /// Detach moves it to a separate OS window, OpenCommit bubbles up to
     /// RootView, SendToTerminal routes to the focused terminal via the broker.
