@@ -5,7 +5,6 @@ god classes, concurrency, render-path perf, clippy). One markdown per issue.
 
 ## High
 
-- [Diff viewer: horizontal scrollbar char-width mismatch](diff-scrollbar-char-width-mismatch.md) — bug, scrollbar uses `0.6em` vs measured metrics
 - [File viewer: blocking filesystem I/O on the render thread](file-viewer-blocking-io-in-render.md) — perf, sync fs in `render()`
 - [Markdown preview: full re-render per frame + no virtualization](markdown-preview-rerender-and-virtualization.md) — perf, rebuild every frame
 - [Updater orchestration embedded inside render()](updater-orchestration-in-render.md) — refactor, ~120 lines of async logic in `render()`
