@@ -15,7 +15,6 @@ recovery toasts). The items below remain.
 
 ## Medium
 
-- [Split okena-git/repository.rs (1846-line god module)](split-git-repository-rs.md) — refactor
 - [OverlayManager: collapse event-passthrough boilerplate](refactor-overlay-manager-event-passthrough.md) — refactor, 32-variant event enum
 - [Extract worktree lifecycle out of actions/project.rs](extract-worktree-actions-from-project.md) — refactor
 - [Split execute_action (900-line match, 40+ arms)](split-execute-action-dispatcher.md) — refactor
