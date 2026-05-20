@@ -251,6 +251,45 @@ impl WorkspaceData {
         WindowId::Extra(id)
     }
 
+    /// Remove per-window references to projects/folders that no longer exist.
+    ///
+    /// Walks `main_window` plus every extra and drops any `hidden_project_ids`
+    /// / `project_widths` entry whose project id is not in `self.projects`, any
+    /// `folder_collapsed` entry whose folder id is not in `self.folders`, and
+    /// clears a `folder_filter` that points at a gone folder.
+    ///
+    /// The in-app delete actions already scrub eagerly via
+    /// `delete_project_scrub_all_windows` / `delete_folder_scrub_all_windows`.
+    /// This is the load-time safety net for state that arrived any other way
+    /// (a crash between delete and save, a hand-edited file, a project removed
+    /// by a path the delete actions don't cover), so a stale id can never
+    /// linger across launches. Pure and idempotent.
+    pub fn scrub_orphan_window_state(&mut self) {
+        let valid_projects: std::collections::HashSet<String> =
+            self.projects.iter().map(|p| p.id.clone()).collect();
+        let valid_folders: std::collections::HashSet<String> =
+            self.folders.iter().map(|f| f.id.clone()).collect();
+
+        for window in
+            std::iter::once(&mut self.main_window).chain(self.extra_windows.iter_mut())
+        {
+            window
+                .hidden_project_ids
+                .retain(|id| valid_projects.contains(id));
+            window
+                .project_widths
+                .retain(|id, _| valid_projects.contains(id));
+            window
+                .folder_collapsed
+                .retain(|id, _| valid_folders.contains(id));
+            if let Some(filter) = &window.folder_filter {
+                if !valid_folders.contains(filter) {
+                    window.folder_filter = None;
+                }
+            }
+        }
+    }
+
     /// Drop the extra window with the given id from `extra_windows`.
     ///
     /// Lifecycle counterpart to `spawn_extra_window` — the slice 07 close-flow
