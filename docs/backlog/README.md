@@ -15,7 +15,6 @@ recovery toasts). The items below remain.
 
 ## Medium
 
-- [OverlayManager: collapse event-passthrough boilerplate](refactor-overlay-manager-event-passthrough.md) — refactor, 32-variant event enum
 - [Split execute_action (900-line match, 40+ arms)](split-execute-action-dispatcher.md) — refactor
 - [RootView god object + remote-sync logic in the view layer](rootview-god-object-and-remote-sync.md) — refactor
 

@@ -42,7 +42,7 @@ use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
 
 // Re-export generic overlay utilities from okena-ui
 pub use okena_ui::overlay::{CloseEvent, OverlaySlot};
-pub use okena_ui::toggle_overlay;
+pub use okena_ui::{open_overlay, toggle_overlay};
 
 // CloseEvent impls for overlay events defined in src/ (local types)
 
@@ -278,21 +278,6 @@ impl OverlayManager {
         }
     }
 
-    /// Hide the active modal without dropping it (used for cached overlays like FileViewer).
-    fn hide_modal(&mut self, cx: &mut Context<Self>) {
-        if self.active_modal.is_some() {
-            self.active_modal = None;
-            self.modal_type_id = None;
-            self.detach_active_modal_fn = None;
-            let workspace = self.workspace.clone();
-            self.focus_manager.update(cx, |fm, cx| {
-                workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
-                cx.notify();
-            });
-            cx.notify();
-        }
-    }
-
     /// Check if the active modal is of a specific type.
     fn is_modal<T: 'static>(&self) -> bool {
         self.modal_type_id == Some(std::any::TypeId::of::<T>())
@@ -427,20 +412,11 @@ impl OverlayManager {
         remote_manager: Option<Entity<RemoteConnectionManager>>,
         cx: &mut Context<Self>,
     ) {
-        if self.is_modal::<AddProjectDialog>() {
-            self.close_modal(cx);
-        } else {
-            let workspace = self.workspace.clone();
-            let window_id = self.window_id;
-            let entity = cx.new(|cx| AddProjectDialog::new(workspace, remote_manager, window_id, cx));
-            cx.subscribe(&entity, |this, _, event: &AddProjectDialogEvent, cx| {
-                if event.is_close() {
-                    this.close_modal(cx);
-                }
-            }).detach();
-            self.open_modal(entity, cx);
-        }
-        cx.notify();
+        let workspace = self.workspace.clone();
+        let window_id = self.window_id;
+        toggle_overlay!(self, cx, AddProjectDialog, AddProjectDialogEvent, |cx| {
+            AddProjectDialog::new(workspace, remote_manager, window_id, cx)
+        });
     }
 
     /// Toggle keybindings help overlay.
@@ -461,7 +437,6 @@ impl OverlayManager {
             }).detach();
             self.open_modal(entity, cx);
         }
-        cx.notify();
     }
 
     /// Toggle theme selector overlay.
@@ -471,39 +446,20 @@ impl OverlayManager {
 
     /// Toggle command palette overlay.
     pub fn toggle_command_palette(&mut self, cx: &mut Context<Self>) {
-        if self.is_modal::<CommandPalette>() {
-            self.close_modal(cx);
-        } else {
-            let ws = self.workspace.clone();
-            let fm = self.focus_manager.clone();
-            let window_id = self.window_id;
-            let entity = cx.new(|cx| CommandPalette::new(ws, fm, window_id, cx));
-            cx.subscribe(&entity, |this, _, event: &CommandPaletteEvent, cx| {
-                if event.is_close() {
-                    this.close_modal(cx);
-                }
-            })
-            .detach();
-            self.open_modal(entity, cx);
-        }
-        cx.notify();
+        let ws = self.workspace.clone();
+        let fm = self.focus_manager.clone();
+        let window_id = self.window_id;
+        toggle_overlay!(self, cx, CommandPalette, CommandPaletteEvent, |cx| {
+            CommandPalette::new(ws, fm, window_id, cx)
+        });
     }
 
     /// Toggle settings panel overlay.
     pub fn toggle_settings_panel(&mut self, cx: &mut Context<Self>) {
-        if self.is_modal::<SettingsPanel>() {
-            self.close_modal(cx);
-        } else {
-            let workspace = self.workspace.clone();
-            let entity = cx.new(|cx| SettingsPanel::new(workspace, cx));
-            cx.subscribe(&entity, |this, _, event: &SettingsPanelEvent, cx| {
-                if event.is_close() {
-                    this.close_modal(cx);
-                }
-            }).detach();
-            self.open_modal(entity, cx);
-        }
-        cx.notify();
+        let workspace = self.workspace.clone();
+        toggle_overlay!(self, cx, SettingsPanel, SettingsPanelEvent, |cx| {
+            SettingsPanel::new(workspace, cx)
+        });
     }
 
     /// Toggle hook log overlay.
@@ -525,20 +481,14 @@ impl OverlayManager {
             }).detach();
             self.open_modal(entity, cx);
         }
-        cx.notify();
     }
 
     /// Show settings panel opened to Hooks category for a specific project.
     pub fn show_settings_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
-        let entity = cx.new(|cx| SettingsPanel::new_for_project(workspace, project_id, cx));
-        cx.subscribe(&entity, |this, _, event: &SettingsPanelEvent, cx| {
-            if event.is_close() {
-                this.close_modal(cx);
-            }
-        }).detach();
-        self.open_modal(entity, cx);
-        cx.notify();
+        open_overlay!(self, cx, SettingsPanelEvent, |cx| {
+            SettingsPanel::new_for_project(workspace, project_id, cx)
+        });
     }
 
     /// Toggle project switcher overlay.
@@ -567,7 +517,6 @@ impl OverlayManager {
             .detach();
             self.open_modal(entity, cx);
         }
-        cx.notify();
     }
 
     // ========================================================================
@@ -595,7 +544,6 @@ impl OverlayManager {
             .detach();
             self.open_modal(manager, cx);
         }
-        cx.notify();
     }
 
     // ========================================================================
@@ -622,7 +570,6 @@ impl OverlayManager {
             .detach();
             self.open_modal(manager, cx);
         }
-        cx.notify();
     }
 
     // ========================================================================
@@ -657,7 +604,6 @@ impl OverlayManager {
             }
         }).detach();
         self.open_modal(entity, cx);
-        cx.notify();
     }
 
     // ========================================================================
@@ -690,7 +636,6 @@ impl OverlayManager {
         })
         .detach();
         self.open_modal(dialog, cx);
-        cx.notify();
     }
 
     // ========================================================================
@@ -706,17 +651,9 @@ impl OverlayManager {
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
         let app_settings = crate::settings::settings(cx);
-        let dialog = cx.new(|cx| {
+        open_overlay!(self, cx, CloseWorktreeDialogEvent, |cx| {
             CloseWorktreeDialog::new(workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
         });
-        cx.subscribe(&dialog, |this, _, event: &CloseWorktreeDialogEvent, cx| {
-            if event.is_close() {
-                this.close_modal(cx);
-            }
-        })
-        .detach();
-        self.open_modal(dialog, cx);
-        cx.notify();
     }
 
     // ========================================================================
@@ -731,17 +668,9 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
-        let dialog = cx.new(|cx| {
+        open_overlay!(self, cx, RenameDirectoryDialogEvent, |cx| {
             RenameDirectoryDialog::new(workspace, project_id, project_path, cx)
         });
-        cx.subscribe(&dialog, |this, _, event: &RenameDirectoryDialogEvent, cx| {
-            if event.is_close() {
-                this.close_modal(cx);
-            }
-        })
-        .detach();
-        self.open_modal(dialog, cx);
-        cx.notify();
     }
 
     // ========================================================================
@@ -1304,7 +1233,6 @@ impl OverlayManager {
         .detach();
 
         self.open_modal(dialog, cx);
-        cx.notify();
     }
 
     // ========================================================================
@@ -1353,7 +1281,6 @@ impl OverlayManager {
         .detach();
 
         self.open_modal(dialog, cx);
-        cx.notify();
     }
 
     // ========================================================================
@@ -1390,7 +1317,6 @@ impl OverlayManager {
         self.subscribe_file_viewer(&viewer, cx);
         self.cached_file_viewers.insert(cache_key, viewer.clone());
         self.open_file_viewer_modal(viewer, cx);
-        cx.notify();
     }
 
     /// Show file viewer for a file.
@@ -1433,7 +1359,6 @@ impl OverlayManager {
         self.subscribe_file_viewer(&viewer, cx);
         self.cached_file_viewers.insert(cache_key, viewer.clone());
         self.open_file_viewer_modal(viewer, cx);
-        cx.notify();
     }
 
     /// Drop cached file viewers whose project is no longer present.
@@ -1463,7 +1388,9 @@ impl OverlayManager {
         cx.subscribe(viewer, |this, viewer_entity, event: &FileViewerEvent, cx| {
             match event {
                 FileViewerEvent::Close => {
-                    this.hide_modal(cx);
+                    // Closing keeps the cached viewer alive (cache holds its own
+                    // clone); only the modal slot is cleared.
+                    this.close_modal(cx);
                 }
                 FileViewerEvent::Detach => {
                     this.detach_active_modal(cx);
@@ -1561,7 +1488,6 @@ impl OverlayManager {
             },
             cx,
         );
-        cx.notify();
     }
 
     // ========================================================================
@@ -1594,7 +1520,6 @@ impl OverlayManager {
             .detach();
             self.open_modal(entity, cx);
         }
-        cx.notify();
     }
 
     // ========================================================================
@@ -1625,7 +1550,6 @@ impl OverlayManager {
         })
         .detach();
         self.open_modal(entity, cx);
-        cx.notify();
     }
 
     // ========================================================================

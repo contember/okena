@@ -73,15 +73,35 @@ macro_rules! toggle_overlay {
         if $self.is_modal::<$type>() {
             $self.close_modal($cx);
         } else {
-            let entity = $cx.new($factory);
-            $cx.subscribe(&entity, |this, _, event: &$event_type, cx| {
-                if event.is_close() {
-                    this.close_modal(cx);
-                }
-            })
-            .detach();
-            $self.open_modal(entity, $cx);
+            $crate::open_overlay!($self, $cx, $event_type, $factory);
         }
-        $cx.notify();
+    };
+}
+
+/// Helper macro for opening a close-only modal overlay into the single
+/// `active_modal` slot.
+///
+/// Builds the entity from `$factory`, subscribes to its event type closing the
+/// modal on `is_close()`, and opens it via `open_modal` (which notifies). Use
+/// this for the non-toggle "show" path; pair it with an `is_modal` guard via
+/// [`toggle_overlay!`] for the toggle path.
+///
+/// Usage:
+/// ```ignore
+/// open_overlay!(self, cx, RenameDirectoryDialogEvent, |cx| {
+///     RenameDirectoryDialog::new(workspace, project_id, project_path, cx)
+/// });
+/// ```
+#[macro_export]
+macro_rules! open_overlay {
+    ($self:ident, $cx:ident, $event_type:ty, $factory:expr) => {
+        let entity = $cx.new($factory);
+        $cx.subscribe(&entity, |this, _, event: &$event_type, cx| {
+            if event.is_close() {
+                this.close_modal(cx);
+            }
+        })
+        .detach();
+        $self.open_modal(entity, $cx);
     };
 }
