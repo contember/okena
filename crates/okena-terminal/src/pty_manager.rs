@@ -69,10 +69,14 @@ fn format_panic(payload: &dyn std::any::Any) -> String {
 
 /// Handle to a single PTY process
 struct PtyHandle {
-    master: Box<dyn MasterPty + Send>,
+    /// `Option` so teardown (`shutdown_handle`) and the `Drop` backstop can both
+    /// `take()` it idempotently to close the PTY and unblock the reader thread.
+    master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
-    /// Channel to send input to the writer thread
-    input_tx: mpsc::Sender<Vec<u8>>,
+    /// Channel to send input to the writer thread.
+    /// `Option` so teardown and the `Drop` backstop can both `take()` it
+    /// idempotently to close the channel and unblock the writer thread.
+    input_tx: Option<mpsc::Sender<Vec<u8>>>,
     reader_handle: Option<JoinHandle<()>>,
     writer_handle: Option<JoinHandle<()>>,
     shutdown: Arc<PtyShutdownState>,
@@ -82,6 +86,34 @@ struct PtyHandle {
     /// Resolved session backend for WSL terminals (Windows only)
     #[cfg(windows)]
     wsl_backend: Option<ResolvedBackend>,
+}
+
+impl Drop for PtyHandle {
+    /// Non-blocking teardown backstop.
+    ///
+    /// The normal teardown path is [`PtyManager::shutdown_handle`], which kills
+    /// the child, drops the channel/master, and joins the reader/writer threads.
+    /// This `Drop` impl only exists for the off-happy-path case where a handle is
+    /// dropped without `shutdown_handle` having run (e.g. a future code path that
+    /// removes it from the map directly). In that case we still want the threads
+    /// to observe EOF and exit instead of leaking silently.
+    ///
+    /// It is idempotent (safe to run after `shutdown_handle` already took the
+    /// fields) and must NOT block: it signals shutdown and drops `input_tx` /
+    /// `master` so the channel and PTY close, but it does NOT join the threads
+    /// and does NOT call `child.kill()` (the PID may have been reaped/recycled).
+    fn drop(&mut self) {
+        // Signal the reader/writer threads to stop (idempotent: just sets a bool).
+        self.shutdown.mark_broken();
+        // Closing the input channel makes the writer thread's `recv` return Err;
+        // dropping the master unblocks a reader still stuck in `read`. Both are
+        // no-ops if `shutdown_handle` already took them.
+        drop(self.input_tx.take());
+        drop(self.master.take());
+        // Intentionally do NOT join reader_handle / writer_handle here — a Drop
+        // must not block. The threads exit on their own once the channel/master
+        // close (or the process exits).
+    }
 }
 
 /// Manages all PTY processes
@@ -279,9 +311,9 @@ impl PtyManager {
         self.terminals.lock().insert(
             terminal_id.to_string(),
             PtyHandle {
-                master: pair.master,
+                master: Some(pair.master),
                 child,
-                input_tx,
+                input_tx: Some(input_tx),
                 reader_handle: Some(reader_handle),
                 writer_handle: Some(writer_handle),
                 shutdown,
@@ -514,15 +546,17 @@ impl PtyManager {
     /// Input is sent through a channel to a dedicated writer thread,
     /// which batches writes for better performance.
     pub fn send_input(&self, terminal_id: &str, data: &[u8]) {
-        if let Some(handle) = self.terminals.lock().get(terminal_id) {
-            let _ = handle.input_tx.send(data.to_vec());
+        if let Some(handle) = self.terminals.lock().get(terminal_id)
+            && let Some(input_tx) = handle.input_tx.as_ref() {
+            let _ = input_tx.send(data.to_vec());
         }
     }
 
     /// Resize a terminal
     pub fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
         if let Some(handle) = self.terminals.lock().get(terminal_id)
-            && let Err(e) = handle.master.resize(PtySize {
+            && let Some(master) = handle.master.as_ref()
+            && let Err(e) = master.resize(PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
@@ -591,10 +625,10 @@ impl PtyManager {
         }
 
         // 3. Drop input_tx - writer gets Err from rx.recv()
-        drop(handle.input_tx);
+        drop(handle.input_tx.take());
 
         // 4. Drop master - safety net to unblock reader if still stuck
-        drop(handle.master);
+        drop(handle.master.take());
 
         // 5. Join writer thread (should exit quickly after input_tx drop)
         if let Some(h) = handle.writer_handle.take()
