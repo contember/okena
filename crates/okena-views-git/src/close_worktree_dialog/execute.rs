@@ -7,6 +7,7 @@ use super::{CloseWorktreeDialog, ProcessingState};
 use okena_git as git;
 use okena_workspace::hooks;
 use okena_workspace::state::PendingWorktreeClose;
+use okena_workspace::toast::ToastManager;
 
 use gpui::Context;
 use std::path::PathBuf;
@@ -96,7 +97,23 @@ impl CloseWorktreeDialog {
                     if let Err(e) = fetch_result {
                         if did_stash {
                             let pop_path = PathBuf::from(&project_path);
-                            let _ = smol::unblock(move || git::stash_pop(&pop_path)).await;
+                            if let Err(pop_err) =
+                                smol::unblock(move || git::stash_pop(&pop_path)).await
+                            {
+                                log::warn!(
+                                    "Failed to restore stashed changes for worktree '{}' at {} after fetch failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+                                    branch, project_path, pop_err
+                                );
+                                cx.update(|cx| {
+                                    ToastManager::warning(
+                                        format!(
+                                            "Couldn't restore your stashed changes in '{}'. They are still saved in the git stash — run `git stash pop` to recover them.",
+                                            branch
+                                        ),
+                                        cx,
+                                    );
+                                });
+                            }
                         }
                         let _ = cx.update(|cx| {
                             this.update(cx, |this, cx| {
@@ -147,7 +164,23 @@ impl CloseWorktreeDialog {
                 if let Err(e) = pre_merge_result {
                     if did_stash {
                         let pop_path = PathBuf::from(&project_path);
-                        let _ = smol::unblock(move || git::stash_pop(&pop_path)).await;
+                        if let Err(pop_err) =
+                            smol::unblock(move || git::stash_pop(&pop_path)).await
+                        {
+                            log::warn!(
+                                "Failed to restore stashed changes for worktree '{}' at {} after pre_merge hook failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+                                branch, project_path, pop_err
+                            );
+                            cx.update(|cx| {
+                                ToastManager::warning(
+                                    format!(
+                                        "Couldn't restore your stashed changes in '{}'. They are still saved in the git stash — run `git stash pop` to recover them.",
+                                        branch
+                                    ),
+                                    cx,
+                                );
+                            });
+                        }
                     }
                     let _ = cx.update(|cx| {
                         this.update(cx, |this, cx| {
@@ -203,7 +236,23 @@ impl CloseWorktreeDialog {
 
                     if did_stash {
                         let pop_path = PathBuf::from(&project_path);
-                        let _ = smol::unblock(move || git::stash_pop(&pop_path)).await;
+                        if let Err(pop_err) =
+                            smol::unblock(move || git::stash_pop(&pop_path)).await
+                        {
+                            log::warn!(
+                                "Failed to restore stashed changes for worktree '{}' at {} after rebase failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+                                branch, project_path, pop_err
+                            );
+                            cx.update(|cx| {
+                                ToastManager::warning(
+                                    format!(
+                                        "Couldn't restore your stashed changes in '{}'. They are still saved in the git stash — run `git stash pop` to recover them.",
+                                        branch
+                                    ),
+                                    cx,
+                                );
+                            });
+                        }
                     }
                     let _ = cx.update(|cx| {
                         this.update(cx, |this, cx| {
@@ -233,7 +282,23 @@ impl CloseWorktreeDialog {
                 if let Err(e) = merge_result {
                     if did_stash {
                         let pop_path = PathBuf::from(&project_path);
-                        let _ = smol::unblock(move || git::stash_pop(&pop_path)).await;
+                        if let Err(pop_err) =
+                            smol::unblock(move || git::stash_pop(&pop_path)).await
+                        {
+                            log::warn!(
+                                "Failed to restore stashed changes for worktree '{}' at {} after merge failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+                                branch, project_path, pop_err
+                            );
+                            cx.update(|cx| {
+                                ToastManager::warning(
+                                    format!(
+                                        "Couldn't restore your stashed changes in '{}'. They are still saved in the git stash — run `git stash pop` to recover them.",
+                                        branch
+                                    ),
+                                    cx,
+                                );
+                            });
+                        }
                     }
                     let _ = cx.update(|cx| {
                         this.update(cx, |this, cx| {
