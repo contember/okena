@@ -302,6 +302,16 @@ impl ResolvedBackend {
                     #[cfg(unix)]
                     {
                         let my_pid = std::process::id() as i32;
+                        // Discover the PIDs holding the dtach socket open. This is a
+                        // best-effort scan: the set is a point-in-time snapshot from
+                        // `lsof`, and there is an inherent TOCTOU window between reading
+                        // it here and signalling below. By the time we call `kill`, the
+                        // dtach process may have already exited and its PID been recycled
+                        // onto an unrelated process. We accept this risk because there is
+                        // no portable, race-free way to atomically "signal whoever holds
+                        // this socket"; the window is short and the dtach socket is
+                        // user-private (see get_dtach_socket_dir). Don't try to "fix" the
+                        // TOCTOU by adding more lsof round-trips — that only widens it.
                         if let Ok(output) = Command::new("lsof")
                             .arg("-t")
                             .arg(&socket_path)
@@ -313,6 +323,17 @@ impl ResolvedBackend {
                                             log::debug!("Skipping own PID {} when killing dtach session {}", pid, session_name);
                                             continue;
                                         }
+                                        // SAFETY: `libc::kill` is a thin FFI wrapper over the
+                                        // `kill(2)` syscall. It takes two plain `i32` values
+                                        // (a pid and a signal number) by value, dereferences no
+                                        // pointers, and has no memory-safety preconditions, so
+                                        // the call itself cannot cause UB regardless of the
+                                        // argument values. The only hazard is *logical*, not a
+                                        // memory-safety one: per the TOCTOU note above, `pid`
+                                        // may have been recycled since the lsof read, so we
+                                        // could signal an unrelated process. We tolerate that as
+                                        // best-effort cleanup and intentionally ignore the
+                                        // return value (the process may already be gone).
                                         unsafe {
                                             libc::kill(pid, libc::SIGTERM);
                                         }
@@ -570,6 +591,11 @@ fn get_dtach_socket_dir() -> std::path::PathBuf {
         // Fallback: /tmp/okena-<uid> for security
         #[cfg(unix)]
         {
+            // SAFETY: `libc::getuid` is a thin FFI wrapper over the `getuid(2)`
+            // syscall. It takes no arguments, dereferences no pointers, always
+            // succeeds (it is documented as never failing), and returns a plain
+            // `uid_t` by value. There are no memory-safety preconditions, so the
+            // call cannot cause UB.
             let uid = unsafe { libc::getuid() };
             std::path::PathBuf::from(format!("/tmp/okena-{}", uid))
         }
