@@ -377,7 +377,9 @@ pub fn open_settings_file() {
 
     if !path.exists() {
         let settings = load_settings();
-        let _ = save_settings(&settings);
+        if let Err(e) = save_settings(&settings) {
+            log::error!("Failed to write settings file before opening it: {}", e);
+        }
     }
 
     #[cfg(target_os = "macos")]
