@@ -463,4 +463,65 @@ mod tests {
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p2"]);
     }
+
+    #[test]
+    fn focus_override_pierces_folder_filter_for_top_level_project() {
+        // Filter pins f1 (p1, p2). A top-level project p3 outside the folder
+        // is focused. Focus override must still surface p3 even though the
+        // active filter hides every top-level project, and focus semantics
+        // mean ONLY the focused project shows. This filter+focus interaction
+        // is called out in the PRD and was not covered by any other test.
+        let mut data = make_data(
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
+            vec!["f1", "p3"],
+            &[],
+        );
+        data.folders.push(FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string(), "p2".to_string()],
+            folder_color: FolderColor::default(),
+        });
+        let window = WindowState {
+            folder_filter: Some("f1".to_string()),
+            ..WindowState::default()
+        };
+        let focused = "p3".to_string();
+        let visible = compute_visible_projects(&data, Some(&focused), false, &window);
+        let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["p3"]);
+    }
+
+    #[test]
+    fn focus_override_surfaces_project_from_non_matching_folder_under_filter() {
+        // Two folders; filter pins f1, but the focused project lives in f2.
+        // The non-matching-folder branch must let the focused project through
+        // (the focused.is_some() path inside a skipped folder), and nothing
+        // from f1 leaks because focus shows only the focused project.
+        let mut data = make_data(
+            vec![make_project("a1"), make_project("b1")],
+            vec!["f1", "f2"],
+            &[],
+        );
+        data.folders.push(FolderData {
+            id: "f1".to_string(),
+            name: "F1".to_string(),
+            project_ids: vec!["a1".to_string()],
+            folder_color: FolderColor::default(),
+        });
+        data.folders.push(FolderData {
+            id: "f2".to_string(),
+            name: "F2".to_string(),
+            project_ids: vec!["b1".to_string()],
+            folder_color: FolderColor::default(),
+        });
+        let window = WindowState {
+            folder_filter: Some("f1".to_string()),
+            ..WindowState::default()
+        };
+        let focused = "b1".to_string();
+        let visible = compute_visible_projects(&data, Some(&focused), false, &window);
+        let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["b1"]);
+    }
 }
