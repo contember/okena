@@ -396,7 +396,8 @@ impl FileViewer {
         let position = menu.position;
         let is_folder = menu.target.is_folder();
 
-        let abs_path = menu.target.abs_path().to_string_lossy().to_string();
+        let abs_path_buf = menu.target.abs_path().to_path_buf();
+        let abs_path = abs_path_buf.to_string_lossy().to_string();
         let project_root = PathBuf::from(self.project_fs.project_id());
         let rel_path = menu
             .target
@@ -405,6 +406,8 @@ impl FileViewer {
             .unwrap_or(menu.target.abs_path())
             .to_string_lossy()
             .to_string();
+
+        let send_path = if is_folder { None } else { Some(abs_path_buf.clone()) };
 
         Some(
             div()
@@ -432,6 +435,22 @@ impl FileViewer {
                                         this.start_rename(window, cx);
                                     })),
                             )
+                            .when_some(send_path, |d, path| {
+                                d.child(
+                                    menu_item(
+                                        "fv-ctx-send-to-terminal",
+                                        "icons/terminal.svg",
+                                        "Send to Terminal",
+                                        t,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.close_context_menu(cx);
+                                        cx.emit(super::FileViewerEvent::SendToTerminal(
+                                            okena_core::send_payload::SendPayload::Path(path.clone()),
+                                        ));
+                                    })),
+                                )
+                            })
                             .child(
                                 menu_item(
                                     "fv-ctx-copy-rel-path",
@@ -493,6 +512,12 @@ impl FileViewer {
         let position = menu.position;
         let tab_index = menu.tab_index;
 
+        let send_path: Option<PathBuf> = self
+            .tabs
+            .get(tab_index)
+            .filter(|t| !t.is_empty())
+            .map(|tab| tab.file_path.clone());
+
         Some(
             div()
                 .id("fv-tab-context-menu-backdrop")
@@ -515,6 +540,24 @@ impl FileViewer {
                 .child(deferred(
                     anchored().position(position).snap_to_window().child(
                         context_menu_panel("fv-tab-context-menu", t)
+                            .when_some(send_path, |d, path| {
+                                d.child(
+                                    menu_item(
+                                        "fv-tab-ctx-send-to-terminal",
+                                        "icons/terminal.svg",
+                                        "Send to Terminal",
+                                        t,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.tab_context_menu = None;
+                                        cx.emit(super::FileViewerEvent::SendToTerminal(
+                                            okena_core::send_payload::SendPayload::Path(path.clone()),
+                                        ));
+                                        cx.notify();
+                                    })),
+                                )
+                                .child(menu_separator(t))
+                            })
                             .child(
                                 menu_item("fv-tab-ctx-close", "icons/close.svg", "Close", t)
                                     .on_click(cx.listener(move |this, _, _, cx| {

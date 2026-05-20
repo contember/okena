@@ -5,7 +5,7 @@ use super::types::{ChangedRange, DisplayItem, DisplayLine, SideBySideLine, SideB
 use super::DiffViewer;
 use okena_git::DiffLineType;
 use okena_core::theme::ThemeColors;
-use okena_files::selection::Selection2DExtension;
+use okena_files::selection::{Selection2DExtension, Selection2DNonEmpty};
 use okena_files::code_view::{find_word_boundaries, selection_bg_ranges};
 use gpui::prelude::*;
 use gpui::*;
@@ -373,6 +373,15 @@ impl DiffViewer {
                         cx.listener(|this, _, _window, cx| {
                             this.selection.finish();
                             cx.notify();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            if this.selection.normalized_non_empty().is_some() {
+                                this.selection_context_menu = Some(event.position);
+                                cx.notify();
+                            }
                         }),
                     );
 

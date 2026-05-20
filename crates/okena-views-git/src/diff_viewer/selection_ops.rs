@@ -5,7 +5,7 @@ use super::DiffViewer;
 
 use okena_core::types::DiffViewMode;
 use okena_files::code_view::extract_selected_text;
-use okena_files::selection::copy_to_clipboard;
+use okena_files::selection::{copy_to_clipboard, Selection2DNonEmpty};
 
 use gpui::*;
 
@@ -124,6 +124,91 @@ impl DiffViewer {
 
     pub(super) fn copy_selection(&self, cx: &mut Context<Self>) {
         copy_to_clipboard(cx, self.get_selected_text());
+    }
+
+    /// Build a single-block code payload from the current file's selection.
+    /// Returns None for empty/header-only selections, or when the current file
+    /// is binary or pure-deletion.
+    pub(super) fn selection_to_send_payload(&self) -> Option<okena_core::send_payload::SendPayload> {
+        use okena_core::send_payload::{CodeBlock, SendPayload};
+        use std::path::PathBuf;
+
+        let file = self.current_file.as_ref()?;
+        let stats = self.file_stats.get(self.selected_file_index)?;
+        if stats.is_deleted || stats.is_binary {
+            return None;
+        }
+
+        let (first, last, text) = if let Some(side) = self.selection_side {
+            // side-by-side
+            let ((start, _), (end, _)) = self.selection.normalized_non_empty()?;
+            let end = end.min(self.side_by_side_lines.len().saturating_sub(1));
+            let mut first_num: Option<usize> = None;
+            let mut last_num: usize = 0;
+            let mut texts: Vec<String> = Vec::new();
+            for i in start..=end {
+                let sbs_line = self.side_by_side_lines.get(i)?;
+                if sbs_line.expander.is_some() || sbs_line.is_header {
+                    continue;
+                }
+                let content = match side {
+                    SideBySideSide::Left => sbs_line.left.as_ref(),
+                    SideBySideSide::Right => sbs_line.right.as_ref(),
+                }?;
+                if first_num.is_none() {
+                    first_num = Some(content.line_num);
+                }
+                last_num = content.line_num;
+                texts.push(content.plain_text.clone());
+            }
+            let first = first_num?;
+            if texts.is_empty() {
+                return None;
+            }
+            (first, last_num, texts.join("\n"))
+        } else {
+            // unified
+            let ((start, _), (end, _)) = self.selection.normalized_non_empty()?;
+            let end = end.min(file.items.len().saturating_sub(1));
+            let mut first_num: Option<usize> = None;
+            let mut last_num: usize = 0;
+            let mut texts: Vec<String> = Vec::new();
+            for i in start..=end {
+                let DisplayItem::Line(line) = file.items.get(i)? else { continue };
+                let line_num = line.new_line_num.or(line.old_line_num)?;
+                if first_num.is_none() {
+                    first_num = Some(line_num);
+                }
+                last_num = line_num;
+                texts.push(line.plain_text.clone());
+            }
+            let first = first_num?;
+            if texts.is_empty() {
+                return None;
+            }
+            (first, last_num, texts.join("\n"))
+        };
+
+        let absolute_path = self
+            .provider
+            .absolute_file_path(&stats.path)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&stats.path));
+
+        Some(SendPayload::Code(vec![CodeBlock {
+            absolute_path,
+            first,
+            last,
+            text,
+        }]))
+    }
+
+    /// Emit SendToTerminal with the selection payload.
+    pub(super) fn send_selection_to_terminal(&mut self, cx: &mut Context<Self>) {
+        if let Some(payload) = self.selection_to_send_payload() {
+            cx.emit(super::DiffViewerEvent::SendToTerminal(payload));
+        }
+        cx.notify();
     }
 
     pub(super) fn select_all(&mut self, cx: &mut Context<Self>) {

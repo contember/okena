@@ -1,8 +1,9 @@
 //! Selection, clipboard, scrollbar, and navigation for the file viewer.
 
 use crate::code_view::{get_selected_text, start_scrollbar_drag, update_scrollbar_drag};
-use crate::selection::{copy_to_clipboard, Selection1DExtension};
+use crate::selection::{copy_to_clipboard, Selection1DExtension, Selection2DNonEmpty};
 use gpui::*;
+use okena_core::send_payload::{CodeBlock, SendPayload};
 
 use super::{DisplayMode, FileViewer, FileViewerEvent};
 
@@ -34,6 +35,51 @@ impl FileViewer {
     /// Copy selected text to clipboard.
     pub(super) fn copy_selection(&self, cx: &mut Context<Self>) {
         copy_to_clipboard(cx, self.get_selected_text());
+    }
+
+    /// Build a single-block code payload from the active tab's selection.
+    /// Returns None for empty selections or unloaded tabs. The block's path is
+    /// the absolute file path on disk; the dispatcher rewrites it relative to
+    /// the receiving terminal's CWD at format time.
+    pub(super) fn selection_to_send_payload(&self) -> Option<SendPayload> {
+        let tab = self.active_tab();
+        if tab.is_empty() {
+            return None;
+        }
+        let ((start_line, _), (end_line, _)) = tab.selection.normalized_non_empty()?;
+
+        // Convert from 0-based line index to 1-based, clamp to file length.
+        let last_line_idx = tab.line_count.checked_sub(1)?;
+        let first_idx = start_line.min(last_line_idx);
+        let last_idx = end_line.min(last_line_idx);
+
+        let text: String = tab.highlighted_lines
+            .get(first_idx..=last_idx)?
+            .iter()
+            .map(|l| l.plain_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Some(SendPayload::Code(vec![CodeBlock {
+            absolute_path: tab.file_path.clone(),
+            first: first_idx + 1,
+            last: last_idx + 1,
+            text,
+        }]))
+    }
+
+    /// Emit SendToTerminal with the active selection's payload.
+    pub(super) fn send_selection_to_terminal(&mut self, cx: &mut Context<Self>) {
+        if let Some(payload) = self.selection_to_send_payload() {
+            cx.emit(FileViewerEvent::SendToTerminal(payload));
+        }
+        cx.notify();
+    }
+
+    /// Clear the active tab's source selection.
+    pub(super) fn clear_source_selection(&mut self, cx: &mut Context<Self>) {
+        self.active_tab_mut().selection.clear();
+        cx.notify();
     }
 
     /// Select all text.

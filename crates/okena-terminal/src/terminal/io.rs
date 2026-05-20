@@ -130,24 +130,49 @@ impl Terminal {
         self.had_user_input.store(true, Ordering::Relaxed);
         self.scroll_to_bottom();
 
-        // Convert line endings: \r\n → \r, then \n → \r
-        // Terminals send \r for Enter; shells in bracketed paste mode buffer these.
-        let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
-
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         if bracketed {
-            // Strip any embedded bracketed paste sequences to prevent escape injection
-            let sanitized = normalized
-                .replace("\x1b[200~", "")
-                .replace("\x1b[201~", "");
-            let mut buf = Vec::with_capacity(sanitized.len() + 12);
-            buf.extend_from_slice(b"\x1b[200~");
-            buf.extend_from_slice(sanitized.as_bytes());
-            buf.extend_from_slice(b"\x1b[201~");
-            self.transport.send_input(&self.terminal_id, &buf);
+            self.write_bracketed_paste(text);
         } else {
+            // No bracketed paste mode: convert all newlines to CR so each line lands
+            // as Enter for the shell. (Multi-line content will execute line-by-line.)
+            let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
             self.transport.send_input(&self.terminal_id, normalized.as_bytes());
         }
+    }
+
+    /// Send text wrapped in bracketed-paste sequences regardless of whether the
+    /// receiving program enabled DECSET 2004. Used by programmatic-paste paths
+    /// (e.g. "Send to Terminal") where the alacritty-tracked mode flag is
+    /// unreliable: multiplexers, prompt frameworks that toggle the mode, and
+    /// fresh terminals where the shell hasn't sent its startup sequence yet all
+    /// cause `BRACKETED_PASTE` to read false even when the receiver supports it.
+    /// Receivers that don't support bracketed paste will see the bracket bytes
+    /// as literal text — annoying but recoverable, vs. multi-line content
+    /// executing each line as a separate command.
+    pub fn send_paste_force_bracketed(&self, text: &str) {
+        self.had_user_input.store(true, Ordering::Relaxed);
+        self.scroll_to_bottom();
+        self.write_bracketed_paste(text);
+    }
+
+    /// Common bracketed-paste byte assembly for both `send_paste` (when mode is
+    /// active) and `send_paste_force_bracketed` (always).
+    fn write_bracketed_paste(&self, text: &str) {
+        // Inside a bracketed paste, newlines should land as literal LF — readers
+        // (zsh's zle, Claude/Codex TUIs, etc.) treat the content as one paste and
+        // CR would be misread as Enter, prematurely submitting the line/prompt.
+        let normalized = text.replace("\r\n", "\n");
+        // Strip any embedded paste markers so callers can't smuggle an early
+        // `\x1b[201~` and break out into raw input.
+        let sanitized = normalized
+            .replace("\x1b[200~", "")
+            .replace("\x1b[201~", "");
+        let mut buf = Vec::with_capacity(sanitized.len() + 12);
+        buf.extend_from_slice(b"\x1b[200~");
+        buf.extend_from_slice(sanitized.as_bytes());
+        buf.extend_from_slice(b"\x1b[201~");
+        self.transport.send_input(&self.terminal_id, &buf);
     }
 
     /// Send raw bytes to the PTY

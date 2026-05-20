@@ -1438,7 +1438,8 @@ impl OverlayManager {
     }
 
     /// Subscribe to a FileViewer's events: Close hides modal (keeps cache),
-    /// Detach moves it to a separate OS window, OpenCommit bubbles up to RootView.
+    /// Detach moves it to a separate OS window, OpenCommit bubbles up to
+    /// RootView, SendToTerminal routes to the focused terminal via the broker.
     fn subscribe_file_viewer(&mut self, viewer: &Entity<FileViewer>, cx: &mut Context<Self>) {
         cx.subscribe(viewer, |this, viewer_entity, event: &FileViewerEvent, cx| {
             match event {
@@ -1466,6 +1467,11 @@ impl OverlayManager {
                 FileViewerEvent::BlamePreferenceChanged(visible) => {
                     crate::settings::settings_entity(cx).update(cx, |state, cx| {
                         state.set_blame_visible(*visible, cx);
+                    });
+                }
+                FileViewerEvent::SendToTerminal(payload) => {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_send_to_terminal(payload.clone(), cx);
                     });
                 }
             }
@@ -1516,6 +1522,11 @@ impl OverlayManager {
                 }
                 DiffViewerEvent::Detach => {
                     this.detach_active_modal(cx);
+                }
+                DiffViewerEvent::SendToTerminal(payload) => {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_send_to_terminal(payload.clone(), cx);
+                    });
                 }
             }
         })

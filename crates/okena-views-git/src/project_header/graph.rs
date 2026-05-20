@@ -158,12 +158,20 @@ fn render_ref_label(ref_name: &str, t: &ThemeColors, cx: &App) -> AnyElement {
 
 /// Render a single commit row. The rails canvas lives *inside* the row
 /// container; the row's `.hover()` background tint paints behind it.
+///
+/// `on_commit_click` is called with `(commit_hash, commit_message, commit_index)`
+/// when the user clicks a commit row.
+///
+/// `on_commit_right_click` is called with `(commit_hash, mouse_position)` when
+/// the user right-clicks a commit row — used to open a context menu (e.g.
+/// "Send to Terminal", "Copy Hash").
 pub(super) fn render_lane_row(
     row: &LaneRow,
     index: usize,
     max_col: usize,
     palette: &BTreeMap<LaneId, usize>,
     on_commit_click: Option<Arc<dyn Fn(&str, &str, usize, &mut Window, &mut App)>>,
+    on_commit_right_click: Option<Arc<dyn Fn(&str, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>>,
     t: &ThemeColors,
     cx: &App,
 ) -> AnyElement {
@@ -194,7 +202,7 @@ pub(super) fn render_lane_row(
     let dot_x = GRAPH_PAD_LEFT + dot_col as f32 * GRAPH_CELL_W + (GRAPH_CELL_W - DOT_SIZE) / 2.0;
     let dot_y = (row_h - DOT_SIZE) / 2.0;
 
-    let row_el = h_flex()
+    let mut row_el = h_flex()
         .id(ElementId::Name(format!("graph-row-{}", index).into()))
         .relative()
         .pr(px(12.0))
@@ -246,6 +254,16 @@ pub(super) fn render_lane_row(
                         .child(entry.author.clone()),
                 ),
         );
+
+    if let Some(cb) = on_commit_right_click {
+        let hash = entry.hash.clone();
+        row_el = row_el.on_mouse_down(
+            MouseButton::Right,
+            move |event: &MouseDownEvent, window, cx| {
+                cb(&hash, event.position, window, cx);
+            },
+        );
+    }
 
     if let Some(cb) = on_commit_click {
         let hash = entry.hash.clone();

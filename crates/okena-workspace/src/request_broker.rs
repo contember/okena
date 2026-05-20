@@ -1,5 +1,6 @@
 use crate::requests::{OverlayRequest, SidebarRequest};
 use gpui::*;
+use okena_core::send_payload::SendPayload;
 use std::collections::VecDeque;
 
 /// Dedicated entity for transient UI request routing.
@@ -10,6 +11,7 @@ use std::collections::VecDeque;
 pub struct RequestBroker {
     overlay_requests: VecDeque<OverlayRequest>,
     sidebar_requests: VecDeque<SidebarRequest>,
+    send_to_terminal: VecDeque<SendPayload>,
 }
 
 impl RequestBroker {
@@ -17,6 +19,7 @@ impl RequestBroker {
         Self {
             overlay_requests: VecDeque::new(),
             sidebar_requests: VecDeque::new(),
+            send_to_terminal: VecDeque::new(),
         }
     }
 
@@ -30,6 +33,13 @@ impl RequestBroker {
         cx.notify();
     }
 
+    /// Queue a "Send to Terminal" payload. The host drains this on observation,
+    /// resolves the focused terminal's CWD, and formats + pastes the result.
+    pub fn push_send_to_terminal(&mut self, payload: SendPayload, cx: &mut Context<Self>) {
+        self.send_to_terminal.push_back(payload);
+        cx.notify();
+    }
+
     pub fn drain_overlay_requests(&mut self) -> Vec<OverlayRequest> {
         self.overlay_requests.drain(..).collect()
     }
@@ -38,11 +48,19 @@ impl RequestBroker {
         self.sidebar_requests.drain(..).collect()
     }
 
+    pub fn drain_send_to_terminal(&mut self) -> Vec<SendPayload> {
+        self.send_to_terminal.drain(..).collect()
+    }
+
     pub fn has_overlay_requests(&self) -> bool {
         !self.overlay_requests.is_empty()
     }
 
     pub fn has_sidebar_requests(&self) -> bool {
         !self.sidebar_requests.is_empty()
+    }
+
+    pub fn has_send_to_terminal(&self) -> bool {
+        !self.send_to_terminal.is_empty()
     }
 }
