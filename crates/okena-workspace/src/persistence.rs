@@ -555,12 +555,12 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
 
     // Migration from v1 to v2: the three legacy fields
     // (ProjectData.show_in_overview, FolderData.collapsed, top-level
-    // WorkspaceData.project_widths) have been removed from their structs --
-    // serde silently drops the unknown keys on load and there is no fold
-    // helper for any of them. The dedicated
-    // legacy_v1_*_does_not_migrate_into_main_window tests pin this contract.
-    // The block is kept so the version bump path is explicit; future
-    // migrations can extend it.
+    // WorkspaceData.project_widths) are folded into main_window *before* this
+    // typed step, at the raw-JSON layer in `migrate_legacy_json` (it runs
+    // first in `load_workspace`). By the time data reaches here those values
+    // already live on main_window, so this step only bumps the version. The
+    // legacy_v1_*_does_not_migrate_into_main_window tests pin that the typed
+    // step itself does no folding. Future migrations can extend this block.
     if data.version == 1 {
         log::info!("Migrating workspace from v1 to v2");
         data.version = 2;

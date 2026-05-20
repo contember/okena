@@ -746,18 +746,6 @@ fn main() {
                     }
                 }));
 
-                // Wire up viewer-count lookup so the terminal-element resize
-                // path can detect "this terminal is rendered in N>1 windows"
-                // and gate resize() to "shrinks only" — prevents ping-pong
-                // between windows of differing bounds.
-                okena_views_terminal::set_viewer_count_fn(Box::new(|terminal_id| {
-                    let registry = crate::views::window::content_pane_registry().lock();
-                    registry
-                        .get(terminal_id)
-                        .map(|weaks| weaks.iter().filter(|w| w.upgrade().is_some()).count())
-                        .unwrap_or(0)
-                }));
-
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
                     Okena::new(workspace_data, pty_manager.clone(), pty_events, listen_addr, window, cx)
