@@ -593,6 +593,10 @@ impl GitHeader {
         let request_broker = self.request_broker.clone();
 
         let panel = context_menu_panel("commit-row-context-menu", t)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.commit_row_menu = None;
+                cx.notify();
+            }))
             .child(
                 menu_item(
                     "commit-row-ctx-send",
@@ -608,6 +612,7 @@ impl GitHeader {
                             cx,
                         );
                     });
+                    cx.notify();
                 })),
             )
             .child(menu_separator(t))
@@ -621,21 +626,7 @@ impl GitHeader {
             );
 
         Some(
-            div()
-                .id("commit-row-menu-backdrop")
-                .absolute()
-                .inset_0()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.commit_row_menu = None;
-                    cx.notify();
-                }))
-                .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| {
-                    this.commit_row_menu = None;
-                    cx.notify();
-                }))
-                .child(deferred(
-                    anchored().position(position).snap_to_window().child(panel),
-                ))
+            deferred(anchored().position(position).snap_to_window().child(panel))
                 .into_any_element(),
         )
     }
