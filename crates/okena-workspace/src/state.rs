@@ -375,7 +375,7 @@ impl Workspace {
     /// Update the saved service terminal IDs for a project.
     /// Called by the ServiceManager observer to persist terminal IDs across restarts.
     pub fn sync_service_terminals(&mut self, project_id: &str, terminals: HashMap<String, String>, cx: &mut Context<Self>) {
-        if let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id)
+        if let Some(project) = self.project_mut(project_id)
             && project.service_terminals != terminals {
                 project.service_terminals = terminals;
                 self.notify_data(cx);
@@ -389,7 +389,7 @@ impl Workspace {
         entry: HookTerminalEntry,
         cx: &mut Context<Self>,
     ) {
-        if let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+        if let Some(project) = self.project_mut(project_id) {
             let label = entry.label.clone();
             project.hook_terminals.insert(terminal_id.to_string(), entry);
 
@@ -491,7 +491,7 @@ impl Workspace {
         new_id: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) else {
+        let Some(project) = self.project_mut(project_id) else {
             return;
         };
 
