@@ -24,7 +24,6 @@ recovery toasts). The items below remain.
 
 ## Low
 
-- [recover_settings_from_json silently drops fields](settings-recover-from-json-incomplete.md) — data safety
 
 ## Context
 

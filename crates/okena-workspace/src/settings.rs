@@ -508,100 +508,68 @@ pub fn load_settings() -> AppSettings {
     }
 }
 
-/// Attempt to recover settings from a potentially malformed JSON file
-/// This extracts valid fields and uses defaults for invalid/missing ones
+/// Attempt to recover settings from a potentially malformed JSON file.
+///
+/// Every `AppSettings` field carries `#[serde(default)]`, so the only thing
+/// that makes a settings file fail to deserialize directly is a single field
+/// holding a value of the wrong type. Rather than enumerate fields by hand
+/// (which silently drops every field not listed, and breaks whenever a new
+/// setting is added without updating this function), we recover *generically*:
+/// we drop only the offending key(s) from the JSON object and let
+/// `#[serde(default)]` fill the gaps. Every field that parses — including
+/// fields added after this function was written — is preserved.
 fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
     use anyhow::Context;
-    use okena_core::theme::ThemeMode;
+    use serde_json::{Map, Value};
 
-    let value: serde_json::Value = serde_json::from_str(content)
-        .context("Settings file is not valid JSON")?;
+    // Compute the recovered `AppSettings` (fast path or cleaned), then funnel
+    // both paths through `clamp_settings` before returning so that numeric
+    // fields are bounded exactly as the old hand-rolled recovery did.
+    let mut settings = if let Ok(settings) = serde_json::from_str::<AppSettings>(content) {
+        // Fast path: the file is valid as-is. (`load_settings` already tries
+        // this, but recovering directly keeps the function correct in isolation
+        // and cheap in the common case.)
+        settings
+    } else {
+        let value: Value =
+            serde_json::from_str(content).context("Settings file is not valid JSON")?;
 
-    let obj = value.as_object()
-        .context("Settings file root is not a JSON object")?;
+        let obj = value
+            .as_object()
+            .context("Settings file root is not a JSON object")?;
 
-    let mut settings = AppSettings::default();
-
-    // Try to recover each field individually
-    if let Some(v) = obj.get("version").and_then(|v| v.as_u64()) {
-        settings.version = v as u32;
-    }
-
-    if let Some(v) = obj.get("theme_mode") {
-        if let Ok(theme) = serde_json::from_value::<ThemeMode>(v.clone()) {
-            settings.theme_mode = theme;
-        } else {
-            log::warn!("Could not parse theme_mode, using default");
-        }
-    }
-
-    if let Some(v) = obj.get("active_session")
-        && let Ok(session) = serde_json::from_value::<Option<String>>(v.clone()) {
-            settings.active_session = session;
-        }
-
-    if let Some(v) = obj.get("sidebar") {
-        if let Ok(sidebar) = serde_json::from_value::<SidebarSettings>(v.clone()) {
-            settings.sidebar = sidebar;
-        } else {
-            log::warn!("Could not parse sidebar settings, using default");
-        }
-    }
-
-    if let Some(v) = obj.get("show_focused_border").and_then(|v| v.as_bool()) {
-        settings.show_focused_border = v;
-    }
-    if let Some(v) = obj.get("color_tinted_background").and_then(|v| v.as_bool()) {
-        settings.color_tinted_background = v;
-    }
-
-    if let Some(v) = obj.get("font_size").and_then(|v| v.as_f64()) {
-        settings.font_size = (v as f32).clamp(8.0, 48.0);
-    }
-
-    if let Some(v) = obj.get("font_family").and_then(|v| v.as_str()) {
-        settings.font_family = v.to_string();
-    }
-
-    if let Some(v) = obj.get("line_height").and_then(|v| v.as_f64()) {
-        settings.line_height = (v as f32).clamp(1.0, 3.0);
-    }
-
-    if let Some(v) = obj.get("ui_font_size").and_then(|v| v.as_f64()) {
-        settings.ui_font_size = (v as f32).clamp(8.0, 24.0);
-    }
-
-    if let Some(v) = obj.get("file_font_size").and_then(|v| v.as_f64()) {
-        settings.file_font_size = (v as f32).clamp(8.0, 24.0);
-    }
-
-    if let Some(v) = obj.get("cursor_style")
-        && let Ok(style) = serde_json::from_value::<CursorShape>(v.clone()) {
-            settings.cursor_style = style;
+        // Rebuild the object key-by-key, keeping a key only if the accumulated
+        // object still deserializes into `AppSettings`. Because no field uses
+        // `#[serde(flatten)]`, aliases, or `deny_unknown_fields`, top-level keys
+        // are independent: a key that parses on its own keeps parsing alongside
+        // the others, and a key with a wrong-typed value is the only one dropped.
+        let mut cleaned = Map::new();
+        for (key, val) in obj {
+            let mut candidate = cleaned.clone();
+            candidate.insert(key.clone(), val.clone());
+            if serde_json::from_value::<AppSettings>(Value::Object(candidate.clone())).is_ok() {
+                cleaned = candidate;
+            } else {
+                log::warn!("Could not parse setting '{key}', falling back to its default");
+            }
         }
 
-    if let Some(v) = obj.get("cursor_blink").and_then(|v| v.as_bool()) {
-        settings.cursor_blink = v;
-    }
+        serde_json::from_value::<AppSettings>(Value::Object(cleaned))
+            .context("Failed to deserialize recovered settings")?
+    };
 
-    if let Some(v) = obj.get("scrollback_lines").and_then(|v| v.as_u64()) {
-        settings.scrollback_lines = (v as u32).clamp(100, 100000);
-    }
-
-    if let Some(v) = obj.get("file_opener").and_then(|v| v.as_str()) {
-        settings.file_opener = v.to_string();
-    }
-
-    if let Some(v) = obj.get("auto_update_enabled").and_then(|v| v.as_bool()) {
-        settings.auto_update_enabled = v;
-    }
-
-    if let Some(v) = obj.get("worktree")
-        && let Ok(wt) = serde_json::from_value::<WorktreeConfig>(v.clone()) {
-            settings.worktree = wt;
-        }
-
+    clamp_settings(&mut settings);
     Ok(settings)
+}
+
+/// Clamp numeric settings into their valid ranges, preserving the bounds the
+/// old hand-rolled `recover_settings_from_json` enforced.
+fn clamp_settings(settings: &mut AppSettings) {
+    settings.font_size = settings.font_size.clamp(8.0, 48.0);
+    settings.line_height = settings.line_height.clamp(1.0, 3.0);
+    settings.ui_font_size = settings.ui_font_size.clamp(8.0, 24.0);
+    settings.file_font_size = settings.file_font_size.clamp(8.0, 24.0);
+    settings.scrollback_lines = settings.scrollback_lines.clamp(100, 100_000);
 }
 
 /// Migrate settings from older versions to the current version
@@ -892,6 +860,80 @@ mod tests {
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         let migrated = migrate_settings(settings);
         assert!(!migrated.enabled_extensions.contains("updater"));
+    }
+
+    #[test]
+    fn recover_keeps_valid_and_future_fields_drops_wrong_typed() {
+        // (a) a valid known field, (b) a field with a wrong type, and
+        // (c) a brand-new field not enumerated anywhere. Recovery must keep
+        // (a) and (c) and reset only (b) to its default.
+        let json = r#"{
+            "font_family": "Fira Code",
+            "font_size": "not-a-number",
+            "some_future_setting_we_dont_know_about": {"deep": [1, 2, 3]}
+        }"#;
+        let recovered = recover_settings_from_json(json).unwrap();
+        // (a) valid known field preserved
+        assert_eq!(recovered.font_family, "Fira Code");
+        // (b) wrong-typed field reset to default
+        assert_eq!(recovered.font_size, default_font_size());
+        // (c) the unknown future field neither breaks recovery nor pollutes a
+        // known field; everything not present falls back to its serde default
+        // (here `version` has no key, so it gets `default_settings_version()`).
+        assert_eq!(recovered.version, default_settings_version());
+        assert_eq!(recovered.cursor_blink, default_cursor_blink());
+    }
+
+    #[test]
+    fn recover_fully_valid_input_round_trips() {
+        let original = AppSettings {
+            font_family: "Custom Font".to_string(),
+            font_size: 18.0,
+            scrollback_lines: 42000,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let recovered = recover_settings_from_json(&json).unwrap();
+        assert_eq!(recovered.font_family, "Custom Font");
+        assert_eq!(recovered.font_size, 18.0);
+        assert_eq!(recovered.scrollback_lines, 42000);
+    }
+
+    #[test]
+    fn recover_clamps_out_of_range_numeric_fields() {
+        // Fast path: otherwise-valid JSON, but numeric fields exceed their
+        // allowed ranges. Recovery must clamp them exactly as the old
+        // hand-rolled version did.
+        let json = r#"{
+            "font_size": 1000.0,
+            "scrollback_lines": 999999999
+        }"#;
+        let recovered = recover_settings_from_json(json).unwrap();
+        assert_eq!(recovered.font_size, 48.0);
+        assert_eq!(recovered.scrollback_lines, 100_000);
+    }
+
+    #[test]
+    fn recover_all_garbage_fields_returns_defaults() {
+        // Valid JSON object, but every value has the wrong type.
+        let json = r#"{
+            "font_family": 123,
+            "font_size": "huge",
+            "cursor_blink": "yes",
+            "scrollback_lines": [1, 2, 3]
+        }"#;
+        let recovered = recover_settings_from_json(json).unwrap();
+        let defaults = AppSettings::default();
+        assert_eq!(recovered.font_family, defaults.font_family);
+        assert_eq!(recovered.font_size, defaults.font_size);
+        assert_eq!(recovered.cursor_blink, defaults.cursor_blink);
+        assert_eq!(recovered.scrollback_lines, defaults.scrollback_lines);
+    }
+
+    #[test]
+    fn recover_rejects_non_object_root() {
+        assert!(recover_settings_from_json("[1, 2, 3]").is_err());
+        assert!(recover_settings_from_json("not json at all").is_err());
     }
 
     #[test]
