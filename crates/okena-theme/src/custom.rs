@@ -435,9 +435,9 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
     if let Ok(entries) = std::fs::read_dir(&themes_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "json") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(config) = serde_json::from_str::<CustomThemeConfig>(&content) {
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Ok(content) = std::fs::read_to_string(&path)
+                    && let Ok(config) = serde_json::from_str::<CustomThemeConfig>(&content) {
                         let theme_id = path
                             .file_stem()
                             .and_then(|s| s.to_str())
@@ -453,8 +453,6 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
                         let colors = config.colors.to_theme_colors();
                         custom_themes.push((info, colors));
                     }
-                }
-            }
         }
     }
 

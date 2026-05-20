@@ -40,7 +40,7 @@ pub fn compute_visible_projects<'a>(
             .filter(|p| {
                 p.worktree_info
                     .as_ref()
-                    .map_or(false, |wi| {
+                    .is_some_and(|wi| {
                         folder_project_ids.contains(wi.parent_project_id.as_str())
                     })
             })
@@ -54,8 +54,8 @@ pub fn compute_visible_projects<'a>(
     for id in &data.project_order {
         if let Some(folder) = data.folders.iter().find(|f| f.id == *id) {
             // When folder filter is active, skip folders that don't match
-            if let Some(filter_id) = folder_filter {
-                if &folder.id != filter_id {
+            if let Some(filter_id) = folder_filter
+                && &folder.id != filter_id {
                     // Still allow the focused project (or its worktree) through
                     if focused.is_some() {
                         for pid in &folder.project_ids {
@@ -73,7 +73,6 @@ pub fn compute_visible_projects<'a>(
                     }
                     continue;
                 }
-            }
             // Folder: include its projects and their worktree children.
             // Worktree children live in project_order (not folder.project_ids),
             // so we expand them here to keep them positioned within their folder's section.
@@ -132,11 +131,10 @@ pub fn compute_visible_projects<'a>(
         let result_ids: HashSet<&str> = result.iter().map(|p| p.id.as_str()).collect();
         let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
         for p in &result {
-            if let Some(ref wi) = p.worktree_info {
-                if result_ids.contains(wi.parent_project_id.as_str()) {
+            if let Some(ref wi) = p.worktree_info
+                && result_ids.contains(wi.parent_project_id.as_str()) {
                     map.entry(wi.parent_project_id.as_str()).or_default().push(p);
                 }
-            }
         }
         map
     };

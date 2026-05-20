@@ -17,8 +17,8 @@ impl Sidebar {
         }
         // Try to place cursor on the focused project
         let focused_id = self.focus_manager.read(cx).focused_project_id().cloned();
-        if let Some(ref focused_id) = focused_id {
-            if let Some(pos) = items.iter().position(|item| match item {
+        if let Some(ref focused_id) = focused_id
+            && let Some(pos) = items.iter().position(|item| match item {
                 SidebarCursorItem::Project { project_id } |
                 SidebarCursorItem::WorktreeProject { project_id } => project_id == focused_id,
                 _ => false,
@@ -27,7 +27,6 @@ impl Sidebar {
                 cx.notify();
                 return;
             }
-        }
         self.cursor_index = Some(0);
         cx.notify();
     }
@@ -94,7 +93,7 @@ impl Sidebar {
                     for pid in &folder.project_ids {
                         if let Some(&project) = all_projects.get(pid.as_str()) {
                             // Skip worktree children that have a parent in the project list
-                            if project.worktree_info.as_ref().map_or(false, |w| {
+                            if project.worktree_info.as_ref().is_some_and(|w| {
                                 all_project_ids.contains(w.parent_project_id.as_str())
                             }) {
                                 continue;
@@ -108,7 +107,7 @@ impl Sidebar {
 
             // Top-level project (not a worktree child of another)
             if let Some(&project) = all_projects.get(id.as_str()) {
-                if project.worktree_info.as_ref().map_or(false, |w| {
+                if project.worktree_info.as_ref().is_some_and(|w| {
                     all_project_ids.contains(w.parent_project_id.as_str())
                 }) {
                     continue;
@@ -129,7 +128,7 @@ impl Sidebar {
         hook_terminal_ids: &HashMap<String, Vec<String>>,
         cursor_items: &mut Vec<SidebarCursorItem>,
     ) {
-        let has_worktrees = worktree_children_map.get(&project.id).map_or(false, |c| !c.is_empty());
+        let has_worktrees = worktree_children_map.get(&project.id).is_some_and(|c| !c.is_empty());
         let is_orphan = project.worktree_info.is_some();
 
         if has_worktrees && !is_orphan {
@@ -195,8 +194,8 @@ impl Sidebar {
         }
 
         // Services group
-        if let Some(names) = service_names.get(project_id) {
-            if !names.is_empty() {
+        if let Some(names) = service_names.get(project_id)
+            && !names.is_empty() {
                 cursor_items.push(SidebarCursorItem::GroupHeader {
                     project_id: project_id.to_string(),
                     group: GroupKind::Services,
@@ -211,11 +210,10 @@ impl Sidebar {
                     }
                 }
             }
-        }
 
         // Hooks group
-        if let Some(tids) = hook_terminal_ids.get(project_id) {
-            if !tids.is_empty() {
+        if let Some(tids) = hook_terminal_ids.get(project_id)
+            && !tids.is_empty() {
                 cursor_items.push(SidebarCursorItem::GroupHeader {
                     project_id: project_id.to_string(),
                     group: GroupKind::Hooks,
@@ -230,18 +228,16 @@ impl Sidebar {
                     }
                 }
             }
-        }
     }
 
     /// Clamp cursor to valid range
     pub(super) fn validate_cursor(&mut self, item_count: usize) {
         if item_count == 0 {
             self.cursor_index = None;
-        } else if let Some(ref mut idx) = self.cursor_index {
-            if *idx >= item_count {
+        } else if let Some(ref mut idx) = self.cursor_index
+            && *idx >= item_count {
                 *idx = item_count - 1;
             }
-        }
     }
 
     /// Check if any rename is active (blocks keyboard nav)
@@ -480,10 +476,9 @@ impl Sidebar {
 
     /// Scroll the sidebar to keep the cursor item visible
     fn scroll_to_cursor(&self, item_count: usize) {
-        if let Some(idx) = self.cursor_index {
-            if item_count > 0 {
+        if let Some(idx) = self.cursor_index
+            && item_count > 0 {
                 self.scroll_handle.scroll_to_item(idx);
             }
-        }
     }
 }

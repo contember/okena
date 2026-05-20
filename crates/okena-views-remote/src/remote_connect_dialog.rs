@@ -266,7 +266,7 @@ impl RemoteConnectDialog {
                     let status_code = resp.status();
                     let body = resp.text().await.unwrap_or_default();
                     let msg = if status_code.as_u16() == 401 || status_code.as_u16() == 400 {
-                        format!("Invalid pairing code")
+                        "Invalid pairing code".to_string()
                     } else {
                         format!("Pairing failed: HTTP {} - {}", status_code, body)
                     };

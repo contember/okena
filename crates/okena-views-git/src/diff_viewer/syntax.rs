@@ -189,7 +189,7 @@ pub fn process_file(
         }
 
         // Add this hunk's items
-        items.extend(hunk_items[hunk_idx].drain(..));
+        items.append(&mut hunk_items[hunk_idx]);
     }
 
     // Expander after last hunk (if file continues beyond)

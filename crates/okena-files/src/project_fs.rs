@@ -212,20 +212,17 @@ impl ProjectFs for RemoteProjectFs {
             file_glob: config.file_glob.clone(),
             context_lines: config.context_lines,
         };
-        match self.post_action(action) {
-            Ok(Some(value)) => {
-                let results: Vec<FileSearchResult> = serde_json::from_value(value).unwrap_or_else(|e| {
-                    log::warn!("Failed to deserialize search results: {}", e);
-                    Vec::new()
-                });
-                for result in results {
-                    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    on_result(result);
+        if let Ok(Some(value)) = self.post_action(action) {
+            let results: Vec<FileSearchResult> = serde_json::from_value(value).unwrap_or_else(|e| {
+                log::warn!("Failed to deserialize search results: {}", e);
+                Vec::new()
+            });
+            for result in results {
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
                 }
+                on_result(result);
             }
-            _ => {}
         }
     }
 

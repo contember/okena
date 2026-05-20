@@ -79,7 +79,7 @@ pub fn cancel_rename<Id>(state: &mut Option<RenameState<Id>>) {
 
 /// Check if a rename is active for a specific target.
 pub fn is_renaming<Id: PartialEq>(state: &Option<RenameState<Id>>, target: &Id) -> bool {
-    state.as_ref().map_or(false, |s| &s.target == target)
+    state.as_ref().is_some_and(|s| &s.target == target)
 }
 
 /// Get the input entity from an active rename state.

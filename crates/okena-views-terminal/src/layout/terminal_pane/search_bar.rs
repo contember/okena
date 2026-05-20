@@ -168,8 +168,8 @@ impl SearchBar {
     }
 
     fn scroll_to_current_match(&self) {
-        if let (Some(idx), Some(terminal)) = (self.current_match_index, &self.terminal) {
-            if let Some(search_match) = self.matches.get(idx) {
+        if let (Some(idx), Some(terminal)) = (self.current_match_index, &self.terminal)
+            && let Some(search_match) = self.matches.get(idx) {
                 let screen_lines = terminal.screen_lines() as i32;
                 let display_offset = terminal.display_offset() as i32;
                 // Convert absolute grid line to visual line
@@ -181,16 +181,12 @@ impl SearchBar {
                     else if scroll_delta < 0 { terminal.scroll_down(-scroll_delta); }
                 }
             }
-        }
     }
 
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "enter" => {
-                if event.keystroke.modifiers.shift { self.prev_match(cx); }
-                else { self.next_match(cx); }
-            }
-            _ => {}
+        if event.keystroke.key.as_str() == "enter" {
+            if event.keystroke.modifiers.shift { self.prev_match(cx); }
+            else { self.next_match(cx); }
         }
     }
 }

@@ -135,8 +135,8 @@ impl Workspace {
     /// Reorder a project within a folder
     #[allow(dead_code)]
     pub fn reorder_project_in_folder(&mut self, folder_id: &str, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
-        if let Some(folder) = self.folder_mut(folder_id) {
-            if let Some(current) = folder.project_ids.iter().position(|id| id == project_id) {
+        if let Some(folder) = self.folder_mut(folder_id)
+            && let Some(current) = folder.project_ids.iter().position(|id| id == project_id) {
                 let id = folder.project_ids.remove(current);
                 let target = if new_index > current {
                     new_index.saturating_sub(1)
@@ -147,7 +147,6 @@ impl Workspace {
                 folder.project_ids.insert(target, id);
                 self.notify_data(cx);
             }
-        }
     }
 
     /// Reorder any top-level item (project or folder) in project_order

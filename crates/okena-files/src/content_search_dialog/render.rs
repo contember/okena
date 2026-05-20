@@ -48,8 +48,8 @@ impl Render for ContentSearchDialog {
                 }
                 "escape" => this.close(cx),
                 "c" if event.keystroke.modifiers.platform => {
-                    if let Some(file_path) = &this.preview_file {
-                        if let Some(lines) = this.highlight_cache.get(file_path) {
+                    if let Some(file_path) = &this.preview_file
+                        && let Some(lines) = this.highlight_cache.get(file_path) {
                             let text = extract_selected_text(
                                 &this.preview_selection,
                                 lines.len(),
@@ -57,7 +57,6 @@ impl Render for ContentSearchDialog {
                             );
                             copy_to_clipboard(cx, text);
                         }
-                    }
                 }
                 _ => {}
             }

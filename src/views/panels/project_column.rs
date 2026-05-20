@@ -59,6 +59,8 @@ pub struct ProjectColumn {
 }
 
 impl ProjectColumn {
+    // GPUI view constructor: each param is a distinct injected dependency.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         window_id: WindowId,
         workspace: Entity<Workspace>,

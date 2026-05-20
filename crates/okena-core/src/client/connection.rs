@@ -482,11 +482,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
 
                     // Read the latest token (may have been refreshed since last attempt)
-                    if let Ok(guard) = shared_token.read() {
-                        if let Some(ref latest) = *guard {
+                    if let Ok(guard) = shared_token.read()
+                        && let Some(ref latest) = *guard {
                             current_token = latest.clone();
                         }
-                    }
                 }
             }
         }
@@ -521,7 +520,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         });
         futures::SinkExt::send(
             &mut ws_write,
-            tungstenite::Message::Text(auth_msg.to_string().into()),
+            tungstenite::Message::Text(auth_msg.to_string()),
         )
         .await
         .map_err(|e| SessionError::Transient(format!("Failed to send auth: {}", e)))?;
@@ -627,7 +626,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             });
             futures::SinkExt::send(
                 &mut ws_write,
-                tungstenite::Message::Text(subscribe_msg.to_string().into()),
+                tungstenite::Message::Text(subscribe_msg.to_string()),
             )
             .await
             .map_err(|e| SessionError::Transient(format!("Failed to send subscribe: {}", e)))?;
@@ -668,7 +667,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         );
                         if let Err(e) = futures::SinkExt::send(
                             &mut ws_write,
-                            tungstenite::Message::Binary(frame.into()),
+                            tungstenite::Message::Binary(frame),
                         )
                         .await
                         {
@@ -720,7 +719,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 };
                 if let Err(e) = futures::SinkExt::send(
                     &mut ws_write,
-                    tungstenite::Message::Text(json.to_string().into()),
+                    tungstenite::Message::Text(json.to_string()),
                 )
                 .await
                 {
@@ -763,8 +762,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 .unwrap_or("");
                             match msg_type {
                                 "subscribed" => {
-                                    if let Some(mappings) = value.get("mappings") {
-                                        if let Ok(map) = serde_json::from_value::<
+                                    if let Some(mappings) = value.get("mappings")
+                                        && let Ok(map) = serde_json::from_value::<
                                             HashMap<String, u32>,
                                         >(
                                             mappings.clone()
@@ -784,8 +783,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 }
                                             }
                                             // Pre-resize terminals to server dimensions before snapshots arrive
-                                            if let Some(sizes) = value.get("sizes") {
-                                                if let Ok(size_map) = serde_json::from_value::<
+                                            if let Some(sizes) = value.get("sizes")
+                                                && let Ok(size_map) = serde_json::from_value::<
                                                     HashMap<String, (u16, u16)>,
                                                 >(sizes.clone()) {
                                                     for (terminal_id, (cols, rows)) in &size_map {
@@ -794,7 +793,6 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                     }
                                                     log::info!("Pre-resized {} terminals to server dimensions", size_map.len());
                                                 }
-                                            }
 
                                             let _ = event_tx_clone
                                                 .send(ConnectionEvent::SubscriptionMappings {
@@ -803,7 +801,6 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 })
                                                 .await;
                                         }
-                                    }
                                 }
                                 "state_changed" => {
                                     log::info!("State changed on remote server");
@@ -935,8 +932,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                     }
                                 }
                                 "git_status_changed" => {
-                                    if let Some(projects) = value.get("projects") {
-                                        if let Ok(statuses) = serde_json::from_value::<
+                                    if let Some(projects) = value.get("projects")
+                                        && let Ok(statuses) = serde_json::from_value::<
                                             HashMap<String, crate::api::ApiGitStatus>,
                                         >(projects.clone()) {
                                             let _ = event_tx_clone
@@ -946,7 +943,6 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 })
                                                 .await;
                                         }
-                                    }
                                 }
                                 _ => {
                                     log::debug!("Unknown WS message type: {}", msg_type);

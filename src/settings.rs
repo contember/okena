@@ -274,7 +274,7 @@ impl SettingsState {
         let baseline = self.worktree_template_baseline.clone();
         self.template_migration_task = Some(cx.spawn(async move |_this, cx| {
             smol::Timer::after(std::time::Duration::from_millis(1500)).await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let current = crate::settings::settings(cx).worktree.path_template.clone();
                 if current == value && current != baseline && !baseline.is_empty() {
                     ToastManager::info(
@@ -318,11 +318,10 @@ impl SettingsState {
 
     /// Synchronously flush any pending settings save (called on quit)
     pub fn flush_pending_save(&self) {
-        if self.save_pending.swap(false, Ordering::Relaxed) {
-            if let Err(e) = save_settings(&self.settings) {
+        if self.save_pending.swap(false, Ordering::Relaxed)
+            && let Err(e) = save_settings(&self.settings) {
                 log::error!("Failed to flush settings on quit: {}", e);
             }
-        }
     }
 
     /// Save and notify - common logic for all setters.
@@ -351,7 +350,7 @@ impl SettingsState {
                     let save_result = smol::unblock(move || save_settings(&settings)).await;
                     if let Err(e) = save_result {
                         log::error!("Failed to save settings: {}", e);
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             ToastManager::error(format!("Failed to save settings: {}", e), cx);
                         });
                     }

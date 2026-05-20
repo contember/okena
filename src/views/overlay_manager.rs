@@ -448,7 +448,7 @@ impl OverlayManager {
         if self.is_modal::<KeybindingsHelp>() {
             self.close_modal(cx);
         } else {
-            let entity = cx.new(|cx| KeybindingsHelp::new(cx));
+            let entity = cx.new(KeybindingsHelp::new);
             cx.subscribe(&entity, |this, _, event: &KeybindingsHelpEvent, cx| {
                 match event {
                     KeybindingsHelpEvent::Close => {
@@ -466,7 +466,7 @@ impl OverlayManager {
 
     /// Toggle theme selector overlay.
     pub fn toggle_theme_selector(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, ThemeSelector, ThemeSelectorEvent, |cx| ThemeSelector::new(cx));
+        toggle_overlay!(self, cx, ThemeSelector, ThemeSelectorEvent, ThemeSelector::new);
     }
 
     /// Toggle command palette overlay.
@@ -508,25 +508,22 @@ impl OverlayManager {
 
     /// Toggle hook log overlay.
     pub fn toggle_hook_log(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, HookLog, HookLogEvent, |cx| HookLog::new(cx));
+        toggle_overlay!(self, cx, HookLog, HookLogEvent, HookLog::new);
     }
 
     /// Toggle pairing dialog overlay.
     pub fn toggle_pairing_dialog(&mut self, cx: &mut Context<Self>) {
         if self.is_modal::<PairingDialog>() {
             self.close_modal(cx);
-        } else {
-            if let Some(remote_info) = cx.try_global::<GlobalRemoteInfo>() {
-                if let Some(auth_store) = remote_info.0.auth_store() {
-                    let entity = cx.new(|cx| PairingDialog::new(auth_store, cx));
-                    cx.subscribe(&entity, |this, _, event: &PairingDialogEvent, cx| {
-                        if event.is_close() {
-                            this.close_modal(cx);
-                        }
-                    }).detach();
-                    self.open_modal(entity, cx);
+        } else if let Some(remote_info) = cx.try_global::<GlobalRemoteInfo>()
+        && let Some(auth_store) = remote_info.0.auth_store() {
+            let entity = cx.new(|cx| PairingDialog::new(auth_store, cx));
+            cx.subscribe(&entity, |this, _, event: &PairingDialogEvent, cx| {
+                if event.is_close() {
+                    this.close_modal(cx);
                 }
-            }
+            }).detach();
+            self.open_modal(entity, cx);
         }
         cx.notify();
     }
@@ -590,7 +587,7 @@ impl OverlayManager {
                         this.close_modal(cx);
                     }
                     SessionManagerEvent::SwitchWorkspace(data) => {
-                        cx.emit(OverlayManagerEvent::SwitchWorkspace(data.clone()));
+                        cx.emit(OverlayManagerEvent::SwitchWorkspace((**data).clone()));
                         this.close_modal(cx);
                     }
                 }
@@ -610,7 +607,7 @@ impl OverlayManager {
         if self.is_modal::<ProfileManager>() {
             self.close_modal(cx);
         } else {
-            let manager = cx.new(|cx| ProfileManager::new(cx));
+            let manager = cx.new(ProfileManager::new);
             cx.subscribe(&manager, |this, _, event: &ProfileManagerEvent, cx| {
                 match event {
                     ProfileManagerEvent::Close => {
@@ -1017,6 +1014,8 @@ impl OverlayManager {
     // ========================================================================
 
     /// Show terminal context menu.
+    // GPUI overlay setup: params are position/context inputs, not a group.
+    #[allow(clippy::too_many_arguments)]
     pub fn show_terminal_context_menu(
         &mut self,
         terminal_id: String,
@@ -1499,6 +1498,8 @@ impl OverlayManager {
     // ========================================================================
 
     /// Show diff viewer for a project, optionally selecting a specific file, diff mode, commit message, and commit navigation list.
+    // GPUI overlay setup: params are selection/context inputs, not a group.
+    #[allow(clippy::too_many_arguments)]
     pub fn show_diff_viewer(
         &mut self,
         provider: std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::GitProvider>,

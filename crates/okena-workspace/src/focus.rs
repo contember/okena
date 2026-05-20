@@ -122,7 +122,7 @@ impl FocusManager {
     /// Check if a specific terminal is currently focused
     #[allow(dead_code)]
     pub fn is_focused(&self, project_id: &str, layout_path: &[usize]) -> bool {
-        self.current_focus.as_ref().map_or(false, |f| {
+        self.current_focus.as_ref().is_some_and(|f| {
             f.project_id == project_id && f.layout_path == layout_path
         })
     }
@@ -195,13 +195,13 @@ impl FocusManager {
     /// Check if a specific terminal is currently fullscreened
     pub fn is_terminal_fullscreened(&self, project_id: &str, terminal_id: &str) -> bool {
         self.fullscreen_state()
-            .map_or(false, |(pid, tid)| pid == project_id && tid == terminal_id)
+            .is_some_and(|(pid, tid)| pid == project_id && tid == terminal_id)
     }
 
     /// Check if any terminal is in fullscreen mode
     pub fn has_fullscreen(&self) -> bool {
         self.context == FocusContext::Fullscreen
-            && self.current_focus.as_ref().map_or(false, |f| f.terminal_id.is_some())
+            && self.current_focus.as_ref().is_some_and(|f| f.terminal_id.is_some())
     }
 
     /// Get the project ID of the fullscreened terminal (if any)

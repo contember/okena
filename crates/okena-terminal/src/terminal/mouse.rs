@@ -46,8 +46,8 @@ impl Terminal {
                 b'[',
                 b'M',
                 legacy_cb.saturating_add(32),
-                (col as u8).saturating_add(33).min(255),
-                (row as u8).saturating_add(33).min(255),
+                (col as u8).saturating_add(33),
+                (row as u8).saturating_add(33),
             ]
         };
         self.send_bytes(&buf);
@@ -73,8 +73,8 @@ impl Terminal {
                 b'[',
                 b'M',
                 cb.saturating_add(32),
-                (col as u8).saturating_add(33).min(255),
-                (row as u8).saturating_add(33).min(255),
+                (col as u8).saturating_add(33),
+                (row as u8).saturating_add(33),
             ]
         };
         self.send_bytes(&buf);
@@ -108,8 +108,8 @@ impl Terminal {
                     b'[',
                     b'M',
                     button.saturating_add(32),
-                    (col as u8).saturating_add(33).min(255),
-                    (row as u8).saturating_add(33).min(255),
+                    (col as u8).saturating_add(33),
+                    (row as u8).saturating_add(33),
                 ]);
             }
         }
@@ -165,9 +165,7 @@ impl Terminal {
 
         let arrow_seq: &[u8] = if going_right {
             if app_cursor { b"\x1bOC" } else { b"\x1b[C" }
-        } else {
-            if app_cursor { b"\x1bOD" } else { b"\x1b[D" }
-        };
+        } else if app_cursor { b"\x1bOD" } else { b"\x1b[D" };
 
         let mut buf = Vec::with_capacity(arrow_seq.len() * arrow_count);
         for _ in 0..arrow_count {

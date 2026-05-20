@@ -50,6 +50,12 @@ pub struct HookMonitor(Arc<Mutex<HookMonitorInner>>);
 
 impl gpui::Global for HookMonitor {}
 
+impl Default for HookMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HookMonitor {
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(HookMonitorInner {
@@ -90,11 +96,10 @@ impl HookMonitor {
         while inner.history.len() > MAX_HISTORY {
             let removed = inner.history.pop_front();
             // If we're removing a still-running entry (shouldn't normally happen), adjust count
-            if let Some(entry) = removed {
-                if matches!(entry.status, HookStatus::Running) {
+            if let Some(entry) = removed
+                && matches!(entry.status, HookStatus::Running) {
                     inner.running_count = inner.running_count.saturating_sub(1);
                 }
-            }
         }
 
         id

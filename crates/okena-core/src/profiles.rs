@@ -36,6 +36,8 @@ impl ProfilePaths {
 /// Initialize the process-wide active profile. Must be called exactly once before
 /// any code calls `current()`. Panics if called twice.
 pub fn init_profile(paths: ProfilePaths) {
+    // Intentional panic: documented "call exactly once" contract.
+    #[allow(clippy::expect_used)]
     PROFILE_PATHS
         .set(paths)
         .expect("init_profile called more than once");
@@ -43,6 +45,8 @@ pub fn init_profile(paths: ProfilePaths) {
 
 /// Returns the active profile paths. Panics if `init_profile` was never called.
 pub fn current() -> &'static ProfilePaths {
+    // Intentional panic: documented precondition that init_profile() ran first.
+    #[allow(clippy::expect_used)]
     PROFILE_PATHS.get().expect("profile not initialized — call init_profile() first")
 }
 
@@ -129,8 +133,8 @@ pub fn resolve_active_profile(flag_id: Option<String>) -> Result<ProfilePaths> {
             // No profiles.json — first ever run. Bootstrap default profile.
             // Migration is handled by the caller (main.rs) after init_profile.
             let idx = bootstrap_default_profile(&root)?;
-            if let Some(req) = &requested {
-                if req != "default" {
+            if let Some(req) = &requested
+                && req != "default" {
                     bail!(
                         "Profile '{req}' not found. This appears to be a first launch; \
                          the 'default' profile was just created.\n\
@@ -138,7 +142,6 @@ pub fn resolve_active_profile(flag_id: Option<String>) -> Result<ProfilePaths> {
                          or omit --profile to use 'default'."
                     );
                 }
-            }
             return make_profile_paths(&idx.profiles[0], &root);
         }
     };
@@ -158,6 +161,9 @@ pub fn resolve_active_profile(flag_id: Option<String>) -> Result<ProfilePaths> {
     };
 
     index.set_last_used(&id, &root);
+    // `id` is guaranteed present: it was either validated against the index above
+    // or returned by pick_profile_id, which only yields ids from this same index.
+    #[allow(clippy::unwrap_used)]
     let entry = index.profiles.iter().find(|p| p.id == id).unwrap().clone();
     make_profile_paths(&entry, &root)
 }
@@ -170,11 +176,10 @@ fn pick_profile_id(index: &ProfileIndex) -> Result<String> {
         return Ok(index.profiles[0].id.clone());
     }
     // Use last_used if it still exists
-    if let Some(last) = &index.last_used {
-        if index.profiles.iter().any(|p| &p.id == last) {
+    if let Some(last) = &index.last_used
+        && index.profiles.iter().any(|p| &p.id == last) {
             return Ok(last.clone());
         }
-    }
     // Ambiguous — give the user a clear error
     let mut msg = String::from(
         "Multiple profiles found. Specify one with --profile <id> or OKENA_PROFILE:\n",
@@ -274,11 +279,10 @@ pub fn delete_profile(id: &str) -> Result<()> {
     if id == index.default_profile {
         bail!("Cannot delete the default profile");
     }
-    if let Some(active) = try_current() {
-        if active.id == id {
+    if let Some(active) = try_current()
+        && active.id == id {
             bail!("Cannot delete the active profile — switch to another profile first");
         }
-    }
     let paths = make_profile_paths(&entry, &root)?;
     if is_profile_running(&paths) {
         bail!("Profile '{id}' is currently in use by another Okena instance");
@@ -337,16 +341,14 @@ pub fn migrate_legacy_layout_if_needed(paths: &ProfilePaths) -> Result<()> {
     // Check for a live legacy lock
     let legacy_lock = src.join("okena.lock");
     if legacy_lock.exists() {
-        if let Ok(content) = std::fs::read_to_string(&legacy_lock) {
-            if let Ok(pid) = content.trim().parse::<u32>() {
-                if is_process_alive(pid) {
+        if let Ok(content) = std::fs::read_to_string(&legacy_lock)
+            && let Ok(pid) = content.trim().parse::<u32>()
+                && is_process_alive(pid) {
                     bail!(
                         "An older Okena instance is still running (PID {pid}). \
                          Quit it before upgrading to profiles."
                     );
                 }
-            }
-        }
         let _ = std::fs::remove_file(&legacy_lock);
     }
 
@@ -498,13 +500,13 @@ fn now_iso8601() -> String {
 fn unix_days_to_ymd(mut n: u64) -> (u64, u64, u64) {
     let mut y = 1970u64;
     loop {
-        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
         let days = if leap { 366 } else { 365 };
         if n < days { break; }
         n -= days;
         y += 1;
     }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
     let months: [u64; 12] = if leap {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {

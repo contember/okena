@@ -22,6 +22,8 @@ impl RemoteServer {
     ///
     /// Tries ports 19100-19200, falling back to OS-assigned (port 0).
     /// Writes `remote.json` with port + pid on success.
+    // Each param is a distinct channel/state dependency wired into the server.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         bridge_tx: BridgeSender,
         auth_store: Arc<AuthStore>,
@@ -195,12 +197,11 @@ fn cleanup_stale_remote_json() {
         }
     };
 
-    if let Some(pid) = json.get("pid").and_then(|v| v.as_u64()) {
-        if !is_process_alive(pid as u32) {
+    if let Some(pid) = json.get("pid").and_then(|v| v.as_u64())
+        && !is_process_alive(pid as u32) {
             log::info!("Removing stale remote.json (pid {} is dead)", pid);
             let _ = std::fs::remove_file(&path);
         }
-    }
 }
 
 /// Check if a process with the given PID is still running.

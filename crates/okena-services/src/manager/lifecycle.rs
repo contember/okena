@@ -80,11 +80,10 @@ impl ServiceManager {
         // Auto-start services that weren't reconnected
         for name in auto_start_names {
             let key = (project_id.to_string(), name.clone());
-            if let Some(instance) = self.instances.get(&key) {
-                if instance.status == ServiceStatus::Stopped {
+            if let Some(instance) = self.instances.get(&key)
+                && instance.status == ServiceStatus::Stopped {
                     self.start_service(project_id, &name, project_path, cx);
                 }
-            }
         }
 
         // Load Docker Compose services
@@ -168,13 +167,12 @@ impl ServiceManager {
             .collect();
 
         for key in keys {
-            if let Some(instance) = self.instances.get(&key) {
-                if let Some(terminal_id) = &instance.terminal_id {
+            if let Some(instance) = self.instances.get(&key)
+                && let Some(terminal_id) = &instance.terminal_id {
                     self.backend.kill(terminal_id);
                     self.terminals.lock().remove(terminal_id);
                     self.terminal_to_service.remove(terminal_id);
                 }
-            }
             self.instances.remove(&key);
         }
 
@@ -227,13 +225,12 @@ impl ServiceManager {
             .collect();
 
         for key in removed_keys {
-            if let Some(instance) = self.instances.get(&key) {
-                if let Some(terminal_id) = &instance.terminal_id {
+            if let Some(instance) = self.instances.get(&key)
+                && let Some(terminal_id) = &instance.terminal_id {
                     self.backend.kill(terminal_id);
                     self.terminals.lock().remove(terminal_id);
                     self.terminal_to_service.remove(terminal_id);
                 }
-            }
             self.instances.remove(&key);
         }
 

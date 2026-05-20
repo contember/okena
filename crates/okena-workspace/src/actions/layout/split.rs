@@ -21,7 +21,7 @@ impl Workspace {
         // which creates a clunky UI.
         let split_path = if let Some(project) = self.project(project_id) {
             if let Some(ref layout) = project.layout {
-                if path.len() >= 1 {
+                if !path.is_empty() {
                     let parent_path = &path[..path.len() - 1];
                     if let Some(LayoutNode::Tabs { .. }) = layout.get_at_path(parent_path) {
                         parent_path.to_vec()
@@ -98,37 +98,31 @@ impl Workspace {
         new_sizes: Vec<f32>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(project) = self.project_mut(project_id) {
-            if let Some(ref mut layout) = project.layout {
-                if let Some(node) = layout.get_at_path_mut(path) {
-                    if let LayoutNode::Split { sizes, .. } = node {
+        if let Some(project) = self.project_mut(project_id)
+            && let Some(ref mut layout) = project.layout
+                && let Some(node) = layout.get_at_path_mut(path)
+                    && let LayoutNode::Split { sizes, .. } = node {
                         *sizes = new_sizes;
                         self.notify_ui_only(cx);
                     }
-                }
-            }
-        }
     }
 
     /// Equalize pane sizes in the focused terminal's parent split.
     pub fn equalize_focused_split(&mut self, focus_manager: &FocusManager, cx: &mut Context<Self>) {
-        if let Some(target) = focus_manager.focused_terminal_state() {
-            if let Some(project) = self.project_mut(&target.project_id) {
-                if let Some(ref mut layout) = project.layout {
+        if let Some(target) = focus_manager.focused_terminal_state()
+            && let Some(project) = self.project_mut(&target.project_id)
+                && let Some(ref mut layout) = project.layout {
                     let parent_path = if target.layout_path.is_empty() {
                         &target.layout_path[..]
                     } else {
                         &target.layout_path[..target.layout_path.len() - 1]
                     };
-                    if let Some(node) = layout.get_at_path_mut(parent_path) {
-                        if let LayoutNode::Split { sizes, children, .. } = node {
+                    if let Some(node) = layout.get_at_path_mut(parent_path)
+                        && let LayoutNode::Split { sizes, children, .. } = node {
                             let n = children.len();
                             *sizes = vec![100.0 / n as f32; n];
                         }
-                    }
                 }
-            }
-        }
         self.notify_data(cx);
     }
 }

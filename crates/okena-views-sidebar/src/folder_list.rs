@@ -27,18 +27,19 @@ impl Sidebar {
             None
         };
 
-        if let Some(folder_id) = server_folder_id {
-            if let Some(ref send_action) = this.send_remote_action {
+        if let Some(folder_id) = server_folder_id
+            && let Some(ref send_action) = this.send_remote_action {
                 (send_action)(conn_id, okena_core::api::ActionRequest::ReorderProjectInFolder {
                     folder_id,
                     project_id: server_project_id,
                     new_index,
                 }, cx);
             }
-        }
     }
 
     /// Renders only the folder header row (expand arrow, icon, name, badges)
+    // GPUI render helper: params are render inputs (indent, indices, state flags).
+    #[allow(clippy::too_many_arguments)]
     pub fn render_folder_header(
         &self,
         folder: &FolderData,
@@ -299,11 +300,10 @@ impl Sidebar {
                             // Send reorder to server for remote folders
                             if folder_id.starts_with("remote:") {
                                 // Folder ID is "remote:{conn_id}:{folder_id}" — extract conn_id
-                                if let Some(rest) = folder_id.strip_prefix("remote:") {
-                                    if let Some(conn_id) = rest.split(':').next() {
+                                if let Some(rest) = folder_id.strip_prefix("remote:")
+                                    && let Some(conn_id) = rest.split(':').next() {
                                         Self::send_remote_reorder(this, conn_id, &drag.project_id, pos, cx);
                                     }
-                                }
                             }
                         }
                     }

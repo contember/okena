@@ -113,8 +113,8 @@ impl Render for PaneSwitcher {
                 let key = &event.keystroke.key;
 
                 // Try to map key to pane index (0-9, a-z)
-                if let Some(index) = key_to_pane_index(key) {
-                    if let Some((project_id, layout_path, _)) = this.panes.get(index) {
+                if let Some(index) = key_to_pane_index(key)
+                    && let Some((project_id, layout_path, _)) = this.panes.get(index) {
                         let pid = project_id.clone();
                         let lp = layout_path.clone();
                         let workspace = this.workspace.clone();
@@ -127,7 +127,6 @@ impl Render for PaneSwitcher {
                         cx.emit(PaneSwitcherEvent::Close);
                         return;
                     }
-                }
 
                 // Any other key deactivates without switching
                 cx.emit(PaneSwitcherEvent::Close);

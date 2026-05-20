@@ -32,7 +32,7 @@ impl Terminal {
         // catch up before we read `grid.cursor.point`.
         advance_with_prompt_marks(
             &mut *term,
-            &mut *processor,
+            &mut processor,
             &mut prompt_sidecar,
             &mut prompt_tracker,
             data,
@@ -90,7 +90,7 @@ impl Terminal {
         sidecar.advance(&data);
         advance_with_prompt_marks(
             &mut *term,
-            &mut *processor,
+            &mut processor,
             &mut prompt_sidecar,
             &mut prompt_tracker,
             &data,

@@ -58,7 +58,7 @@ impl TerminalContent {
         workspace: Entity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let scrollbar = cx.new(|cx| Scrollbar::new(cx));
+        let scrollbar = cx.new(Scrollbar::new);
 
         Self {
             terminal: None,
@@ -141,12 +141,11 @@ impl TerminalContent {
         if forwarded != button_code {
             return false;
         }
-        if let Some(terminal) = self.terminal.as_ref() {
-            if let Some((col, row, _)) = self.pixel_to_cell(event_position) {
+        if let Some(terminal) = self.terminal.as_ref()
+            && let Some((col, row, _)) = self.pixel_to_cell(event_position) {
                 let mods = Self::mouse_modifier_bits(modifiers);
                 terminal.send_mouse_button(button_code, false, col, row as usize, mods);
             }
-        }
         self.forwarded_button = None;
         self.mouse_down_cell = None;
         true
@@ -374,13 +373,11 @@ impl TerminalContent {
         }
 
         if let Some((button, mods)) = self.forwarded_button {
-            if let Some(ref terminal) = self.terminal {
-                if terminal.supports_mouse_drag() {
-                    if let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
+            if let Some(ref terminal) = self.terminal
+                && terminal.supports_mouse_drag()
+                    && let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
                         terminal.send_mouse_drag(button, col, row as usize, mods);
                     }
-                }
-            }
             return;
         }
 
@@ -399,12 +396,11 @@ impl TerminalContent {
                 return;
             }
 
-            if let Some(ref terminal) = self.terminal {
-                if let Some((col, row, side)) = self.pixel_to_cell(event.position) {
+            if let Some(ref terminal) = self.terminal
+                && let Some((col, row, side)) = self.pixel_to_cell(event.position) {
                     terminal.update_selection(col, row, side);
                     cx.notify();
                 }
-            }
         }
     }
 
@@ -414,8 +410,8 @@ impl TerminalContent {
             return;
         }
 
-        if self.is_selecting {
-            if let Some(ref terminal) = self.terminal {
+        if self.is_selecting
+            && let Some(ref terminal) = self.terminal {
                 terminal.end_selection();
                 self.is_selecting = false;
 
@@ -426,28 +422,23 @@ impl TerminalContent {
                     terminal.clear_selection();
 
                     // Click-to-cursor: on a clean single click (no drag), move cursor
-                    if self.click_count == 1 {
-                        if let Some((col, row)) = self.mouse_down_cell.take() {
-                            if !terminal.is_mouse_mode() && !terminal.is_alt_screen() && !terminal.has_running_child() {
+                    if self.click_count == 1
+                        && let Some((col, row)) = self.mouse_down_cell.take()
+                            && !terminal.is_mouse_mode() && !terminal.is_alt_screen() && !terminal.has_running_child() {
                                 terminal.move_cursor_to_click(col, row);
                             }
-                        }
-                    }
                 }
                 cx.notify();
             }
-        }
 
         // Sync any non-empty selection to PRIMARY so middle-click paste works
         // for drag, double-click (word), and triple-click (line) selections.
         #[cfg(target_os = "linux")]
-        if let Some(ref terminal) = self.terminal {
-            if let Some(text) = terminal.get_selected_text() {
-                if !text.is_empty() {
+        if let Some(ref terminal) = self.terminal
+            && let Some(text) = terminal.get_selected_text()
+                && !text.is_empty() {
                     cx.write_to_primary(ClipboardItem::new_string(text));
                 }
-            }
-        }
 
         self.mouse_down_cell = None;
     }
@@ -621,15 +612,12 @@ impl Render for TerminalContent {
                         return;
                     }
                     #[cfg(target_os = "linux")]
-                    if let Some(ref terminal) = this.terminal {
-                        if let Some(item) = cx.read_from_primary() {
-                            if let Some(text) = item.text() {
-                                if !text.is_empty() {
+                    if let Some(ref terminal) = this.terminal
+                        && let Some(item) = cx.read_from_primary()
+                            && let Some(text) = item.text()
+                                && !text.is_empty() {
                                     terminal.send_paste(&text);
                                 }
-                            }
-                        }
-                    }
                 }),
             )
             .on_mouse_up(

@@ -62,11 +62,10 @@ fn expand_tilde(path: &str) -> PathBuf {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest);
         }
-    } else if path == "~" {
-        if let Some(home) = dirs::home_dir() {
+    } else if path == "~"
+        && let Some(home) = dirs::home_dir() {
             return home;
         }
-    }
     PathBuf::from(path)
 }
 
@@ -92,18 +91,15 @@ fn existing_path(path: &str, source: &str) -> Option<PathBuf> {
 /// 2. `CLAUDE_CONFIG_DIR` environment variable (Claude CLI convention)
 /// 3. `$HOME/.claude` (default)
 pub fn resolve_claude_dir(cx: &App) -> PathBuf {
-    if let Some(settings) = cx.global::<ExtensionSettingsStore>().get("claude-code", cx) {
-        if let Some(dir) = settings["config_dir"].as_str() {
-            if let Some(expanded) = existing_path(dir, "settings config_dir") {
+    if let Some(settings) = cx.global::<ExtensionSettingsStore>().get("claude-code", cx)
+        && let Some(dir) = settings["config_dir"].as_str()
+            && let Some(expanded) = existing_path(dir, "settings config_dir") {
                 return expanded;
             }
-        }
-    }
-    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
-        if let Some(expanded) = existing_path(&dir, "CLAUDE_CONFIG_DIR") {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR")
+        && let Some(expanded) = existing_path(&dir, "CLAUDE_CONFIG_DIR") {
             return expanded;
         }
-    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")

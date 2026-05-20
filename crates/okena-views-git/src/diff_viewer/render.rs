@@ -18,6 +18,8 @@ use gpui_component::h_flex;
 use std::sync::Arc;
 
 impl DiffViewer {
+    // GPUI render helper: params are render inputs (theme, flags, callbacks).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_header(
         &self,
         t: &ThemeColors,
@@ -381,6 +383,8 @@ impl DiffViewer {
             })
     }
 
+    // GPUI render helper: params are render inputs (theme, flags, callbacks).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_content(
         &mut self,
         t: &ThemeColors,
@@ -482,6 +486,8 @@ impl DiffViewer {
             )
     }
 
+    // GPUI render helper: params are render inputs (theme, flags, callbacks).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_diff_pane(
         &mut self,
         t: &ThemeColors,
@@ -964,7 +970,7 @@ impl Render for DiffViewer {
         let total_added: usize = self.file_stats.iter().map(|f| f.added).sum();
         let total_removed: usize = self.file_stats.iter().map(|f| f.removed).sum();
 
-        let theme_colors = Arc::new(t.clone());
+        let theme_colors = Arc::new(t);
 
         if !focus_handle.is_focused(window) {
             window.focus(&focus_handle, cx);

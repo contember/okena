@@ -55,12 +55,11 @@ impl ServiceManager {
                             okena_core::process::safe_output(&mut cmd)
                         })
                         .await;
-                    if let Ok(output) = result {
-                        if !output.status.success() {
+                    if let Ok(output) = result
+                        && !output.status.success() {
                             let stderr = String::from_utf8_lossy(&output.stderr);
                             log::error!("docker compose start failed for '{}': {}", log_name, stderr.trim());
                         }
-                    }
                     // Trigger an immediate status poll
                     let _ = this.update(cx, |_this, cx| cx.notify());
                 }).detach();
@@ -267,7 +266,7 @@ impl ServiceManager {
                             .spawn(async move {
                                 backend_ref.get_service_pids(&tid)
                                     .into_iter()
-                                    .flat_map(|p| port_detect::get_descendant_pids(p))
+                                    .flat_map(port_detect::get_descendant_pids)
                                     .collect()
                             })
                             .await
@@ -297,11 +296,10 @@ impl ServiceManager {
 
                     let _ = this.update(cx, |this, cx| {
                         let key = (pid.clone(), name.clone());
-                        if let Some(instance) = this.instances.get(&key) {
-                            if instance.status == ServiceStatus::Restarting {
+                        if let Some(instance) = this.instances.get(&key)
+                            && instance.status == ServiceStatus::Restarting {
                                 this.start_service(&pid, &name, &path, cx);
                             }
-                        }
                     });
                 })
                 .detach();

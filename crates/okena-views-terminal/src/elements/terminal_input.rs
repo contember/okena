@@ -45,7 +45,7 @@ impl TerminalInputHandler {
         for c in filtered.chars() {
             match c {
                 '\u{8}' => self.terminal.send_bytes(&[DEL]),
-                '\n' | '\r' => self.terminal.send_bytes(&[b'\r']),
+                '\n' | '\r' => self.terminal.send_bytes(b"\r"),
                 _ => {
                     let mut buf = [0u8; 4];
                     let s = c.encode_utf8(&mut buf);

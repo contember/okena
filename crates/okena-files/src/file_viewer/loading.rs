@@ -3,7 +3,7 @@
 use super::{FileViewerTab, MAX_FILE_SIZE, MAX_LINES};
 use crate::syntax::{highlight_content, HighlightedLine};
 use okena_markdown::MarkdownDocument;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use syntect::parsing::SyntaxSet;
 
@@ -52,11 +52,10 @@ pub(super) fn compute_freshness_reload(
     }
     let content = std::fs::read_to_string(path).map_err(|e| {
         // Distinguish binary files from other read errors, matching load_file.
-        if let Ok(bytes) = std::fs::read(path) {
-            if bytes.iter().take(1024).any(|&b| b == 0) {
+        if let Ok(bytes) = std::fs::read(path)
+            && bytes.iter().take(1024).any(|&b| b == 0) {
                 return "Cannot display binary file".to_string();
             }
-        }
         format!("Cannot read file: {}", e)
     })?;
     let highlighted_lines = highlight_content(&content, path, syntax_set, MAX_LINES, is_dark);
@@ -75,7 +74,7 @@ pub(super) fn compute_freshness_reload(
 
 impl FileViewerTab {
     /// Check if a file is a markdown file based on extension.
-    pub(super) fn is_markdown_file(path: &PathBuf) -> bool {
+    pub(super) fn is_markdown_file(path: &Path) -> bool {
         path.extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| {
@@ -208,7 +207,7 @@ impl FileViewerTab {
     /// Apply syntax highlighting to the content using shared utilities.
     pub(super) fn do_highlight_content(
         &mut self,
-        path: &PathBuf,
+        path: &Path,
         syntax_set: &SyntaxSet,
         is_dark: bool,
     ) {

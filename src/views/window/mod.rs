@@ -860,14 +860,13 @@ impl WindowView {
                         .iter()
                         .map(|s| s.as_str())
                         .collect();
-                    if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str())) {
-                        if let Some(path) = ws.project(&pid)
+                    if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str()))
+                        && let Some(path) = ws.project(&pid)
                             .and_then(|p| p.layout.as_ref())
                             .and_then(|l| l.find_terminal_path(new_tid))
                         {
                             ws.set_focused_terminal(fm, pid.clone(), path, cx);
                         }
-                    }
                 }
             });
             cx.notify();
@@ -906,11 +905,10 @@ impl WindowView {
         }
 
         for (id, new_path) in &changed {
-            if let Some(column) = self.project_columns.get(id).cloned() {
-                if let Some(provider) = self.build_git_provider(id, cx) {
+            if let Some(column) = self.project_columns.get(id).cloned()
+                && let Some(provider) = self.build_git_provider(id, cx) {
                     column.update(cx, |col, cx| col.set_git_provider(provider, cx));
                 }
-            }
             if let Some(sm) = self.service_manager.clone() {
                 let id = id.clone();
                 let new_path = new_path.clone();

@@ -535,11 +535,10 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
         }
     }
 
-    if let Some(v) = obj.get("active_session") {
-        if let Ok(session) = serde_json::from_value::<Option<String>>(v.clone()) {
+    if let Some(v) = obj.get("active_session")
+        && let Ok(session) = serde_json::from_value::<Option<String>>(v.clone()) {
             settings.active_session = session;
         }
-    }
 
     if let Some(v) = obj.get("sidebar") {
         if let Ok(sidebar) = serde_json::from_value::<SidebarSettings>(v.clone()) {
@@ -576,11 +575,10 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
         settings.file_font_size = (v as f32).clamp(8.0, 24.0);
     }
 
-    if let Some(v) = obj.get("cursor_style") {
-        if let Ok(style) = serde_json::from_value::<CursorShape>(v.clone()) {
+    if let Some(v) = obj.get("cursor_style")
+        && let Ok(style) = serde_json::from_value::<CursorShape>(v.clone()) {
             settings.cursor_style = style;
         }
-    }
 
     if let Some(v) = obj.get("cursor_blink").and_then(|v| v.as_bool()) {
         settings.cursor_blink = v;
@@ -598,11 +596,10 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
         settings.auto_update_enabled = v;
     }
 
-    if let Some(v) = obj.get("worktree") {
-        if let Ok(wt) = serde_json::from_value::<WorktreeConfig>(v.clone()) {
+    if let Some(v) = obj.get("worktree")
+        && let Ok(wt) = serde_json::from_value::<WorktreeConfig>(v.clone()) {
             settings.worktree = wt;
         }
-    }
 
     Ok(settings)
 }
@@ -681,11 +678,10 @@ fn save_settings_locked(settings: &AppSettings) -> Result<()> {
     // Preserve remote_connections from disk (they are managed out-of-band
     // by update_remote_connections and not kept in SettingsState's in-memory copy).
     let mut to_save = settings.clone();
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(on_disk) = serde_json::from_str::<AppSettings>(&content) {
+    if let Ok(content) = std::fs::read_to_string(&path)
+        && let Ok(on_disk) = serde_json::from_str::<AppSettings>(&content) {
             to_save.remote_connections = on_disk.remote_connections;
         }
-    }
 
     let content = serde_json::to_string_pretty(&to_save)?;
 
@@ -751,7 +747,7 @@ where
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
 
         // Lock is released automatically when `file` is dropped
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]

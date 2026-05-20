@@ -66,8 +66,8 @@ pub(super) fn grid_to_ansi(term: &Term<ZedEventListener>) -> Vec<u8> {
                 underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
                 inverse: cell.flags.contains(Flags::INVERSE),
                 strikeout: cell.flags.contains(Flags::STRIKEOUT),
-                fg: if cell.fg == default_fg { None } else { Some(cell.fg.clone()) },
-                bg: if cell.bg == default_bg { None } else { Some(cell.bg.clone()) },
+                fg: if cell.fg == default_fg { None } else { Some(cell.fg) },
+                bg: if cell.bg == default_bg { None } else { Some(cell.bg) },
             };
 
             if desired != current {

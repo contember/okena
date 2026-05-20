@@ -15,11 +15,10 @@ pub fn has_child_processes(pid: u32) -> bool {
             continue;
         };
         let path = format!("/proc/{}/task/{}/children", pid, tid);
-        if let Ok(s) = std::fs::read_to_string(&path) {
-            if !s.trim().is_empty() {
+        if let Ok(s) = std::fs::read_to_string(&path)
+            && !s.trim().is_empty() {
                 return true;
             }
-        }
     }
     false
 }

@@ -21,7 +21,6 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 /// Width of each lane in pixels (centre-to-centre distance between two
 /// adjacent display columns).
@@ -170,8 +169,8 @@ pub(super) fn render_lane_row(
     index: usize,
     max_col: usize,
     palette: &BTreeMap<LaneId, usize>,
-    on_commit_click: Option<Arc<dyn Fn(&str, &str, usize, &mut Window, &mut App)>>,
-    on_commit_right_click: Option<Arc<dyn Fn(&str, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>>,
+    on_commit_click: super::CommitClickCallback,
+    on_commit_right_click: super::CommitRightClickCallback,
     t: &ThemeColors,
     cx: &App,
 ) -> AnyElement {

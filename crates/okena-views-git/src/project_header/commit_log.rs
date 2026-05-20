@@ -9,7 +9,6 @@ use okena_ui::tokens::ui_text_ms;
 
 use gpui::prelude::*;
 use gpui::*;
-use std::sync::Arc;
 
 /// Render the "loading..." or "no commits" content, or the list of commit
 /// graph rows.
@@ -23,8 +22,8 @@ use std::sync::Arc;
 pub fn render_commit_log_content(
     entries: &[CommitLogEntry],
     loading: bool,
-    on_commit_click: Option<Arc<dyn Fn(&str, &str, usize, &mut Window, &mut App)>>,
-    on_commit_right_click: Option<Arc<dyn Fn(&str, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>>,
+    on_commit_click: super::CommitClickCallback,
+    on_commit_right_click: super::CommitRightClickCallback,
     t: &ThemeColors,
     cx: &App,
 ) -> AnyElement {

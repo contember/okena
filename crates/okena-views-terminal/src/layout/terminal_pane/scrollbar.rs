@@ -179,13 +179,12 @@ impl Scrollbar {
                     self.last_activity = Instant::now();
                     cx.notify();
                 }
-            } else if relative_y > content_height - zone {
-                if let Some(ref terminal) = self.terminal {
+            } else if relative_y > content_height - zone
+                && let Some(ref terminal) = self.terminal {
                     terminal.scroll_to(0);
                     self.last_activity = Instant::now();
                     cx.notify();
                 }
-            }
         }
     }
 
@@ -240,12 +239,11 @@ impl Render for Scrollbar {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if this.dragging {
-                    if let Some(bounds) = this.element_bounds {
+                if this.dragging
+                    && let Some(bounds) = this.element_bounds {
                         let content_height = f32::from(bounds.size.height);
                         this.update_drag(f32::from(event.position.y), content_height, cx);
                     }
-                }
             }))
             .on_mouse_up(
                 MouseButton::Left,

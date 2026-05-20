@@ -57,7 +57,7 @@ impl AddProjectDialog {
         cx: &mut Context<Self>,
     ) -> Self {
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter project name..."));
-        let path_input = cx.new(|cx| PathAutoCompleteState::new(cx));
+        let path_input = cx.new(PathAutoCompleteState::new);
 
         // Build targets list: Local + connected remote connections
         let mut targets = vec![AddProjectTarget::Local];
@@ -158,8 +158,8 @@ impl AddProjectDialog {
         });
 
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(selected_paths))) = paths.await {
-                if let Some(path) = selected_paths.first() {
+            if let Ok(Ok(Some(selected_paths))) = paths.await
+                && let Some(path) = selected_paths.first() {
                     let path_str = path.to_string_lossy().to_string();
                     let name_str = path
                         .file_name()
@@ -173,7 +173,6 @@ impl AddProjectDialog {
                     })
                     .ok();
                 }
-            }
         })
         .detach();
     }
@@ -289,9 +288,9 @@ impl AddProjectDialog {
                                             "icons/file.svg"
                                         })
                                         .size(px(14.0))
-                                        .text_color(if suggestion.is_select_current {
-                                            rgb(t.border_active)
-                                        } else if suggestion.is_directory {
+                                        .text_color(if suggestion.is_select_current
+                                            || suggestion.is_directory
+                                        {
                                             rgb(t.border_active)
                                         } else {
                                             rgb(t.text_muted)

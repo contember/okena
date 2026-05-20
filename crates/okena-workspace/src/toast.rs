@@ -16,6 +16,12 @@ pub struct ToastManager(pub Arc<Mutex<Vec<Toast>>>);
 
 impl Global for ToastManager {}
 
+impl Default for ToastManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToastManager {
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(Vec::new())))

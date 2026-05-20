@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 impl Sidebar {
     /// Render expanded children (terminals group + services group) for a project.
     /// Returns elements and advances flat_idx.
+    // GPUI render helper: params are render inputs and traversal state.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_expanded_children(
         &self,
         project: &SidebarProjectInfo,
@@ -231,7 +233,7 @@ impl Render for Sidebar {
                     ))
                     .map(|p| {
                         let mut info = SidebarProjectInfo::from_project(p, workspace, self.window_id);
-                        info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
+                        info.is_orphan = p.worktree_info.as_ref().is_some_and(|wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
                         info.is_closing = workspace.is_project_closing(&p.id);
@@ -265,15 +267,14 @@ impl Render for Sidebar {
 
             // Check if this is a top-level project (not a worktree child)
             if let Some(&project) = all_projects.get(id.as_str()) {
-                if let Some(ref wt_info) = project.worktree_info {
-                    if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
+                if let Some(ref wt_info) = project.worktree_info
+                    && all_project_ids.contains(wt_info.parent_project_id.as_str()) {
                         // This is a worktree child shown under its parent, skip
                         continue;
                     }
-                }
                 let mut wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
                 let mut project_info = SidebarProjectInfo::from_project(project, workspace, self.window_id);
-                project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
+                project_info.is_orphan = project.worktree_info.as_ref().is_some_and(|wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
                 project_info.is_closing = workspace.is_project_closing(&project.id);
@@ -426,7 +427,7 @@ impl Render for Sidebar {
                         let terminals = self.terminals.lock();
                         projects.iter()
                             .flat_map(|p| p.terminal_ids.iter())
-                            .filter(|id| terminals.get(id.as_str()).map_or(false, |t| t.is_waiting_for_input()))
+                            .filter(|id| terminals.get(id.as_str()).is_some_and(|t| t.is_waiting_for_input()))
                             .count()
                     } else {
                         0
@@ -441,7 +442,7 @@ impl Render for Sidebar {
                     if !folder_collapsed {
                         for fp in &projects {
                             let fp_wt_children = worktree_children.get(&fp.id);
-                            let has_worktrees = fp_wt_children.map_or(false, |c| !c.is_empty());
+                            let has_worktrees = fp_wt_children.is_some_and(|c| !c.is_empty());
 
                             if has_worktrees && !fp.is_orphan {
                                 // Group header mode within folder
@@ -449,7 +450,7 @@ impl Render for Sidebar {
                                 let is_focused_group = focused_project_id.as_ref() == Some(&fp.id) && !focus_individual;
                                 flat_elements.push(
                                     {
-                                    let all_hidden = !fp.show_in_overview && fp_wt_children.map_or(true, |c| c.iter().all(|c| !c.show_in_overview));
+                                    let all_hidden = !fp.show_in_overview && fp_wt_children.is_none_or(|c| c.iter().all(|c| !c.show_in_overview));
                                     self.render_project_group_header(fp, 20.0, "fgh", "fgh-item", crate::project_list::GroupHeaderDragConfig::InFolder { folder_id: folder.id.clone() }, all_hidden, is_cursor, is_focused_group, window, cx).into_any_element()
                                     }
                                 );

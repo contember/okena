@@ -117,14 +117,13 @@ impl Sidebar {
                 let target = std::path::PathBuf::from(&worktree_path_clone);
 
                 // Fetch and create worktree — fetch runs first if we have a default branch
-                if let Some(ref db) = default_branch {
-                    if let Some(repo_str) = git_root_clone.to_str() {
+                if let Some(ref db) = default_branch
+                    && let Some(repo_str) = git_root_clone.to_str() {
                         let _ = okena_core::process::safe_output(
                             okena_core::process::command("git")
                                 .args(["-C", repo_str, "fetch", "origin", db.as_str()]),
                         );
                     }
-                }
 
                 okena_git::repository::create_worktree_with_start_point(
                     &git_root_clone,
@@ -137,7 +136,7 @@ impl Sidebar {
             match create_result {
                 Ok(()) => {
                     // Worktree directory exists — clear creating state and fire hooks
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         workspace.update(cx, |ws, cx| {
                             ws.finish_creating_project(&project_id);
                             ws.fire_worktree_hooks(&project_id, &hooks_for_fire, cx);
@@ -148,7 +147,7 @@ impl Sidebar {
                 Err(e) => {
                     log::error!("Quick worktree git operation failed: {}", e);
                     // Remove the optimistically-added project since git worktree add failed
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         focus_manager.update(cx, |fm, cx| {
                             workspace.update(cx, |ws, cx| {
                                 ws.finish_creating_project(&project_id);

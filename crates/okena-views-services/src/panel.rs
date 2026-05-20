@@ -8,11 +8,19 @@ use okena_services::manager::ServiceStatus;
 use okena_ui::icon_action_button::icon_action_button;
 use okena_ui::theme::ThemeColors;
 use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_ms, ui_text_md, ui_text};
+use std::sync::Arc;
+
+/// Callback taking a service name (e.g. start/stop/restart a named service).
+type ServiceActionCallback = Arc<dyn Fn(String, &mut Window, &mut App) + 'static>;
+/// Callback taking a port number (e.g. open a detected port in the browser).
+type PortClickCallback = Arc<dyn Fn(u16) + 'static>;
 
 /// Render the tab header row for the service panel.
 ///
 /// Contains the Overview tab, per-service tabs, contextual action buttons, and close button.
 /// Event handlers are passed as closures so the caller retains state control.
+// GPUI render helper: params are render inputs and event callbacks.
+#[allow(clippy::too_many_arguments)]
 pub fn render_service_panel_header(
     services: &[ServiceSnapshot],
     active_service_name: Option<&str>,
@@ -275,6 +283,8 @@ pub fn render_service_panel_header(
 ///
 /// Contains column headers and data rows. The caller passes closures for
 /// service name clicks, port clicks, and action button clicks.
+// GPUI render helper: params are render inputs and event callbacks.
+#[allow(clippy::too_many_arguments)]
 pub fn render_service_overview(
     services: &[ServiceSnapshot],
     project_id: &str,
@@ -395,6 +405,8 @@ pub fn render_service_overview(
 }
 
 /// Render a single service row in the overview table.
+// GPUI render helper: params are render inputs and event callbacks.
+#[allow(clippy::too_many_arguments)]
 fn render_overview_row(
     idx: usize,
     svc: &ServiceSnapshot,
@@ -404,11 +416,11 @@ fn render_overview_row(
     remote_host: Option<&str>,
     t: &ThemeColors,
     cx: &App,
-    on_service_click: std::sync::Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
-    on_start: std::sync::Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
-    on_stop: std::sync::Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
-    on_restart: std::sync::Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
-    on_port_click: std::sync::Arc<dyn Fn(u16) + 'static>,
+    on_service_click: ServiceActionCallback,
+    on_start: ServiceActionCallback,
+    on_stop: ServiceActionCallback,
+    on_restart: ServiceActionCallback,
+    on_port_click: PortClickCallback,
 ) -> gpui::AnyElement {
     let name = svc.name.clone();
     let status = svc.status.clone();

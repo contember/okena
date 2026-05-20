@@ -209,13 +209,12 @@ impl FileViewer {
             Some(s) => s,
             None => return,
         };
-        if let Some(idx) = state.current_match_index {
-            if let Some(m) = state.matches.get(idx) {
+        if let Some(idx) = state.current_match_index
+            && let Some(m) = state.matches.get(idx) {
                 self.active_tab()
                     .source_scroll_handle
                     .scroll_to_item(m.line, ScrollStrategy::Top);
             }
-        }
     }
 
     /// Toggle case sensitivity and re-run search.
@@ -301,15 +300,12 @@ impl FileViewer {
                     )
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                         cx.stop_propagation();
-                        match event.keystroke.key.as_str() {
-                            "enter" => {
-                                if event.keystroke.modifiers.shift {
-                                    this.prev_search_match(cx);
-                                } else {
-                                    this.next_search_match(cx);
-                                }
+                        if event.keystroke.key.as_str() == "enter" {
+                            if event.keystroke.modifiers.shift {
+                                this.prev_search_match(cx);
+                            } else {
+                                this.next_search_match(cx);
                             }
-                            _ => {}
                         }
                     })),
             )

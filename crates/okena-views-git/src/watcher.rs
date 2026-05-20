@@ -173,11 +173,10 @@ impl GitStatusWatcher {
                     if let Ok(remote_terminals) = remote_subscribed_terminals.read() {
                         for terminal_ids in remote_terminals.values() {
                             for tid in terminal_ids {
-                                if let Some(p) = ws.find_project_for_terminal(tid) {
-                                    if !p.is_remote {
+                                if let Some(p) = ws.find_project_for_terminal(tid)
+                                    && !p.is_remote {
                                         project_ids.insert(p.id.clone());
                                     }
-                                }
                             }
                         }
                     }
@@ -190,13 +189,13 @@ impl GitStatusWatcher {
                         .collect()
                 });
 
-                let check_prs = cycle % PR_POLL_EVERY_N_CYCLES == 0;
+                let check_prs = cycle.is_multiple_of(PR_POLL_EVERY_N_CYCLES);
                 let ci_poll_interval = if this.update(cx, |this, _| this.any_pending_ci).unwrap_or(false) {
                     CI_PENDING_POLL_EVERY_N_CYCLES
                 } else {
                     CI_SETTLED_POLL_EVERY_N_CYCLES
                 };
-                let check_ci = cycle % ci_poll_interval == 0;
+                let check_ci = cycle.is_multiple_of(ci_poll_interval);
 
                 // Phase 1: Fetch git status for all projects in parallel
                 let status_futures: Vec<_> = projects.iter().map(|(id, path)| {

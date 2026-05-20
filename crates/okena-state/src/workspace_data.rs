@@ -187,11 +187,10 @@ impl ProjectData {
         if let Some(custom_name) = self.terminal_names.get(terminal_id) {
             return custom_name.clone();
         }
-        if let Some(ref title) = osc_title {
-            if !is_bash_prompt_title(title) {
+        if let Some(ref title) = osc_title
+            && !is_bash_prompt_title(title) {
                 return title.clone();
             }
-        }
         self.directory_name()
     }
 

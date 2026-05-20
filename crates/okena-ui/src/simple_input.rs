@@ -638,8 +638,8 @@ impl SimpleInputState {
                 return KeyHandled::Handled;
             }
             "v" if modifiers.platform || modifiers.control => {
-                if let Some(clipboard_item) = cx.read_from_clipboard() {
-                    if let Some(text) = clipboard_item.text() {
+                if let Some(clipboard_item) = cx.read_from_clipboard()
+                    && let Some(text) = clipboard_item.text() {
                         if self.multiline {
                             if !text.is_empty() {
                                 self.insert_text(&text, cx);
@@ -652,7 +652,6 @@ impl SimpleInputState {
                             }
                         }
                     }
-                }
                 return KeyHandled::Handled;
             }
             "c" if modifiers.platform || modifiers.control => {
@@ -712,7 +711,7 @@ impl SimpleInputState {
         // Handle character input via key_char (it's a String, not a char)
         if let Some(ref s) = event.keystroke.key_char {
             // Skip control characters (except for normal space/printable)
-            if !s.is_empty() && !s.chars().next().map_or(true, |c| c.is_control() && c != ' ') {
+            if !s.is_empty() && !s.chars().next().is_none_or(|c| c.is_control() && c != ' ') {
                 self.insert_text(s, cx);
                 return KeyHandled::Handled;
             }
@@ -736,8 +735,8 @@ fn var_segments(text: &str) -> Vec<(&str, bool)> {
     let mut i = 0;
 
     while i < bytes.len() {
-        if bytes[i] == b'{' {
-            if let Some(close) = text[i..].find('}') {
+        if bytes[i] == b'{'
+            && let Some(close) = text[i..].find('}') {
                 if i > last_end {
                     segments.push((&text[last_end..i], false));
                 }
@@ -747,7 +746,6 @@ fn var_segments(text: &str) -> Vec<(&str, bool)> {
                 i = end;
                 continue;
             }
-        }
         i += 1;
     }
     if last_end < text.len() {
@@ -996,8 +994,8 @@ fn cursor_canvas(
         },
         // Paint: draw the 1px cursor line, vertically centered within the text line
         move |_bounds, (cursor_pos, line_h), window, _cx| {
-            if visible {
-                if let Some(pos) = cursor_pos {
+            if visible
+                && let Some(pos) = cursor_pos {
                     let cursor_h = px(14.0).min(line_h);
                     let y_offset = (line_h - cursor_h) * 0.5;
                     let adjusted = point(pos.x, pos.y + y_offset);
@@ -1006,7 +1004,6 @@ fn cursor_canvas(
                         color,
                     ));
                 }
-            }
         },
     )
     .absolute()

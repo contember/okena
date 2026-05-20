@@ -127,9 +127,9 @@ pub fn get_blame(repo_path: &Path, relative_path: &str) -> Result<Vec<BlameLine>
     // Cache one `Arc<BlameCommit>` per unique commit referenced by the blame.
     let mut commit_cache: HashMap<ObjectId, Arc<BlameCommit>> = HashMap::new();
     for entry in &outcome.entries {
-        if !commit_cache.contains_key(&entry.commit_id) {
+        if let std::collections::hash_map::Entry::Vacant(e) = commit_cache.entry(entry.commit_id) {
             let meta = load_commit_meta(&repo, entry.commit_id)?;
-            commit_cache.insert(entry.commit_id, Arc::new(meta));
+            e.insert(Arc::new(meta));
         }
     }
 
@@ -137,6 +137,8 @@ pub fn get_blame(repo_path: &Path, relative_path: &str) -> Result<Vec<BlameLine>
     let head_line_count = count_lines(&outcome.blob);
     let mut head_blame: Vec<Arc<BlameCommit>> = Vec::with_capacity(head_line_count);
     for entry in &outcome.entries {
+        // Every commit_id was inserted into commit_cache by the loop above.
+        #[allow(clippy::expect_used)]
         let commit = commit_cache
             .get(&entry.commit_id)
             .expect("populated above")

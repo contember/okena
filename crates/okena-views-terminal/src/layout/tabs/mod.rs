@@ -138,14 +138,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     .on_click({
                         let terminal_id_for_minimize = terminal_id.clone();
                         move |_, _window, cx| {
-                            if let Some(ref tid) = terminal_id_for_minimize {
-                                if let Some(ref dispatcher) = ctx_minimize.action_dispatcher {
+                            if let Some(ref tid) = terminal_id_for_minimize
+                                && let Some(ref dispatcher) = ctx_minimize.action_dispatcher {
                                     dispatcher.dispatch(okena_core::api::ActionRequest::ToggleMinimized {
                                         project_id: ctx_minimize.project_id.clone(),
                                         terminal_id: tid.clone(),
                                     }, cx);
                                 }
-                            }
                         }
                     }),
             )
@@ -153,26 +152,24 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 el.child(
                     header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                         .on_click(move |_, _window, cx| {
-                            if let Some(ref tid) = terminal_id_for_export {
-                                if let Some(path) = backend_for_export.capture_buffer(tid) {
+                            if let Some(ref tid) = terminal_id_for_export
+                                && let Some(path) = backend_for_export.capture_buffer(tid) {
                                     cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
                                     log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
                                 }
-                            }
                         }),
                 )
             })
             .child(
                 header_button_base(HeaderAction::Fullscreen, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                     .on_click(move |_, _window, cx| {
-                        if let Some(ref tid) = terminal_id_for_fullscreen {
-                            if let Some(ref dispatcher) = ctx_fullscreen.action_dispatcher {
+                        if let Some(ref tid) = terminal_id_for_fullscreen
+                            && let Some(ref dispatcher) = ctx_fullscreen.action_dispatcher {
                                 dispatcher.dispatch(okena_core::api::ActionRequest::SetFullscreen {
                                     project_id: ctx_fullscreen.project_id.clone(),
                                     terminal_id: Some(tid.clone()),
                                 }, cx);
                             }
-                        }
                     }),
             )
             .child(
@@ -193,14 +190,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .child({
                 header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some(if standalone { "Close" } else { "Close Tab" }), None)
                     .on_click(move |_, _window, cx| {
-                        if let Some(ref tid) = terminal_id_for_close {
-                            if let Some(ref dispatcher) = ctx_close.action_dispatcher {
+                        if let Some(ref tid) = terminal_id_for_close
+                            && let Some(ref dispatcher) = ctx_close.action_dispatcher {
                                 dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
                                     project_id: ctx_close.project_id.clone(),
                                     terminal_id: tid.clone(),
                                 }, cx);
                             }
-                        }
                     })
             })
     }
@@ -318,7 +314,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     ) -> Div {
         let node = {
             let ws = self.workspace.read(cx);
-            self.get_layout(&ws).cloned()
+            self.get_layout(ws).cloned()
         };
 
         let children: &[LayoutNode] = match node {
@@ -351,7 +347,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
         let is_pane_focused = self.focus_manager.read(cx)
             .focused_terminal_state()
-            .map_or(false, |f| {
+            .is_some_and(|f| {
                 f.project_id == self.project_id
                     && f.layout_path.starts_with(&self.layout_path)
             });
@@ -382,8 +378,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 })
             });
 
-            let is_hook = terminal_id.as_ref().map_or(false, |tid| {
-                project_for_names.as_ref().map_or(false, |p| p.hook_terminals.contains_key(tid))
+            let is_hook = terminal_id.as_ref().is_some_and(|tid| {
+                project_for_names.as_ref().is_some_and(|p| p.hook_terminals.contains_key(tid))
             });
 
             let tab_label = if let Some(ref tid) = terminal_id {
@@ -443,7 +439,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         .rounded(px(4.0))
                 })
                 .child({
-                    let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
+                    let is_renaming_this = terminal_id.as_ref().is_some_and(|tid| {
                         is_renaming(&self.tab_rename_state, tid)
                     });
                     if let Some(input) = is_renaming_this.then(|| rename_input(&self.tab_rename_state)).flatten() {
@@ -513,14 +509,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     let terminal_id = terminal_id.clone();
                     let action_dispatcher = self.action_dispatcher.clone();
                     cx.listener(move |_this, _event: &MouseDownEvent, _window, cx| {
-                        if let Some(ref tid) = terminal_id {
-                            if let Some(ref dispatcher) = action_dispatcher {
+                        if let Some(ref tid) = terminal_id
+                            && let Some(ref dispatcher) = action_dispatcher {
                                 dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
                                     project_id: project_id.clone(),
                                     terminal_id: tid.clone(),
                                 }, cx);
                             }
-                        }
                         cx.stop_propagation();
                     })
                 })
@@ -571,8 +566,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             if drag.project_id == project_id_for_drop
                                 && drag_parent == layout_path_for_drop.as_slice()
                             {
-                                if let Some(from_index) = drag_tab_index {
-                                    if from_index != i {
+                                if let Some(from_index) = drag_tab_index
+                                    && from_index != i {
                                         let target_index = if from_index < i { i - 1 } else { i };
                                         if let Some(ref dispatcher) = dispatcher_for_drop {
                                             dispatcher.dispatch(okena_core::api::ActionRequest::MoveTab {
@@ -584,17 +579,14 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                         }
                                         this.start_drop_animation(target_index, cx);
                                     }
-                                }
-                            } else {
-                                if let Some(ref dispatcher) = dispatcher_for_drop {
-                                    dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
-                                        project_id: drag.project_id.clone(),
-                                        terminal_id: drag.terminal_id.clone(),
-                                        target_path: layout_path_for_drop.clone(),
-                                        position: Some(i),
-                                        target_project_id: Some(project_id_for_drop.clone()),
-                                    }, cx);
-                                }
+                            } else if let Some(ref dispatcher) = dispatcher_for_drop {
+                                dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
+                                    project_id: drag.project_id.clone(),
+                                    terminal_id: drag.terminal_id.clone(),
+                                    target_path: layout_path_for_drop.clone(),
+                                    position: Some(i),
+                                    target_project_id: Some(project_id_for_drop.clone()),
+                                }, cx);
                             }
                         }
                     }))
@@ -610,7 +602,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         let is_double_click = this.tab_click_detector.check(i);
 
                         if this.tab_rename_state.is_some() && !is_double_click {
-                            let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
+                            let is_renaming_this = terminal_id.as_ref().is_some_and(|tid| {
                                 is_renaming(&this.tab_rename_state, tid)
                             });
                             if !is_renaming_this {
@@ -618,15 +610,14 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             }
                         }
 
-                        if !standalone {
-                            if let Some(ref dispatcher) = dispatcher_for_click {
+                        if !standalone
+                            && let Some(ref dispatcher) = dispatcher_for_click {
                                 dispatcher.dispatch(okena_core::api::ActionRequest::SetActiveTab {
                                     project_id: project_id.clone(),
                                     path: layout_path.clone(),
                                     index: i,
                                 }, cx);
                             }
-                        }
 
                         if terminal_id.is_some() {
                             let terminal_path = if standalone {
@@ -646,11 +637,10 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             });
                         }
 
-                        if is_double_click {
-                            if let Some(ref tid) = terminal_id {
+                        if is_double_click
+                            && let Some(ref tid) = terminal_id {
                                 this.start_tab_rename(tid.clone(), tab_label.clone(), window, cx);
                             }
-                        }
                     })
                 })
         }).collect();
@@ -666,8 +656,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .h_full()
             .min_w(px(20.0))
             .on_click(cx.listener(move |this, _, _window, cx| {
-                if this.empty_area_click_detector.check(()) {
-                    if let Some(ref dispatcher) = dispatcher_for_new {
+                if this.empty_area_click_detector.check(())
+                    && let Some(ref dispatcher) = dispatcher_for_new {
                         dispatcher.add_tab(
                             &project_id_for_new,
                             &layout_path_for_new,
@@ -675,7 +665,6 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             cx,
                         );
                     }
-                }
             }));
 
         if !standalone {
@@ -720,16 +709,14 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 this.start_drop_animation(num_children - 1, cx);
                             }
                         }
-                    } else {
-                        if let Some(ref dispatcher) = dispatcher_for_end {
-                            dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
-                                project_id: drag.project_id.clone(),
-                                terminal_id: drag.terminal_id.clone(),
-                                target_path: layout_path_for_end.clone(),
-                                position: None,
-                                target_project_id: Some(project_id_for_end.clone()),
-                            }, cx);
-                        }
+                    } else if let Some(ref dispatcher) = dispatcher_for_end {
+                        dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
+                            project_id: drag.project_id.clone(),
+                            terminal_id: drag.terminal_id.clone(),
+                            target_path: layout_path_for_end.clone(),
+                            position: None,
+                            target_project_id: Some(project_id_for_end.clone()),
+                        }, cx);
                     }
                 }));
         }

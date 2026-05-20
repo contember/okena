@@ -14,14 +14,14 @@ impl ContentSearchDialog {
         let t = theme(cx);
 
         // Get the currently selected match info
-        let selected_match = self.rows.get(self.selected_index).and_then(|row| match row {
+        let selected_match = self.rows.get(self.selected_index).map(|row| match row {
             ResultRow::Match {
                 file_path,
                 line_number,
                 match_ranges,
                 ..
-            } => Some((file_path.clone(), *line_number, match_ranges.clone())),
-            ResultRow::FileHeader { file_path, .. } => Some((file_path.clone(), 1, vec![])),
+            } => (file_path.clone(), *line_number, match_ranges.clone()),
+            ResultRow::FileHeader { file_path, .. } => (file_path.clone(), 1, vec![]),
         });
 
         let Some((file_path, match_line, _match_ranges)) = selected_match else {

@@ -116,7 +116,7 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
         #[cfg(unix)]
         {
             let status = crate::process::command("unzip")
-                .args(["-o", &archive.to_string_lossy().into_owned(), "-d", &dest.to_string_lossy().into_owned()])
+                .args(["-o", &archive.to_string_lossy(), "-d", &dest.to_string_lossy()])
                 .status()
                 .context("failed to run unzip")?;
             if !status.success() {
@@ -163,11 +163,10 @@ fn find_binary_recursive(dir: &Path, name: &str, depth: u32) -> Result<PathBuf> 
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
-                if let Ok(found) = find_binary_recursive(&path, name, depth - 1) {
+            if path.is_dir()
+                && let Ok(found) = find_binary_recursive(&path, name, depth - 1) {
                     return Ok(found);
                 }
-            }
         }
     }
 

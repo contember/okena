@@ -61,8 +61,8 @@ impl BatchedTextRun {
             font: self.style.font.clone(),
             color: self.style.color,
             background_color: self.style.background_color,
-            underline: self.style.underline.clone(),
-            strikethrough: self.style.strikethrough.clone(),
+            underline: self.style.underline,
+            strikethrough: self.style.strikethrough,
         };
 
         // Shape and paint entire run at once, passing cell_width for fixed-width spacing

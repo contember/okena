@@ -59,11 +59,10 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     }
 
     pub(super) fn handle_copy(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            if let Some(text) = terminal.get_selected_text() {
+        if let Some(ref terminal) = self.terminal
+            && let Some(text) = terminal.get_selected_text() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
-        }
     }
 
     pub(super) fn handle_paste(&mut self, cx: &mut Context<Self>) {
@@ -132,19 +131,17 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     }
 
     pub(super) fn handle_jump_prev_prompt(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            if terminal.jump_to_prompt_above() {
+        if let Some(ref terminal) = self.terminal
+            && terminal.jump_to_prompt_above() {
                 cx.notify();
             }
-        }
     }
 
     pub(super) fn handle_jump_next_prompt(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            if terminal.jump_to_prompt_below() {
+        if let Some(ref terminal) = self.terminal
+            && terminal.jump_to_prompt_below() {
                 cx.notify();
             }
-        }
     }
 
     pub(super) fn handle_file_drop(&mut self, paths: &ExternalPaths, _cx: &mut Context<Self>) {

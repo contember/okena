@@ -127,13 +127,12 @@ impl Terminal {
     /// Returns ((start_col, start_row), (end_col, end_row)) where rows are buffer coordinates (can be negative for history)
     pub fn selection_bounds(&self) -> Option<((usize, i32), (usize, i32))> {
         let term = self.term.lock();
-        if let Some(ref selection) = term.selection {
-            if let Some(range) = selection.to_range(&*term) {
+        if let Some(ref selection) = term.selection
+            && let Some(range) = selection.to_range(&*term) {
                 let start = (range.start.column.0, range.start.line.0);
                 let end = (range.end.column.0, range.end.line.0);
                 return Some((start, end));
             }
-        }
         None
     }
 
@@ -214,10 +213,8 @@ impl Terminal {
             }
         }
 
-        // Send backspaces for each character in the selection
-        for _ in 0..char_count {
-            buf.push(0x7f); // DEL / Backspace
-        }
+        // Send backspaces (DEL / 0x7f) for each character in the selection
+        buf.extend(std::iter::repeat_n(0x7f, char_count));
 
         // Clear selection
         term.selection = None;

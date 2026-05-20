@@ -43,6 +43,8 @@ pub struct AppState {
 }
 
 /// Build the complete axum router.
+// Each param is a distinct piece of shared router state.
+#[allow(clippy::too_many_arguments)]
 pub fn build_router(
     bridge_tx: BridgeSender,
     auth_store: Arc<AuthStore>,

@@ -343,7 +343,7 @@ impl Sidebar {
     pub fn count_waiting_terminals(&self, terminal_ids: &[String]) -> usize {
         let terminals = self.terminals.lock();
         terminal_ids.iter()
-            .filter(|id| terminals.get(id.as_str()).map_or(false, |t| t.is_waiting_for_input()))
+            .filter(|id| terminals.get(id.as_str()).is_some_and(|t| t.is_waiting_for_input()))
             .count()
     }
 

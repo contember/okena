@@ -74,11 +74,10 @@ fn quit(_: &Quit, cx: &mut App) {
     }
 
     // Flush pending workspace save
-    if let Some(gw) = cx.try_global::<GlobalWorkspace>() {
-        if let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
+    if let Some(gw) = cx.try_global::<GlobalWorkspace>()
+        && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
             log::error!("Failed to flush workspace on quit: {}", e);
         }
-    }
 
     cx.quit();
 }
@@ -609,8 +608,8 @@ fn main() {
         // Create theme entity from settings, restoring custom theme if applicable
         let theme_entity = cx.new(|_cx| {
             let mut theme = AppTheme::new(app_settings.theme_mode, true);
-            if app_settings.theme_mode == ThemeMode::Custom {
-                if let Some(ref custom_id) = app_settings.custom_theme_id {
+            if app_settings.theme_mode == ThemeMode::Custom
+                && let Some(ref custom_id) = app_settings.custom_theme_id {
                     for (info, colors) in crate::theme::load_custom_themes() {
                         if info.id == format!("custom:{}", custom_id) {
                             theme.set_custom_colors(colors);
@@ -618,7 +617,6 @@ fn main() {
                         }
                     }
                 }
-            }
             theme
         });
         cx.set_global(GlobalTheme(theme_entity.clone()));
@@ -769,11 +767,10 @@ fn main() {
             }
 
             // Flush pending workspace save
-            if let Some(gw) = cx.try_global::<GlobalWorkspace>() {
-                if let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
+            if let Some(gw) = cx.try_global::<GlobalWorkspace>()
+                && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
                     log::error!("Failed to flush workspace on quit: {}", e);
                 }
-            }
             async {}
         });
     });

@@ -19,13 +19,13 @@ pub fn register() -> ExtensionRegistration {
             default_enabled: false,
         },
         activate: Arc::new(|app| {
-            let status = app.new(|cx| status::ClaudeStatus::new(cx));
-            let usage = app.new(|cx| usage::ClaudeUsage::new(cx));
+            let status = app.new(status::ClaudeStatus::new);
+            let usage = app.new(usage::ClaudeUsage::new);
             ExtensionInstance {
                 status_bar_widgets: vec![status.into(), usage.into()],
                 status_bar_right_widgets: vec![],
             }
         }),
-        settings_view: Some(Arc::new(|app| AnyView::from(app.new(|cx| settings::ClaudeSettingsView::new(cx))))),
+        settings_view: Some(Arc::new(|app| AnyView::from(app.new(settings::ClaudeSettingsView::new)))),
     }
 }

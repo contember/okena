@@ -73,7 +73,8 @@ impl SessionManager {
 
 pub enum SessionManagerEvent {
     Close,
-    SwitchWorkspace(WorkspaceData),
+    // Boxed: WorkspaceData is large and would bloat every event otherwise.
+    SwitchWorkspace(Box<WorkspaceData>),
 }
 
 impl EventEmitter<SessionManagerEvent> for SessionManager {}

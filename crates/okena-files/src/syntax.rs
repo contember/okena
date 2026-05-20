@@ -23,7 +23,7 @@ static SYNTAX_THEME_LIGHT: OnceLock<Theme> = OnceLock::new();
 /// Uses the two-face crate which provides many additional syntaxes.
 pub fn load_syntax_set() -> SyntaxSet {
     SYNTAX_SET
-        .get_or_init(|| two_face::syntax::extra_newlines())
+        .get_or_init(two_face::syntax::extra_newlines)
         .clone()
 }
 
@@ -138,7 +138,7 @@ pub fn get_syntax_for_path<'a>(
 ) -> &'a syntect::parsing::SyntaxReference {
     let ext = path.extension().and_then(|e| e.to_str());
 
-    ext.and_then(|e| map_extension_to_syntax(e))
+    ext.and_then(map_extension_to_syntax)
         .and_then(|mapped| syntax_set.find_syntax_by_extension(mapped))
         .or_else(|| ext.and_then(|e| syntax_set.find_syntax_by_extension(e)))
         .or_else(|| {
@@ -263,15 +263,14 @@ pub fn highlight_content(
                     plain.push_str(&processed);
 
                     // Try to merge with previous span if same color
-                    if let Some(last) = merged.last_mut() {
-                        if (last.color.r - color.r).abs() < 0.01
+                    if let Some(last) = merged.last_mut()
+                        && (last.color.r - color.r).abs() < 0.01
                             && (last.color.g - color.g).abs() < 0.01
                             && (last.color.b - color.b).abs() < 0.01
                         {
                             last.text.push_str(&processed);
                             continue;
                         }
-                    }
 
                     merged.push(HighlightedSpan {
                         color,

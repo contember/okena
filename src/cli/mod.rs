@@ -145,11 +145,9 @@ fn ensure_token() -> Result<String, String> {
                 .header("Authorization", format!("Bearer {}", config.token))
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
-            {
-                if resp.status().is_success() {
+                && resp.status().is_success() {
                     return Ok(config.token);
                 }
-            }
         }
     }
 

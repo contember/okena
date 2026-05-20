@@ -60,6 +60,12 @@ pub struct ExtensionRegistry {
 
 impl Global for ExtensionRegistry {}
 
+impl Default for ExtensionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExtensionRegistry {
     pub fn new() -> Self {
         Self {
@@ -91,11 +97,16 @@ pub trait ExtensionSettings {
     fn is_extension_enabled(&self, extension_id: &str) -> bool;
 }
 
+/// Reads an extension's persisted settings blob.
+pub type SettingsGetter = Arc<dyn Fn(&str, &App) -> Option<serde_json::Value>>;
+/// Writes an extension's persisted settings blob.
+pub type SettingsSetter = Arc<dyn Fn(&str, serde_json::Value, &mut App)>;
+
 /// Global bridge for extensions to read/write their persisted settings.
 /// The host app registers an implementation at startup via `cx.set_global()`.
 pub struct ExtensionSettingsStore {
-    getter: Arc<dyn Fn(&str, &App) -> Option<serde_json::Value>>,
-    setter: Arc<dyn Fn(&str, serde_json::Value, &mut App)>,
+    getter: SettingsGetter,
+    setter: SettingsSetter,
 }
 
 impl Global for ExtensionSettingsStore {}
@@ -136,7 +147,13 @@ impl ExtensionSettingsStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Import specific items rather than `use super::*` — the latter pulls in
+    // `gpui`'s `test` proc-macro (re-exported via `use gpui::*`), which shadows
+    // the std `#[test]` attribute and blows the macro recursion limit.
+    use super::{
+        ExtensionInstance, ExtensionManifest, ExtensionRegistration, ExtensionRegistry,
+    };
+    use std::sync::Arc;
 
     #[test]
     fn registry_register_and_lookup() {

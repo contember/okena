@@ -76,7 +76,7 @@ impl WorktreeListPopover {
         ws.data().projects.iter()
             .find(|p| (p.path == expected_path || p.path == wt_path)
                 && p.worktree_info.as_ref()
-                    .map_or(false, |wt| wt.parent_project_id == self.project_id))
+                    .is_some_and(|wt| wt.parent_project_id == self.project_id))
             .map(|p| p.id.clone())
     }
 
@@ -99,7 +99,7 @@ impl Render for WorktreeListPopover {
 
         let tracked_project_paths: std::collections::HashSet<String> = ws.data().projects.iter()
             .filter(|p| p.worktree_info.as_ref()
-                .map_or(false, |wt| wt.parent_project_id == *project_id))
+                .is_some_and(|wt| wt.parent_project_id == *project_id))
             .map(|p| p.path.clone())
             .collect();
 

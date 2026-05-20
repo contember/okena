@@ -14,6 +14,12 @@ pub struct RequestBroker {
     send_to_terminal: VecDeque<SendPayload>,
 }
 
+impl Default for RequestBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RequestBroker {
     pub fn new() -> Self {
         Self {

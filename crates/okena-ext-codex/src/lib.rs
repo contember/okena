@@ -16,8 +16,8 @@ pub fn register() -> ExtensionRegistration {
             default_enabled: false,
         },
         activate: Arc::new(|app| {
-            let status = app.new(|cx| status::CodexStatus::new(cx));
-            let usage = app.new(|cx| usage::CodexUsage::new(cx));
+            let status = app.new(status::CodexStatus::new);
+            let usage = app.new(usage::CodexUsage::new);
             ExtensionInstance {
                 status_bar_widgets: vec![status.into(), usage.into()],
                 status_bar_right_widgets: vec![],

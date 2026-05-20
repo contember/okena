@@ -70,8 +70,8 @@ impl WindowView {
 
         // Compute the left edge (x offset) of the focused column
         let mut col_left: f32 = 0.0;
-        for i in 0..focused_idx {
-            col_left += pixel_widths[i] + 1.0; // +1 for divider
+        for width in &pixel_widths[..focused_idx] {
+            col_left += width + 1.0; // +1 for divider
         }
 
         let new_offset = if center {
@@ -606,11 +606,10 @@ impl Render for WindowView {
                         .map(|state| state.project_id)
                         .or_else(|| fm.focused_project_id().map(String::from))
                 };
-                if let Some(project_id) = project_id {
-                    if let Some(col) = this.project_columns.get(&project_id).cloned() {
+                if let Some(project_id) = project_id
+                    && let Some(col) = this.project_columns.get(&project_id).cloned() {
                         col.update(cx, |col, cx| col.show_branch_picker(window, cx));
                     }
-                }
             }))
             // Handle equalize layout action
             .on_action(cx.listener(|this, _: &EqualizeLayout, _window, cx| {

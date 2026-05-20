@@ -193,11 +193,10 @@ impl MarkdownDocument {
                     let mut children = inline_stack.pop().unwrap_or_default();
                     // Extract URL from marker
                     let url = children.iter().find_map(|c| {
-                        if let Inline::Text(t) = c {
-                            if t.starts_with("\x00LINK:") && t.ends_with("\x00") {
+                        if let Inline::Text(t) = c
+                            && t.starts_with("\x00LINK:") && t.ends_with("\x00") {
                                 return Some(t[6..t.len()-1].to_string());
                             }
-                        }
                         None
                     }).unwrap_or_default();
                     children.retain(|c| {

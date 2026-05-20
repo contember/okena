@@ -40,12 +40,11 @@ fn pick_focus_replacement(
 /// Expand `~` or `~/...` at the start of a path to the user's home directory.
 /// Does not expand `~user/...` syntax (other user's home directories).
 fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
+    if (path == "~" || path.starts_with("~/"))
+        && let Some(home) = dirs::home_dir() {
             let rest = &path[1..]; // "" or "/..."
             return format!("{}{}", home.display(), rest);
         }
-    }
     path.to_string()
 }
 
@@ -441,8 +440,8 @@ impl Workspace {
 
     /// Reorder a worktree within its parent's worktree_ids list
     pub fn reorder_worktree(&mut self, parent_id: &str, worktree_id: &str, new_index: usize, cx: &mut Context<Self>) {
-        if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_id) {
-            if let Some(current_index) = parent.worktree_ids.iter().position(|id| id == worktree_id) {
+        if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_id)
+            && let Some(current_index) = parent.worktree_ids.iter().position(|id| id == worktree_id) {
                 let id = parent.worktree_ids.remove(current_index);
                 let target = if new_index > current_index {
                     new_index.saturating_sub(1)
@@ -453,7 +452,6 @@ impl Workspace {
                 parent.worktree_ids.insert(target, id);
                 self.notify_data(cx);
             }
-        }
     }
 
     /// Update project column widths on the targeted window.
@@ -529,6 +527,9 @@ impl Workspace {
     /// other window via `data.add_project_hide_in_other_windows` after
     /// the project is pushed. Threaded through to
     /// `register_worktree_project` -> `register_worktree_project_inner`.
+    // Worktree identity is described by several cohesive path/branch params;
+    // a param struct would add indirection without grouping anything reusable.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_worktree_project(
         &mut self,
         parent_project_id: &str,
@@ -564,6 +565,7 @@ impl Workspace {
     /// `window_id` identifies the spawning window for the multi-window
     /// new-project visibility rule (PRD user story 14). See
     /// `create_worktree_project` for details.
+    #[allow(clippy::too_many_arguments)] // cohesive worktree path/branch params
     pub fn register_worktree_project(
         &mut self,
         parent_project_id: &str,
@@ -584,6 +586,7 @@ impl Workspace {
     /// `window_id` identifies the spawning window for the multi-window
     /// new-project visibility rule (PRD user story 14). See
     /// `create_worktree_project` for details.
+    #[allow(clippy::too_many_arguments)] // cohesive worktree path/branch params
     pub fn register_worktree_project_deferred_hooks(
         &mut self,
         parent_project_id: &str,
@@ -598,6 +601,7 @@ impl Workspace {
         self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, false, global_hooks, window_id, cx)
     }
 
+    #[allow(clippy::too_many_arguments)] // cohesive worktree path/branch params
     fn register_worktree_project_inner(
         &mut self,
         parent_project_id: &str,
@@ -818,11 +822,10 @@ impl Workspace {
     /// Add a worktree project ID to its parent's worktree_ids list (deduped).
     /// Also removes the worktree from project_order since it lives under its parent now.
     pub fn add_to_worktree_ids(&mut self, parent_id: &str, worktree_id: &str) {
-        if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_id) {
-            if !parent.worktree_ids.iter().any(|id| id == worktree_id) {
+        if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_id)
+            && !parent.worktree_ids.iter().any(|id| id == worktree_id) {
                 parent.worktree_ids.push(worktree_id.to_string());
             }
-        }
         // Worktrees in worktree_ids don't belong in project_order
         self.data.project_order.retain(|id| id != worktree_id);
         // Also remove from any folder's project_ids
@@ -873,7 +876,6 @@ impl Workspace {
     }
 
     /// Remove a worktree project and its git worktree
-
     pub fn remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> Result<(), String> {
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;

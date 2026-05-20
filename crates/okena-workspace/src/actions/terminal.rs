@@ -16,14 +16,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.with_project(project_id, cx, |project| {
-            if let Some(ref mut layout) = project.layout {
-                if let Some(node) = layout.get_at_path_mut(path) {
-                    if let LayoutNode::Terminal { terminal_id: id, .. } = node {
+            if let Some(ref mut layout) = project.layout
+                && let Some(node) = layout.get_at_path_mut(path)
+                    && let LayoutNode::Terminal { terminal_id: id, .. } = node {
                         *id = Some(terminal_id);
                         return true;
                     }
-                }
-            }
             false
         });
     }
@@ -105,31 +103,24 @@ impl Workspace {
         terminal_id: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(project) = self.project_mut(project_id) {
-            if let Some(ref mut layout) = project.layout {
-                if let Some(path) = layout.find_terminal_path(terminal_id) {
-                    if let Some(node) = layout.get_at_path_mut(&path) {
-                        if let LayoutNode::Terminal { minimized, .. } = node {
+        if let Some(project) = self.project_mut(project_id)
+            && let Some(ref mut layout) = project.layout
+                && let Some(path) = layout.find_terminal_path(terminal_id)
+                    && let Some(node) = layout.get_at_path_mut(&path)
+                        && let LayoutNode::Terminal { minimized, .. } = node {
                             *minimized = !*minimized;
                             self.notify_data(cx);
                         }
-                    }
-                }
-            }
-        }
     }
 
     /// Check if a terminal is minimized by ID
     pub fn is_terminal_minimized(&self, project_id: &str, terminal_id: &str) -> bool {
-        if let Some(project) = self.project(project_id) {
-            if let Some(ref layout) = project.layout {
-                if let Some(path) = layout.find_terminal_path(terminal_id) {
-                    if let Some(LayoutNode::Terminal { minimized, .. }) = layout.get_at_path(&path) {
+        if let Some(project) = self.project(project_id)
+            && let Some(ref layout) = project.layout
+                && let Some(path) = layout.find_terminal_path(terminal_id)
+                    && let Some(LayoutNode::Terminal { minimized, .. }) = layout.get_at_path(&path) {
                         return *minimized;
                     }
-                }
-            }
-        }
         false
     }
 
@@ -143,12 +134,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         self.with_layout_node(project_id, path, cx, |node| {
-            if let LayoutNode::Terminal { terminal_id: Some(_), detached, .. } = node {
-                if !*detached {
+            if let LayoutNode::Terminal { terminal_id: Some(_), detached, .. } = node
+                && !*detached {
                     *detached = true;
                     return true;
                 }
-            }
             false
         })
     }
@@ -157,30 +147,26 @@ impl Workspace {
     /// Scans all project layouts to find the terminal and clear the detached flag.
     pub fn attach_terminal(&mut self, terminal_id: &str, cx: &mut Context<Self>) {
         for project in &mut self.data.projects {
-            if let Some(ref mut layout) = project.layout {
-                if let Some(path) = layout.find_terminal_path(terminal_id) {
-                    if let Some(node) = layout.get_at_path_mut(&path) {
-                        if let LayoutNode::Terminal { detached, .. } = node {
+            if let Some(ref mut layout) = project.layout
+                && let Some(path) = layout.find_terminal_path(terminal_id) {
+                    if let Some(node) = layout.get_at_path_mut(&path)
+                        && let LayoutNode::Terminal { detached, .. } = node {
                             *detached = false;
                         }
-                    }
                     self.notify_data(cx);
                     return;
                 }
-            }
         }
     }
 
     /// Check if a terminal is detached by scanning layout trees.
     pub fn is_terminal_detached(&self, terminal_id: &str) -> bool {
         for project in &self.data.projects {
-            if let Some(ref layout) = project.layout {
-                if let Some(path) = layout.find_terminal_path(terminal_id) {
-                    if let Some(LayoutNode::Terminal { detached, .. }) = layout.get_at_path(&path) {
+            if let Some(ref layout) = project.layout
+                && let Some(path) = layout.find_terminal_path(terminal_id)
+                    && let Some(LayoutNode::Terminal { detached, .. }) = layout.get_at_path(&path) {
                         return *detached;
                     }
-                }
-            }
         }
         false
     }

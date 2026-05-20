@@ -102,14 +102,13 @@ impl Workspace {
         let candidates = std::iter::once(project_id.to_string())
             .chain(self.worktree_child_ids(project_id));
         for id in candidates {
-            if let Some(project) = self.project(&id) {
-                if let Some(layout) = project.layout.as_ref() {
+            if let Some(project) = self.project(&id)
+                && let Some(layout) = project.layout.as_ref() {
                     // Focus the currently visible terminal (follows active tabs)
                     let path = layout.find_visible_terminal_path();
                     focus_manager.focus_terminal(id, path);
                     return;
                 }
-            }
         }
     }
 
@@ -193,21 +192,18 @@ impl Workspace {
         terminal_id: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(project) = self.project(project_id) {
-            if let Some(ref layout) = project.layout {
-                if let Some(path) = layout.find_terminal_path(terminal_id) {
+        if let Some(project) = self.project(project_id)
+            && let Some(ref layout) = project.layout
+                && let Some(path) = layout.find_terminal_path(terminal_id) {
                     // Activate any tabs along the path so the terminal becomes visible
-                    if let Some(project_mut) = self.project_mut(project_id) {
-                        if let Some(ref mut layout) = project_mut.layout {
+                    if let Some(project_mut) = self.project_mut(project_id)
+                        && let Some(ref mut layout) = project_mut.layout {
                             layout.activate_tabs_along_path(&path);
                         }
-                    }
                     self.notify_data(cx);
                     // Focus the terminal without changing which projects are shown
                     self.set_focused_terminal(focus_manager, project_id.to_string(), path, cx);
                 }
-            }
-        }
     }
 }
 

@@ -17,23 +17,30 @@ use gpui_component::h_flex;
 use gpui_component::tooltip::Tooltip;
 use std::sync::Arc;
 
+/// The shared `Arc<dyn Fn>` click handler, before being wrapped in `Option`.
+pub type ClickHandler = Arc<dyn Fn(&mut Window, &mut App)>;
+/// A click handler for an interactive part of the branch status pill.
+pub type ClickCallback = Option<ClickHandler>;
+/// A bounds-reporting callback used to anchor popovers under a pill element.
+pub type BoundsCallback = Option<Arc<dyn Fn(Bounds<Pixels>, &mut App)>>;
+
 /// Callbacks for the interactive parts of the branch status pill.
 pub struct BranchStatusCallbacks {
     /// Called when the user clicks the branch chip. When `None` the chip is
     /// rendered as plain (non-clickable) text — used for read-only providers.
-    pub on_branch_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>,
+    pub on_branch_click: ClickCallback,
     /// Called when the user clicks the PR badge. When `None` the PR badge
     /// stays informational only (still rendered, but not clickable).
-    pub on_pr_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>,
+    pub on_pr_click: ClickCallback,
     /// Called when the user clicks the CI status pill. When `None` the pill
     /// stays informational only.
-    pub on_ci_click: Option<Arc<dyn Fn(&mut Window, &mut App)>>,
+    pub on_ci_click: ClickCallback,
     /// Called every layout pass with the on-screen bounds of the branch chip,
     /// so the caller can anchor a popover underneath it.
-    pub on_branch_bounds: Option<Arc<dyn Fn(Bounds<Pixels>, &mut App)>>,
+    pub on_branch_bounds: BoundsCallback,
     /// Same as `on_branch_bounds` but for the CI pill — used to anchor the
     /// CI checks popover.
-    pub on_ci_bounds: Option<Arc<dyn Fn(Bounds<Pixels>, &mut App)>>,
+    pub on_ci_bounds: BoundsCallback,
 }
 
 /// Render the git branch status pill (branch chip + PR badge + CI pill).

@@ -13,7 +13,7 @@ use gpui_component::tooltip::Tooltip;
 impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     pub(super) fn get_active_terminal_id(&self, active_tab: usize, cx: &Context<Self>) -> Option<String> {
         let ws = self.workspace.read(cx);
-        match self.get_layout(&ws) {
+        match self.get_layout(ws) {
             Some(LayoutNode::Tabs { children, .. }) => {
                 if let Some(LayoutNode::Terminal { terminal_id, .. }) = children.get(active_tab) {
                     return terminal_id.clone();
@@ -29,7 +29,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
     fn get_active_shell_type(&self, active_tab: usize, cx: &Context<Self>) -> ShellType {
         let ws = self.workspace.read(cx);
-        match self.get_layout(&ws) {
+        match self.get_layout(ws) {
             Some(LayoutNode::Tabs { children, .. }) => {
                 if let Some(LayoutNode::Terminal { shell_type, .. }) = children.get(active_tab) {
                     return shell_type.clone();

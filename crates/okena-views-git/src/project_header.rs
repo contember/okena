@@ -19,9 +19,21 @@ mod diff_tree;
 mod graph;
 mod lane_layout;
 
-pub use branch_status::{render_branch_status, BranchStatusCallbacks};
+pub use branch_status::{
+    render_branch_status, BoundsCallback, BranchStatusCallbacks, ClickCallback, ClickHandler,
+};
 pub use commit_log::render_commit_log_content;
 pub use diff_tree::render_diff_file_list_interactive;
+
+/// Called with `(commit_hash, commit_message, commit_index)` when a commit row
+/// is clicked. `None` renders the rows as non-interactive.
+pub type CommitClickCallback =
+    Option<std::sync::Arc<dyn Fn(&str, &str, usize, &mut Window, &mut App)>>;
+
+/// Called with `(commit_hash, mouse_position)` when a commit row is
+/// right-clicked. `None` disables the row context menu.
+pub type CommitRightClickCallback =
+    Option<std::sync::Arc<dyn Fn(&str, Point<Pixels>, &mut Window, &mut App)>>;
 
 // ── Theme-dependent color traits ────────────────────────────────────────────
 

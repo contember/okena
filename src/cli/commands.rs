@@ -19,12 +19,11 @@ pub fn cli_pair() -> i32 {
     let code = generate_pairing_code();
     let path = pair_code_path();
 
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!("Failed to create config directory: {e}");
             return 1;
         }
-    }
 
     if let Err(e) = std::fs::write(&path, &code) {
         eprintln!("Failed to write pairing code: {e}");

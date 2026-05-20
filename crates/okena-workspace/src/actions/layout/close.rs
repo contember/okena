@@ -8,8 +8,8 @@ impl Workspace {
     /// Close a terminal at a path.
     /// Returns the terminal IDs that were removed from the layout.
     pub fn close_terminal(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) -> Vec<String> {
-        if let Some(project) = self.project_mut(project_id) {
-            if let Some(ref mut layout) = project.layout {
+        if let Some(project) = self.project_mut(project_id)
+            && let Some(ref mut layout) = project.layout {
                 if path.is_empty() {
                     // Closing root - remove layout entirely (project becomes bookmark)
                     project.layout = None;
@@ -59,7 +59,6 @@ impl Workspace {
                     }
                 }
             }
-        }
         vec![]
     }
 

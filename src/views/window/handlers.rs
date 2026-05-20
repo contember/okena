@@ -314,11 +314,10 @@ impl WindowView {
             }
             OverlayManagerEvent::TerminalCopy { terminal_id } => {
                 let terminals = self.terminals.lock();
-                if let Some(terminal) = terminals.get(terminal_id) {
-                    if let Some(text) = terminal.get_selected_text() {
+                if let Some(terminal) = terminals.get(terminal_id)
+                    && let Some(text) = terminal.get_selected_text() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
-                }
             }
             OverlayManagerEvent::TerminalPaste { terminal_id } => {
                 let text = cx.read_from_clipboard()
@@ -472,11 +471,10 @@ impl WindowView {
         }
 
         // 2. Flush workspace
-        if let Some(gw) = cx.try_global::<GlobalWorkspace>() {
-            if let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
+        if let Some(gw) = cx.try_global::<GlobalWorkspace>()
+            && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
                 log::error!("Failed to flush workspace before profile switch: {e}");
             }
-        }
 
         // 3. Spawn current_exe with --profile <id>. Strip any existing --profile arg
         //    so we don't double-pass it.

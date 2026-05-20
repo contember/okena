@@ -43,14 +43,13 @@ impl DetachedTerminalView {
             let mut found_project_path = String::new();
 
             for project in ws.projects() {
-                if let Some(layout) = &project.layout {
-                    if let Some(path) = layout.find_terminal_path(&terminal_id) {
+                if let Some(layout) = &project.layout
+                    && let Some(path) = layout.find_terminal_path(&terminal_id) {
                         found_project_id = project.id.clone();
                         found_layout_path = path;
                         found_project_path = project.path.clone();
                         break;
                     }
-                }
             }
             (found_project_id, found_layout_path, found_project_path)
         };

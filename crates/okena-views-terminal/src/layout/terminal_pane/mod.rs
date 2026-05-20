@@ -65,6 +65,8 @@ pub struct TerminalPane<D: ActionDispatch> {
 }
 
 impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
+    // GPUI view constructor: each param is a distinct injected dependency.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         workspace: Entity<Workspace>,
         focus_manager: Entity<FocusManager>,

@@ -281,6 +281,8 @@ impl Sidebar {
 
     /// Renders a worktree project row. Promoted worktrees use the same indent as their parent
     /// (solid dot, conditional expand arrow). Nested worktrees are indented with a hollow circle.
+    // GPUI render helper: params are render inputs (indent, indices, state flags).
+    #[allow(clippy::too_many_arguments)]
     pub fn render_worktree_item(&self, project: &SidebarProjectInfo, indent: f32, worktree_index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_closing = project.is_closing;
@@ -356,6 +358,8 @@ impl Sidebar {
         )
     }
 
+    // GPUI render helper: params are render inputs (indent, indices, state flags).
+    #[allow(clippy::too_many_arguments)]
     pub fn render_terminal_item(
         &self,
         project_id: &str,
@@ -388,8 +392,8 @@ impl Sidebar {
             } else {
                 "Terminal".to_string()
             };
-            let bell = terminal.map_or(false, |t| t.has_bell());
-            let waiting = terminal.map_or(false, |t| t.is_waiting_for_input());
+            let bell = terminal.is_some_and(|t| t.has_bell());
+            let waiting = terminal.is_some_and(|t| t.is_waiting_for_input());
             let idle = if waiting { terminal.map(|t| t.idle_duration_display()) } else { None };
             (name, bell, waiting, idle)
         };
@@ -401,11 +405,11 @@ impl Sidebar {
         let is_focused = {
             let ws = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
-            fm.focused_terminal_state().map_or(false, |ft| {
+            fm.focused_terminal_state().is_some_and(|ft| {
                 if let Some(proj) = ws.project(&project_id) {
                     proj.layout.as_ref()
                         .and_then(|l| l.find_terminal_path(&terminal_id))
-                        .map_or(false, |path| ft.project_id == project_id && ft.layout_path == path)
+                        .is_some_and(|path| ft.project_id == project_id && ft.layout_path == path)
                 } else {
                     false
                 }
@@ -471,9 +475,7 @@ impl Sidebar {
                                 rgb(t.border_bell)
                             } else if is_waiting {
                                 rgb(t.border_idle)
-                            } else if is_minimized {
-                                rgb(t.text_muted)
-                            } else if is_inactive_tab {
+                            } else if is_minimized || is_inactive_tab {
                                 rgb(t.text_muted)
                             } else {
                                 rgb(t.success)
@@ -603,6 +605,8 @@ impl Sidebar {
 
     /// Render project as a group header when it has worktrees.
     /// Click = show parent + all worktrees (non-individual focus).
+    // GPUI render helper: params are render inputs (indent, indices, state flags).
+    #[allow(clippy::too_many_arguments)]
     pub fn render_project_group_header(
         &self,
         project: &SidebarProjectInfo,
@@ -771,6 +775,8 @@ impl Sidebar {
 
     /// Render main project as a child row under a group header.
     /// Click = show just this project (individual focus).
+    // GPUI render helper: params are render inputs (indent, indices, state flags).
+    #[allow(clippy::too_many_arguments)]
     pub fn render_project_group_child(
         &self,
         project: &SidebarProjectInfo,

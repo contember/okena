@@ -37,11 +37,8 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
         // Wait for first-message auth (2 second timeout)
         match tokio::time::timeout(std::time::Duration::from_secs(2), socket.recv()).await {
             Ok(Some(Ok(Message::Text(text)))) => {
-                if let Ok(msg) = serde_json::from_str::<WsInbound>(&text) {
-                    match msg {
-                        WsInbound::Auth { token } => state.auth_store.validate_token(&token),
-                        _ => false,
-                    }
+                if let Ok(WsInbound::Auth { token }) = serde_json::from_str::<WsInbound>(&text) {
+                    state.auth_store.validate_token(&token)
                 } else {
                     false
                 }
@@ -197,8 +194,8 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                     }
                     Some(Ok(Message::Binary(data))) => {
                         // Binary input frame from client — fire-and-forget
-                        if let Some((FRAME_TYPE_INPUT, stream_id, payload)) = parse_binary_frame(&data) {
-                            if let Some(terminal_id) = reverse_stream_map.get(&stream_id) {
+                        if let Some((FRAME_TYPE_INPUT, stream_id, payload)) = parse_binary_frame(&data)
+                            && let Some(terminal_id) = reverse_stream_map.get(&stream_id) {
                                 let text = String::from_utf8_lossy(payload).to_string();
                                 let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::Action(ActionRequest::SendText {
@@ -208,7 +205,6 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                     reply: None,
                                 }).await;
                             }
-                        }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {} // Ignore ping, pong
@@ -412,14 +408,12 @@ async fn send_snapshots(
                 })
                 .await
                 .is_ok()
-            {
-                if let Ok(CommandResult::OkBytes(snapshot)) = reply_rx.await {
+                && let Ok(CommandResult::OkBytes(snapshot)) = reply_rx.await {
                     let frame = build_binary_frame(FRAME_TYPE_SNAPSHOT, stream_id, &snapshot);
                     if out_tx.send(Message::Binary(frame.into())).await.is_err() {
                         return Err(());
                     }
                 }
-            }
         }
     }
     Ok(())

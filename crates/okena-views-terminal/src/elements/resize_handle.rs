@@ -5,11 +5,15 @@ use std::rc::Rc;
 const DIVIDER_SIZE: f32 = 1.0;
 const HANDLE_HITBOX_SIZE: f32 = 9.0;
 
+/// One-shot drag-start callback, shared into the element's paint closure and
+/// `take()`n on first invocation.
+type DragStartCallback = Rc<RefCell<Option<Box<dyn FnOnce(Point<Pixels>, &mut App)>>>>;
+
 pub struct ResizeHandle {
     is_horizontal: bool,
     border_color: u32,
     border_active_color: u32,
-    on_drag_start: Rc<RefCell<Option<Box<dyn FnOnce(Point<Pixels>, &mut App)>>>>,
+    on_drag_start: DragStartCallback,
 }
 
 impl ResizeHandle {

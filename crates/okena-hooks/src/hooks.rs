@@ -1,3 +1,8 @@
+// The hook-firing functions thread project metadata, env vars, the monitor,
+// the runner and hook config through a family of related signatures; grouping
+// them into a context struct would obscure more than it clarifies here.
+#![allow(clippy::too_many_arguments)]
+
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
@@ -24,6 +29,10 @@ impl HookRunner {
 }
 
 impl gpui::Global for HookRunner {}
+
+/// Pending terminal-backed hook actions paired with their env vars, returned
+/// alongside the `HookTerminalResult`s produced by background PTY commands.
+type HookActionOutcome = (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>);
 
 /// Result of a hook execution via PTY.
 #[derive(Clone)]
@@ -295,7 +304,7 @@ fn run_hook_actions(
     runner: Option<&HookRunner>,
     project_id: &str,
     keep_alive: bool,
-) -> (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>) {
+) -> HookActionOutcome {
     let actions = parse_hook_actions(command);
     let mut terminal_actions = Vec::new();
     let mut hook_results = Vec::new();
@@ -798,7 +807,7 @@ pub fn fire_on_rebase_conflict(
     folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
-) -> (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>) {
+) -> HookActionOutcome {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_rebase_conflict) {
         let mut env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path, folder_id, folder_name);
         env.insert("OKENA_REBASE_ERROR".into(), rebase_error.into());
@@ -822,7 +831,7 @@ pub fn fire_on_dirty_worktree_close(
     folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
-) -> (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>) {
+) -> HookActionOutcome {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_dirty_close) {
         let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_BRANCH".into(), branch.into());

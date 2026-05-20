@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_build_file_tree_flat_files() {
-        let files = vec!["a.rs", "b.rs", "c.rs"];
+        let files = ["a.rs", "b.rs", "c.rs"];
         let tree = build_file_tree(files.iter().enumerate().map(|(i, f)| (i, *f)));
         assert_eq!(tree.files, vec![0, 1, 2]);
         assert!(tree.children.is_empty());
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn test_build_file_tree_nested_dirs() {
-        let files = vec!["src/main.rs", "src/lib.rs", "README.md"];
+        let files = ["src/main.rs", "src/lib.rs", "README.md"];
         let tree = build_file_tree(files.iter().enumerate().map(|(i, f)| (i, *f)));
         assert_eq!(tree.files, vec![2]); // README.md at root
         assert!(tree.children.contains_key("src"));
@@ -171,12 +171,10 @@ mod tests {
 
     #[test]
     fn test_build_file_tree_multi_level() {
-        let files = vec![
-            "src/views/mod.rs",
+        let files = ["src/views/mod.rs",
             "src/views/render.rs",
             "src/main.rs",
-            "Cargo.toml",
-        ];
+            "Cargo.toml"];
         let tree = build_file_tree(files.iter().enumerate().map(|(i, f)| (i, *f)));
         assert_eq!(tree.files, vec![3]); // Cargo.toml
         let src = &tree.children["src"];

@@ -140,15 +140,15 @@ impl SidebarController {
     pub fn toggle_auto_hide(&mut self) -> AnimationTarget {
         self.auto_hide = !self.auto_hide;
 
-        let target = if self.auto_hide && self.open {
+        
+
+        if self.auto_hide && self.open {
             // Close sidebar when enabling auto-hide
             self.open = false;
             AnimationTarget::Close
         } else {
             AnimationTarget::None
-        };
-
-        target
+        }
     }
 
     /// Show sidebar on hover (in auto-hide mode).

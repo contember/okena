@@ -86,7 +86,7 @@ impl GitHeader {
             move |file_path, _window, cx| {
                 let file_path = file_path.to_string();
                 let pid = project_id.clone();
-                let _ = entity_handle.update(cx, |this: &mut GitHeader, cx| {
+                entity_handle.update(cx, |this: &mut GitHeader, cx| {
                     this.hide_diff_popover(cx);
                 });
                 request_broker.update(cx, |broker, cx| {

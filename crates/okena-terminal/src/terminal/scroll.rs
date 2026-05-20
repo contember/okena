@@ -24,18 +24,13 @@ impl Terminal {
     pub fn with_content<R>(&self, f: impl FnOnce(&Term<ZedEventListener>) -> R) -> R {
         self.drain_pending_output();
         let term = self.term.lock();
-        f(&*term)
+        f(&term)
     }
 
     /// Scroll the terminal
     pub fn scroll(&self, delta: i32) {
         let mut term = self.term.lock();
-        let scroll = if delta > 0 {
-            Scroll::Delta(delta)
-        } else {
-            Scroll::Delta(delta)
-        };
-        term.scroll_display(scroll);
+        term.scroll_display(Scroll::Delta(delta));
         *self.scroll_offset.lock() += delta;
         self.content_generation.fetch_add(1, Ordering::Relaxed);
         // External scroll disengages the prompt-jump walker — the user's

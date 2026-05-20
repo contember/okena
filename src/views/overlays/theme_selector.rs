@@ -30,18 +30,18 @@ pub struct ThemeSelector {
 impl ThemeSelector {
     pub fn new(cx: &mut Context<Self>) -> Self {
         // Build theme list: built-in + custom
-        let mut themes = Vec::new();
-
-        // Add built-in themes
-        themes.push(ThemeEntry {
-            info: ThemeInfo {
-                id: "auto".to_string(),
-                name: "Auto".to_string(),
-                description: "Follow system appearance".to_string(),
-                is_dark: true,
+        let mut themes = vec![
+            // Add built-in themes
+            ThemeEntry {
+                info: ThemeInfo {
+                    id: "auto".to_string(),
+                    name: "Auto".to_string(),
+                    description: "Follow system appearance".to_string(),
+                    is_dark: true,
+                },
+                colors: DARK_THEME, // Preview with dark theme
             },
-            colors: DARK_THEME, // Preview with dark theme
-        });
+        ];
 
         themes.push(ThemeEntry {
             info: ThemeInfo {

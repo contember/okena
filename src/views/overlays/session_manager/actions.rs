@@ -52,7 +52,7 @@ impl SessionManager {
         match load_session(name, backend) {
             Ok(data) => {
                 // Emit event to notify parent to switch workspace
-                cx.emit(SessionManagerEvent::SwitchWorkspace(data));
+                cx.emit(SessionManagerEvent::SwitchWorkspace(Box::new(data)));
                 self.error_message = None;
             }
             Err(e) => {
@@ -175,7 +175,7 @@ impl SessionManager {
 
         match import_workspace(std::path::Path::new(&path)) {
             Ok(data) => {
-                cx.emit(SessionManagerEvent::SwitchWorkspace(data));
+                cx.emit(SessionManagerEvent::SwitchWorkspace(Box::new(data)));
                 self.error_message = None;
             }
             Err(e) => {

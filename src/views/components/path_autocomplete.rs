@@ -118,12 +118,11 @@ impl PathAutoCompleteState {
 
     /// Expand ~ to home directory
     fn expand_path(path: &str) -> String {
-        if path.starts_with('~') {
-            if let Some(home) = dirs::home_dir() {
+        if path.starts_with('~')
+            && let Some(home) = dirs::home_dir() {
                 let rest = path.strip_prefix('~').unwrap_or("");
                 return format!("{}{}", home.display(), rest);
             }
-        }
         path.to_string()
     }
 

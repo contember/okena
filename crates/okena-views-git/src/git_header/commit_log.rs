@@ -159,7 +159,7 @@ impl GitHeader {
             let entity_handle = cx.entity().clone();
             let project_id = self.project_id.clone();
             let request_broker = self.request_broker.clone();
-            let on_commit_click: Option<Arc<dyn Fn(&str, &str, usize, &mut Window, &mut App)>> =
+            let on_commit_click: crate::project_header::CommitClickCallback =
                 if self.commit_log_entries.is_empty() {
                     None
                 } else {
@@ -168,7 +168,7 @@ impl GitHeader {
                         let commit_hash = hash.to_string();
                         let commit_msg = msg.to_string();
                         let commits_vec = all_commits.clone();
-                        let _ = entity_handle.update(cx, |this: &mut GitHeader, cx| {
+                        entity_handle.update(cx, |this: &mut GitHeader, cx| {
                             this.hide_commit_log(cx);
                         });
                         request_broker.update(cx, |broker, cx| {

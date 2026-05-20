@@ -163,7 +163,7 @@ impl LayoutNode {
         match self {
             LayoutNode::Terminal { terminal_id, minimized, detached, .. } => {
                 let should_keep = terminal_id.as_deref()
-                    .map_or(false, |id| keep.contains(id));
+                    .is_some_and(|id| keep.contains(id));
                 if !should_keep {
                     *terminal_id = None;
                     *minimized = false;
@@ -216,11 +216,10 @@ impl LayoutNode {
     fn collect_inactive_tabs_recursive(&self, result: &mut HashSet<String>, is_behind_inactive_tab: bool) {
         match self {
             LayoutNode::Terminal { terminal_id, .. } => {
-                if is_behind_inactive_tab {
-                    if let Some(id) = terminal_id {
+                if is_behind_inactive_tab
+                    && let Some(id) = terminal_id {
                         result.insert(id.clone());
                     }
-                }
             }
             LayoutNode::Split { children, .. } => {
                 for child in children {
@@ -247,11 +246,10 @@ impl LayoutNode {
     fn collect_tab_group_recursive(&self, result: &mut HashSet<String>, inside_tab_group: bool) {
         match self {
             LayoutNode::Terminal { terminal_id, .. } => {
-                if inside_tab_group {
-                    if let Some(id) = terminal_id {
+                if inside_tab_group
+                    && let Some(id) = terminal_id {
                         result.insert(id.clone());
                     }
-                }
             }
             LayoutNode::Split { children, .. } => {
                 for child in children {
@@ -300,11 +298,10 @@ impl LayoutNode {
     fn collect_minimized_recursive(&self, result: &mut Vec<(String, Vec<usize>)>, current_path: Vec<usize>) {
         match self {
             LayoutNode::Terminal { terminal_id, minimized, .. } => {
-                if *minimized {
-                    if let Some(id) = terminal_id {
+                if *minimized
+                    && let Some(id) = terminal_id {
                         result.push((id.clone(), current_path));
                     }
-                }
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
@@ -326,11 +323,10 @@ impl LayoutNode {
     fn collect_detached_recursive(&self, result: &mut Vec<(String, Vec<usize>)>, current_path: Vec<usize>) {
         match self {
             LayoutNode::Terminal { terminal_id, detached, .. } => {
-                if *detached {
-                    if let Some(id) = terminal_id {
+                if *detached
+                    && let Some(id) = terminal_id {
                         result.push((id.clone(), current_path));
                     }
-                }
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
@@ -469,14 +465,13 @@ impl LayoutNode {
             }
         }
 
-        if let LayoutNode::Split { sizes, children, .. } = self {
-            if sizes.len() != children.len() {
+        if let LayoutNode::Split { sizes, children, .. } = self
+            && sizes.len() != children.len() {
                 sizes.truncate(children.len());
                 while sizes.len() < children.len() {
                     sizes.push(100.0 / children.len() as f32);
                 }
             }
-        }
 
         // Sizes are relative weights — the tiny-pair threshold is 10% of the total
         // sum so the check works regardless of overall scale.

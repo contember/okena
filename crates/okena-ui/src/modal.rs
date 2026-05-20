@@ -86,7 +86,7 @@ pub fn window_min_max_controls(
     t: &ThemeColors,
     cx: &App,
 ) -> Div {
-    let t = t.clone();
+    let t = *t;
     div().when(needs_controls, move |d| {
         d.child(
             h_flex()

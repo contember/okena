@@ -261,12 +261,11 @@ fn test_equalize_parent_split_via_path() {
     };
     // Focused terminal at path [1] → parent split at path []
     let parent_path: &[usize] = &[];
-    if let Some(node) = layout.get_at_path_mut(parent_path) {
-        if let LayoutNode::Split { sizes, children, .. } = node {
+    if let Some(node) = layout.get_at_path_mut(parent_path)
+        && let LayoutNode::Split { sizes, children, .. } = node {
             let n = children.len();
             *sizes = vec![100.0 / n as f32; n];
         }
-    }
     if let LayoutNode::Split { sizes, .. } = &layout {
         assert_eq!(sizes, &vec![50.0, 50.0]);
     } else {
@@ -290,12 +289,11 @@ fn test_equalize_nested_parent_split_via_path() {
         ],
     };
     let parent_path: &[usize] = &[0];
-    if let Some(node) = layout.get_at_path_mut(parent_path) {
-        if let LayoutNode::Split { sizes, children, .. } = node {
+    if let Some(node) = layout.get_at_path_mut(parent_path)
+        && let LayoutNode::Split { sizes, children, .. } = node {
             let n = children.len();
             *sizes = vec![100.0 / n as f32; n];
         }
-    }
     // Outer split unchanged
     if let LayoutNode::Split { sizes, children, .. } = &layout {
         assert_eq!(sizes, &vec![60.0, 40.0]);

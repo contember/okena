@@ -490,6 +490,12 @@ pub struct SearchHandle {
     cancelled: Arc<AtomicBool>,
 }
 
+impl Default for SearchHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SearchHandle {
     pub fn new() -> Self {
         Self {

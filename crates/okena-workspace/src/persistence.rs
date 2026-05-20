@@ -73,9 +73,9 @@ pub fn acquire_instance_lock() -> Result<LockGuard> {
     }
 
     // Check if a lock file already exists with a live process
-    if lock_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&lock_path) {
-            if let Ok(pid) = content.trim().parse::<u32>() {
+    if lock_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&lock_path)
+            && let Ok(pid) = content.trim().parse::<u32>() {
                 if is_process_alive(pid) {
                     anyhow::bail!(
                         "Another Okena instance is already running (PID {pid}). \
@@ -85,8 +85,6 @@ pub fn acquire_instance_lock() -> Result<LockGuard> {
                 // Stale lock file from a crashed process — safe to take over
                 log::info!("Removing stale lock file from PID {pid}");
             }
-        }
-    }
 
     let my_pid = std::process::id();
     std::fs::write(&lock_path, my_pid.to_string())?;
@@ -214,13 +212,12 @@ pub(crate) fn validate_workspace_data(
         }
 
         for project in &mut data.projects {
-            if project.worktree_ids.is_empty() {
-                if let Some(mut children) = parent_to_children.remove(&project.id) {
+            if project.worktree_ids.is_empty()
+                && let Some(mut children) = parent_to_children.remove(&project.id) {
                     // Sort by position in project_order for deterministic migration
                     children.sort_by_key(|(_, pos)| pos.unwrap_or(usize::MAX));
                     project.worktree_ids = children.into_iter().map(|(id, _)| id).collect();
                 }
-            }
         }
 
         // Remove non-orphan worktrees from project_order (they live in parent's worktree_ids now)

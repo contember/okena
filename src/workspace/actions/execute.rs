@@ -478,11 +478,10 @@ pub fn execute_action(
             }
         }
         ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines } => {
-            if let Some(ref glob) = file_glob {
-                if glob.contains("..") || glob.starts_with('/') {
+            if let Some(ref glob) = file_glob
+                && (glob.contains("..") || glob.starts_with('/')) {
                     return ActionResult::Err("file_glob must not contain '..' or start with '/'".to_string());
                 }
-            }
             match ws.project(&project_id) {
                 Some(p) => {
                     let path = match std::path::Path::new(&p.path).canonicalize() {
@@ -551,7 +550,7 @@ pub fn execute_action(
                             lines.push(trimmed);
                         }
 
-                        while lines.last().map_or(false, |l| l.is_empty()) {
+                        while lines.last().is_some_and(|l| l.is_empty()) {
                             lines.pop();
                         }
 
@@ -750,7 +749,7 @@ pub fn execute_action(
                     let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, cx);
                     let terminal_id = ws.project(&new_project_id)
                         .and_then(|p| p.layout.as_ref())
-                        .and_then(|l| find_first_terminal_id(l));
+                        .and_then(find_first_terminal_id);
                     match result {
                         ActionResult::Ok(_) => ActionResult::Ok(Some(serde_json::json!({
                             "project_id": new_project_id,
@@ -782,12 +781,11 @@ pub fn ensure_terminal(
     // Find which project owns this terminal_id and get its path
     let mut cwd = None;
     for project in &ws.data().projects {
-        if let Some(layout) = &project.layout {
-            if layout.find_terminal_path(terminal_id).is_some() {
+        if let Some(layout) = &project.layout
+            && layout.find_terminal_path(terminal_id).is_some() {
                 cwd = Some(project.path.clone());
                 break;
             }
-        }
     }
     let cwd = cwd?;
 
@@ -1015,6 +1013,32 @@ fn validate_leaf_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Recursively collect paths to all Terminal nodes with `terminal_id: None`.
+/// Collect uninitialized terminals in a layout tree, returning their paths and shell types.
+fn collect_uninitialized_terminals_with_shell(
+    node: &LayoutNode,
+    current_path: Vec<usize>,
+    result: &mut Vec<(Vec<usize>, ShellType)>,
+) {
+    match node {
+        LayoutNode::Terminal {
+            terminal_id: None,
+            shell_type,
+            ..
+        } => {
+            result.push((current_path, shell_type.clone()));
+        }
+        LayoutNode::Terminal { .. } => {}
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for (i, child) in children.iter().enumerate() {
+                let mut child_path = current_path.clone();
+                child_path.push(i);
+                collect_uninitialized_terminals_with_shell(child, child_path, result);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod path_guard_tests {
     use super::{resolve_new_project_file, resolve_project_file, validate_leaf_name};
@@ -1088,7 +1112,6 @@ mod path_guard_tests {
         assert!(validate_leaf_name("a\\b").is_err());
     }
 }
-
 #[cfg(test)]
 mod set_show_in_overview_tests {
     use super::{apply_set_project_show_in_overview, ActionResult};
@@ -1254,31 +1277,5 @@ mod set_show_in_overview_tests {
             assert!(extra_state.hidden_project_ids.contains("p1"));
             assert!(ws.data().main_window.hidden_project_ids.is_empty());
         });
-    }
-}
-
-/// Recursively collect paths to all Terminal nodes with `terminal_id: None`.
-/// Collect uninitialized terminals in a layout tree, returning their paths and shell types.
-fn collect_uninitialized_terminals_with_shell(
-    node: &LayoutNode,
-    current_path: Vec<usize>,
-    result: &mut Vec<(Vec<usize>, ShellType)>,
-) {
-    match node {
-        LayoutNode::Terminal {
-            terminal_id: None,
-            shell_type,
-            ..
-        } => {
-            result.push((current_path, shell_type.clone()));
-        }
-        LayoutNode::Terminal { .. } => {}
-        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
-            for (i, child) in children.iter().enumerate() {
-                let mut child_path = current_path.clone();
-                child_path.push(i);
-                collect_uninitialized_terminals_with_shell(child, child_path, result);
-            }
-        }
     }
 }

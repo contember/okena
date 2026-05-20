@@ -13,6 +13,11 @@ use gpui::prelude::*;
 /// Characters allowed in the keybinding search query.
 const SEARCH_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_+./";
 
+/// One displayed binding entry: `(keystroke, entry_idx, is_customized, is_enabled)`.
+type BindingEntry = (String, usize, bool, bool);
+/// All binding entries for an action: `(action_name, entries)`.
+type ActionBindings = (String, Vec<BindingEntry>);
+
 /// State for the keybinding currently being recorded
 #[derive(Clone, Debug)]
 struct EditingState {
@@ -164,13 +169,11 @@ impl KeybindingsHelp {
                 // If we get here and still waiting, finalize with single keystroke
                 let _ = cx.update(|window, cx| {
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(editing) = this.editing.as_mut() {
-                            if editing.waiting_for_chord {
-                                if let Some(single) = editing.first_chord.take() {
+                        if let Some(editing) = this.editing.as_mut()
+                            && editing.waiting_for_chord
+                                && let Some(single) = editing.first_chord.take() {
                                     this.finalize_recording(single, window, cx);
                                 }
-                            }
-                        }
                     });
                 });
             }).detach();
@@ -261,7 +264,7 @@ impl KeybindingsHelp {
     fn render_category(
         &self,
         category: &str,
-        bindings: &[(String, Vec<(String, usize, bool, bool)>)], // (action_name, [(keystroke, entry_idx, is_customized, is_enabled)])
+        bindings: &[ActionBindings],
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let t = theme(cx);
@@ -405,10 +408,10 @@ impl KeybindingsHelp {
                                     let ks = keystroke.clone();
 
                                     // Check if this entry is currently being recorded
-                                    let is_recording = self.editing.as_ref().map_or(false, |e| {
+                                    let is_recording = self.editing.as_ref().is_some_and(|e| {
                                         e.action == action_name && e.entry_index == idx
                                     });
-                                    let is_waiting_chord = is_recording && self.editing.as_ref().map_or(false, |e| e.waiting_for_chord);
+                                    let is_waiting_chord = is_recording && self.editing.as_ref().is_some_and(|e| e.waiting_for_chord);
 
                                     h_flex()
                                         .justify_between()
@@ -454,7 +457,7 @@ impl KeybindingsHelp {
                                                 .on_mouse_down(MouseButton::Left, {
                                                     let action = action_name.clone();
                                                     cx.listener(move |this, _, _window, cx| {
-                                                        if this.editing.as_ref().map_or(false, |e| e.action == action && e.entry_index == idx) {
+                                                        if this.editing.as_ref().is_some_and(|e| e.action == action && e.entry_index == idx) {
                                                             this.cancel_recording(cx);
                                                         } else {
                                                             this.start_recording(action.clone(), idx, cx);
@@ -533,7 +536,7 @@ impl Render for KeybindingsHelp {
         // Group bindings by category, with per-action entry details
         let descriptions = get_action_descriptions();
         let query = self.search_query.to_lowercase();
-        let mut categories: std::collections::HashMap<&str, Vec<(String, Vec<(String, usize, bool, bool)>)>> =
+        let mut categories: std::collections::HashMap<&str, Vec<ActionBindings>> =
             std::collections::HashMap::new();
 
         // Track which actions we've already processed
@@ -574,7 +577,7 @@ impl Render for KeybindingsHelp {
             if !entry_details.is_empty() {
                 categories
                     .entry(category)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((action.clone(), entry_details));
             }
         }

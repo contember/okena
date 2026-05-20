@@ -2,7 +2,6 @@
 //! invalidation on file changes.
 
 use super::{BlameLoadState, FileViewer};
-use crate::blame::BlameError;
 use gpui::{Context, WeakEntity};
 use std::sync::Arc;
 
@@ -65,9 +64,6 @@ impl FileViewer {
                 if let Some(tab) = this.tabs.iter_mut().find(|t| t.relative_path == rel) {
                     tab.blame = match result {
                         Ok(lines) => BlameLoadState::Loaded(Arc::new(lines)),
-                        Err(BlameError::NotGitRepo)
-                        | Err(BlameError::NoCommits)
-                        | Err(BlameError::NotTracked) => BlameLoadState::Error(result.unwrap_err()),
                         Err(e) => BlameLoadState::Error(e),
                     };
                     cx.notify();

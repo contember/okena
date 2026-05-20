@@ -227,7 +227,7 @@ impl Okena {
                         }
                         Err(e) => {
                             log::error!("Failed to save workspace: {}", e);
-                            let _ = cx.update(|cx| {
+                            cx.update(|cx| {
                                 ToastManager::error(format!("Failed to save workspace: {}", e), cx);
                             });
                             // Don't update last_saved — next mutation will retry the save
@@ -497,23 +497,21 @@ impl Okena {
 
             if enabled && !running {
                 // Update listen_addr from settings if not forced via CLI
-                if !this.force_remote {
-                    if let Ok(addr) = s.remote_listen_address.parse::<IpAddr>() {
+                if !this.force_remote
+                    && let Ok(addr) = s.remote_listen_address.parse::<IpAddr>() {
                         this.listen_addr = addr;
                     }
-                }
                 this.start_remote_server(bridge_tx_for_observer.clone());
             } else if !enabled && running {
                 this.stop_remote_server();
             } else if enabled && running && !this.force_remote {
                 // Check if address changed while server is running
-                if let Ok(new_addr) = s.remote_listen_address.parse::<IpAddr>() {
-                    if new_addr != this.listen_addr {
+                if let Ok(new_addr) = s.remote_listen_address.parse::<IpAddr>()
+                    && new_addr != this.listen_addr {
                         this.listen_addr = new_addr;
                         this.stop_remote_server();
                         this.start_remote_server(bridge_tx_for_observer.clone());
                     }
-                }
             }
         })
         .detach();
@@ -744,9 +742,9 @@ impl Okena {
                             if ws.is_hook_terminal(tid).is_none() {
                                 continue;
                             }
-                            if let Some(terminal) = terminals_guard.get(tid) {
-                                if let Some(title) = terminal.title() {
-                                    if let Some(code_str) = title.strip_prefix("__okena_hook_exit:") {
+                            if let Some(terminal) = terminals_guard.get(tid)
+                                && let Some(title) = terminal.title()
+                                    && let Some(code_str) = title.strip_prefix("__okena_hook_exit:") {
                                         let exit_code = code_str.parse::<i32>().unwrap_or(-1);
                                         let status = if exit_code == 0 {
                                             crate::workspace::state::HookTerminalStatus::Succeeded
@@ -755,8 +753,6 @@ impl Okena {
                                         };
                                         status_updates.push((tid.clone(), status));
                                     }
-                                }
-                            }
                         }
                         drop(terminals_guard);
                         if !status_updates.is_empty() {
@@ -863,6 +859,8 @@ impl Okena {
     }
 
     /// Handle the result of a pending worktree close after hook exit (success path only).
+    // Threads the cohesive set of close-result params; no reusable grouping.
+    #[allow(clippy::too_many_arguments)]
     fn handle_pending_close_result(
         &mut self,
         tid: &str,
@@ -937,7 +935,7 @@ impl Okena {
                 if let Err(e) = result {
                     log::error!("Background worktree remove failed: {}", e);
                 }
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     workspace.update(cx, |ws, _| {
                         ws.finish_worktree_removing(&path);
                     });

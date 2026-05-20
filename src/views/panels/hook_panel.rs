@@ -49,6 +49,8 @@ pub struct HookPanel {
 }
 
 impl HookPanel {
+    // GPUI view constructor: each param is a distinct injected dependency.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         project_id: String,
         workspace: Entity<Workspace>,
@@ -76,7 +78,7 @@ impl HookPanel {
                 if let Some(newest_tid) = project
                     .and_then(|p| {
                         p.hook_terminals.keys()
-                            .find(|k| !this.active_terminal_id.as_ref().is_some_and(|a| a == *k))
+                            .find(|k| this.active_terminal_id.as_ref().is_none_or(|a| a != *k))
                             .or_else(|| p.hook_terminals.keys().last())
                             .cloned()
                     })

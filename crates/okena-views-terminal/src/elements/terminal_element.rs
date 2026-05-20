@@ -491,8 +491,8 @@ impl Element for TerminalElement {
                     let cell = &grid[cell_point];
                     let col_i32 = col as i32;
 
-                    let mut fg = cell.fg.clone();
-                    let mut bg = cell.bg.clone();
+                    let mut fg = cell.fg;
+                    let mut bg = cell.bg;
 
                     if cell.flags.contains(Flags::BOLD) {
                         fg = match fg {

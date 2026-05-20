@@ -174,8 +174,8 @@ fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Re
 
 pub fn cleanup_updates_dir() {
     let updates_dir = crate::process::get_config_dir().join("updates");
-    if updates_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&updates_dir) {
+    if updates_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&updates_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -185,5 +185,4 @@ pub fn cleanup_updates_dir() {
                 }
             }
         }
-    }
 }

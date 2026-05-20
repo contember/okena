@@ -192,7 +192,7 @@ impl CloseWorktreeDialog {
                         monitor.as_ref(),
                         runner.as_ref(),
                     );
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         workspace.update(cx, |ws, cx| {
                             for (cmd, env) in terminal_actions {
                                 ws.add_terminal_with_command(&project_id, &cmd, &env, cx);
@@ -374,7 +374,6 @@ impl CloseWorktreeDialog {
                     }
                 });
                 if !ok {
-                    return;
                 }
             } else {
                 // No hook or no runner — run headlessly then remove immediately
@@ -435,7 +434,7 @@ impl CloseWorktreeDialog {
                         monitor.as_ref(),
                         runner.as_ref(),
                     );
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         workspace.update(cx, |ws, cx| {
                             for (cmd, env) in terminal_actions {
                                 ws.add_terminal_with_command(&project_id, &cmd, &env, cx);

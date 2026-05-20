@@ -10,6 +10,8 @@ use super::components::*;
 use super::SettingsPanel;
 
 impl SettingsPanel {
+    // GPUI render helper: params are render inputs (value, bounds, callbacks).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_number_stepper(
         &self,
         id: &str,
@@ -51,6 +53,8 @@ impl SettingsPanel {
         )
     }
 
+    // GPUI render helper: params are render inputs (value, bounds, callbacks).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_integer_stepper(
         &self,
         id: &str,

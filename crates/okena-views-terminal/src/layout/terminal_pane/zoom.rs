@@ -14,7 +14,7 @@ use super::TerminalPane;
 impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub(super) fn is_zoomed(&self, cx: &Context<Self>) -> bool {
         let fm = self.focus_manager.read(cx);
-        self.terminal_id.as_ref().map_or(false, |tid| {
+        self.terminal_id.as_ref().is_some_and(|tid| {
             fm.is_terminal_fullscreened(&self.project_id, tid)
         })
     }
@@ -31,8 +31,8 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         if !self.is_zoomed(cx) { return; }
         let terminals = self.get_project_terminals(cx);
         if terminals.len() <= 1 { return; }
-        if let Some(ref current_id) = self.terminal_id {
-            if let Some(idx) = terminals.iter().position(|id| id == current_id) {
+        if let Some(ref current_id) = self.terminal_id
+            && let Some(idx) = terminals.iter().position(|id| id == current_id) {
                 let next_idx = (idx + 1) % terminals.len();
                 let next_id = terminals[next_idx].clone();
                 if let Some(ref dispatcher) = self.action_dispatcher {
@@ -42,15 +42,14 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     }, cx);
                 }
             }
-        }
     }
 
     pub(super) fn handle_zoom_prev_terminal(&mut self, cx: &mut Context<Self>) {
         if !self.is_zoomed(cx) { return; }
         let terminals = self.get_project_terminals(cx);
         if terminals.len() <= 1 { return; }
-        if let Some(ref current_id) = self.terminal_id {
-            if let Some(idx) = terminals.iter().position(|id| id == current_id) {
+        if let Some(ref current_id) = self.terminal_id
+            && let Some(idx) = terminals.iter().position(|id| id == current_id) {
                 let prev_idx = if idx == 0 { terminals.len() - 1 } else { idx - 1 };
                 let prev_id = terminals[prev_idx].clone();
                 if let Some(ref dispatcher) = self.action_dispatcher {
@@ -60,7 +59,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     }, cx);
                 }
             }
-        }
     }
 
     pub(super) fn render_zoom_header(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -79,8 +77,8 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             "Terminal".to_string()
         };
 
-        let is_hook = self.terminal_id.as_ref().map_or(false, |tid| {
-            ws.project(&self.project_id).map_or(false, |p| p.hook_terminals.contains_key(tid))
+        let is_hook = self.terminal_id.as_ref().is_some_and(|tid| {
+            ws.project(&self.project_id).is_some_and(|p| p.hook_terminals.contains_key(tid))
         });
         let all_terminals = ws
             .project(&self.project_id)
@@ -132,14 +130,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                             let ws = workspace.read(cx);
                                             ws.project(&project_id).and_then(|p| p.layout.as_ref()).map(|l| l.collect_terminal_ids()).unwrap_or_default()
                                         };
-                                        if let Some(ref tid) = terminal_id {
-                                            if let Some(idx) = terminals.iter().position(|id| id == tid) {
+                                        if let Some(ref tid) = terminal_id
+                                            && let Some(idx) = terminals.iter().position(|id| id == tid) {
                                                 let prev = if idx == 0 { terminals.len() - 1 } else { idx - 1 };
                                                 if let Some(ref dispatcher) = dispatcher {
                                                     dispatcher.dispatch(ActionRequest::SetFullscreen { project_id: project_id.clone(), terminal_id: Some(terminals[prev].clone()) }, cx);
                                                 }
                                             }
-                                        }
                                     }
                                 }),
                         )
@@ -155,14 +152,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                             let ws = workspace.read(cx);
                                             ws.project(&project_id).and_then(|p| p.layout.as_ref()).map(|l| l.collect_terminal_ids()).unwrap_or_default()
                                         };
-                                        if let Some(ref tid) = terminal_id {
-                                            if let Some(idx) = terminals.iter().position(|id| id == tid) {
+                                        if let Some(ref tid) = terminal_id
+                                            && let Some(idx) = terminals.iter().position(|id| id == tid) {
                                                 let next = (idx + 1) % terminals.len();
                                                 if let Some(ref dispatcher) = dispatcher {
                                                     dispatcher.dispatch(ActionRequest::SetFullscreen { project_id: project_id.clone(), terminal_id: Some(terminals[next].clone()) }, cx);
                                                 }
                                             }
-                                        }
                                     }
                                 }),
                         )

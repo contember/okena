@@ -69,10 +69,7 @@ impl ServiceManager {
                     let is_extra = filter.as_ref().is_some_and(|f| !f.contains(name));
 
                     let key = (project_id.clone(), name.clone());
-                    if !this.instances.contains_key(&key) {
-                        this.instances.insert(
-                            key,
-                            ServiceInstance {
+                    this.instances.entry(key).or_insert_with(|| ServiceInstance {
                                 definition: ServiceDefinition {
                                     name: name.clone(),
                                     command: String::new(),
@@ -88,9 +85,7 @@ impl ServiceManager {
                                 restart_count: 0,
                                 detected_ports: Vec::new(),
                                 is_extra,
-                            },
-                        );
-                    }
+                            });
                 }
 
                 // Start status poller
@@ -122,13 +117,12 @@ impl ServiceManager {
             .collect();
 
         for key in docker_keys {
-            if let Some(instance) = self.instances.get(&key) {
-                if let Some(terminal_id) = &instance.terminal_id {
+            if let Some(instance) = self.instances.get(&key)
+                && let Some(terminal_id) = &instance.terminal_id {
                     self.backend.kill(terminal_id);
                     self.terminals.lock().remove(terminal_id);
                     self.terminal_to_service.remove(terminal_id);
                 }
-            }
             self.instances.remove(&key);
         }
 
@@ -256,8 +250,8 @@ impl ServiceManager {
                             let mut changed = false;
                             for ds in &statuses {
                                 let key = (pid.clone(), ds.name.clone());
-                                if let Some(inst) = this.instances.get_mut(&key) {
-                                    if matches!(inst.kind, ServiceKind::DockerCompose { .. }) {
+                                if let Some(inst) = this.instances.get_mut(&key)
+                                    && matches!(inst.kind, ServiceKind::DockerCompose { .. }) {
                                         any_docker = true;
                                         let new_status = docker_compose::map_docker_state(&ds.state, ds.exit_code);
                                         if inst.status != new_status {
@@ -269,7 +263,6 @@ impl ServiceManager {
                                             changed = true;
                                         }
                                     }
-                                }
                             }
                             if changed {
                                 cx.notify();

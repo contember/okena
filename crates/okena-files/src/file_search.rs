@@ -389,11 +389,9 @@ impl FileSearchDialog {
         if let Some(ext) = std::path::Path::new(relative_path)
             .extension()
             .and_then(|e| e.to_str())
-        {
-            if BINARY_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+            && BINARY_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
                 score -= 1000;
             }
-        }
 
         Some((score, positions))
     }

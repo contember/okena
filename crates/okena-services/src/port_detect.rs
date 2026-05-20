@@ -93,11 +93,10 @@ fn build_process_tree_linux() -> HashMap<u32, Vec<u32>> {
         if let Some(after_comm) = stat.rfind(')') {
             let fields: Vec<&str> = stat[after_comm + 2..].split_whitespace().collect();
             // fields[0] = state, fields[1] = ppid
-            if let Some(ppid_str) = fields.get(1) {
-                if let Ok(ppid) = ppid_str.parse::<u32>() {
+            if let Some(ppid_str) = fields.get(1)
+                && let Ok(ppid) = ppid_str.parse::<u32>() {
                     tree.entry(ppid).or_default().push(pid);
                 }
-            }
         }
     }
 
@@ -301,11 +300,10 @@ pub(crate) fn parse_lsof_output(stdout: &str) -> Vec<(u32, u16)> {
         };
         // NAME field like "*:5173" or "127.0.0.1:3000"
         let name = fields[8];
-        if let Some(port_str) = name.rsplit(':').next() {
-            if let Ok(port) = port_str.parse::<u16>() {
+        if let Some(port_str) = name.rsplit(':').next()
+            && let Ok(port) = port_str.parse::<u16>() {
                 pairs.push((pid, port));
             }
-        }
     }
     pairs
 }
@@ -328,11 +326,10 @@ pub(crate) fn parse_netstat_output(stdout: &str) -> Vec<(u32, u16)> {
             Err(_) => continue,
         };
         let local_addr = fields[1];
-        if let Some(port_str) = local_addr.rsplit(':').next() {
-            if let Ok(port) = port_str.parse::<u16>() {
+        if let Some(port_str) = local_addr.rsplit(':').next()
+            && let Ok(port) = port_str.parse::<u16>() {
                 pairs.push((pid, port));
             }
-        }
     }
     pairs
 }

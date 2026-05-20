@@ -60,11 +60,10 @@ impl DiffViewer {
                             this.build_file_tree();
 
                             // Select specific file if requested
-                            if let Some(ref file_path) = select_file {
-                                if let Some(index) = this.file_stats.iter().position(|f| f.path == *file_path) {
+                            if let Some(ref file_path) = select_file
+                                && let Some(index) = this.file_stats.iter().position(|f| f.path == *file_path) {
                                     this.selected_file_index = index;
                                 }
-                            }
 
                             this.process_current_file_async(cx);
                         }

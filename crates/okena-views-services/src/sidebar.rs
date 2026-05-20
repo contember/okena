@@ -83,6 +83,8 @@ pub fn render_service_group_actions(
 ///
 /// Returns a `Div` ready to be placed in the sidebar. Event handlers are passed as closures
 /// so the caller retains control over state mutation.
+// GPUI render helper: params are render inputs and event callbacks.
+#[allow(clippy::too_many_arguments)]
 pub fn render_service_item(
     service: &ServiceSnapshot,
     project_id: &str,

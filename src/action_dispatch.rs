@@ -232,13 +232,11 @@ impl ActionDispatcher {
                         let focus_manager = focus_manager.clone();
                         focus_manager.update(cx, |fm, cx| {
                             workspace.update(cx, |ws, cx| {
-                                if let Some(project) = ws.project(&pid) {
-                                    if let Some(ref layout) = project.layout {
-                                        if let Some(path) = layout.find_terminal_path(&tid) {
-                                            ws.set_focused_terminal(fm, pid, path, cx);
-                                        }
+                                if let Some(project) = ws.project(&pid)
+                                    && let Some(ref layout) = project.layout
+                                    && let Some(path) = layout.find_terminal_path(&tid) {
+                                        ws.set_focused_terminal(fm, pid, path, cx);
                                     }
-                                }
                             });
                             cx.notify();
                         });

@@ -110,8 +110,8 @@ fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
     let new_refresh = resp["refresh_token"].as_str();
 
     // Persist new tokens back to auth.json
-    if let Ok(content) = std::fs::read_to_string(&auth.auth_path) {
-        if let Ok(mut file_json) = serde_json::from_str::<serde_json::Value>(&content) {
+    if let Ok(content) = std::fs::read_to_string(&auth.auth_path)
+        && let Ok(mut file_json) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(tokens) = file_json.get_mut("tokens").and_then(|t| t.as_object_mut()) {
                 tokens.insert(
                     "access_token".to_string(),
@@ -128,7 +128,6 @@ fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
                 let _ = std::fs::write(&auth.auth_path, updated);
             }
         }
-    }
 
     Some(new_access.to_string())
 }

@@ -20,7 +20,7 @@ pub fn register() -> Result<String, String> {
     rand::thread_rng().fill(&mut token_bytes);
     let token = base64::Engine::encode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        &token_bytes,
+        token_bytes,
     );
 
     // 3. Compute HMAC

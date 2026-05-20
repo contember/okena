@@ -24,7 +24,7 @@ pub fn register() -> ExtensionRegistration {
             default_enabled: true,
         },
         activate: Arc::new(|app| {
-            let widget = app.new(|cx| crate::status::UpdateStatusWidget::new(cx));
+            let widget = app.new(crate::status::UpdateStatusWidget::new);
             ExtensionInstance {
                 status_bar_widgets: vec![],
                 status_bar_right_widgets: vec![widget.into()],

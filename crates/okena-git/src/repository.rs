@@ -59,13 +59,12 @@ fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> GitResult<(
         let stdout = String::from_utf8_lossy(&output.stdout);
         let target_normalized = normalize_path(target_path);
         for line in stdout.lines() {
-            if let Some(wt_path) = line.strip_prefix("worktree ") {
-                if normalize_path(Path::new(wt_path)) == target_normalized {
+            if let Some(wt_path) = line.strip_prefix("worktree ")
+                && normalize_path(Path::new(wt_path)) == target_normalized {
                     return Err(GitError::WorktreeExists {
                         path: target_path.to_path_buf(),
                     });
                 }
-            }
         }
     }
 
@@ -372,16 +371,14 @@ pub fn get_default_branch(repo_path: &Path) -> Option<String> {
 
     // Read refs/remotes/origin/HEAD; it is a symbolic ref whose target points
     // at e.g. refs/remotes/origin/main.
-    if let Ok(head_ref) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Some(target_name) = head_ref.target().try_name() {
+    if let Ok(head_ref) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let Some(target_name) = head_ref.target().try_name() {
             let target = target_name.as_bstr().to_string();
-            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
-                if !branch.is_empty() {
+            if let Some(branch) = target.strip_prefix("refs/remotes/origin/")
+                && !branch.is_empty() {
                     return Some(branch.to_string());
                 }
-            }
         }
-    }
 
     // Fallback: check if main or master branch exists locally.
     for candidate in ["main", "master"] {
@@ -574,11 +571,10 @@ pub fn list_branches_classified(path: &Path) -> BranchList {
                 continue;
             }
             // Skip remote refs that have a corresponding local branch
-            if let Some(stripped) = name.strip_prefix("origin/") {
-                if local_names.contains(stripped) {
+            if let Some(stripped) = name.strip_prefix("origin/")
+                && local_names.contains(stripped) {
                     continue;
                 }
-            }
             remote.push(name);
         }
     }
@@ -731,11 +727,10 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
 
     // Main worktree: open via common_dir, which always resolves to the main
     // repository even when `repo_path` lives in a linked worktree.
-    if let Ok(main_repo) = gix::open(repo.common_dir()) {
-        if let (Some(workdir), Some(branch)) = (main_repo.workdir(), head_branch_short(&main_repo)) {
+    if let Ok(main_repo) = gix::open(repo.common_dir())
+        && let (Some(workdir), Some(branch)) = (main_repo.workdir(), head_branch_short(&main_repo)) {
             result.push((workdir.to_string_lossy().into_owned(), branch));
         }
-    }
 
     // Linked worktrees from .git/worktrees/*.
     if let Ok(worktrees) = repo.worktrees() {
@@ -1025,11 +1020,10 @@ pub(crate) fn parse_branch_ci(
             for chunk in json.split("}{").map(|s| s.to_string()).collect::<Vec<_>>() {
                 let normalized = if !chunk.starts_with('{') { format!("{{{chunk}") } else { chunk.clone() };
                 let normalized = if !normalized.ends_with('}') { format!("{normalized}}}") } else { normalized };
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&normalized) {
-                    if let Some(arr) = v.get("check_runs").and_then(|x| x.as_array()) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&normalized)
+                    && let Some(arr) = v.get("check_runs").and_then(|x| x.as_array()) {
                         runs.extend(arr.iter().cloned());
                     }
-                }
             }
         }
 
@@ -1080,9 +1074,9 @@ pub(crate) fn parse_branch_ci(
         }
     }
 
-    if let Some(json) = statuses_json {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
-            if let Some(arr) = v.get("statuses").and_then(|x| x.as_array()) {
+    if let Some(json) = statuses_json
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(json)
+            && let Some(arr) = v.get("statuses").and_then(|x| x.as_array()) {
                 for st in arr {
                     let name = st.get("context").and_then(|v| v.as_str()).unwrap_or("(unnamed)").to_string();
                     let state = st.get("state").and_then(|v| v.as_str()).unwrap_or("");
@@ -1109,8 +1103,6 @@ pub(crate) fn parse_branch_ci(
                     });
                 }
             }
-        }
-    }
 
     let total = passed + failed + pending;
     if total == 0 && checks.is_empty() {

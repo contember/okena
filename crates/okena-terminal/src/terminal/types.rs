@@ -77,21 +77,13 @@ pub enum AppCursorShape {
 
 /// Selection state for the terminal
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct SelectionState {
     pub start: Option<(usize, usize)>,
     pub end: Option<(usize, usize)>,
     pub is_selecting: bool,
 }
 
-impl Default for SelectionState {
-    fn default() -> Self {
-        Self {
-            start: None,
-            end: None,
-            is_selecting: false,
-        }
-    }
-}
 
 /// A detected link in terminal content (URL or file path)
 #[derive(Clone, Debug)]

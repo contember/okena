@@ -117,15 +117,13 @@ impl Sidebar {
         if let Some(conn_id) = self.workspace.read(cx).project(project_id)
             .filter(|p| p.is_remote)
             .and_then(|p| p.connection_id.clone())
-        {
-            if let Some(ref send_action) = self.send_remote_action {
+            && let Some(ref send_action) = self.send_remote_action {
                 let server_id = okena_core::client::strip_prefix(project_id, &conn_id);
                 (send_action)(&conn_id, ActionRequest::SetProjectColor {
                     project_id: server_id,
                     color,
                 }, cx);
             }
-        }
     }
 
     pub fn start_folder_rename(&mut self, folder_id: String, current_name: String, window: &mut Window, cx: &mut Context<Self>) {

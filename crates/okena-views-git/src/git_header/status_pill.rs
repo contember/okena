@@ -51,10 +51,10 @@ impl GitHeader {
                         let supports_switch = self.git_provider.supports_mutations();
                         let has_ci = status.ci_checks.is_some();
                         let pr_url = status.pr_info.as_ref().map(|p| p.url.clone());
-                        let on_branch_click: Option<Arc<dyn Fn(&mut Window, &mut App)>> =
+                        let on_branch_click: project_header::ClickCallback =
                             if supports_switch {
                                 Some(Arc::new(move |window, app| {
-                                    let _ = entity_for_branch_click.update(app, |this, cx| {
+                                    entity_for_branch_click.update(app, |this, cx| {
                                         if this.branch_picker_visible {
                                             this.hide_branch_picker(cx);
                                         } else {
@@ -65,36 +65,36 @@ impl GitHeader {
                             } else {
                                 None
                             };
-                        let on_pr_click: Option<Arc<dyn Fn(&mut Window, &mut App)>> =
-                            pr_url.map(|url| -> Arc<dyn Fn(&mut Window, &mut App)> {
+                        let on_pr_click: project_header::ClickCallback =
+                            pr_url.map(|url| -> project_header::ClickHandler {
                                 Arc::new(move |_window, _app| {
                                     open_url(&url);
                                 })
                             });
-                        let on_ci_click: Option<Arc<dyn Fn(&mut Window, &mut App)>> =
+                        let on_ci_click: project_header::ClickCallback =
                             if has_ci {
                                 Some(Arc::new(move |_window, app| {
-                                    let _ = entity_for_ci_click.update(app, |this, cx| {
+                                    entity_for_ci_click.update(app, |this, cx| {
                                         this.toggle_ci_checks(cx);
                                     });
                                 }))
                             } else {
                                 None
                             };
-                        let on_branch_bounds: Option<Arc<dyn Fn(Bounds<Pixels>, &mut App)>> =
+                        let on_branch_bounds: project_header::BoundsCallback =
                             if supports_switch {
                                 Some(Arc::new(move |bounds, app| {
-                                    let _ = entity_for_branch_bounds.update(app, |this, _cx| {
+                                    entity_for_branch_bounds.update(app, |this, _cx| {
                                         this.set_branch_chip_bounds(bounds);
                                     });
                                 }))
                             } else {
                                 None
                             };
-                        let on_ci_bounds: Option<Arc<dyn Fn(Bounds<Pixels>, &mut App)>> =
+                        let on_ci_bounds: project_header::BoundsCallback =
                             if has_ci {
                                 Some(Arc::new(move |bounds, app| {
-                                    let _ = entity_for_ci_bounds.update(app, |this, _cx| {
+                                    entity_for_ci_bounds.update(app, |this, _cx| {
                                         this.set_ci_badge_bounds(bounds);
                                     });
                                 }))
@@ -143,7 +143,7 @@ impl GitHeader {
                             .child(
                                 canvas(
                                     move |bounds, _window, app| {
-                                        let _ = entity_for_bounds.update(app, |this: &mut GitHeader, _cx| {
+                                        entity_for_bounds.update(app, |this: &mut GitHeader, _cx| {
                                             this.commit_log_bounds = bounds;
                                         });
                                     },

@@ -360,11 +360,10 @@ impl KeybindingConfig {
 
     /// Update the keystroke for a specific binding entry
     pub fn update_binding(&mut self, action: &str, entry_index: usize, new_keystroke: String) {
-        if let Some(entries) = self.bindings.get_mut(action) {
-            if let Some(entry) = entries.get_mut(entry_index) {
+        if let Some(entries) = self.bindings.get_mut(action)
+            && let Some(entry) = entries.get_mut(entry_index) {
                 entry.keystroke = new_keystroke;
             }
-        }
     }
 
     /// Reset a single action's bindings back to defaults
@@ -382,29 +381,27 @@ impl KeybindingConfig {
     pub fn add_binding(&mut self, action: &str, entry: KeybindingEntry) {
         self.bindings
             .entry(action.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(entry);
     }
 
     /// Remove a specific binding entry by index
     /// Returns true if the entry was removed
     pub fn remove_binding(&mut self, action: &str, entry_index: usize) -> bool {
-        if let Some(entries) = self.bindings.get_mut(action) {
-            if entry_index < entries.len() {
+        if let Some(entries) = self.bindings.get_mut(action)
+            && entry_index < entries.len() {
                 entries.remove(entry_index);
                 return true;
             }
-        }
         false
     }
 
     /// Toggle the enabled state of a specific binding entry
     pub fn toggle_binding(&mut self, action: &str, entry_index: usize) {
-        if let Some(entries) = self.bindings.get_mut(action) {
-            if let Some(entry) = entries.get_mut(entry_index) {
+        if let Some(entries) = self.bindings.get_mut(action)
+            && let Some(entry) = entries.get_mut(entry_index) {
                 entry.enabled = !entry.enabled;
             }
-        }
     }
 
     /// Get all actions that have custom (non-default) bindings
@@ -450,8 +447,8 @@ pub fn get_keybindings_path() -> PathBuf {
 /// Load keybinding configuration from disk
 pub fn load_keybindings() -> KeybindingConfig {
     let path = get_keybindings_path();
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
+    if path.exists()
+        && let Ok(content) = std::fs::read_to_string(&path) {
             match serde_json::from_str::<KeybindingConfig>(&content) {
                 Ok(mut config) => {
                     // Merge in any new default actions missing from the saved config
@@ -474,7 +471,6 @@ pub fn load_keybindings() -> KeybindingConfig {
                 }
             }
         }
-    }
     KeybindingConfig::defaults()
 }
 

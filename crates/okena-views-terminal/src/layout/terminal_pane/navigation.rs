@@ -122,11 +122,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 && !terminal.is_mouse_mode()
                 && !terminal.is_alt_screen()
                 && !terminal.has_running_child()
-            {
-                if terminal.delete_selection() {
+                && terminal.delete_selection() {
                     return;
                 }
-            }
 
             // Opt-in: Ctrl+C copies selection (and clears it) instead of sending SIGINT.
             // Without a (non-empty) selection, falls through to the normal Ctrl+C → SIGINT path.
@@ -137,16 +135,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 && !event.keystroke.modifiers.alt
                 && !event.keystroke.modifiers.platform
                 && crate::terminal_view_settings(cx).ctrl_c_copies_selection
-            {
-                if let Some(text) = terminal.get_selected_text() {
-                    if !text.is_empty() {
+                && let Some(text) = terminal.get_selected_text()
+                    && !text.is_empty() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                         terminal.clear_selection();
                         cx.notify();
                         return;
                     }
-                }
-            }
 
             let app_cursor_mode = terminal.is_app_cursor_mode();
             let key_event = KeyEvent {

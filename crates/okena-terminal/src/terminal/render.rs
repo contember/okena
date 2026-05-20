@@ -8,7 +8,7 @@ impl Terminal {
     /// reproduces the current screen state including colors and attributes.
     pub fn render_snapshot(&self) -> Vec<u8> {
         let mut slow = okena_core::timing::SlowGuard::new("Terminal::render_snapshot");
-        let bytes = self.with_content(|term| grid_to_ansi(term));
+        let bytes = self.with_content(grid_to_ansi);
         slow.set_detail(format!("{} bytes", bytes.len()));
         bytes
     }

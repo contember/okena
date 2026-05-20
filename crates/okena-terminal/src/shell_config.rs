@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 /// Shell type for terminal creation
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
+#[derive(Default)]
 pub enum ShellType {
     /// Use system default shell (CommandBuilder::new_default_prog())
+    #[default]
     Default,
 
     /// Windows Command Prompt (cmd.exe)
@@ -45,11 +47,6 @@ pub enum ShellType {
     },
 }
 
-impl Default for ShellType {
-    fn default() -> Self {
-        ShellType::Default
-    }
-}
 
 impl ShellType {
     /// Create a shell type that runs a single command via the user's shell.

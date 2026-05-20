@@ -99,6 +99,8 @@ pub fn compute(commits: &[CommitLogEntry]) -> LaneLayout {
             .collect();
 
         let (dot_col, dot_lane) = if let Some(&first) = arriving.first() {
+            // `arriving` indices come from a filter_map that only keeps Some lanes.
+            #[allow(clippy::expect_used)]
             (first, active[first].as_ref().expect("arriving lane is Some").id)
         } else {
             (leftmost_free(&active), alloc(&mut next_id))
@@ -163,6 +165,8 @@ pub fn compute(commits: &[CommitLogEntry]) -> LaneLayout {
                     Some(l) => l.expected == *parent,
                     None => false,
                 }) {
+                    // `ec` is the index where `position` matched a Some lane.
+                    #[allow(clippy::expect_used)]
                     let id = next_active[ec].as_ref().expect("position returned Some").id;
                     extra_slants.push((id, ec));
                 } else {
@@ -199,8 +203,8 @@ pub fn compute(commits: &[CommitLogEntry]) -> LaneLayout {
             }
         }
         // Dot lane merging into an existing lane: explicit slant.
-        if let Some(cc) = cont_col {
-            if cc != dot_col {
+        if let Some(cc) = cont_col
+            && cc != dot_col {
                 rails.push(Rail {
                     lane_id: dot_lane,
                     from_col: dot_col,
@@ -208,7 +212,6 @@ pub fn compute(commits: &[CommitLogEntry]) -> LaneLayout {
                     half: Half::Lower,
                 });
             }
-        }
         // Merges into already-existing lanes (extra parents sharing a target).
         for (id, ec) in extra_slants {
             rails.push(Rail {

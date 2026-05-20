@@ -69,7 +69,7 @@ impl CommandPalette {
                     .map(|e| format_keystroke(&e.keystroke));
 
                 CommandEntry {
-                    action_key: *action,
+                    action_key: action,
                     name: desc.name.to_string(),
                     description: desc.description.to_string(),
                     category: desc.category.to_string(),
@@ -161,13 +161,10 @@ impl CommandPalette {
             let pane_map = okena_views_terminal::layout::navigation::get_pane_map(self.window_id);
             if let Some(focused) = self.focus_manager.read(cx)
                 .focused_terminal_state()
-            {
-                if let Some(pane) = pane_map.find_pane(&focused.project_id, &focused.layout_path) {
-                    if let Some(ref fh) = pane.focus_handle {
+                && let Some(pane) = pane_map.find_pane(&focused.project_id, &focused.layout_path)
+                    && let Some(ref fh) = pane.focus_handle {
                         window.focus(fh, cx);
                     }
-                }
-            }
 
             window.dispatch_action(action, cx);
             cx.emit(CommandPaletteEvent::Close);

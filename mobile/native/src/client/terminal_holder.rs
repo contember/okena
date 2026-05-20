@@ -86,8 +86,8 @@ impl TerminalHolder {
                     continue;
                 }
 
-                let mut fg = cell.fg.clone();
-                let mut bg = cell.bg.clone();
+                let mut fg = cell.fg;
+                let mut bg = cell.bg;
                 if cell.flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
@@ -232,13 +232,12 @@ impl TerminalHolder {
     /// where rows are buffer coordinates (adjusted for display_offset for rendering).
     pub fn selection_bounds(&self) -> Option<((usize, i32), (usize, i32))> {
         let term = self.term.lock();
-        if let Some(ref selection) = term.selection {
-            if let Some(range) = selection.to_range(&*term) {
+        if let Some(ref selection) = term.selection
+            && let Some(range) = selection.to_range(&*term) {
                 let start = (range.start.column.0, range.start.line.0);
                 let end = (range.end.column.0, range.end.line.0);
                 return Some((start, end));
             }
-        }
         None
     }
 

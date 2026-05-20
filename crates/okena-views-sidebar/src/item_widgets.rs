@@ -113,6 +113,8 @@ pub fn sidebar_name_label(
 /// Collapsible group header (e.g. "Terminals (3)" or "Services (2)").
 ///
 /// Returns a `Stateful<Div>` so the caller can chain `.on_click()` to toggle collapse.
+// GPUI render helper: params are render inputs (label, counts, state flags).
+#[allow(clippy::too_many_arguments)]
 pub fn sidebar_group_header(
     id: impl Into<ElementId>,
     label: &str,

@@ -10,6 +10,9 @@ use gpui::*;
 use gpui_component::h_flex;
 use std::sync::Arc;
 
+/// Called with the clicked file path inside the diff file list.
+type FileClickCallback = Arc<dyn Fn(&str, &mut Window, &mut App)>;
+
 /// Build the diff file tree elements with click handlers attached.
 ///
 /// `on_file_click` is called with the file path when the user clicks a file row.
@@ -21,7 +24,7 @@ pub fn render_diff_file_list_interactive(
     cx: &App,
 ) -> Vec<AnyElement> {
     let tree = build_file_tree(summaries.iter().enumerate().map(|(i, f)| (i, &f.path)));
-    let on_file_click: Arc<dyn Fn(&str, &mut Window, &mut App)> = Arc::new(on_file_click);
+    let on_file_click: FileClickCallback = Arc::new(on_file_click);
     render_diff_tree_node(&tree, 0, summaries, &on_file_click, t, cx)
 }
 
@@ -29,7 +32,7 @@ fn render_diff_tree_node(
     node: &FileTreeNode,
     depth: usize,
     summaries: &[FileDiffSummary],
-    on_file_click: &Arc<dyn Fn(&str, &mut Window, &mut App)>,
+    on_file_click: &FileClickCallback,
     t: &ThemeColors,
     cx: &App,
 ) -> Vec<AnyElement> {

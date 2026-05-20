@@ -365,8 +365,8 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
     )
     .ok();
 
-    if let Some(output) = output {
-        if output.status.success() {
+    if let Some(output) = output
+        && output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 let parts: Vec<&str> = line.split('\t').collect();
@@ -383,7 +383,6 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
                 }
             }
         }
-    }
 
     // Get untracked files (best effort: silently skip on transient gix failure)
     for file in crate::gix_helpers::list_untracked_files(path).unwrap_or_default() {

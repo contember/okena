@@ -204,7 +204,6 @@ impl TitleBar {
                         cx.stop_propagation();
                     })
                     .on_click({
-                        let control_type = control_type;
                         move |_, window, cx| {
                             cx.stop_propagation();
                             match control_type {

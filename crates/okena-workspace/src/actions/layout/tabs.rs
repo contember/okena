@@ -16,17 +16,15 @@ impl Workspace {
         log::info!("Workspace::add_tab called for project {} at path {:?}", project_id, path);
 
         // Check if parent is a Tabs container
-        if path.len() >= 1 {
+        if !path.is_empty() {
             let parent_path = &path[..path.len() - 1];
-            if let Some(project) = self.project(project_id) {
-                if let Some(ref layout) = project.layout {
-                    if let Some(LayoutNode::Tabs { .. }) = layout.get_at_path(parent_path) {
+            if let Some(project) = self.project(project_id)
+                && let Some(ref layout) = project.layout
+                    && let Some(LayoutNode::Tabs { .. }) = layout.get_at_path(parent_path) {
                         // Parent is Tabs - add new tab to the group
                         self.add_tab_to_group(focus_manager, project_id, parent_path, cx);
                         return;
                     }
-                }
-            }
         }
 
         // Parent is not Tabs - create new tab group

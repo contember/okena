@@ -75,11 +75,10 @@ fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
                 .context("missing download URL")?
                 .to_string();
             found_asset = Some((name.to_string(), url));
-        } else if name == "SHA256SUMS" || name == "sha256sums.txt" {
-            if let Some(url) = asset["browser_download_url"].as_str() {
+        } else if (name == "SHA256SUMS" || name == "sha256sums.txt")
+            && let Some(url) = asset["browser_download_url"].as_str() {
                 checksum_url = Some(url.to_string());
             }
-        }
     }
 
     if let Some((asset_name, asset_url)) = found_asset {

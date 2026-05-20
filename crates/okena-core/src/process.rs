@@ -40,8 +40,7 @@ pub fn safe_output(cmd: &mut std::process::Command) -> std::io::Result<std::proc
                 "unknown panic".to_string()
             };
             log::error!("Command::output() panicked: {}", msg);
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(std::io::Error::other(
                 format!("Command::output() panicked: {}", msg),
             ))
         }

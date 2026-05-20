@@ -436,7 +436,7 @@ impl DiffViewer {
                 menu_item(
                     "dv-ctx-stage",
                     "icons/plus.svg",
-                    &format!("Stage {}", kind.noun()),
+                    format!("Stage {}", kind.noun()),
                     t,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -477,7 +477,7 @@ impl DiffViewer {
                 menu_item(
                     "dv-ctx-unstage",
                     "icons/minus.svg",
-                    &format!("Unstage {}", kind.noun()),
+                    format!("Unstage {}", kind.noun()),
                     t,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {

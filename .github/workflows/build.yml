@@ -27,6 +27,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93"
+          components: clippy
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
@@ -59,6 +60,9 @@ jobs:
 
       - name: Check compilation
         run: cargo check --release
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests
         run: cargo test

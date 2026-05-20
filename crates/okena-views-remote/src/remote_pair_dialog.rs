@@ -92,7 +92,7 @@ impl Render for RemotePairDialog {
                 modal_content("remote-pair-modal", &t)
                     .w(px(400.0))
                     .child(modal_header(
-                        &format!("Pair \"{}\"", self.connection_name),
+                        format!("Pair \"{}\"", self.connection_name),
                         None::<&str>,
                         &t,
                         cx,

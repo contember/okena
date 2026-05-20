@@ -205,14 +205,12 @@ impl Render for WorktreeDialog {
 
                 match event.keystroke.key.as_str() {
                     "up" => {
-                        if search_focused {
-                            if let Some(idx) = this.selected_branch_index {
-                                if idx > 0 {
+                        if search_focused
+                            && let Some(idx) = this.selected_branch_index
+                                && idx > 0 {
                                     this.selected_branch_index = Some(idx - 1);
                                     cx.notify();
                                 }
-                            }
-                        }
                     }
                     "down" => {
                         if search_focused {
@@ -402,8 +400,8 @@ impl Render for WorktreeDialog {
                                         )
                                     })
                                     // Branch list or PR list
-                                    .when(!pr_mode, |d| d.child(self.render_branch_list(t.clone(), cx)))
-                                    .when(pr_mode, |d| d.child(self.render_pr_list(t.clone(), cx)))
+                                    .when(!pr_mode, |d| d.child(self.render_branch_list(t, cx)))
+                                    .when(pr_mode, |d| d.child(self.render_pr_list(t, cx)))
                             )
                     )
                     // Error message

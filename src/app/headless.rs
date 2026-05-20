@@ -331,7 +331,7 @@ impl HeadlessApp {
                 }
 
                 if !exit_events.is_empty() {
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         // Let service manager handle service terminals
                         let service_tids: HashSet<String> =
                             service_manager.update(cx, |sm, cx| {

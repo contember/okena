@@ -37,22 +37,20 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             let search_active = self.search_bar.read(cx).is_active();
 
             if !search_active && !is_modal {
-                if let Some(focused) = fm.focused_terminal_state() {
-                    if focused.project_id == self.project_id
+                if let Some(focused) = fm.focused_terminal_state()
+                    && focused.project_id == self.project_id
                         && focused.layout_path == self.layout_path
                         && !focus_handle.is_focused(window)
                     {
                         self.pending_focus = true;
                     }
-                }
 
-                if let Some(ref tid) = self.terminal_id {
-                    if fm.is_terminal_fullscreened(&self.project_id, tid)
+                if let Some(ref tid) = self.terminal_id
+                    && fm.is_terminal_fullscreened(&self.project_id, tid)
                         && !focus_handle.is_focused(window)
                     {
                         self.pending_focus = true;
                     }
-                }
             }
             is_modal
         };
@@ -69,31 +67,27 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
 
         let is_focused = focus_handle.is_focused(window);
 
-        let has_bell = self.terminal.as_ref().map_or(false, |t| t.has_bell());
-        if is_focused && has_bell {
-            if let Some(ref terminal) = self.terminal {
+        let has_bell = self.terminal.as_ref().is_some_and(|t| t.has_bell());
+        if is_focused && has_bell
+            && let Some(ref terminal) = self.terminal {
                 terminal.clear_bell();
             }
-        }
 
-        if is_focused {
-            if let Some(ref terminal) = self.terminal {
-                if terminal.is_waiting_for_input() {
+        if is_focused
+            && let Some(ref terminal) = self.terminal
+                && terminal.is_waiting_for_input() {
                     terminal.clear_waiting();
                 }
-            }
-        }
 
-        if self.was_focused && !is_focused {
-            if let Some(ref terminal) = self.terminal {
+        if self.was_focused && !is_focused
+            && let Some(ref terminal) = self.terminal {
                 terminal.mark_as_viewed();
             }
-        }
         self.was_focused = is_focused;
 
         let show_focused_border = terminal_view_settings(cx).show_focused_border;
         let is_waiting = !is_focused && self.terminal.as_ref()
-            .map_or(false, |t| t.is_waiting_for_input());
+            .is_some_and(|t| t.is_waiting_for_input());
         let show_border = (is_focused && show_focused_border) || has_bell || is_waiting;
         let border_color = if is_focused && show_focused_border {
             rgb(t.border_focused)
