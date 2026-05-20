@@ -15,7 +15,6 @@ recovery toasts). The items below remain.
 
 ## Medium
 
-- [Split execute_action (900-line match, 40+ arms)](split-execute-action-dispatcher.md) — refactor
 - [RootView god object + remote-sync logic in the view layer](rootview-god-object-and-remote-sync.md) — refactor
 
 ## Low
