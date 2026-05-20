@@ -2,6 +2,7 @@
 
 use crate::ActionDispatch;
 use okena_core::api::ActionRequest;
+#[cfg(target_os = "windows")]
 use okena_terminal::shell_config::ShellType;
 use okena_workspace::state::SplitDirection;
 use gpui::*;
@@ -93,7 +94,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         // wl-copy / xclip aren't installed.
         #[cfg(target_os = "windows")]
         {
-            let shell = self.resolved_shell(cx);
+            let settings = crate::terminal_view_settings(cx);
+            let ws = self.workspace.read(cx);
+            let shell = self.shell_type.clone().resolve_default(
+                ws.project(&self.project_id)
+                    .and_then(|p| p.default_shell.as_ref()),
+                &settings.default_shell,
+            );
             if let Some(distro) = wsl_distro(&shell) {
                 let unc = format!(r"\\wsl$\{}\tmp\{}", distro, filename);
                 if std::fs::write(&unc, &image.bytes).is_ok() {
@@ -122,15 +129,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             let Some(path) = write_paste_image_to_temp(&image, &filename) else { return };
             terminal.send_paste(&path.to_string_lossy());
         }
-    }
-
-    fn resolved_shell(&self, cx: &mut Context<Self>) -> ShellType {
-        let settings = crate::terminal_view_settings(cx);
-        let ws = self.workspace.read(cx);
-        self.shell_type.clone().resolve_default(
-            ws.project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
-            &settings.default_shell,
-        )
     }
 
     pub(super) fn handle_jump_prev_prompt(&mut self, cx: &mut Context<Self>) {
