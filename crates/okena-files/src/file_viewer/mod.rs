@@ -261,6 +261,10 @@ pub struct FileViewer {
     pub(super) history: NavigationHistory,
     /// Last time we checked files for external modifications
     last_change_check: std::time::Instant,
+    /// True while a background freshness check (stat + possible reload) is in
+    /// flight, so we don't spawn overlapping checks if a stat outlives the
+    /// once-per-second throttle window (e.g. on a slow network mount).
+    freshness_check_in_flight: bool,
     /// Whether to include gitignored files in the file tree
     pub(super) show_ignored: bool,
     /// Whether the filter popover is open
@@ -338,6 +342,7 @@ impl FileViewer {
             active_tab: 0,
             history: NavigationHistory::new(),
             last_change_check: std::time::Instant::now(),
+            freshness_check_in_flight: false,
             show_ignored: false,
             filter_popover_open: false,
             filter_button_bounds: None,
@@ -392,6 +397,7 @@ impl FileViewer {
             active_tab: 0,
             history: NavigationHistory::new(),
             last_change_check: std::time::Instant::now(),
+            freshness_check_in_flight: false,
             show_ignored: false,
             filter_popover_open: false,
             filter_button_bounds: None,
@@ -555,18 +561,71 @@ impl FileViewer {
         .detach();
     }
 
-    /// Check if the active tab's file was modified externally and reload if so.
-    /// Throttled to at most once per second.
-    pub(super) fn check_active_tab_freshness(&mut self) {
-        if self.last_change_check.elapsed() < std::time::Duration::from_secs(1) {
+    /// Check if the active tab's file was modified externally and reload it if
+    /// so. Throttled to at most once per second. The actual stat + (on change)
+    /// read + re-highlight runs on the background executor so it never blocks
+    /// the render/UI thread; results are swapped in via `entity.update`.
+    ///
+    /// Called cheaply from `render`: the render thread only checks the throttle
+    /// and (at most once/sec) schedules a background task — no filesystem I/O.
+    pub(super) fn check_active_tab_freshness(&mut self, cx: &mut Context<Self>) {
+        if self.freshness_check_in_flight
+            || self.last_change_check.elapsed() < std::time::Duration::from_secs(1)
+        {
             return;
         }
         self.last_change_check = std::time::Instant::now();
 
-        let tab = &mut self.tabs[self.active_tab];
-        if !tab.is_empty() {
-            tab.reload_if_changed(&self.syntax_set, self.is_dark);
+        let tab = &self.tabs[self.active_tab];
+        if tab.is_empty() {
+            return;
         }
+
+        // Capture only the plain data the background work needs — no entity or
+        // tab borrows held across the await.
+        let relative_path = tab.relative_path.clone();
+        let path = tab.file_path.clone();
+        let old_mtime = tab.modified_at;
+        let is_markdown = tab.is_markdown;
+        let syntax_set = self.syntax_set.clone();
+        let is_dark = self.is_dark;
+
+        self.freshness_check_in_flight = true;
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    loading::compute_freshness_reload(
+                        &path,
+                        old_mtime,
+                        is_markdown,
+                        &syntax_set,
+                        is_dark,
+                    )
+                })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                this.freshness_check_in_flight = false;
+                let reloaded = matches!(result, Ok(Some(_)));
+                // Re-find the tab by relative_path; concurrent reorders/closes
+                // mean the index may have shifted since we scheduled the check.
+                if let Some(tab) =
+                    this.tabs.iter_mut().find(|t| t.relative_path == relative_path)
+                {
+                    tab.apply_freshness_reload(result);
+                    if reloaded {
+                        tab.blame = BlameLoadState::NotLoaded;
+                    }
+                }
+                if reloaded {
+                    if this.blame_visible {
+                        this.spawn_blame_load_for_active(cx);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Get the active tab.
