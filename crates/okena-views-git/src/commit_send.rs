@@ -158,8 +158,7 @@ mod tests {
             message: "subject".into(),
             author: "Jane".into(),
             timestamp: STABLE_PAST_TIMESTAMP,
-            is_merge: false,
-            graph: String::new(),
+            parents: vec![],
             refs: vec!["main".into()],
         };
         let s = format_commit_entry(&entry);
