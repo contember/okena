@@ -1102,6 +1102,71 @@ mod tests {
     }
 
     #[test]
+    fn scrub_orphan_window_state_drops_refs_to_missing_projects_and_folders() {
+        // Safety net: per-window state that references a project/folder no
+        // longer present in the workspace (e.g. a project removed outside the
+        // in-app delete path) must be cleaned on load. Pin every per-window
+        // storage: hidden set, widths, folder-collapse, and folder_filter.
+        let mut data = make_workspace();
+        let mut present = make_project("/present");
+        present.id = "present".to_string();
+        data.projects.push(present);
+        data.folders.push(FolderData {
+            id: "live-folder".to_string(),
+            name: "Live".to_string(),
+            project_ids: Vec::new(),
+            folder_color: Default::default(),
+        });
+
+        // main_window: one live ref + several orphans across every storage.
+        data.main_window.hidden_project_ids.insert("present".to_string());
+        data.main_window.hidden_project_ids.insert("ghost".to_string());
+        data.main_window.project_widths.insert("present".to_string(), 0.4);
+        data.main_window.project_widths.insert("ghost".to_string(), 0.6);
+        data.main_window.folder_collapsed.insert("live-folder".to_string(), true);
+        data.main_window.folder_collapsed.insert("dead-folder".to_string(), true);
+        data.main_window.folder_filter = Some("dead-folder".to_string());
+
+        // An extra whose filter points at a live folder must be preserved.
+        let mut extra = WindowState::default();
+        extra.hidden_project_ids.insert("ghost".to_string());
+        extra.folder_filter = Some("live-folder".to_string());
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        data.scrub_orphan_window_state();
+
+        // Live refs survive; orphans are gone.
+        assert!(data.main_window.hidden_project_ids.contains("present"));
+        assert!(!data.main_window.hidden_project_ids.contains("ghost"));
+        assert!(data.main_window.project_widths.contains_key("present"));
+        assert!(!data.main_window.project_widths.contains_key("ghost"));
+        assert!(data.main_window.folder_collapsed.contains_key("live-folder"));
+        assert!(!data.main_window.folder_collapsed.contains_key("dead-folder"));
+        assert_eq!(data.main_window.folder_filter, None);
+
+        let after = data.window(WindowId::Extra(extra_id)).unwrap();
+        assert!(!after.hidden_project_ids.contains("ghost"));
+        assert_eq!(after.folder_filter.as_deref(), Some("live-folder"));
+    }
+
+    #[test]
+    fn scrub_orphan_window_state_is_noop_when_all_refs_are_live() {
+        // No false positives: every reference resolves, so nothing is touched.
+        let mut data = make_workspace();
+        let mut p = make_project("/p");
+        p.id = "p".to_string();
+        data.projects.push(p);
+        data.main_window.hidden_project_ids.insert("p".to_string());
+        data.main_window.project_widths.insert("p".to_string(), 0.5);
+
+        data.scrub_orphan_window_state();
+
+        assert!(data.main_window.hidden_project_ids.contains("p"));
+        assert_eq!(data.main_window.project_widths.get("p").copied(), Some(0.5));
+    }
+
+    #[test]
     fn workspace_data_has_no_top_level_project_widths_field() {
         // Per-window column widths live exclusively on main_window.project_widths.
         // The legacy top-level WorkspaceData.project_widths field has been

@@ -266,6 +266,11 @@ pub(crate) fn validate_workspace_data(
             valid_project_ids.contains(id.as_str()) || valid_folder_ids.contains(id.as_str())
         });
     }
+
+    // Drop per-window references (hidden set, widths, folder-collapse, filter)
+    // to projects/folders that no longer exist. In-app deletes scrub eagerly;
+    // this is the load-time safety net for state that bypassed that path.
+    data.scrub_orphan_window_state();
 }
 
 /// Load workspace from disk.
