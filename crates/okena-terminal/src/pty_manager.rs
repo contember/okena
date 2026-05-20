@@ -67,6 +67,45 @@ fn format_panic(payload: &dyn std::any::Any) -> String {
     }
 }
 
+/// Number of shared teardown worker threads. Bounds how many PTY teardowns
+/// (thread joins + `lsof`/`tmux kill-session`/SIGTERM subprocess calls) can run
+/// concurrently. On bulk shutdown we enqueue N jobs but only this many run at once,
+/// instead of spawning one detached OS thread per `kill()`/`cleanup_exited()` call.
+const TEARDOWN_WORKERS: usize = 4;
+
+/// What a teardown worker should do with a job. Modeling the two paths explicitly
+/// keeps the deliberate double-fire behavior (see `kill` / `cleanup_exited`) legible.
+enum TeardownKind {
+    /// The process already EOF'd (reader saw it); we only reap the reader/writer
+    /// threads via `shutdown_handle`. No session kill — there's nothing left to
+    /// SIGTERM from our side. Enqueued by `cleanup_exited`.
+    ReapOnly,
+    /// Kill the underlying session backend (tmux/screen/dtach), and on Windows the
+    /// WSL session. Enqueued by `kill`. The job's `handle` may be `None`: that is the
+    /// "client already exited (cleanup_exited ran first), SIGTERM the lingering
+    /// session/daemon" path — in that case the worker does ONLY the session kill.
+    KillSession {
+        session_backend: ResolvedBackend,
+        session_name: String,
+        /// WSL distro for the session (Windows only).
+        #[cfg(windows)]
+        wsl_distro: Option<String>,
+        /// Resolved WSL backend; when present the kill happens inside WSL (Windows only).
+        #[cfg(windows)]
+        wsl_backend: Option<ResolvedBackend>,
+    },
+}
+
+/// A unit of teardown work handed to the shared worker pool. Everything is owned so
+/// the job is `Send` and the workers never touch `PtyManager` state.
+struct TeardownJob {
+    /// The PTY handle to reap, if we own it. `None` for the `KillSession` path when
+    /// `cleanup_exited` already took the handle (double-fire) — then only the session
+    /// kill runs.
+    handle: Option<PtyHandle>,
+    kind: TeardownKind,
+}
+
 /// Handle to a single PTY process
 struct PtyHandle {
     /// `Option` so teardown (`shutdown_handle`) and the `Drop` backstop can both
@@ -131,6 +170,11 @@ pub struct PtyManager {
     /// Extra environment variables injected into every spawned PTY.
     /// Only variables not already set in the spawning process are injected.
     extra_env: Mutex<Vec<(String, String)>>,
+    /// Sender for the shared teardown worker pool. `kill`/`cleanup_exited` enqueue
+    /// jobs here instead of spawning a detached thread per call. Wrapped in `Option`
+    /// only so `Drop` can `take()` it and close the channel, signaling workers to
+    /// drain remaining jobs and exit.
+    teardown_tx: Option<Sender<TeardownJob>>,
 }
 
 impl PtyManager {
@@ -155,6 +199,28 @@ impl PtyManager {
                 log::warn!("failed to spawn dtach cleanup thread: {e}");
             }
 
+        // Shared teardown worker pool. `async-channel` is MPMC, so all workers share
+        // one `Receiver` and pull jobs via `recv_blocking`. Unbounded so enqueuing
+        // never blocks the GPUI thread; concurrency is bounded by the worker count.
+        let (teardown_tx, teardown_rx) = async_channel::unbounded::<TeardownJob>();
+        for i in 0..TEARDOWN_WORKERS {
+            let rx = teardown_rx.clone();
+            if let Err(e) = std::thread::Builder::new()
+                .name(format!("pty-teardown-{i}"))
+                .spawn(move || {
+                    // Exits when the channel is closed AND drained (Drop closes the
+                    // sender, then `recv_blocking` returns Err once buffered jobs run).
+                    while let Ok(job) = rx.recv_blocking() {
+                        Self::run_teardown_job(job);
+                    }
+                })
+            {
+                log::error!("failed to spawn teardown worker {i}: {e}");
+            }
+        }
+        // Drop our copy of the receiver so the only receivers are the workers.
+        drop(teardown_rx);
+
         (
             Self {
                 terminals: Arc::new(Mutex::new(HashMap::new())),
@@ -164,9 +230,46 @@ impl PtyManager {
                 session_backend_preference: backend,
                 output_sink: Arc::new(Mutex::new(None)),
                 extra_env: Mutex::new(Vec::new()),
+                teardown_tx: Some(teardown_tx),
             },
             rx,
         )
+    }
+
+    /// Execute one teardown job on a worker thread. This is exactly what the old
+    /// per-call detached closures did: reap the handle's reader/writer threads (if a
+    /// handle is present), then run the session kill (only for `KillSession` jobs).
+    fn run_teardown_job(job: TeardownJob) {
+        if let Some(handle) = job.handle {
+            Self::shutdown_handle(handle);
+        }
+        match job.kind {
+            // Process already EOF'd; nothing to SIGTERM from our side.
+            TeardownKind::ReapOnly => {}
+            TeardownKind::KillSession {
+                session_backend,
+                session_name,
+                #[cfg(windows)]
+                wsl_distro,
+                #[cfg(windows)]
+                wsl_backend,
+            } => {
+                // On Windows, if this was a WSL terminal with a session backend,
+                // kill the session inside WSL instead of on the host.
+                #[cfg(windows)]
+                {
+                    if let Some(backend) = wsl_backend {
+                        crate::session_backend::kill_wsl_session(
+                            backend,
+                            wsl_distro.as_deref(),
+                            &session_name,
+                        );
+                        return;
+                    }
+                }
+                session_backend.kill_session(&session_name);
+            }
+        }
     }
 
     /// Set the output sink for streaming PTY output to external consumers.
@@ -573,11 +676,13 @@ impl PtyManager {
     /// Kill a terminal
     /// Also kills the underlying tmux/screen session if applicable
     pub fn kill(&self, terminal_id: &str) {
-        // Remove handle from map immediately (fast, non-blocking)
+        // Remove handle from map immediately (fast, non-blocking).
+        // `handle` may be `None` if `cleanup_exited` already took it on PTY EOF
+        // (the double-fire). In that case the enqueued job does ONLY the session
+        // kill below — SIGTERMing the lingering session/daemon after the client EOF'd.
         let handle = self.terminals.lock().remove(terminal_id);
         let session_backend = self.session_backend;
         let session_name = session_backend.session_name(terminal_id);
-        let short_id = terminal_id[..8.min(terminal_id.len())].to_string();
 
         // Read WSL info before moving the handle
         #[cfg(windows)]
@@ -585,30 +690,34 @@ impl PtyManager {
         #[cfg(windows)]
         let wsl_backend = handle.as_ref().and_then(|h| h.wsl_backend);
 
-        // Move blocking cleanup (thread joins, subprocess calls) to a background thread
-        if let Err(e) = std::thread::Builder::new()
-            .name(format!("pty-shutdown-{}", short_id))
-            .spawn(move || {
-                if let Some(handle) = handle {
-                    Self::shutdown_handle(handle);
-                }
-                // On Windows, if this was a WSL terminal with a session backend,
-                // kill the session inside WSL instead of on the host
+        let job = TeardownJob {
+            handle,
+            kind: TeardownKind::KillSession {
+                session_backend,
+                session_name,
                 #[cfg(windows)]
-                {
-                    if let Some(backend) = wsl_backend {
-                        crate::session_backend::kill_wsl_session(
-                            backend,
-                            wsl_distro.as_deref(),
-                            &session_name,
-                        );
-                        return;
-                    }
+                wsl_distro,
+                #[cfg(windows)]
+                wsl_backend,
+            },
+        };
+        self.enqueue_teardown(job);
+    }
+
+    /// Hand a teardown job to the shared worker pool. If the channel is closed
+    /// (only happens once `Drop` has taken the sender during quit), run the teardown
+    /// inline so a handle is never silently leaked — better to block briefly on the
+    /// calling thread than to drop reader/writer threads on the floor.
+    fn enqueue_teardown(&self, job: TeardownJob) {
+        match self.teardown_tx.as_ref() {
+            Some(tx) => {
+                if let Err(e) = tx.send_blocking(job) {
+                    log::warn!("teardown channel closed; running teardown inline");
+                    Self::run_teardown_job(e.into_inner());
                 }
-                session_backend.kill_session(&session_name);
-            })
-        {
-            log::error!("Failed to spawn shutdown thread: {}", e);
+            }
+            // Sender already taken by Drop — fall back to inline teardown.
+            None => Self::run_teardown_job(job),
         }
     }
 
@@ -954,15 +1063,13 @@ impl PtyManager {
     pub fn cleanup_exited(&self, terminal_id: &str) {
         let handle = self.terminals.lock().remove(terminal_id);
         if let Some(handle) = handle {
-            let short_id = terminal_id[..8.min(terminal_id.len())].to_string();
-            if let Err(e) = std::thread::Builder::new()
-                .name(format!("pty-cleanup-{}", short_id))
-                .spawn(move || {
-                    Self::shutdown_handle(handle);
-                })
-            {
-                log::error!("Failed to spawn cleanup thread: {}", e);
-            }
+            // Process already EOF'd — only reap the reader/writer threads. The later
+            // `kill()` in the exit-events loop does the session kill (and finds the
+            // handle already gone here).
+            self.enqueue_teardown(TeardownJob {
+                handle: Some(handle),
+                kind: TeardownKind::ReapOnly,
+            });
         }
     }
 }
@@ -986,6 +1093,15 @@ impl Drop for PtyManager {
         // On drop, just detach - don't kill sessions
         // This allows sessions to persist across app restarts
         self.detach_all();
+
+        // Close the teardown channel so the worker threads drain any buffered jobs
+        // and then exit on `Closed`. We intentionally do NOT join the workers here:
+        // teardown can block on `lsof`/`tmux kill-session`/`waitpid`, and joining
+        // would risk stalling app quit on a hung subprocess. This matches the prior
+        // behavior of detached-per-call threads (also never joined). As a result,
+        // teardown of already-enqueued jobs is best-effort at quit — the process may
+        // exit before slow jobs finish, which is acceptable for graceful detach.
+        drop(self.teardown_tx.take());
     }
 }
 

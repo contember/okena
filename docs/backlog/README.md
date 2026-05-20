@@ -20,7 +20,6 @@ recovery toasts). The items below remain.
 - [Extract worktree lifecycle out of actions/project.rs](extract-worktree-actions-from-project.md) — refactor
 - [Split execute_action (900-line match, 40+ arms)](split-execute-action-dispatcher.md) — refactor
 - [RootView god object + remote-sync logic in the view layer](rootview-god-object-and-remote-sync.md) — refactor
-- [PTY kill() spawns an unbounded detached thread per call](pty-kill-thread-per-call.md) — concurrency / resource scaling
 
 ## Low
 
