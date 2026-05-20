@@ -42,6 +42,9 @@ pub enum RenderedNode {
 /// Parsed markdown document ready for rendering.
 pub struct MarkdownDocument {
     nodes: Vec<Node>,
+    /// Cumulative start offset (in characters) of each node, parallel to `nodes`.
+    /// Precomputed at parse time so rendering does not re-walk node text lengths.
+    node_offsets: Vec<usize>,
     /// Flat text representation of all visible content
     pub plain_text: String,
 }

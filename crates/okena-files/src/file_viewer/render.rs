@@ -1297,15 +1297,20 @@ impl Render for FileViewer {
                                                                 && let Some(sel_start) =
                                                                     tab.markdown_selection.start
                                                                 {
-                                                                    if start_offset >= sel_start {
-                                                                        tab.markdown_selection
-                                                                            .end = Some(node_end);
+                                                                    let new_end = if start_offset
+                                                                        >= sel_start
+                                                                    {
+                                                                        Some(node_end)
                                                                     } else {
+                                                                        Some(start_offset)
+                                                                    };
+                                                                    if tab.markdown_selection.end
+                                                                        != new_end
+                                                                    {
                                                                         tab.markdown_selection
-                                                                            .end =
-                                                                            Some(start_offset);
+                                                                            .end = new_end;
+                                                                        cx.notify();
                                                                     }
-                                                                    cx.notify();
                                                                 }
                                                         },
                                                     ))
@@ -1358,12 +1363,15 @@ impl Render for FileViewer {
                                                             let tab = this.active_tab_mut();
                                                             if tab.markdown_selection.is_selecting
                                                                 && let Some(sel_start) = tab.markdown_selection.start {
-                                                                    if start_offset >= sel_start {
-                                                                        tab.markdown_selection.end = Some(line_end);
+                                                                    let new_end = if start_offset >= sel_start {
+                                                                        Some(line_end)
                                                                     } else {
-                                                                        tab.markdown_selection.end = Some(start_offset);
+                                                                        Some(start_offset)
+                                                                    };
+                                                                    if tab.markdown_selection.end != new_end {
+                                                                        tab.markdown_selection.end = new_end;
+                                                                        cx.notify();
                                                                     }
-                                                                    cx.notify();
                                                                 }
                                                         }))
                                                         .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
@@ -1426,12 +1434,15 @@ impl Render for FileViewer {
                                                             let tab = this.active_tab_mut();
                                                             if tab.markdown_selection.is_selecting
                                                                 && let Some(sel_start) = tab.markdown_selection.start {
-                                                                    if start_offset >= sel_start {
-                                                                        tab.markdown_selection.end = Some(row_end);
+                                                                    let new_end = if start_offset >= sel_start {
+                                                                        Some(row_end)
                                                                     } else {
-                                                                        tab.markdown_selection.end = Some(start_offset);
+                                                                        Some(start_offset)
+                                                                    };
+                                                                    if tab.markdown_selection.end != new_end {
+                                                                        tab.markdown_selection.end = new_end;
+                                                                        cx.notify();
                                                                     }
-                                                                    cx.notify();
                                                                 }
                                                         }))
                                                         .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
@@ -1467,12 +1478,15 @@ impl Render for FileViewer {
                                                             let tab = this.active_tab_mut();
                                                             if tab.markdown_selection.is_selecting
                                                                 && let Some(sel_start) = tab.markdown_selection.start {
-                                                                    if start_offset >= sel_start {
-                                                                        tab.markdown_selection.end = Some(row_end);
+                                                                    let new_end = if start_offset >= sel_start {
+                                                                        Some(row_end)
                                                                     } else {
-                                                                        tab.markdown_selection.end = Some(start_offset);
+                                                                        Some(start_offset)
+                                                                    };
+                                                                    if tab.markdown_selection.end != new_end {
+                                                                        tab.markdown_selection.end = new_end;
+                                                                        cx.notify();
                                                                     }
-                                                                    cx.notify();
                                                                 }
                                                         }))
                                                         .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {

@@ -242,7 +242,20 @@ impl MarkdownDocument {
             Self::node_to_flat_text(node, &mut plain_text);
         }
 
-        Self { nodes, plain_text }
+        // Precompute each node's cumulative start offset (in characters) once,
+        // so rendering does not re-walk node text lengths on every frame.
+        let mut node_offsets = Vec::with_capacity(nodes.len());
+        let mut offset = 0usize;
+        for node in &nodes {
+            node_offsets.push(offset);
+            offset += Self::node_text_length(node);
+        }
+
+        Self {
+            nodes,
+            node_offsets,
+            plain_text,
+        }
     }
 
     /// Convert a node to flat text (in characters, not bytes).
@@ -300,5 +313,47 @@ impl MarkdownDocument {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::MarkdownDocument;
+
+    /// The precomputed `node_offsets` must match a running offset computed by
+    /// walking `node_text_length` over the nodes (the previous behavior).
+    #[test]
+    fn precomputed_offsets_match_walk() {
+        let content = "\
+# Heading One
+
+A paragraph with **bold** and `code`.
+
+```rust
+fn main() {}
+let x = 1;
+```
+
+| A | B |
+|---|---|
+| 1 | 2 |
+| 3 | 4 |
+
+## Heading Two
+";
+        let doc = MarkdownDocument::parse(content);
+
+        // Reconstruct offsets the old way.
+        let mut expected = Vec::with_capacity(doc.nodes.len());
+        let mut offset = 0usize;
+        for node in &doc.nodes {
+            expected.push(offset);
+            offset += MarkdownDocument::node_text_length(node);
+        }
+
+        assert_eq!(doc.node_offsets, expected);
+        assert_eq!(doc.node_offsets.len(), doc.nodes.len());
+        // First node always starts at 0.
+        assert_eq!(doc.node_offsets.first().copied(), Some(0));
     }
 }

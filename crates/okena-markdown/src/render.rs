@@ -21,9 +21,8 @@ impl MarkdownDocument {
         selection: Option<(usize, usize)>,
     ) -> Vec<RenderedNode> {
         let mut result = Vec::new();
-        let mut offset = 0usize;
 
-        for node in &self.nodes {
+        for (node, &offset) in self.nodes.iter().zip(self.node_offsets.iter()) {
             let node_len = Self::node_text_length(node);
             let node_selection = selection.and_then(|(start, end)| {
                 if end <= offset || start >= offset + node_len {
@@ -228,8 +227,6 @@ impl MarkdownDocument {
                     });
                 }
             }
-
-            offset += node_len;
         }
 
         result

@@ -11,7 +11,7 @@ recovery toasts). The items below remain.
 
 ## High
 
-- [Markdown preview: full re-render per frame + no virtualization](markdown-preview-rerender-and-virtualization.md) — perf, rebuild every frame
+- [Markdown preview: virtualization (remaining)](markdown-preview-rerender-and-virtualization.md) — perf, per-frame/per-pixel waste fixed
 
 ## Medium
 
