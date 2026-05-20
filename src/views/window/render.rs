@@ -7,7 +7,6 @@ use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayK
 use crate::ui::tokens::{ui_text_md, ui_text_xl};
 use gpui::*;
 use gpui::prelude::*;
-use std::future::Future;
 
 use super::WindowView;
 
@@ -755,81 +754,16 @@ impl Render for WindowView {
                     info.set_status(okena_ext_updater::UpdateStatus::Checking);
                     let token = info.current_token();
                     cx.notify();
-                    cx.spawn(async move |_this, cx| {
-                        match okena_ext_updater::checker::check_for_update(info.app_version()).await {
-                            Ok(Some(release)) => {
-                                if info.is_homebrew() {
-                                    info.set_status(okena_ext_updater::UpdateStatus::BrewUpdate {
-                                        version: release.version,
-                                    });
-                                    let _ = _this.update(cx, |_, cx| cx.notify());
-                                } else {
-                                    // Set downloading status and notify before the blocking download
-                                    info.set_status(okena_ext_updater::UpdateStatus::Downloading {
-                                        version: release.version.clone(),
-                                        progress: 0,
-                                    });
-                                    let _ = _this.update(cx, |_, cx| cx.notify());
-
-                                    // Download with periodic UI refresh for progress
-                                    let download = okena_ext_updater::downloader::download_asset(
-                                        release.asset_url,
-                                        release.asset_name,
-                                        release.version.clone(),
-                                        info.clone(),
-                                        token,
-                                        release.checksum_url,
-                                    );
-                                    let mut download = std::pin::pin!(download);
-
-                                    let download_result: anyhow::Result<std::path::PathBuf> = loop {
-                                        let polled = std::future::poll_fn(|task_cx| {
-                                            match download.as_mut().poll(task_cx) {
-                                                std::task::Poll::Ready(r) => std::task::Poll::Ready(Some(r)),
-                                                std::task::Poll::Pending => std::task::Poll::Ready(None),
-                                            }
-                                        }).await;
-                                        match polled {
-                                            Some(r) => break r,
-                                            None => {
-                                                smol::Timer::after(std::time::Duration::from_millis(250)).await;
-                                                let _ = _this.update(cx, |_, cx| cx.notify());
-                                            }
-                                        }
-                                    };
-
-                                    match download_result {
-                                        Ok(path) => {
-                                            info.set_status(okena_ext_updater::UpdateStatus::Ready {
-                                                version: release.version,
-                                                path,
-                                            });
-                                            let _ = _this.update(cx, |_, cx| cx.notify());
-                                        }
-                                        Err(e) => {
-                                            log::error!("Download failed: {}", e);
-                                            info.set_status(okena_ext_updater::UpdateStatus::Failed {
-                                                error: e.to_string(),
-                                            });
-                                            let _ = _this.update(cx, |_, cx| cx.notify());
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                info.set_status(okena_ext_updater::UpdateStatus::Idle);
-                                let _ = _this.update(cx, |_, cx| cx.notify());
-                            }
-                            Err(e) => {
-                                log::error!("Update check failed: {}", e);
-                                info.set_status(okena_ext_updater::UpdateStatus::Failed {
-                                    error: e.to_string(),
-                                });
-                                let _ = _this.update(cx, |_, cx| cx.notify());
-                            }
-                        }
-
-                        info.finish_manual();
+                    cx.spawn(async move |this, cx| {
+                        okena_ext_updater::orchestrator::run_manual_check(
+                            info,
+                            token,
+                            cx,
+                            move |cx| {
+                                let _ = this.update(cx, |_, cx| cx.notify());
+                            },
+                        )
+                        .await;
                     })
                     .detach();
                 }
@@ -843,24 +777,17 @@ impl Render for WindowView {
                             version: version.clone(),
                         });
                         cx.notify();
-                        cx.spawn(async move |_this, cx| {
-                            let result = smol::unblock({
-                                move || okena_ext_updater::installer::install_update(&path)
-                            }).await;
-                            match result {
-                                Ok(_) => {
-                                    info.set_status(okena_ext_updater::UpdateStatus::ReadyToRestart {
-                                        version,
-                                    });
-                                }
-                                Err(e) => {
-                                    log::error!("Install failed: {}", e);
-                                    info.set_status(okena_ext_updater::UpdateStatus::Failed {
-                                        error: e.to_string(),
-                                    });
-                                }
-                            }
-                            let _ = _this.update(cx, |_, cx| cx.notify());
+                        cx.spawn(async move |this, cx| {
+                            okena_ext_updater::orchestrator::run_install(
+                                info,
+                                version,
+                                path,
+                                cx,
+                                move |cx| {
+                                    let _ = this.update(cx, |_, cx| cx.notify());
+                                },
+                            )
+                            .await;
                         }).detach();
                     }
                 }

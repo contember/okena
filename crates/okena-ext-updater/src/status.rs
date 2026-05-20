@@ -247,24 +247,17 @@ impl Render for UpdateStatusWidget {
                                             version: version.clone(),
                                         });
                                         cx.notify();
-                                        cx.spawn(async move |_this, cx| {
-                                            let result = smol::unblock({
-                                                move || crate::installer::install_update(&path)
-                                            }).await;
-                                            match result {
-                                                Ok(_) => {
-                                                    info.set_status(UpdateStatus::ReadyToRestart {
-                                                        version,
-                                                    });
-                                                }
-                                                Err(e) => {
-                                                    log::error!("Install failed: {}", e);
-                                                    info.set_status(UpdateStatus::Failed {
-                                                        error: e.to_string(),
-                                                    });
-                                                }
-                                            }
-                                            let _ = _this.update(cx, |_, cx| cx.notify());
+                                        cx.spawn(async move |this, cx| {
+                                            crate::orchestrator::run_install(
+                                                info,
+                                                version,
+                                                path,
+                                                cx,
+                                                move |cx| {
+                                                    let _ = this.update(cx, |_, cx| cx.notify());
+                                                },
+                                            )
+                                            .await;
                                         }).detach();
                                     }
                                 }

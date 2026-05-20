@@ -3,6 +3,7 @@
 pub mod checker;
 pub mod downloader;
 pub mod installer;
+pub mod orchestrator;
 mod process;
 mod status;
 mod update_checker;
