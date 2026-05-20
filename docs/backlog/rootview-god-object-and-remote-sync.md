@@ -1,30 +1,37 @@
-# RootView god object + remote-sync logic in the view layer
+# RootView god object — remaining column/scroll extraction
 
 - **Severity:** Medium (architecture)
 - **Type:** refactor
-- **Area:** `src/` (desktop app), `okena-workspace`
-- **Location:** `src/views/root/mod.rs:47-94`, `367-625`, `render.rs:101`
+- **Area:** `src/` (desktop app)
+- **Location:** `src/views/root/mod.rs` (`sync_project_columns` ~669-809, `project_columns` map), `render.rs:100` (`render_projects_grid`)
 
-## Problem
+## Done
 
-`RootView` is a 22-field god object holding workspace, broker, backend, terminals,
-sidebar+controller, columns map, title/status bars, overlay manager, toast, drag
-state, scroll/bounds refs, three optional managers, and bookkeeping fields. It mixes
-layout/scroll, remote sync, git-provider building, and column lifecycle.
+The headline leak — `sync_remote_projects_into_workspace` (~260 lines of remote-state
+reconciliation in the view layer) — has been moved into `okena-workspace`:
+`okena_workspace::remote_apply::apply_remote_snapshot` is a pure, GPUI-free core
+(unit-tested), with a thin `Workspace::apply_remote_snapshot` wrapper for the
+focus/notify side-effects. The view function shrank from ~258 lines to ~26 (just
+snapshots the connection entity and delegates).
 
-Two specific leaks:
-- `sync_remote_projects_into_workspace` (367-625, ~260 lines) is heavy
-  remote-state reconciliation (prefixing, folder/order rebuild, merge_visual_state,
-  stale pruning, pending-focus diffing) sitting in the *view* layer — it's
-  workspace/state-domain logic.
-- `render_projects_grid` (render.rs:101) mutates state during render
-  (`pending_center_scroll.take()`, `sync_project_columns` creates entities,
-  `prune_pane_map`, re-queues `cx.notify()`).
+## Remaining (deferred — behavior-sensitive)
+
+`RootView` is still a large struct, and two coupled concerns remain in the view:
+
+- **`ProjectColumnManager` extraction**: the `project_columns` map plus
+  `sync_project_columns` (and `create_remote_column` / `create_local_column`).
+  Not a purely mechanical move — the create methods need `cx.new()` and read
+  `remote_manager` / `git_watcher` / `service_manager` / `backend` and call
+  `build_git_provider`, so a clean extraction must thread those dependencies.
+- **Drive column sync from the workspace observer, not `render`**:
+  `render_projects_grid` (render.rs:100) mutates state during render
+  (`pending_center_scroll.take()`, entity creation, `prune_pane_map`, re-queued
+  `cx.notify()`). The center-scroll logic deliberately runs *during* a render pass
+  after layout has reported overflow (`max_offset > 0`), deferring across frames —
+  moving it to an observer would break that frame-deferral mechanism. Needs a
+  different scroll-anchoring approach before it can leave the render path.
 
 ## Suggested fix
 
-- Move remote reconciliation into `okena-workspace`
-  (e.g. `Workspace::apply_remote_snapshot`) so it's unit-testable without GPUI.
-- Extract a `ProjectColumnManager` (columns map + sync/create, lines 670-809) and a
-  `ProjectsScroll` helper.
-- Drive `sync_project_columns` from the existing workspace observer, not from `render`.
+Extract `ProjectColumnManager` once the dependency threading is designed, and rework
+the center-scroll so column sync no longer needs to run inside `render`.

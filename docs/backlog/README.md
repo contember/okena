@@ -15,7 +15,7 @@ recovery toasts). The items below remain.
 
 ## Medium
 
-- [RootView god object + remote-sync logic in the view layer](rootview-god-object-and-remote-sync.md) — refactor
+- [RootView god object — remaining column/scroll extraction](rootview-god-object-and-remote-sync.md) — refactor, remote-sync extracted
 
 ## Low
 
