@@ -95,8 +95,8 @@ pub struct ContentSearchDialog {
     pub(super) highlight_cache: HashMap<PathBuf, Vec<HighlightedLine>>,
     /// Files currently being loaded for highlighting (to avoid duplicate loads).
     pub(super) loading_files: HashSet<PathBuf>,
-    /// Shared syntax set.
-    pub(super) syntax_set: SyntaxSet,
+    /// Shared syntax set (shared via `Arc`, large to clone).
+    pub(super) syntax_set: std::sync::Arc<SyntaxSet>,
     /// Whether the theme is dark.
     pub(super) is_dark: bool,
     /// Debounce task for search.

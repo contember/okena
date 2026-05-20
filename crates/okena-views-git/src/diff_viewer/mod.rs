@@ -65,7 +65,7 @@ pub struct DiffViewer {
     pub(super) tree_scroll_handle: ScrollHandle,
     pub(super) error_message: Option<String>,
     pub(super) line_num_width: usize,
-    pub(super) syntax_set: SyntaxSet,
+    pub(super) syntax_set: std::sync::Arc<SyntaxSet>,
     pub(super) scrollbar_drag: Option<ScrollbarDrag>,
     pub(super) file_font_size: f32,
     /// Cached side-by-side lines for current file.

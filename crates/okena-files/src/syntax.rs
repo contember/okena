@@ -5,14 +5,14 @@
 
 use gpui::Rgba;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::Theme;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
 /// Global cached syntax set with extended syntaxes (including TypeScript/TSX).
-static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static SYNTAX_SET: OnceLock<Arc<SyntaxSet>> = OnceLock::new();
 
 /// Global cached dark syntax highlighting theme.
 static SYNTAX_THEME_DARK: OnceLock<Theme> = OnceLock::new();
@@ -21,9 +21,12 @@ static SYNTAX_THEME_LIGHT: OnceLock<Theme> = OnceLock::new();
 
 /// Load a SyntaxSet with extended syntaxes including TypeScript/TSX.
 /// Uses the two-face crate which provides many additional syntaxes.
-pub fn load_syntax_set() -> SyntaxSet {
+///
+/// The `SyntaxSet` is large (megabytes), so it is stored once behind an `Arc`
+/// and shared. Each call only bumps the refcount instead of deep-cloning.
+pub fn load_syntax_set() -> Arc<SyntaxSet> {
     SYNTAX_SET
-        .get_or_init(two_face::syntax::extra_newlines)
+        .get_or_init(|| Arc::new(two_face::syntax::extra_newlines()))
         .clone()
 }
 

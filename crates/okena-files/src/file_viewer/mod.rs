@@ -232,8 +232,8 @@ impl NavigationHistory {
 pub struct FileViewer {
     focus_handle: FocusHandle,
     project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
-    /// Syntax set for highlighting
-    syntax_set: SyntaxSet,
+    /// Syntax set for highlighting (shared via `Arc`, large to clone)
+    syntax_set: std::sync::Arc<SyntaxSet>,
     /// File font size from settings
     file_font_size: f32,
     /// Measured monospace character width (from font metrics)
