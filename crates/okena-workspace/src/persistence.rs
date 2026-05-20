@@ -1098,6 +1098,69 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_migration_is_idempotent_across_save_reload() {
+        // A v1 file migrated, serialized (as save would), then run through the
+        // full load pipeline again must be stable: the second pass over the
+        // already-migrated shape is a no-op — no double-folding, no lost or
+        // duplicated state. Directly pins "a save/reload cycle cannot drift or
+        // drop user data after the v1->v2 migration."
+        let legacy_json = r#"{
+            "version": 1,
+            "projects": [
+                { "id": "visible", "name": "Visible", "path": "/tmp/visible", "layout": null },
+                { "id": "hidden", "name": "Hidden", "path": "/tmp/hidden", "layout": null, "show_in_overview": false }
+            ],
+            "project_order": ["folder1", "visible", "hidden"],
+            "folders": [
+                { "id": "folder1", "name": "Group", "project_ids": [], "collapsed": true }
+            ],
+            "project_widths": { "visible": 60.0, "hidden": 40.0 }
+        }"#;
+
+        let run = |json: &str| -> WorkspaceData {
+            let migrated = migrate_legacy_json(json).expect("legacy migration succeeds");
+            let raw: WorkspaceData = serde_json::from_str(&migrated).expect("typed parse succeeds");
+            let mut data = migrate_workspace(raw);
+            validate_workspace_data(&mut data, false, SessionBackend::None);
+            data
+        };
+
+        let first = run(legacy_json);
+        let saved = serde_json::to_string(&first).expect("serialize migrated workspace");
+        let second = run(&saved);
+
+        // Version reached the terminal value on the first pass and stays there.
+        assert_eq!(first.version, WORKSPACE_VERSION);
+        assert_eq!(second.version, WORKSPACE_VERSION);
+
+        // Per-window migrated state is identical across the reload. HashSet /
+        // HashMap equality is order-independent, so this is robust to JSON key
+        // ordering.
+        assert_eq!(
+            first.main_window.hidden_project_ids,
+            second.main_window.hidden_project_ids
+        );
+        assert_eq!(
+            first.main_window.project_widths,
+            second.main_window.project_widths
+        );
+        assert_eq!(
+            first.main_window.folder_collapsed,
+            second.main_window.folder_collapsed
+        );
+        assert_eq!(first.main_window.folder_filter, second.main_window.folder_filter);
+
+        // The underlying workspace shape (projects, folders, order) is preserved.
+        let ids1: std::collections::HashSet<&str> =
+            first.projects.iter().map(|p| p.id.as_str()).collect();
+        let ids2: std::collections::HashSet<&str> =
+            second.projects.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids1, ids2);
+        assert_eq!(first.folders.len(), second.folders.len());
+        assert_eq!(first.project_order, second.project_order);
+    }
+
+    #[test]
     fn migrate_current_version_noop() {
         let data = WorkspaceData {
             version: WORKSPACE_VERSION,
