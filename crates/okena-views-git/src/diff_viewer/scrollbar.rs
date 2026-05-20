@@ -79,7 +79,7 @@ impl DiffViewer {
 
     /// Width of a single panel's gutter (line number column + accent + padding).
     fn panel_gutter_width(&self) -> f32 {
-        let char_width = self.file_font_size * 0.6;
+        let char_width = self.char_width();
         let num_col_width = (self.line_num_width as f32) * char_width + 12.0;
         // accent(3) + line number column + separator(1) + content padding(10)
         3.0 + num_col_width + 1.0 + 10.0
@@ -87,7 +87,7 @@ impl DiffViewer {
 
     /// Maximum text content width in pixels (just the code text, no gutter).
     pub(super) fn max_text_width(&self) -> f32 {
-        let char_width = self.file_font_size * 0.6;
+        let char_width = self.char_width();
         self.max_line_chars as f32 * char_width
     }
 
