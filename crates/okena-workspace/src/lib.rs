@@ -7,6 +7,7 @@ pub mod hook_monitor;
 pub mod hooks;
 pub mod lifecycle;
 pub mod persistence;
+pub mod remote_apply;
 pub mod remote_sync;
 pub mod request_broker;
 pub mod requests;

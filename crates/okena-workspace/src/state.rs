@@ -700,6 +700,34 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Reconcile remote connection snapshots into the workspace.
+    ///
+    /// Runs the pure reconciliation core (`remote_apply::apply_remote_snapshot`)
+    /// on `self.data`/`self.remote_sync`, then applies the GPUI side-effects:
+    /// focuses any newly-created terminals and notifies the UI without bumping
+    /// `data_version` (remote changes shouldn't trigger auto-save).
+    pub fn apply_remote_snapshot(
+        &mut self,
+        snapshots: &[crate::remote_apply::RemoteSnapshot],
+        window_id: WindowId,
+        focus_manager: &mut FocusManager,
+        cx: &mut Context<Self>,
+    ) {
+        let outcome = crate::remote_apply::apply_remote_snapshot(
+            &mut self.data,
+            &mut self.remote_sync,
+            snapshots,
+            window_id,
+        );
+
+        for target in outcome.focus_targets {
+            self.set_focused_terminal(focus_manager, target.project_id, target.layout_path, cx);
+        }
+
+        // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
+        self.notify_ui_only(cx);
+    }
+
     /// Helper to mutate a layout node at a path, with automatic notify.
     /// Returns true if the mutation was applied.
     pub fn with_layout_node<F>(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>, f: F) -> bool

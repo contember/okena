@@ -66,39 +66,6 @@ pub fn notify_pane_weaks<T: 'static>(
     any_alive
 }
 
-fn apply_initial_remote_project_visibility(
-    ws: &mut Workspace,
-    connection_id: &str,
-    prefixed_id: &str,
-    name: &str,
-    path: &str,
-    show_in_overview: bool,
-) {
-    // Apply one-shot visibility for remote creates issued from a local
-    // window. The server assigns the ID, so the pending request is consumed
-    // when the project first appears in state sync.
-    //
-    // When a pending create matches, the wire `show_in_overview` flag is
-    // intentionally IGNORED: the local spawn intent ("visible in this
-    // window, hidden everywhere else") takes precedence over the server's
-    // initial sync value. The user explicitly created the project from one
-    // window; honouring a stale server-side hidden flag would surprise
-    // them on the very first sync.
-    if let Some(spawning_window) =
-        ws.take_pending_remote_project_visibility(connection_id, name, path)
-    {
-        ws.data.add_project_hide_in_other_windows(prefixed_id, spawning_window);
-        return;
-    }
-
-    // Otherwise translate the wire-format show_in_overview flag into
-    // per-window hidden state on initial sync. Subsequent syncs hit the
-    // existing-project branch and leave the local hidden set alone.
-    if !show_in_overview {
-        ws.data.hide_project_in_all_windows(prefixed_id);
-    }
-}
-
 /// Per-window view of the application: one instance per OS window.
 ///
 /// Owns the per-window UI state (sidebar, overlays, toasts, scroll handles,
@@ -572,6 +539,11 @@ impl WindowView {
     }
 
     /// Sync remote connection state into workspace as materialized ProjectData entries.
+    ///
+    /// This is the GPUI/view-layer shell: it snapshots the connection data out of
+    /// the `RemoteConnectionManager` entity (to release the `cx` borrow), then hands
+    /// the owned snapshots to `Workspace::apply_remote_snapshot`, which runs the pure
+    /// reconciliation core and applies focus/notify side-effects.
     fn sync_remote_projects_into_workspace(
         window_id: WindowId,
         workspace: &Entity<Workspace>,
@@ -579,303 +551,21 @@ impl WindowView {
         rm: &Entity<RemoteConnectionManager>,
         cx: &mut Context<Self>,
     ) {
-        use crate::workspace::state::{FolderData, ProjectData, LayoutNode};
-        use crate::workspace::settings::HooksConfig;
-        use okena_core::client::RemoteConnectionConfig;
+        use okena_workspace::remote_apply::RemoteSnapshot;
 
         // Snapshot all connection data into owned structures to release the borrow on cx
-        struct ConnSnapshot {
-            config: RemoteConnectionConfig,
-            state: Option<okena_core::api::StateResponse>,
-        }
-        let snapshots: Vec<ConnSnapshot> = {
+        let snapshots: Vec<RemoteSnapshot> = {
             let rm_read = rm.read(cx);
             rm_read.connections().iter().map(|(config, _status, state)| {
-                ConnSnapshot {
+                RemoteSnapshot {
                     config: (*config).clone(),
                     state: state.cloned(),
                 }
             }).collect()
         };
 
-        let mut expected_remote_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let active_conn_ids: std::collections::HashSet<String> = snapshots.iter()
-            .map(|s| s.config.id.clone()).collect();
-
-        for snap in &snapshots {
-            let conn_id = &snap.config.id;
-
-            if let Some(ref state) = snap.state {
-                // Build the server folder lookup
-                let server_folder_map: std::collections::HashMap<&str, &okena_core::api::ApiFolder> =
-                    state.folders.iter().map(|f| (f.id.as_str(), f)).collect();
-
-                // Build prefixed project_order and folder entries that mirror the server structure
-                let mut remote_order: Vec<String> = Vec::new();
-                let mut remote_folders: Vec<FolderData> = Vec::new();
-
-                if !state.project_order.is_empty() {
-                    for order_id in &state.project_order {
-                        if let Some(sf) = server_folder_map.get(order_id.as_str()) {
-                            // This is a folder — create a prefixed FolderData
-                            let prefixed_folder_id = format!("remote:{}:{}", conn_id, sf.id);
-                            let prefixed_project_ids: Vec<String> = sf.project_ids.iter()
-                                .map(|pid| format!("remote:{}:{}", conn_id, pid))
-                                .collect();
-                            remote_folders.push(FolderData {
-                                id: prefixed_folder_id.clone(),
-                                name: sf.name.clone(),
-                                project_ids: prefixed_project_ids,
-                                folder_color: sf.folder_color,
-                            });
-                            remote_order.push(prefixed_folder_id);
-                        } else {
-                            // This is a top-level project
-                            remote_order.push(format!("remote:{}:{}", conn_id, order_id));
-                        }
-                    }
-                } else {
-                    // Old server without project_order: put all projects as top-level
-                    for api_project in &state.projects {
-                        remote_order.push(format!("remote:{}:{}", conn_id, api_project.id));
-                    }
-                };
-
-                for api_project in &state.projects {
-                    let prefixed_id = format!("remote:{}:{}", conn_id, api_project.id);
-                    expected_remote_ids.insert(prefixed_id.clone());
-
-                    let layout = api_project.layout.as_ref().map(|l| {
-                        LayoutNode::from_api_prefixed(l, &format!("remote:{}", conn_id))
-                    });
-
-                    let terminal_names: std::collections::HashMap<String, String> = api_project.terminal_names.iter()
-                        .map(|(k, v)| (format!("remote:{}:{}", conn_id, k), v.clone()))
-                        .collect();
-
-                    let project_color = api_project.folder_color;
-                    let conn_id_owned = conn_id.clone();
-
-                    // Build remote services with prefixed terminal IDs
-                    let remote_services: Vec<okena_core::api::ApiServiceInfo> = api_project.services.iter().map(|s| {
-                        let mut svc = s.clone();
-                        svc.terminal_id = s.terminal_id.as_ref()
-                            .map(|tid| format!("remote:{}:{}", conn_id, tid));
-                        svc
-                    }).collect();
-                    let remote_host = Some(snap.config.host.clone());
-                    let remote_git_status = api_project.git_status.clone();
-
-                    workspace.update(cx, |ws, _cx| {
-                        if let Some(existing) = ws.data.projects.iter_mut().find(|p| p.id == prefixed_id) {
-                            existing.name = api_project.name.clone();
-                            existing.path = api_project.path.clone();
-                            // Merge server layout with locally-preserved visual state
-                            // (split sizes, minimized, detached, active_tab).
-                            existing.layout = match (&existing.layout, &layout) {
-                                (Some(local), Some(server)) => {
-                                    Some(LayoutNode::merge_visual_state(server, local))
-                                }
-                                _ => layout,
-                            };
-                            existing.terminal_names = terminal_names;
-                            existing.folder_color = project_color;
-                            existing.worktree_info = api_project.worktree_info.as_ref().map(|wt| {
-                                crate::workspace::state::WorktreeMetadata {
-                                    parent_project_id: format!("remote:{}:{}", conn_id, wt.parent_project_id),
-                                    color_override: wt.color_override,
-                                    main_repo_path: String::new(),
-                                    worktree_path: String::new(),
-                                    branch_name: String::new(),
-                                }
-                            });
-                            existing.worktree_ids = api_project.worktree_ids.iter()
-                                .map(|id| format!("remote:{}:{}", conn_id, id))
-                                .collect();
-                            // Don't overwrite the local hidden set — the
-                            // user may have toggled visibility locally.
-                        } else {
-                            let worktree_info = api_project.worktree_info.as_ref().map(|wt| {
-                                crate::workspace::state::WorktreeMetadata {
-                                    parent_project_id: format!("remote:{}:{}", conn_id, wt.parent_project_id),
-                                    color_override: wt.color_override,
-                                    main_repo_path: String::new(),
-                                    worktree_path: String::new(),
-                                    branch_name: String::new(),
-                                }
-                            });
-                            let worktree_ids: Vec<String> = api_project.worktree_ids.iter()
-                                .map(|id| format!("remote:{}:{}", conn_id, id))
-                                .collect();
-                            apply_initial_remote_project_visibility(
-                                ws,
-                                conn_id,
-                                &prefixed_id,
-                                &api_project.name,
-                                &api_project.path,
-                                api_project.show_in_overview,
-                            );
-                            ws.data.projects.push(ProjectData {
-                                id: prefixed_id.clone(),
-                                name: api_project.name.clone(),
-                                path: api_project.path.clone(),
-                                layout,
-                                terminal_names,
-                                hidden_terminals: std::collections::HashMap::new(),
-                                worktree_info,
-                                worktree_ids,
-                                folder_color: project_color,
-                                hooks: HooksConfig::default(),
-                                is_remote: true,
-                                connection_id: Some(conn_id_owned),
-                                service_terminals: std::collections::HashMap::new(),
-                                default_shell: None,
-                                hook_terminals: std::collections::HashMap::new(),
-                            });
-                        }
-                        // Update the transient remote snapshot regardless of create/update path.
-                        let snapshot = ws.remote_sync.snapshot_mut(&prefixed_id);
-                        snapshot.services = remote_services;
-                        snapshot.host = remote_host;
-                        snapshot.git_status = remote_git_status;
-                    });
-                }
-
-                // Sync remote folders and project_order into workspace
-                let remote_prefix = format!("remote:{}:", conn_id);
-                workspace.update(cx, |ws, _cx| {
-                    let next_remote_folder_ids: std::collections::HashSet<String> =
-                        remote_folders.iter().map(|f| f.id.clone()).collect();
-                    let removed_folder_ids: Vec<String> = ws.data.folders.iter()
-                        .filter(|f| f.id.starts_with(&remote_prefix) && !next_remote_folder_ids.contains(&f.id))
-                        .map(|f| f.id.clone())
-                        .collect();
-                    for folder_id in removed_folder_ids {
-                        ws.data.delete_folder_scrub_all_windows(&folder_id);
-                    }
-
-                    // Remove old remote folders for this connection
-                    ws.data.folders.retain(|f| !f.id.starts_with(&remote_prefix));
-                    // Remove old remote entries from project_order for this connection
-                    ws.data.project_order.retain(|id| !id.starts_with(&remote_prefix));
-
-                    // Add new remote folders
-                    for rf in remote_folders {
-                        ws.data.folders.push(rf);
-                    }
-
-                    // Add new remote project_order entries
-                    ws.data.project_order.extend(remote_order);
-                });
-            } else {
-                // No state (disconnected/connecting) — remove materialized projects and folders
-                let prefix = format!("remote:{}:", conn_id);
-                workspace.update(cx, |ws, _cx| {
-                    let removed_project_ids: Vec<String> = ws.data.projects.iter()
-                        .filter(|p| p.id.starts_with(&prefix))
-                        .map(|p| p.id.clone())
-                        .collect();
-                    let removed_folder_ids: Vec<String> = ws.data.folders.iter()
-                        .filter(|f| f.id.starts_with(&prefix))
-                        .map(|f| f.id.clone())
-                        .collect();
-                    for project_id in removed_project_ids {
-                        ws.data.delete_project_scrub_all_windows(&project_id);
-                    }
-                    for folder_id in removed_folder_ids {
-                        ws.data.delete_folder_scrub_all_windows(&folder_id);
-                    }
-
-                    ws.data.projects.retain(|p| !p.id.starts_with(&prefix));
-                    ws.data.folders.retain(|f| !f.id.starts_with(&prefix));
-                    ws.data.project_order.retain(|id| !id.starts_with(&prefix));
-                });
-            }
-        }
-
-        // Remove stale remote projects/folders from connections that no longer exist
-        workspace.update(cx, |ws, _cx| {
-            let removed_project_ids: Vec<String> = ws.data.projects.iter()
-                .filter(|p| p.is_remote && !expected_remote_ids.contains(&p.id))
-                .map(|p| p.id.clone())
-                .collect();
-            let removed_folder_ids: Vec<String> = ws.data.folders.iter()
-                .filter(|f| {
-                    if f.id.starts_with("remote:") {
-                        // Remote folder IDs are "remote:{conn_id}:{folder_id}"
-                        // Extract conn_id (second segment)
-                        let rest = f.id.strip_prefix("remote:").unwrap_or("");
-                        let conn_id = rest.split(':').next().unwrap_or("");
-                        !active_conn_ids.contains(conn_id)
-                    } else {
-                        false
-                    }
-                })
-                .map(|f| f.id.clone())
-                .collect();
-            for project_id in removed_project_ids {
-                ws.data.delete_project_scrub_all_windows(&project_id);
-            }
-            for folder_id in removed_folder_ids {
-                ws.data.delete_folder_scrub_all_windows(&folder_id);
-            }
-
-            ws.data.projects.retain(|p| {
-                if p.is_remote {
-                    expected_remote_ids.contains(&p.id)
-                } else {
-                    true
-                }
-            });
-            ws.data.folders.retain(|f| {
-                if f.id.starts_with("remote:") {
-                    // Remote folder IDs are "remote:{conn_id}:{folder_id}"
-                    // Extract conn_id (second segment)
-                    let rest = f.id.strip_prefix("remote:").unwrap_or("");
-                    let conn_id = rest.split(':').next().unwrap_or("");
-                    active_conn_ids.contains(conn_id)
-                } else {
-                    true
-                }
-            });
-            let valid_ids: std::collections::HashSet<&str> = ws.data.projects.iter().map(|p| p.id.as_str())
-                .chain(ws.data.folders.iter().map(|f| f.id.as_str()))
-                .collect();
-            ws.data.project_order.retain(|id| valid_ids.contains(id.as_str()));
-        });
-
-        // Focus newly appeared terminals for projects that had a pending CreateTerminal.
         focus_manager.update(cx, |fm, cx| {
-            workspace.update(cx, |ws, cx| {
-                let pending = ws.drain_pending_remote_focus(window_id);
-                for pending_focus in pending {
-                    let pid = pending_focus.project_id;
-                    let new_ids = match ws.project(&pid).and_then(|p| p.layout.as_ref()) {
-                        Some(layout) => layout.collect_terminal_ids(),
-                        None => continue,
-                    };
-                    // Find the first terminal ID that wasn't present when the
-                    // CreateTerminal action originated in this window.
-                    let old_set: std::collections::HashSet<&str> = pending_focus
-                        .old_terminal_ids
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect();
-                    if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str()))
-                        && let Some(path) = ws.project(&pid)
-                            .and_then(|p| p.layout.as_ref())
-                            .and_then(|l| l.find_terminal_path(new_tid))
-                        {
-                            ws.set_focused_terminal(fm, pid.clone(), path, cx);
-                        }
-                }
-            });
-            cx.notify();
-        });
-
-        // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
-        workspace.update(cx, |ws, cx| {
-            ws.notify_ui_only(cx);
+            workspace.update(cx, |ws, cx| ws.apply_remote_snapshot(&snapshots, window_id, fm, cx));
         });
     }
 
@@ -1074,25 +764,10 @@ impl_focusable!(WindowView);
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_initial_remote_project_visibility, notify_pane_weaks};
-    use crate::workspace::state::{WindowId, WindowState, Workspace, WorkspaceData};
+    use super::notify_pane_weaks;
     use gpui::AppContext as _;
-    use std::collections::HashMap;
 
     struct Stub;
-
-    fn make_workspace() -> Workspace {
-        Workspace::new(WorkspaceData {
-            version: 1,
-            projects: Vec::new(),
-            project_order: Vec::new(),
-            folders: Vec::new(),
-            service_panel_heights: HashMap::new(),
-            hook_panel_heights: HashMap::new(),
-            main_window: WindowState::default(),
-            extra_windows: Vec::new(),
-        })
-    }
 
     #[gpui::test]
     fn fans_out_to_every_alive_weak_and_prunes_dead(cx: &mut gpui::TestAppContext) {
@@ -1121,76 +796,5 @@ mod tests {
             assert!(!notify_pane_weaks(&mut weaks, cx));
             assert!(weaks.is_empty(), "all dead entries pruned");
         });
-    }
-
-    #[test]
-    fn remote_project_initial_visibility_consumes_pending_create_window() {
-        let mut ws = make_workspace();
-        let extra_a = WindowState::default();
-        let extra_a_id = extra_a.id;
-        let extra_b = WindowState::default();
-        let extra_b_id = extra_b.id;
-        ws.data.extra_windows = vec![extra_a, extra_b];
-
-        ws.queue_pending_remote_project_visibility(
-            WindowId::Extra(extra_a_id),
-            "conn",
-            "Project",
-            Some("/repo/project"),
-        );
-        apply_initial_remote_project_visibility(
-            &mut ws,
-            "conn",
-            "remote:conn:p1",
-            "Project",
-            "/repo/project",
-            true,
-        );
-
-        assert!(ws.data.main_window.hidden_project_ids.contains("remote:conn:p1"));
-        assert!(
-            !ws.data
-                .window(WindowId::Extra(extra_a_id))
-                .unwrap()
-                .hidden_project_ids
-                .contains("remote:conn:p1")
-        );
-        assert!(
-            ws.data
-                .window(WindowId::Extra(extra_b_id))
-                .unwrap()
-                .hidden_project_ids
-                .contains("remote:conn:p1")
-        );
-        assert_eq!(
-            ws.take_pending_remote_project_visibility("conn", "Project", "/repo/project"),
-            None
-        );
-    }
-
-    #[test]
-    fn remote_project_initial_visibility_without_pending_uses_wire_hidden_flag() {
-        let mut ws = make_workspace();
-        let extra = WindowState::default();
-        let extra_id = extra.id;
-        ws.data.extra_windows = vec![extra];
-
-        apply_initial_remote_project_visibility(
-            &mut ws,
-            "conn",
-            "remote:conn:p1",
-            "Project",
-            "/repo/project",
-            false,
-        );
-
-        assert!(ws.data.main_window.hidden_project_ids.contains("remote:conn:p1"));
-        assert!(
-            ws.data
-                .window(WindowId::Extra(extra_id))
-                .unwrap()
-                .hidden_project_ids
-                .contains("remote:conn:p1")
-        );
     }
 }
