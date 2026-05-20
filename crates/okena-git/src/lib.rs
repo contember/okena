@@ -359,9 +359,13 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
 
     let mut summaries = Vec::new();
 
-    // Get tracked file changes with numstat
+    // Get tracked file changes with numstat.
+    // --no-renames: report renames as the new path directly (a delete of the
+    // old path + add of the new) instead of numstat's `old => new` /
+    // `{a => b}` arrow form, which would otherwise be stored verbatim as the
+    // file path. Keeps this consistent with get_diff_stats in repository.rs.
     let output = safe_output(
-        command("git").args(["-C", path_str, "diff", "--numstat", "--no-color", "--no-ext-diff", "HEAD"]),
+        command("git").args(["-C", path_str, "diff", "--numstat", "--no-renames", "--no-color", "--no-ext-diff", "HEAD"]),
     )
     .ok();
 

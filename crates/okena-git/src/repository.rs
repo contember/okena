@@ -316,8 +316,11 @@ fn get_diff_stats(path: &Path) -> Option<(usize, usize)> {
 
     let (mut added, mut removed) = (0usize, 0usize);
 
+    // --no-renames: report renames as a delete of the old path + add of the
+    // new path rather than numstat's `old => new` arrow form. Consistent with
+    // get_diff_file_summary in lib.rs.
     match safe_output(
-        command("git").args(["-C", path_str, "diff", "--numstat", "--no-color", "--no-ext-diff", "HEAD"]),
+        command("git").args(["-C", path_str, "diff", "--numstat", "--no-renames", "--no-color", "--no-ext-diff", "HEAD"]),
     ) {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);

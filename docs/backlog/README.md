@@ -24,7 +24,6 @@ recovery toasts). The items below remain.
 
 ## Low
 
-- [Git diff parser mishandles renames](git-diff-rename-handling.md) — bug, edge case
 - [recover_settings_from_json silently drops fields](settings-recover-from-json-incomplete.md) — data safety
 
 ## Context

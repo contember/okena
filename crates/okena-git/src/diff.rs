@@ -127,10 +127,15 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
                 files.push(file);
             }
 
-            // Start new file
+            // Start new file. Use the "diff --git a/<old> b/<new>" header as a
+            // fallback source of paths: pure renames/copies and mode-only
+            // changes emit no `---`/`+++` lines, so without this fallback the
+            // FileDiff would have both paths None and display_name() would
+            // return "unknown".
+            let (old_path, new_path) = parse_diff_git_header(line);
             current_file = Some(FileDiff {
-                old_path: None,
-                new_path: None,
+                old_path,
+                new_path,
                 hunks: Vec::new(),
                 is_binary: false,
                 lines_added: 0,
@@ -145,10 +150,33 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
             None => continue,
         };
 
-        // Parse old file path
+        // Parse rename/copy headers. A pure rename (100% similarity) emits
+        // `rename from <old>` / `rename to <new>` with no `---`/`+++` lines;
+        // copies emit `copy from`/`copy to` analogously. These override the
+        // `diff --git` fallback with the authoritative (unprefixed) paths.
+        if let Some(old) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("copy from "))
+        {
+            file.old_path = Some(old.to_string());
+            continue;
+        }
+        if let Some(new) = line
+            .strip_prefix("rename to ")
+            .or_else(|| line.strip_prefix("copy to "))
+        {
+            file.new_path = Some(new.to_string());
+            continue;
+        }
+
+        // Parse old file path. These lines are authoritative and override the
+        // `diff --git` header fallback (e.g. /dev/null clears the path for an
+        // added file even though the header carried a fake `a/<new>`).
         if line.starts_with("--- ") {
             let path = line.strip_prefix("--- ").unwrap_or("");
-            if path != "/dev/null" {
+            if path == "/dev/null" {
+                file.old_path = None;
+            } else {
                 // Strip "a/" prefix if present
                 let path = path.strip_prefix("a/").unwrap_or(path);
                 file.old_path = Some(path.to_string());
@@ -159,7 +187,9 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
         // Parse new file path
         if line.starts_with("+++ ") {
             let path = line.strip_prefix("+++ ").unwrap_or("");
-            if path != "/dev/null" {
+            if path == "/dev/null" {
+                file.new_path = None;
+            } else {
                 // Strip "b/" prefix if present
                 let path = path.strip_prefix("b/").unwrap_or(path);
                 file.new_path = Some(path.to_string());
@@ -260,6 +290,48 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
     }
 
     DiffResult { files }
+}
+
+/// Parse the `diff --git a/<old> b/<new>` header into (old_path, new_path).
+///
+/// This is a best-effort fallback used when a file section carries no
+/// `---`/`+++` lines (pure renames/copies, mode-only changes). The
+/// authoritative paths come from `rename from`/`rename to` or `---`/`+++`
+/// lines when present, which override this.
+///
+/// Caveat: when paths contain spaces the `a/… b/…` form is ambiguous and git
+/// quotes them or relies on the explicit headers instead, so this helper only
+/// reliably handles unquoted, space-free paths. Returns `(None, None)` if the
+/// header can't be split unambiguously.
+fn parse_diff_git_header(line: &str) -> (Option<String>, Option<String>) {
+    let rest = match line.strip_prefix("diff --git ") {
+        Some(r) => r,
+        None => return (None, None),
+    };
+
+    // Quoted paths (contain spaces / special chars) are not handled here; defer
+    // to the explicit rename/`---`/`+++` headers.
+    if rest.starts_with('"') {
+        return (None, None);
+    }
+
+    let a = match rest.strip_prefix("a/") {
+        Some(a) => a,
+        None => return (None, None),
+    };
+
+    // Split on the " b/" that separates the two paths. Use the last occurrence
+    // so directory components named "b" earlier in the old path don't trip us.
+    let (old, new) = match a.rsplit_once(" b/") {
+        Some(pair) => pair,
+        None => return (None, None),
+    };
+
+    if old.is_empty() || new.is_empty() {
+        return (None, None);
+    }
+
+    (Some(old.to_string()), Some(new.to_string()))
 }
 
 /// Parse hunk header to extract old and new starting line numbers.
@@ -819,6 +891,112 @@ diff --git a/b.rs b/b.rs
             get_file_from_working_tree(dir.path(), "../../../etc/passwd"),
             None
         );
+    }
+
+    #[test]
+    fn test_parse_pure_rename() {
+        // A 100%-similarity rename emits no `---`/`+++` lines and no hunks.
+        let diff = "diff --git a/src/old_name.rs b/src/new_name.rs\n\
+                    similarity index 100%\n\
+                    rename from src/old_name.rs\n\
+                    rename to src/new_name.rs\n";
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].old_path, Some("src/old_name.rs".to_string()));
+        assert_eq!(result.files[0].new_path, Some("src/new_name.rs".to_string()));
+        assert!(result.files[0].hunks.is_empty());
+        // Bug fix: previously returned "unknown" because both paths were None.
+        assert_eq!(result.files[0].display_name(), "src/new_name.rs");
+    }
+
+    #[test]
+    fn test_parse_rename_with_changes() {
+        // A rename with content edits emits both rename headers and `---`/`+++`.
+        let diff = r#"diff --git a/src/old.rs b/src/new.rs
+similarity index 80%
+rename from src/old.rs
+rename to src/new.rs
+--- a/src/old.rs
++++ b/src/new.rs
+@@ -1,3 +1,4 @@
+ fn main() {
++    println!("added");
+     println!("World");
+ }
+"#;
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].old_path, Some("src/old.rs".to_string()));
+        assert_eq!(result.files[0].new_path, Some("src/new.rs".to_string()));
+        assert_eq!(result.files[0].lines_added, 1);
+        assert_eq!(result.files[0].hunks.len(), 1);
+        assert_eq!(result.files[0].display_name(), "src/new.rs");
+    }
+
+    #[test]
+    fn test_parse_copy() {
+        // `copy from`/`copy to` headers are handled like renames.
+        let diff = "diff --git a/src/orig.rs b/src/copy.rs\n\
+                    similarity index 100%\n\
+                    copy from src/orig.rs\n\
+                    copy to src/copy.rs\n";
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].old_path, Some("src/orig.rs".to_string()));
+        assert_eq!(result.files[0].new_path, Some("src/copy.rs".to_string()));
+        assert_eq!(result.files[0].display_name(), "src/copy.rs");
+    }
+
+    #[test]
+    fn test_parse_diff_git_header_helper() {
+        assert_eq!(
+            parse_diff_git_header("diff --git a/src/main.rs b/src/main.rs"),
+            (Some("src/main.rs".to_string()), Some("src/main.rs".to_string()))
+        );
+        assert_eq!(
+            parse_diff_git_header("diff --git a/old.rs b/new.rs"),
+            (Some("old.rs".to_string()), Some("new.rs".to_string()))
+        );
+        // Quoted (special-char) paths are deferred to explicit headers.
+        assert_eq!(
+            parse_diff_git_header("diff --git \"a/has space.rs\" \"b/has space.rs\""),
+            (None, None)
+        );
+        // Non-header input.
+        assert_eq!(parse_diff_git_header("@@ -1 +1 @@"), (None, None));
+    }
+
+    #[test]
+    fn test_parse_rename_falls_back_to_git_header() {
+        // No explicit rename/`---`/`+++` lines (e.g. mode-only change): paths
+        // come from the `diff --git` header so display_name isn't "unknown".
+        let diff = "diff --git a/script.sh b/script.sh\n\
+                    old mode 100644\n\
+                    new mode 100755\n";
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].new_path, Some("script.sh".to_string()));
+        assert_eq!(result.files[0].display_name(), "script.sh");
+    }
+
+    #[test]
+    fn test_numstat_rename_arrow_and_brace_forms() {
+        // Documents the shapes `git diff --numstat` (without --no-renames) emits
+        // for renames, and confirms the `--no-renames` choice avoids them: the
+        // path column would otherwise carry an arrow that we'd store verbatim.
+        // Bare arrow form.
+        let bare = "0\t0\told.rs => new.rs";
+        let parts: Vec<&str> = bare.split('\t').collect();
+        assert!(parts[2].contains(" => "));
+        // Brace form.
+        let brace = "3\t1\tdir/{old => new}/file.rs";
+        let parts: Vec<&str> = brace.split('\t').collect();
+        assert!(parts[2].contains("{old => new}"));
+        // Binary rename uses "-" for the counts.
+        let binary = "-\t-\tassets/{a => b}/logo.png";
+        let parts: Vec<&str> = binary.split('\t').collect();
+        assert_eq!(parts[0], "-");
+        assert_eq!(parts[1], "-");
     }
 
     #[test]
