@@ -515,7 +515,15 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
+
+    // Drain stdout/stderr on dedicated threads, concurrently with the wait loop
+    // below. Otherwise a child that writes more than the OS pipe buffer (~64KB)
+    // blocks on `write` forever while we wait for it to exit and never drain —
+    // a classic deadlock, hit by e.g. a large `docker ps -a` or `git diff`.
+    let out_reader = spawn_pipe_reader(child.stdout.take());
+    let err_reader = spawn_pipe_reader(child.stderr.take());
+
     let child = Arc::new(Mutex::new(child));
 
     // Publish the kill handle so cancel()/cancel_scope() can reach this child.
@@ -526,10 +534,9 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
     }
     // Lost a cancellation race between the check above and registering: honor it.
     if ctl.is_cancelled() {
-        if let Ok(mut c) = child.lock() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
+        kill_and_reap(&child);
+        let _ = out_reader.join();
+        let _ = err_reader.join();
         return Err(cancelled_err());
     }
 
@@ -541,6 +548,8 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
         // report that as cancelled rather than as a (signal) success.
         if ctl.is_cancelled() {
             kill_and_reap(&child);
+            let _ = out_reader.join();
+            let _ = err_reader.join();
             return Err(cancelled_err());
         }
 
@@ -550,10 +559,10 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
         };
 
         if let Some(status) = status {
-            let (stdout, stderr) = {
-                let mut c = child.lock().unwrap_or_else(|e| e.into_inner());
-                drain_pipes(&mut c)
-            };
+            // Child exited → its write ends are closed, so the reader threads
+            // hit EOF and finish; join collects everything they buffered.
+            let stdout = out_reader.join().unwrap_or_default();
+            let stderr = err_reader.join().unwrap_or_default();
             return Ok(Output {
                 status,
                 stdout,
@@ -565,6 +574,8 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
             && Instant::now() >= deadline
         {
             kill_and_reap(&child);
+            let _ = out_reader.join();
+            let _ = err_reader.join();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "process timed out",
@@ -576,27 +587,18 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
     }
 }
 
-fn drain_pipes(child: &mut std::process::Child) -> (Vec<u8>, Vec<u8>) {
-    use std::io::Read;
-    let stdout = child
-        .stdout
-        .take()
-        .map(|mut s| {
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf);
-            buf
-        })
-        .unwrap_or_default();
-    let stderr = child
-        .stderr
-        .take()
-        .map(|mut s| {
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf);
-            buf
-        })
-        .unwrap_or_default();
-    (stdout, stderr)
+/// Spawn a thread that reads a child pipe to EOF into a buffer. Reading
+/// concurrently with the wait loop prevents a full-pipe write deadlock.
+fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut r) = pipe {
+            let _ = r.read_to_end(&mut buf);
+        }
+        buf
+    })
 }
 
 fn kill_and_reap(child: &Arc<Mutex<std::process::Child>>) {
