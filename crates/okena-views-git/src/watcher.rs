@@ -204,7 +204,14 @@ impl GitStatusWatcher {
                 // Poll the full local project list — git status is fast and
                 // bounded, and any window that ever surfaces a project gets
                 // its data.
-                let projects: Vec<(String, String)> = cx.update(|cx| {
+                // `projects`: every non-remote project (+ remotely subscribed
+                //   ones) — git status (gix, cheap) is polled for all of them.
+                // `gh_ids`: the subset eligible for the expensive `gh` PR/CI
+                //   fan-out — projects visible in some window, plus any with a
+                //   remotely subscribed terminal. A project sitting in a
+                //   collapsed folder or hidden in every window doesn't need its
+                //   PR/CI polled until it's actually shown.
+                let (projects, gh_ids): (Vec<(String, String)>, HashSet<String>) = cx.update(|cx| {
                     let ws = workspace.read(cx);
 
                     let mut project_ids: HashSet<String> = ws.projects()
@@ -213,24 +220,29 @@ impl GitStatusWatcher {
                         .map(|p| p.id.clone())
                         .collect();
 
-                    // Add projects with remotely subscribed terminals
+                    let mut gh_ids = ws.all_visible_project_ids();
+
+                    // Add projects with remotely subscribed terminals — they're
+                    // shown on a remote client, so poll their PR/CI too.
                     if let Ok(remote_terminals) = remote_subscribed_terminals.read() {
                         for terminal_ids in remote_terminals.values() {
                             for tid in terminal_ids {
                                 if let Some(p) = ws.find_project_for_terminal(tid)
                                     && !p.is_remote {
                                         project_ids.insert(p.id.clone());
+                                        gh_ids.insert(p.id.clone());
                                     }
                             }
                         }
                     }
 
                     // Resolve to (id, path) pairs
-                    ws.projects()
+                    let projects = ws.projects()
                         .iter()
                         .filter(|p| project_ids.contains(&p.id))
                         .map(|p| (p.id.clone(), p.path.clone()))
-                        .collect()
+                        .collect();
+                    (projects, gh_ids)
                 });
 
                 // Skip the cycle-0 `gh` fan-out: at startup the app is already
@@ -284,7 +296,9 @@ impl GitStatusWatcher {
                 // Phase 2: Fetch PR info in parallel (slower, network calls) — only on PR poll cycles.
                 // Runs after all statuses are updated so git status isn't delayed by PR checks.
                 let new_pr_infos: HashMap<String, Option<okena_git::PrInfo>> = if check_prs {
-                    let pr_futures: Vec<_> = projects.iter().map(|(id, path)| {
+                    let pr_futures: Vec<_> = projects.iter()
+                        .filter(|(id, _)| gh_ids.contains(id))
+                        .map(|(id, path)| {
                         let id = id.clone();
                         let path = path.clone();
                         async move {
@@ -317,6 +331,7 @@ impl GitStatusWatcher {
                         this.update(cx, |this, _| this.pr_infos.clone()).unwrap_or_default()
                     };
                     let ci_futures: Vec<_> = projects.iter()
+                        .filter(|(id, _)| gh_ids.contains(id))
                         .map(|(id, path)| {
                             let id = id.clone();
                             let path = path.clone();

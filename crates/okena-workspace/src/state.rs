@@ -561,6 +561,25 @@ impl Workspace {
         )
     }
 
+    /// Union of project IDs visible in *any* window (main + extras).
+    ///
+    /// Uses each window's persistent visibility (folder filter + hidden set)
+    /// but deliberately *not* the transient fullscreen-focus narrowing
+    /// (`focus_individual`), so the set stays stable as focus moves around.
+    /// Used by the git-status watcher to scope expensive `gh` PR/CI polling to
+    /// projects the user can actually see somewhere.
+    pub fn all_visible_project_ids(&self) -> std::collections::HashSet<String> {
+        let mut ids = std::collections::HashSet::new();
+        for window in
+            std::iter::once(&self.data.main_window).chain(self.data.extra_windows.iter())
+        {
+            for p in compute_visible_projects(&self.data, None, false, window) {
+                ids.insert(p.id.clone());
+            }
+        }
+        ids
+    }
+
     /// Get IDs of worktree children for a given parent project.
     pub fn worktree_child_ids(&self, parent_id: &str) -> Vec<String> {
         self.data.projects.iter()
