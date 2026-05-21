@@ -138,6 +138,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     ///    - 401: token expired, set Pairing status
     /// 3. No saved_token: set Pairing status
     pub fn connect(&mut self) {
+        // Tear down any prior connection so we don't orphan its WS task.
+        self.abort_ws_task();
         self.status = ConnectionStatus::Connecting;
 
         let config = self.config.clone();
@@ -272,6 +274,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     /// Pair with the remote server using a 6-digit code.
     /// On success, saves the token and starts the WebSocket connection.
     pub fn pair(&mut self, code: &str) {
+        // Tear down any prior connection so we don't orphan its WS task.
+        self.abort_ws_task();
         let config = self.config.clone();
         let code = code.to_string();
         let event_tx = self.event_tx.clone();
@@ -373,17 +377,21 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.ws_abort_handle = Some(task.abort_handle());
     }
 
-    /// Disconnect and clean up all remote terminals.
-    pub fn disconnect(&mut self) {
-        // Abort the WS task
+    /// Abort any in-flight WS task and close its message channel. Called before
+    /// starting a fresh connection so a reconnect doesn't orphan the prior task,
+    /// and on disconnect/drop for cleanup.
+    fn abort_ws_task(&mut self) {
         if let Some(handle) = self.ws_abort_handle.take() {
             handle.abort();
         }
-
-        // Close the WS sender
         if let Some(tx) = self.ws_tx.take() {
             tx.close();
         }
+    }
+
+    /// Disconnect and clean up all remote terminals.
+    pub fn disconnect(&mut self) {
+        self.abort_ws_task();
 
         // Remove all terminals belonging to this connection
         self.handler.remove_all_terminals(&self.config.id);
@@ -990,6 +998,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 }
             }
         }
+    }
+}
+
+impl<H: ConnectionHandler> Drop for RemoteClient<H> {
+    fn drop(&mut self) {
+        // Ensure the background WS task is aborted and its channel closed even if
+        // disconnect() was never called, so the task doesn't outlive the client.
+        self.abort_ws_task();
     }
 }
 
