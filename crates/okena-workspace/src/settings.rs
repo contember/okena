@@ -691,8 +691,23 @@ where
             .truncate(false)
             .open(&path)?;
 
-        // Acquire exclusive file lock
-        unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) };
+        // Acquire exclusive file lock for cross-process safety. Retry on EINTR;
+        // if locking genuinely fails (e.g. a filesystem without advisory locking,
+        // such as some network mounts) log it and proceed — the process-level
+        // SETTINGS_LOCK still serializes writers within this process.
+        // SAFETY: the fd is owned by the live `file` binding for the whole call.
+        loop {
+            let rc = unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) };
+            if rc == 0 {
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            log::warn!("flock on settings.json failed, proceeding without cross-process lock: {err}");
+            break;
+        }
 
         let mut content = String::new();
         file.read_to_string(&mut content)?;
