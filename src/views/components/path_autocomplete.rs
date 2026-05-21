@@ -171,6 +171,33 @@ impl PathAutoCompleteState {
 
         let (dir_path, prefix) = Self::parse_path_for_completion(&current_value);
 
+        // Listing a directory is blocking IO (slow on network mounts / huge dirs),
+        // so run it off the main thread rather than per keystroke on the UI loop.
+        let value_for_task = current_value.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let new_suggestions = cx
+                .background_executor()
+                .spawn(async move { Self::compute_suggestions(dir_path, prefix, value_for_task) })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                // Guard against a stale result overwriting newer input: only apply
+                // if the input hasn't changed since this lookup was kicked off.
+                if this.input.read(cx).value() != current_value {
+                    return;
+                }
+                this.suggestions = new_suggestions;
+                this.show_suggestions = !this.suggestions.is_empty();
+                this.selected_index = 0;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Build the suggestion list for `current_value`. Performs blocking filesystem
+    /// IO (`read_dir`, `is_dir`), so this must run off the GPUI main thread.
+    fn compute_suggestions(dir_path: PathBuf, prefix: String, current_value: String) -> Vec<PathSuggestion> {
         let mut new_suggestions = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(&dir_path) {
@@ -240,10 +267,7 @@ impl PathAutoCompleteState {
             });
         }
 
-        self.suggestions = new_suggestions;
-        self.show_suggestions = !self.suggestions.is_empty();
-        self.selected_index = 0;
-        cx.notify();
+        new_suggestions
     }
 
     fn complete_selected(&mut self, cx: &mut Context<Self>) {
