@@ -1,24 +1,47 @@
 use okena_core::process;
 use crate::manager::ServiceStatus;
 use serde::Deserialize;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Timeout for Docker CLI commands.  When the Docker daemon is not running the
 /// CLI can hang for many seconds waiting for a connection; this cap prevents it
 /// from blocking background executor threads and starving the UI.
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a *successful* `docker compose version` check stays cached.
+const AVAILABLE_TTL: Duration = Duration::from_secs(60);
+
+/// Last time `docker compose version` was confirmed available. Only successes
+/// are cached (see [`is_docker_compose_available`]).
+static AVAILABLE_OK_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
 /// Check if `docker compose` CLI is available.
 ///
-/// This is intentionally **not** cached: a previous check may have failed
-/// because Docker Desktop was not running yet and caching that result would
-/// permanently disable Docker integration for the session.
+/// Caches **only success** for [`AVAILABLE_TTL`]: once Docker is up it stays up
+/// for the session, so re-spawning `docker compose version` on every service
+/// poll (per project) is pure waste. A *failure* is deliberately never cached —
+/// Docker Desktop may not have started yet, and a sticky `false` would
+/// permanently disable the integration; so we keep re-checking until it works.
 pub fn is_docker_compose_available() -> bool {
+    if let Ok(guard) = AVAILABLE_OK_AT.lock()
+        && let Some(ts) = *guard
+        && ts.elapsed() < AVAILABLE_TTL
+    {
+        return true;
+    }
+
     let mut cmd = process::command("docker");
     cmd.args(["compose", "version"]);
-    process::safe_output_with_timeout(&mut cmd, DOCKER_TIMEOUT)
+    let ok = process::safe_output_with_timeout(&mut cmd, DOCKER_TIMEOUT)
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+
+    if ok && let Ok(mut guard) = AVAILABLE_OK_AT.lock() {
+        *guard = Some(Instant::now());
+    }
+    ok
 }
 
 /// Compose file names to probe, in priority order.
@@ -40,10 +63,39 @@ pub fn detect_compose_file(project_path: &str) -> Option<String> {
     None
 }
 
+/// Cache of parsed service lists keyed by `(project_path, compose_file)`,
+/// invalidated by the compose file's modification time. `docker compose config`
+/// is a heavy spawn whose output only changes when the file does, yet the
+/// service poller asks for it repeatedly — this serves the parsed list from
+/// memory until the file actually changes.
+#[allow(clippy::type_complexity)]
+static CONFIG_CACHE: Mutex<Option<HashMap<(String, String), (SystemTime, Vec<String>)>>> =
+    Mutex::new(None);
+
 /// List service names defined in a compose file.
 /// Excludes services with `deploy.replicas = 0`.
+///
+/// Result is cached per compose file and reused until the file's mtime changes,
+/// so repeated polls don't re-spawn `docker compose config`.
 pub fn list_services(project_path: &str, compose_file: &str) -> crate::ServiceResult<Vec<String>> {
     use crate::error::ServiceError;
+
+    let key = (project_path.to_string(), compose_file.to_string());
+    let mtime = std::path::Path::new(project_path)
+        .join(compose_file)
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok();
+
+    // Serve from cache when the file hasn't changed since we last parsed it.
+    if let Some(mt) = mtime
+        && let Ok(guard) = CONFIG_CACHE.lock()
+        && let Some(cache) = guard.as_ref()
+        && let Some((cached_mt, services)) = cache.get(&key)
+        && *cached_mt == mt
+    {
+        return Ok(services.clone());
+    }
 
     let mut cmd = process::command("docker");
     cmd.args(["compose", "-f", compose_file, "config", "--format", "json"])
@@ -60,7 +112,19 @@ pub fn list_services(project_path: &str, compose_file: &str) -> crate::ServiceRe
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_compose_config_services(&stdout)
+    let services = parse_compose_config_services(&stdout)?;
+
+    // Cache the parsed list against the file mtime so subsequent polls skip the
+    // spawn until the compose file changes.
+    if let Some(mt) = mtime
+        && let Ok(mut guard) = CONFIG_CACHE.lock()
+    {
+        guard
+            .get_or_insert_with(HashMap::new)
+            .insert(key, (mt, services.clone()));
+    }
+
+    Ok(services)
 }
 
 /// Parse `docker compose config --format json` output and return service names,
