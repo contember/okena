@@ -17,6 +17,7 @@ dirs = "5.0"
 log = "0.4"
 jiff = "0.2"
 sha2 = "0.10"
+filetime = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
