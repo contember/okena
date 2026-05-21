@@ -185,11 +185,11 @@ impl GitHeader {
                         });
                     }))
                 };
-            let on_commit_right_click: Option<Arc<dyn Fn(&str, Point<Pixels>, &mut Window, &mut App)>> = {
+            let on_commit_right_click: crate::project_header::CommitRightClickCallback = {
                 let entity_handle = cx.entity().clone();
                 Some(Arc::new(move |hash: &str, position: Point<Pixels>, _window: &mut Window, cx: &mut App| {
                     let hash = hash.to_string();
-                    let _ = entity_handle.update(cx, |this, cx| {
+                    entity_handle.update(cx, |this, cx| {
                         let entry = this
                             .commit_log_entries
                             .iter()

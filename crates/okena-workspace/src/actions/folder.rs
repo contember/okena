@@ -645,8 +645,10 @@ mod gpui_tests {
         data.main_window.folder_filter = Some("f1".to_string());
         data.main_window.folder_collapsed.insert("f1".to_string(), true);
 
-        let mut extra = WindowState::default();
-        extra.folder_filter = Some("f1".to_string());
+        let mut extra = WindowState {
+            folder_filter: Some("f1".to_string()),
+            ..Default::default()
+        };
         extra.folder_collapsed.insert("f1".to_string(), true);
         extra.folder_collapsed.insert("f2".to_string(), true);
         data.extra_windows.push(extra);

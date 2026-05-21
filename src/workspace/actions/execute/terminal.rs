@@ -1,5 +1,10 @@
 //! Terminal action handlers — create / split / close / focus and direct PTY I/O.
 
+// Handlers take the workspace, focus manager, terminals registry and cx as
+// distinct dependencies; bundling them into a context struct would obscure
+// more than it clarifies here.
+#![allow(clippy::too_many_arguments)]
+
 use super::{
     ActionResult, ensure_terminal, find_terminal_path, spawn_uninitialized_terminals,
 };

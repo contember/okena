@@ -1,5 +1,10 @@
 //! Tab and pane-move action handlers.
 
+// Handlers take the workspace, focus manager, terminals registry and cx as
+// distinct dependencies; bundling them into a context struct would obscure
+// more than it clarifies here.
+#![allow(clippy::too_many_arguments)]
+
 use super::{ActionResult, spawn_uninitialized_terminals};
 use crate::terminal::backend::TerminalBackend;
 use crate::workspace::focus::FocusManager;

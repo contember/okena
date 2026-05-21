@@ -76,7 +76,8 @@ impl CloseEvent for PairingDialogEvent {
 #[derive(Clone)]
 pub enum OverlayManagerEvent {
     /// Session manager requested workspace switch
-    SwitchWorkspace(WorkspaceData),
+    // Boxed: WorkspaceData is large and would bloat every event otherwise.
+    SwitchWorkspace(Box<WorkspaceData>),
 
     /// Worktree dialog created a new project
     WorktreeCreated(String),
@@ -536,7 +537,7 @@ impl OverlayManager {
                         this.close_modal(cx);
                     }
                     SessionManagerEvent::SwitchWorkspace(data) => {
-                        cx.emit(OverlayManagerEvent::SwitchWorkspace((**data).clone()));
+                        cx.emit(OverlayManagerEvent::SwitchWorkspace(data.clone()));
                         this.close_modal(cx);
                     }
                 }

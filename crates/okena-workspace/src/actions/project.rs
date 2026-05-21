@@ -1173,7 +1173,7 @@ mod gpui_tests {
         // window_id and unconditionally writes to main, scatters the write
         // across all extras, or routes through main's slot.
         let mut data = make_workspace_data();
-        let mut extra_a = WindowState::default();
+        let extra_a = WindowState::default();
         let extra_a_id = extra_a.id;
         let mut extra_b = WindowState::default();
         let extra_b_id = extra_b.id;

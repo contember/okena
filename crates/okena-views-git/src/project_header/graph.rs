@@ -164,6 +164,8 @@ fn render_ref_label(ref_name: &str, t: &ThemeColors, cx: &App) -> AnyElement {
 /// `on_commit_right_click` is called with `(commit_hash, mouse_position)` when
 /// the user right-clicks a commit row — used to open a context menu (e.g.
 /// "Send to Terminal", "Copy Hash").
+// Render helper: params are render inputs (geometry, theme, callbacks).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_lane_row(
     row: &LaneRow,
     index: usize,

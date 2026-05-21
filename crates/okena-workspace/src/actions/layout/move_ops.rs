@@ -1,5 +1,10 @@
 //! Pane and tab moves (same-project and cross-project).
 
+// Move ops thread the workspace, focus manager, layout path, drop zone and cx
+// as distinct positional inputs; a context struct would obscure more than it
+// clarifies here.
+#![allow(clippy::too_many_arguments)]
+
 use crate::focus::FocusManager;
 use crate::state::{DropZone, LayoutNode, SplitDirection, Workspace};
 use gpui::*;
