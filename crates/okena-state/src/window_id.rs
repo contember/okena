@@ -56,7 +56,7 @@ mod tests {
 
         assert_eq!(map.get(&WindowId::Main).copied(), Some("main"));
         assert_eq!(map.get(&WindowId::Extra(extra_id)).copied(), Some("extra"));
-        assert!(map.get(&WindowId::Extra(Uuid::new_v4())).is_none());
+        assert!(!map.contains_key(&WindowId::Extra(Uuid::new_v4())));
     }
 
     #[test]

@@ -270,8 +270,10 @@ mod gpui_tests {
         let mut data = make_workspace_data();
         let extra_a = WindowState::default();
         let extra_a_id = extra_a.id;
-        let mut extra_b = WindowState::default();
-        extra_b.folder_filter = Some("f1".to_string());
+        let extra_b = WindowState {
+            folder_filter: Some("f1".to_string()),
+            ..Default::default()
+        };
         let extra_b_id = extra_b.id;
         data.extra_windows = vec![extra_a, extra_b];
         let workspace = cx.new(|_cx| Workspace::new(data));

@@ -385,7 +385,10 @@ impl WindowView {
         view
     }
 
-    /// Get the terminals registry (for sharing with detached windows)
+    /// Get the terminals registry (for sharing with detached windows).
+    // Forward-looking API for slice 05 (multi-window): detached windows will
+    // share this registry. Unused until then.
+    #[allow(dead_code)]
     pub fn terminals(&self) -> &TerminalsRegistry {
         &self.terminals
     }

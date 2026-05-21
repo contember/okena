@@ -89,14 +89,14 @@ fn format_code_block(block: &CodeBlock, terminal_cwd: Option<&Path>) -> String {
 /// (with a leading `./` so it's unambiguously a path even when it has no
 /// directory). Otherwise return the absolute path as-is.
 fn relative_to_cwd(path: &Path, cwd: Option<&Path>) -> String {
-    if let Some(cwd) = cwd {
-        if let Ok(rel) = path.strip_prefix(cwd) {
-            let rel_str = rel.to_string_lossy();
-            if rel_str.is_empty() {
-                return ".".into();
-            }
-            return format!("./{}", rel_str);
+    if let Some(cwd) = cwd
+        && let Ok(rel) = path.strip_prefix(cwd)
+    {
+        let rel_str = rel.to_string_lossy();
+        if rel_str.is_empty() {
+            return ".".into();
         }
+        return format!("./{}", rel_str);
     }
     path.to_string_lossy().into_owned()
 }

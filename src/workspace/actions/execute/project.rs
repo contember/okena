@@ -1,5 +1,10 @@
 //! Project, folder, and worktree action handlers.
 
+// Handlers take the workspace, focus manager, terminals registry and cx as
+// distinct dependencies; bundling them into a context struct would obscure
+// more than it clarifies here.
+#![allow(clippy::too_many_arguments)]
+
 use super::{ActionResult, find_first_terminal_id, spawn_uninitialized_terminals};
 use crate::settings::settings;
 use crate::terminal::backend::TerminalBackend;

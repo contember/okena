@@ -2595,11 +2595,15 @@ mod gpui_tests {
         // or routes through the wrong slot would surface here.
         let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
         data.main_window.folder_filter = Some("main_folder".to_string());
-        let mut extra_a = WindowState::default();
-        extra_a.folder_filter = Some("extra_a_folder".to_string());
+        let extra_a = WindowState {
+            folder_filter: Some("extra_a_folder".to_string()),
+            ..Default::default()
+        };
         let extra_a_id = extra_a.id;
-        let mut extra_b = WindowState::default();
-        extra_b.folder_filter = Some("extra_b_folder".to_string());
+        let extra_b = WindowState {
+            folder_filter: Some("extra_b_folder".to_string()),
+            ..Default::default()
+        };
         let extra_b_id = extra_b.id;
         data.extra_windows = vec![extra_a, extra_b];
         let workspace = cx.new(|_cx| Workspace::new(data));

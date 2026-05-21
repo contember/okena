@@ -467,11 +467,10 @@ fn migrate_legacy_workspace_value(value: &mut serde_json::Value) {
     }
 
     // Fold top-level project_widths
-    if let Some(widths) = map.remove("project_widths") {
-        if let Value::Object(mw) = &mut main_window {
-            mw.entry("project_widths".to_string())
-                .or_insert(widths);
-        }
+    if let Some(widths) = map.remove("project_widths")
+        && let Value::Object(mw) = &mut main_window
+    {
+        mw.entry("project_widths".to_string()).or_insert(widths);
     }
 
     // Walk projects, strip show_in_overview/is_visible, collect hidden ids
@@ -486,23 +485,23 @@ fn migrate_legacy_workspace_value(value: &mut serde_json::Value) {
                     .remove("is_visible")
                     .and_then(|v| v.as_bool());
                 let visible = show_in_overview.or(is_visible).unwrap_or(true);
-                if !visible {
-                    if let Some(id) = po.get("id").and_then(|v| v.as_str()) {
-                        hidden_ids.push(id.to_string());
-                    }
+                if !visible
+                    && let Some(id) = po.get("id").and_then(|v| v.as_str())
+                {
+                    hidden_ids.push(id.to_string());
                 }
             }
         }
     }
-    if !hidden_ids.is_empty() {
-        if let Value::Object(mw) = &mut main_window {
-            let entry = mw
-                .entry("hidden_project_ids".to_string())
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Value::Array(arr) = entry {
-                for id in hidden_ids {
-                    arr.push(Value::String(id));
-                }
+    if !hidden_ids.is_empty()
+        && let Value::Object(mw) = &mut main_window
+    {
+        let entry = mw
+            .entry("hidden_project_ids".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Value::Array(arr) = entry {
+            for id in hidden_ids {
+                arr.push(Value::String(id));
             }
         }
     }
@@ -516,23 +515,23 @@ fn migrate_legacy_workspace_value(value: &mut serde_json::Value) {
                     .remove("collapsed")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                if collapsed {
-                    if let Some(id) = fo.get("id").and_then(|v| v.as_str()) {
-                        collapsed_ids.push(id.to_string());
-                    }
+                if collapsed
+                    && let Some(id) = fo.get("id").and_then(|v| v.as_str())
+                {
+                    collapsed_ids.push(id.to_string());
                 }
             }
         }
     }
-    if !collapsed_ids.is_empty() {
-        if let Value::Object(mw) = &mut main_window {
-            let entry = mw
-                .entry("folder_collapsed".to_string())
-                .or_insert_with(|| Value::Object(serde_json::Map::new()));
-            if let Value::Object(fc) = entry {
-                for id in collapsed_ids {
-                    fc.insert(id, Value::Bool(true));
-                }
+    if !collapsed_ids.is_empty()
+        && let Value::Object(mw) = &mut main_window
+    {
+        let entry = mw
+            .entry("folder_collapsed".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(fc) = entry {
+            for id in collapsed_ids {
+                fc.insert(id, Value::Bool(true));
             }
         }
     }

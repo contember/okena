@@ -101,7 +101,6 @@ impl ProjectColumn {
             let be = backend.clone();
             let ts = terminals.clone();
             let ad = active_drag.clone();
-            let window_id = window_id;
             cx.new(move |cx| {
                 ServicePanel::new(pid, ws, fm, rb, be, ts, ad, window_id, initial_service_height, cx)
             })
@@ -120,7 +119,6 @@ impl ProjectColumn {
             let be = backend.clone();
             let ts = terminals.clone();
             let ad = active_drag.clone();
-            let window_id = window_id;
             cx.new(move |cx| {
                 HookPanel::new(pid, ws, fm, rb, be, ts, ad, window_id, initial_hook_height, cx)
             })

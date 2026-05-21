@@ -28,6 +28,9 @@ use std::sync::Arc;
 /// the right window's slot. Remote projects also carry `window_id` so a UI
 /// action issued in W2 against a remote project mutates W2's per-window
 /// state on the local mirror, not main's.
+// Threads the workspace, focus manager, terminals, service/remote managers and
+// cx as distinct dependencies; a context struct would obscure more than help.
+#[allow(clippy::too_many_arguments)]
 pub fn dispatcher_for_project(
     project_id: &str,
     window_id: WindowId,

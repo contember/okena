@@ -348,35 +348,35 @@ impl FocusManager {
         F: Fn(&str) -> bool + Copy,
     {
         let mut changed = false;
-        if let Some(id) = self.focused_project_id.as_deref() {
-            if !project_exists(id) {
-                self.focused_project_id = None;
-                changed = true;
-            }
+        if let Some(id) = self.focused_project_id.as_deref()
+            && !project_exists(id)
+        {
+            self.focused_project_id = None;
+            changed = true;
         }
-        if let Some(ref target) = self.current_focus {
-            if !project_exists(&target.project_id) {
-                self.current_focus = None;
-                self.context = FocusContext::Terminal;
-                changed = true;
-            }
+        if let Some(ref target) = self.current_focus
+            && !project_exists(&target.project_id)
+        {
+            self.current_focus = None;
+            self.context = FocusContext::Terminal;
+            changed = true;
         }
-        if let Some(ref target) = self.pre_zoom_focus {
-            if !project_exists(&target.project_id) {
-                self.pre_zoom_focus = None;
-                changed = true;
-            }
+        if let Some(ref target) = self.pre_zoom_focus
+            && !project_exists(&target.project_id)
+        {
+            self.pre_zoom_focus = None;
+            changed = true;
         }
         let before = self.focus_stack.len();
         self.focus_stack.retain(|entry| {
             let target_alive = entry
                 .target
                 .as_ref()
-                .map_or(true, |t| project_exists(&t.project_id));
+                .is_none_or(|t| project_exists(&t.project_id));
             let project_alive = entry
                 .focused_project_id
                 .as_deref()
-                .map_or(true, project_exists);
+                .is_none_or(project_exists);
             target_alive && project_alive
         });
         if self.focus_stack.len() != before {

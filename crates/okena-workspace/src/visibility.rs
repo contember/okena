@@ -455,8 +455,10 @@ mod tests {
             project_ids: vec!["p1".to_string(), "p2".to_string()],
             folder_color: FolderColor::default(),
         });
-        let mut window = WindowState::default();
-        window.folder_filter = Some("f1".to_string());
+        let window = WindowState {
+            folder_filter: Some("f1".to_string()),
+            ..Default::default()
+        };
         let visible = compute_visible_projects(&data, None, false, &window);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p2"]);

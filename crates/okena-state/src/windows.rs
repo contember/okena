@@ -78,10 +78,10 @@ impl WorkspaceData {
     /// becomes visible). Unknown extra ids are a silent no-op, matching the
     /// `window_mut` lookup contract.
     pub fn toggle_hidden(&mut self, id: WindowId, project_id: &str) {
-        if let Some(w) = self.window_mut(id) {
-            if !w.hidden_project_ids.remove(project_id) {
-                w.hidden_project_ids.insert(project_id.to_string());
-            }
+        if let Some(w) = self.window_mut(id)
+            && !w.hidden_project_ids.remove(project_id)
+        {
+            w.hidden_project_ids.insert(project_id.to_string());
         }
     }
 
@@ -282,10 +282,10 @@ impl WorkspaceData {
             window
                 .folder_collapsed
                 .retain(|id, _| valid_folders.contains(id));
-            if let Some(filter) = &window.folder_filter {
-                if !valid_folders.contains(filter) {
-                    window.folder_filter = None;
-                }
+            if let Some(filter) = &window.folder_filter
+                && !valid_folders.contains(filter)
+            {
+                window.folder_filter = None;
             }
         }
     }

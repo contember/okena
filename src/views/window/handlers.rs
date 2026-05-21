@@ -199,7 +199,7 @@ impl WindowView {
     ) {
         match event {
             OverlayManagerEvent::SwitchWorkspace(data) => {
-                self.handle_switch_workspace(data.clone(), cx);
+                self.handle_switch_workspace((**data).clone(), cx);
             }
             OverlayManagerEvent::WorktreeCreated(new_project_id) => {
                 self.spawn_terminals_for_project(new_project_id.clone(), cx);
