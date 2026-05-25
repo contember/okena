@@ -157,6 +157,9 @@ pub fn execute_action(
         ActionRequest::ReadFile { project_id, relative_path } => {
             files::read_file(ws, project_id, relative_path)
         }
+        ActionRequest::ReadFileBytes { project_id, relative_path } => {
+            files::read_file_bytes(ws, project_id, relative_path)
+        }
         ActionRequest::FileSize { project_id, relative_path } => {
             files::file_size(ws, project_id, relative_path)
         }

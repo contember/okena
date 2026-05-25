@@ -675,6 +675,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             relative_path,
         },
+        ActionRequest::ReadFileBytes { project_id, relative_path } => ActionRequest::ReadFileBytes {
+            project_id: s(&project_id),
+            relative_path,
+        },
         ActionRequest::FileSize { project_id, relative_path } => ActionRequest::FileSize {
             project_id: s(&project_id),
             relative_path,

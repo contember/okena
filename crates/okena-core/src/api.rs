@@ -451,6 +451,10 @@ pub enum ActionRequest {
         project_id: String,
         relative_path: String,
     },
+    ReadFileBytes {
+        project_id: String,
+        relative_path: String,
+    },
     FileSize {
         project_id: String,
         relative_path: String,

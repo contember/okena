@@ -22,6 +22,9 @@ pub trait ProjectFs: Send + Sync + 'static {
     /// Read file content as UTF-8 string.
     fn read_file(&self, relative_path: &str) -> Result<String, String>;
 
+    /// Read file content as raw bytes. Used for binary previews (images).
+    fn read_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>, String>;
+
     /// Get file size in bytes.
     fn file_size(&self, relative_path: &str) -> Result<u64, String>;
 
@@ -56,6 +59,25 @@ impl LocalProjectFs {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
+
+    /// Canonicalize `relative_path` inside the project root and reject any
+    /// path that escapes via `..` or absolute-path replacement. Mirrors the
+    /// server-side `resolve_project_file` so the trait has the same
+    /// containment guarantee on both implementations.
+    fn resolve(&self, relative_path: &str) -> Result<PathBuf, String> {
+        let joined = self.path.join(relative_path);
+        let canonical = joined
+            .canonicalize()
+            .map_err(|e| format!("Cannot read file: {}", e))?;
+        let root = self
+            .path
+            .canonicalize()
+            .map_err(|e| format!("Cannot resolve project path: {}", e))?;
+        if !canonical.starts_with(&root) {
+            return Err("path traversal not allowed".to_string());
+        }
+        Ok(canonical)
+    }
 }
 
 impl ProjectFs for LocalProjectFs {
@@ -72,12 +94,17 @@ impl ProjectFs for LocalProjectFs {
     }
 
     fn read_file(&self, relative_path: &str) -> Result<String, String> {
-        let full = self.path.join(relative_path);
+        let full = self.resolve(relative_path)?;
         std::fs::read_to_string(&full).map_err(|e| format!("Cannot read file: {}", e))
     }
 
+    fn read_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>, String> {
+        let full = self.resolve(relative_path)?;
+        std::fs::read(&full).map_err(|e| format!("Cannot read file: {}", e))
+    }
+
     fn file_size(&self, relative_path: &str) -> Result<u64, String> {
-        let full = self.path.join(relative_path);
+        let full = self.resolve(relative_path)?;
         std::fs::metadata(&full)
             .map(|m| m.len())
             .map_err(|e| format!("Cannot read file: {}", e))
@@ -171,6 +198,26 @@ impl ProjectFs for RemoteProjectFs {
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .ok_or_else(|| "Missing content in response".to_string())
+            }
+            None => Err("Empty response".to_string()),
+        }
+    }
+
+    fn read_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>, String> {
+        use base64::Engine as _;
+        let action = okena_core::api::ActionRequest::ReadFileBytes {
+            project_id: self.project_id.clone(),
+            relative_path: relative_path.to_string(),
+        };
+        match self.post_action(action)? {
+            Some(value) => {
+                let encoded = value
+                    .get("content_b64")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "Missing content_b64 in response".to_string())?;
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|e| format!("Invalid base64 in response: {}", e))
             }
             None => Err("Empty response".to_string()),
         }

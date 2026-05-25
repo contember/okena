@@ -52,6 +52,54 @@ pub(super) fn read_file(ws: &Workspace, project_id: String, relative_path: Strin
     }
 }
 
+/// Server-side ceiling on bytes returned from ReadFileBytes. Mirrors the
+/// client's MAX_IMAGE_FILE_SIZE so a misbehaving or older client can't trick
+/// the server into reading and base64-encoding arbitrarily large files
+/// (each request transiently holds raw + base64 + JSON copies, so the
+/// resident multiple is roughly 3-4× the file size).
+const MAX_READ_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+pub(super) fn read_file_bytes(ws: &Workspace, project_id: String, relative_path: String) -> ActionResult {
+    use base64::Engine as _;
+    match ws.project(&project_id) {
+        Some(p) => {
+            let canonical = match resolve_project_file(&p.path, &relative_path) {
+                Ok(c) => c,
+                Err(e) => return ActionResult::Err(e),
+            };
+            // Enforce the cap from metadata before allocating; std::fs::read
+            // alone would happily pull a multi-GB file into memory.
+            match std::fs::metadata(&canonical) {
+                Ok(m) if m.len() > MAX_READ_FILE_BYTES => {
+                    return ActionResult::Err(format!(
+                        "File too large ({:.1} MB). Maximum is {} MB.",
+                        m.len() as f64 / 1024.0 / 1024.0,
+                        MAX_READ_FILE_BYTES / 1024 / 1024
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => return ActionResult::Err(format!("Cannot read file: {}", e)),
+            }
+            match std::fs::read(&canonical) {
+                Ok(bytes) => {
+                    if bytes.len() as u64 > MAX_READ_FILE_BYTES {
+                        // TOCTOU: file grew between stat and read.
+                        return ActionResult::Err(format!(
+                            "File too large ({:.1} MB). Maximum is {} MB.",
+                            bytes.len() as f64 / 1024.0 / 1024.0,
+                            MAX_READ_FILE_BYTES / 1024 / 1024
+                        ));
+                    }
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    ActionResult::Ok(Some(serde_json::json!({ "content_b64": encoded })))
+                }
+                Err(e) => ActionResult::Err(format!("Cannot read file: {}", e)),
+            }
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
 pub(super) fn file_size(ws: &Workspace, project_id: String, relative_path: String) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {

@@ -23,6 +23,10 @@ nucleo-matcher = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
+base64 = "0.22"
+usvg = { version = "0.45", default-features = false }
+ttf-parser = "0.25"
+woff2 = { package = "woff2-patched", version = "0.4" }
 
 [dev-dependencies]
 tempfile = "3"
