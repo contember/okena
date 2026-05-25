@@ -252,17 +252,21 @@ pub(super) fn build_image_content(
                     w, h, MAX_SVG_PIXELS / 1024 / 1024
                 ));
             }
+            let initial_scale: f32 = 1.0;
             let rendered = svg_renderer
-                .render_single_frame(&bytes, 1.0, true)
+                .render_single_frame(&bytes, initial_scale, true)
                 .map_err(|e| format!("Cannot decode SVG: {}", e))?;
             // SVG is XML — UTF-8 unless someone hand-saved it weird. If
             // decoding fails we still surface the preview without source.
-            let source = String::from_utf8(bytes).ok();
+            let svg_bytes = Arc::new(bytes);
+            let source = String::from_utf8(svg_bytes.as_ref().clone()).ok();
             Ok(LoadedContent::Image {
                 decoded: DecodedImage::Rendered {
                     image: rendered,
                     width: w as u32,
                     height: h as u32,
+                    svg_bytes,
+                    rendered_scale: initial_scale,
                 },
                 source,
             })

@@ -83,6 +83,11 @@ pub struct ImageViewState {
     pub pan_anchor: Option<gpui::Point<gpui::Pixels>>,
     pub pan_anchor_offset: gpui::Point<gpui::Pixels>,
     pub background: PreviewBackground,
+    /// True while a background SVG re-rasterization is in flight. Set on
+    /// `maybe_rerender_svg` dispatch and cleared on apply, so concurrent
+    /// zoom changes coalesce into a single follow-up raster instead of
+    /// spamming the background executor.
+    pub svg_rerender_in_flight: bool,
 }
 
 impl Default for ImageViewState {
@@ -95,6 +100,7 @@ impl Default for ImageViewState {
             pan_anchor: None,
             pan_anchor_offset: gpui::Point::default(),
             background: PreviewBackground::Checker,
+            svg_rerender_in_flight: false,
         }
     }
 }
@@ -126,6 +132,8 @@ impl ImageViewState {
         self.is_panning = false;
         self.pan_anchor = None;
         self.pan_anchor_offset = gpui::Point::default();
+        // Keep svg_rerender_in_flight as-is; the in-flight task will
+        // resolve and we'll just discard its result via the apply check.
     }
 }
 
@@ -222,6 +230,16 @@ pub enum DecodedImage {
         image: Arc<RenderImage>,
         width: u32,
         height: u32,
+        /// Raw SVG bytes kept for re-rasterization at higher resolutions
+        /// when the user zooms in. Without this, `image` (a fixed bitmap)
+        /// would visibly pixelate past the rasterized scale.
+        svg_bytes: Arc<Vec<u8>>,
+        /// The `scale_factor` argument that was passed to
+        /// `SvgRenderer::render_single_frame` when `image` was produced.
+        /// GPUI multiplies this by `SMOOTH_SVG_SCALE_FACTOR (= 2)`
+        /// internally, so the actual pixmap is `intrinsic × scale_factor × 2`.
+        /// Used to decide when a re-raster is needed (zoom > rendered_scale).
+        rendered_scale: f32,
     },
 }
 
@@ -896,6 +914,103 @@ impl FileViewer {
             });
         })
         .detach();
+    }
+
+    /// If the active tab is an SVG and the current zoom exceeds the
+    /// rasterized bitmap's resolution, kick off a background re-raster at
+    /// a higher scale so the preview stays crisp.
+    ///
+    /// Coalescing: at most one re-raster is in flight per tab. While one
+    /// is running, further zoom changes are silently absorbed; when the
+    /// result arrives we re-check the current zoom and schedule another
+    /// raster if the user has zoomed further in the meantime.
+    pub(super) fn maybe_rerender_svg(&mut self, cx: &mut Context<Self>) {
+        let relative_path = self.active_tab().relative_path.clone();
+        let svg_renderer = cx.svg_renderer();
+        let Some((bytes, target_scale)) = self.compute_rerender_target(&relative_path) else {
+            return;
+        };
+
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.relative_path == relative_path)
+        {
+            tab.image_view.svg_rerender_in_flight = true;
+        }
+
+        cx.spawn(async move |entity, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    svg_renderer
+                        .render_single_frame(&bytes, target_scale, true)
+                        .map_err(|e| format!("Cannot re-rasterize SVG: {}", e))
+                })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                if let Some(tab) = this
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.relative_path == relative_path)
+                {
+                    tab.image_view.svg_rerender_in_flight = false;
+                    if let Ok(new_image) = result
+                        && let Some(DecodedImage::Rendered {
+                            image,
+                            rendered_scale,
+                            ..
+                        }) = &mut tab.image_data
+                    {
+                        *image = new_image;
+                        *rendered_scale = target_scale;
+                        cx.notify();
+                    }
+                }
+                // The user may have kept zooming while we were rasterizing
+                // — check whether we still need to chase a higher target.
+                this.maybe_rerender_svg(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Return `(svg_bytes, target_scale)` if a re-raster of the named tab
+    /// would meaningfully sharpen the preview. Returns `None` when the tab
+    /// isn't an SVG, isn't zoomed in past its rendered scale, or already
+    /// has a re-raster in flight.
+    fn compute_rerender_target(
+        &self,
+        relative_path: &str,
+    ) -> Option<(Arc<Vec<u8>>, f32)> {
+        let tab = self.tabs.iter().find(|t| t.relative_path == relative_path)?;
+        if !tab.is_svg || tab.image_view.svg_rerender_in_flight {
+            return None;
+        }
+        // Fit mode renders via ObjectFit::Contain so the existing 2× pixmap
+        // is plenty — no need to re-raster.
+        if tab.image_view.auto_fit {
+            return None;
+        }
+        let DecodedImage::Rendered {
+            svg_bytes,
+            rendered_scale,
+            ..
+        } = tab.image_data.as_ref()?
+        else {
+            return None;
+        };
+        let zoom = tab.image_view.zoom;
+        // Small threshold avoids re-rastering on micro-zoom adjustments
+        // and on the way back down from a previously-rendered high scale.
+        if zoom <= *rendered_scale * 1.1 {
+            return None;
+        }
+        // Cap to keep memory bounded. At 16× a 100×100 SVG produces a
+        // 3200×3200 RGBA bitmap (~40 MB) which is the absolute ceiling
+        // before the user notices the allocator.
+        let target = (zoom * 1.25).clamp(1.0, 16.0);
+        Some((svg_bytes.clone(), target))
     }
 
     /// Get the active tab.

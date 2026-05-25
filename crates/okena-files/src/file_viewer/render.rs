@@ -838,10 +838,17 @@ impl FileViewer {
                 .max_h_full()
                 .into_any_element()
         } else {
+            // flex_shrink_0 is required: without it, the flex container at
+            // the next layer ("size_full .flex .items_center .justify_center")
+            // squishes one axis once the image's explicit size exceeds the
+            // pane, which combined with ObjectFit::Fill produced a stretched
+            // preview and made only one axis appear to "zoom past" the
+            // viewport. Contain keeps aspect inside the (now-fixed) box.
             img_element
-                .object_fit(ObjectFit::Fill)
+                .object_fit(ObjectFit::Contain)
                 .w(px((nat_w as f32) * zoom))
                 .h(px((nat_h as f32) * zoom))
+                .flex_shrink_0()
                 .ml(pan.x)
                 .mt(pan.y)
                 .into_any_element()

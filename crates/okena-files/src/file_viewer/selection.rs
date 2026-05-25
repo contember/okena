@@ -213,7 +213,8 @@ impl FileViewer {
     // ── Image zoom / pan / background ────────────────────────────────────
 
     /// Multiply the active tab's image zoom by `factor` (e.g. 1.25 in,
-    /// 1/1.25 out). Leaves auto-fit mode.
+    /// 1/1.25 out). Leaves auto-fit mode and, for SVG tabs, schedules a
+    /// fresh raster at the new scale so the preview stays crisp.
     pub(super) fn image_zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
         let tab = self.active_tab_mut();
         if !tab.is_image {
@@ -221,6 +222,7 @@ impl FileViewer {
         }
         tab.image_view.zoom_by(factor);
         cx.notify();
+        self.maybe_rerender_svg(cx);
     }
 
     /// Set the active tab's image zoom to an explicit factor (1.0 = 100%).
@@ -231,6 +233,7 @@ impl FileViewer {
         }
         tab.image_view.set_zoom(zoom);
         cx.notify();
+        self.maybe_rerender_svg(cx);
     }
 
     /// Reset the active tab's image view to fit-to-pane.
