@@ -27,6 +27,7 @@ base64 = "0.22"
 usvg = { version = "0.45", default-features = false }
 ttf-parser = "0.25"
 woff2 = { package = "woff2-patched", version = "0.4" }
+image = { version = "0.25", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

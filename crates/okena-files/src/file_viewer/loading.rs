@@ -259,14 +259,31 @@ pub(super) fn build_image_content(
             // decoding fails we still surface the preview without source.
             let source = String::from_utf8(bytes).ok();
             Ok(LoadedContent::Image {
-                decoded: DecodedImage::Rendered(rendered),
+                decoded: DecodedImage::Rendered {
+                    image: rendered,
+                    width: w as u32,
+                    height: h as u32,
+                },
                 source,
             })
         }
-        _ => Ok(LoadedContent::Image {
-            decoded: DecodedImage::Raster(Arc::new(Image::from_bytes(format, bytes))),
-            source: None,
-        }),
+        _ => {
+            // Probe intrinsic dimensions without decoding the full pixel
+            // buffer; image::ImageReader reads only the header.
+            let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                .with_guessed_format()
+                .map_err(|e| format!("Cannot read image header: {}", e))?
+                .into_dimensions()
+                .map_err(|e| format!("Cannot read image dimensions: {}", e))?;
+            Ok(LoadedContent::Image {
+                decoded: DecodedImage::Raster {
+                    image: Arc::new(Image::from_bytes(format, bytes)),
+                    width,
+                    height,
+                },
+                source: None,
+            })
+        }
     }
 }
 

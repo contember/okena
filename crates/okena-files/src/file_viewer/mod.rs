@@ -49,6 +49,86 @@ pub(super) enum DisplayMode {
     Preview,
 }
 
+/// Background fill behind an image / SVG preview. Single-colour SVGs (a
+/// black icon) become invisible on a matching pane background, so the user
+/// can flip between a checkerboard (default — shows both extremes) and
+/// explicit Light / Dark fills.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewBackground {
+    #[default]
+    Checker,
+    Light,
+    Dark,
+}
+
+/// Per-tab zoom / pan / background state for the image preview.
+///
+/// `auto_fit` is the default: image renders with `ObjectFit::Contain` to
+/// fill the pane, `zoom` and `pan` are ignored. Once the user wheel-zooms,
+/// drags, or clicks 100%, `auto_fit` flips off and the view renders at
+/// natural-size × `zoom` with `pan` applied.
+#[derive(Clone)]
+pub struct ImageViewState {
+    /// Fit-to-pane mode (ObjectFit::Contain). Reset via Ctrl+0 or the Fit
+    /// header button.
+    pub auto_fit: bool,
+    /// Scale factor: 1.0 = 100% natural pixel size. Ignored when `auto_fit`.
+    pub zoom: f32,
+    /// Pan offset (image translates by this). Ignored when `auto_fit`.
+    pub pan: gpui::Point<gpui::Pixels>,
+    /// True while a pan drag is in progress.
+    pub is_panning: bool,
+    /// Mouse position at drag start, plus the pan offset captured then, so
+    /// we can compute pan = offset + (mouse - anchor) without drift.
+    pub pan_anchor: Option<gpui::Point<gpui::Pixels>>,
+    pub pan_anchor_offset: gpui::Point<gpui::Pixels>,
+    pub background: PreviewBackground,
+}
+
+impl Default for ImageViewState {
+    fn default() -> Self {
+        Self {
+            auto_fit: true,
+            zoom: 1.0,
+            pan: gpui::Point::default(),
+            is_panning: false,
+            pan_anchor: None,
+            pan_anchor_offset: gpui::Point::default(),
+            background: PreviewBackground::Checker,
+        }
+    }
+}
+
+impl ImageViewState {
+    /// Clamp the zoom factor to a sane range. Below 0.1× the image
+    /// disappears; above 10× the rendered surface dwarfs any reasonable
+    /// display and pan becomes unusable.
+    pub const MIN_ZOOM: f32 = 0.1;
+    pub const MAX_ZOOM: f32 = 10.0;
+
+    /// Set zoom and leave auto-fit mode. Pan stays as-is.
+    pub fn set_zoom(&mut self, zoom: f32) {
+        self.zoom = zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        self.auto_fit = false;
+    }
+
+    /// Multiply current zoom by `factor` and leave auto-fit mode.
+    pub fn zoom_by(&mut self, factor: f32) {
+        let current = if self.auto_fit { 1.0 } else { self.zoom };
+        self.set_zoom(current * factor);
+    }
+
+    /// Reset to fit-to-pane.
+    pub fn reset_to_fit(&mut self) {
+        self.auto_fit = true;
+        self.zoom = 1.0;
+        self.pan = gpui::Point::default();
+        self.is_panning = false;
+        self.pan_anchor = None;
+        self.pan_anchor_offset = gpui::Point::default();
+    }
+}
+
 /// Type alias for source view selection (line, column).
 type Selection = SelectionState<(usize, usize)>;
 
@@ -110,6 +190,10 @@ pub(super) struct FileViewerTab {
     /// Decoded image data wrapped for GPUI's `img()` element. Populated by
     /// the async loader for image tabs.
     pub image_data: Option<DecodedImage>,
+    /// Pan / zoom / background state for image and SVG-Preview tabs.
+    /// Persists across freshness reloads so the user keeps their view as
+    /// the file changes on disk.
+    pub image_view: ImageViewState,
     /// True for font files (otf/ttf/woff/woff2). When set, `font_data`
     /// carries parsed metadata and the source/image rendering paths are
     /// bypassed in favour of the font-preview branch.
@@ -124,18 +208,37 @@ pub(super) struct FileViewerTab {
 /// Decoded image payload. Raster formats let GPUI's asset cache handle the
 /// RGBA→BGRA swap; SVGs are pre-rasterized to BGRA ourselves because GPUI's
 /// built-in `ImageDecoder` calls `render_single_frame(.., to_bgra=false)` for
-/// SVG, leaving R/B swapped and the preview inverted.
+/// SVG, leaving R/B swapped and the preview inverted. Each variant carries
+/// the intrinsic pixel dimensions so the zoom UI can compute pan bounds
+/// and a "100%" / "fit" mode without re-decoding.
 #[derive(Clone)]
 pub enum DecodedImage {
-    Raster(Arc<Image>),
-    Rendered(Arc<RenderImage>),
+    Raster {
+        image: Arc<Image>,
+        width: u32,
+        height: u32,
+    },
+    Rendered {
+        image: Arc<RenderImage>,
+        width: u32,
+        height: u32,
+    },
+}
+
+impl DecodedImage {
+    pub fn dimensions(&self) -> (u32, u32) {
+        match self {
+            DecodedImage::Raster { width, height, .. } => (*width, *height),
+            DecodedImage::Rendered { width, height, .. } => (*width, *height),
+        }
+    }
 }
 
 impl From<DecodedImage> for ImageSource {
     fn from(value: DecodedImage) -> Self {
         match value {
-            DecodedImage::Raster(image) => ImageSource::Image(image),
-            DecodedImage::Rendered(rendered) => ImageSource::Render(rendered),
+            DecodedImage::Raster { image, .. } => ImageSource::Image(image),
+            DecodedImage::Rendered { image, .. } => ImageSource::Render(image),
         }
     }
 }
@@ -244,6 +347,7 @@ impl FileViewerTab {
             is_image: false,
             is_svg: false,
             image_data: None,
+            image_view: ImageViewState::default(),
             is_font: false,
             font_data: None,
         }
@@ -285,6 +389,7 @@ impl FileViewerTab {
             is_image,
             is_svg,
             image_data: None,
+            image_view: ImageViewState::default(),
             is_font,
             font_data: None,
         }

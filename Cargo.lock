@@ -5701,6 +5701,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "image",
  "log",
  "nucleo-matcher",
  "okena-core",

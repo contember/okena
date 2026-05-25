@@ -24,7 +24,7 @@ use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use std::sync::Arc;
 
 use super::context_menu::TreeNodeTarget;
-use super::{DisplayMode, FileViewer, FontData, SIDEBAR_WIDTH};
+use super::{DisplayMode, FileViewer, FontData, PreviewBackground, SIDEBAR_WIDTH};
 
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
@@ -770,6 +770,301 @@ impl FileViewer {
 
         tab.markdown_list_state.clone()
     }
+
+    /// Render the image / SVG-Preview pane with zoom / pan / background
+    /// support. Default is `auto_fit` (ObjectFit::Contain); once the user
+    /// wheel-zooms or drags, the view switches to natural-size × zoom with
+    /// manual pan. Double-click resets to fit.
+    pub(super) fn render_image_preview(
+        &self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tab = self.active_tab();
+        let image_data = tab.image_data.clone();
+        let view = tab.image_view.clone();
+        let muted = t.text_muted;
+        let bg_secondary = t.bg_secondary;
+
+        let Some(image) = image_data else {
+            return div()
+                .id("file-image-empty")
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(bg_secondary))
+                .child(
+                    div()
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(muted))
+                        .child("Image not available"),
+                )
+                .into_any_element();
+        };
+
+        let (nat_w, nat_h) = image.dimensions();
+        let zoom = view.zoom;
+        let pan = view.pan;
+        let auto_fit = view.auto_fit;
+
+        // Background fill: explicit color for Light/Dark, checkerboard
+        // canvas for Checker. The canvas is painted into the pane via
+        // paint_quad in tiles small enough to read against both extremes.
+        let (bg_solid, show_checker) = match view.background {
+            PreviewBackground::Light => (0xFFFFFFu32, false),
+            PreviewBackground::Dark => (0x111111u32, false),
+            PreviewBackground::Checker => (0x808080u32, true),
+        };
+
+        let fallback_muted = muted;
+        let img_element = img(image)
+            .with_fallback(move || {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(14.0))
+                    .text_color(rgb(fallback_muted))
+                    .child("Cannot decode image")
+                    .into_any_element()
+            });
+
+        let img_styled: AnyElement = if auto_fit {
+            img_element
+                .object_fit(ObjectFit::Contain)
+                .max_w_full()
+                .max_h_full()
+                .into_any_element()
+        } else {
+            img_element
+                .object_fit(ObjectFit::Fill)
+                .w(px((nat_w as f32) * zoom))
+                .h(px((nat_h as f32) * zoom))
+                .ml(pan.x)
+                .mt(pan.y)
+                .into_any_element()
+        };
+
+        let cursor = if auto_fit {
+            CursorStyle::Arrow
+        } else if view.is_panning {
+            CursorStyle::ClosedHand
+        } else {
+            CursorStyle::OpenHand
+        };
+
+        let mut container = div()
+            .id("file-image")
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .overflow_hidden()
+            .bg(rgb(bg_solid))
+            .cursor(cursor);
+
+        if show_checker {
+            container = container.child(
+                canvas(
+                    |_, _, _| (),
+                    |bounds, _, window, _| paint_checkerboard(bounds, window),
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            );
+        }
+
+        container
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                let delta = event.delta.pixel_delta(px(17.0));
+                let dy = f32::from(delta.y);
+                if dy.abs() < f32::EPSILON {
+                    return;
+                }
+                // Exponential: positive dy zooms in, negative out. ±100 px ≈ 1.2× / 0.83×.
+                let factor = (dy / 250.0).exp();
+                this.image_zoom_by(factor, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    if event.click_count >= 2 {
+                        this.image_fit(cx);
+                    } else {
+                        this.image_start_pan(event.position, cx);
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.image_update_pan(event.position, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.image_end_pan(cx);
+                }),
+            )
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(img_styled),
+            )
+            .into_any_element()
+    }
+}
+
+/// Header chiclet: `−` / `Fit | 100%` / `+`. Click on the label toggles
+/// between Fit and 100%. Buttons step zoom by 1.25× / 0.8×.
+fn image_zoom_controls(
+    zoom_label: String,
+    t: &ThemeColors,
+    cx: &mut Context<FileViewer>,
+) -> impl IntoElement {
+    let button = move |id: &'static str, glyph: &'static str, t: &ThemeColors, cx: &mut Context<FileViewer>, on_click: Box<dyn Fn(&mut FileViewer, &mut Context<FileViewer>)>| {
+        let t_text_muted = t.text_muted;
+        let t_bg_hover = t.bg_hover;
+        div()
+            .id(id)
+            .cursor_pointer()
+            .w(px(24.0))
+            .h(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .hover(|s| s.bg(rgb(t_bg_hover)))
+            .text_size(px(13.0))
+            .text_color(rgb(t_text_muted))
+            .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+            .child(glyph)
+    };
+    h_flex()
+        .gap(px(2.0))
+        .px(px(4.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .bg(rgb(t.bg_secondary))
+        .child(button(
+            "zoom-out",
+            "−",
+            t,
+            cx,
+            Box::new(|this, cx| this.image_zoom_by(1.0 / 1.25, cx)),
+        ))
+        .child(
+            div()
+                .id("zoom-label")
+                .cursor_pointer()
+                .min_w(px(48.0))
+                .text_align(TextAlign::Center)
+                .text_size(px(12.0))
+                .text_color(rgb(t.text_muted))
+                .rounded(px(4.0))
+                .hover(|s| s.bg(rgb(t.bg_hover)))
+                .px(px(4.0))
+                .py(px(2.0))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.active_tab().image_view.auto_fit {
+                        this.image_set_zoom(1.0, cx);
+                    } else {
+                        this.image_fit(cx);
+                    }
+                }))
+                .child(zoom_label),
+        )
+        .child(button(
+            "zoom-in",
+            "+",
+            t,
+            cx,
+            Box::new(|this, cx| this.image_zoom_by(1.25, cx)),
+        ))
+}
+
+/// Header chiclet that cycles the preview background (Checker / Light /
+/// Dark). The current option is highlighted; clicking advances to the
+/// next. Solves the "black SVG on dark theme" / "white SVG on light
+/// theme" invisibility problem.
+fn image_background_toggle(
+    current: PreviewBackground,
+    t: &ThemeColors,
+    cx: &mut Context<FileViewer>,
+) -> impl IntoElement {
+    let labels = [
+        (PreviewBackground::Checker, "Checker"),
+        (PreviewBackground::Light, "Light"),
+        (PreviewBackground::Dark, "Dark"),
+    ];
+    h_flex()
+        .gap(px(2.0))
+        .px(px(2.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .bg(rgb(t.bg_secondary))
+        .children(labels.into_iter().map(|(bg, label)| {
+            let is_active = current == bg;
+            let t_active = t.bg_selection;
+            let t_hover = t.bg_hover;
+            let t_text_primary = t.text_primary;
+            let t_text_muted = t.text_muted;
+            div()
+                .id(ElementId::Name(format!("bg-{}", label).into()))
+                .cursor_pointer()
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(3.0))
+                .when(is_active, |d| d.bg(rgb(t_active)))
+                .when(!is_active, |d| d.hover(|s| s.bg(rgb(t_hover))))
+                .text_size(px(12.0))
+                .text_color(rgb(if is_active { t_text_primary } else { t_text_muted }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.image_set_background(bg, cx);
+                }))
+                .child(label)
+        }))
+}
+
+/// Paint a procedural 12 px checkerboard inside `bounds`. Used as the
+/// default image-preview background — a black SVG icon stays visible
+/// against the light tiles and a white one against the dark tiles, so the
+/// user always sees at least half the artwork regardless of fill color.
+fn paint_checkerboard(bounds: gpui::Bounds<gpui::Pixels>, window: &mut gpui::Window) {
+    const TILE: f32 = 12.0;
+    let light: gpui::Rgba = gpui::Rgba {
+        r: 0.62,
+        g: 0.62,
+        b: 0.62,
+        a: 1.0,
+    };
+    let dark: gpui::Rgba = gpui::Rgba {
+        r: 0.42,
+        g: 0.42,
+        b: 0.42,
+        a: 1.0,
+    };
+    // Base fill — every "even" tile inherits this.
+    window.paint_quad(fill(bounds, light));
+    let cols = (f32::from(bounds.size.width) / TILE).ceil() as usize + 1;
+    let rows = (f32::from(bounds.size.height) / TILE).ceil() as usize + 1;
+    for row in 0..rows {
+        for col in 0..cols {
+            if (row + col) % 2 == 0 {
+                continue;
+            }
+            let x = f32::from(bounds.origin.x) + (col as f32) * TILE;
+            let y = f32::from(bounds.origin.y) + (row as f32) * TILE;
+            let tile_bounds = gpui::Bounds {
+                origin: gpui::point(px(x), px(y)),
+                size: gpui::size(px(TILE), px(TILE)),
+            };
+            window.paint_quad(fill(tile_bounds, dark));
+        }
+    }
 }
 
 impl Render for FileViewer {
@@ -789,7 +1084,6 @@ impl Render for FileViewer {
         let is_image = tab.is_image;
         let is_svg = tab.is_svg;
         let is_font = tab.is_font;
-        let image_data = tab.image_data.clone();
         let font_data = tab.font_data.clone();
         let display_mode = tab.display_mode;
         let is_preview_mode = display_mode == DisplayMode::Preview;
@@ -997,6 +1291,15 @@ impl Render for FileViewer {
                     "w" if modifiers.platform || modifiers.control => {
                         this.close_active_tab(cx);
                     }
+                    "0" if (modifiers.platform || modifiers.control) && is_img => {
+                        this.image_fit(cx);
+                    }
+                    "=" | "+" if (modifiers.platform || modifiers.control) && is_img => {
+                        this.image_zoom_by(1.25, cx);
+                    }
+                    "-" if (modifiers.platform || modifiers.control) && is_img => {
+                        this.image_zoom_by(1.0 / 1.25, cx);
+                    }
                     "r" if !modifiers.platform && !modifiers.control => {
                         this.refresh_file_tree_async(cx);
                     }
@@ -1162,6 +1465,17 @@ impl Render for FileViewer {
                                         )),
                                 )
                             })
+                            .when(show_image, |d| {
+                                let view = self.active_tab().image_view.clone();
+                                let zoom_label = if view.auto_fit {
+                                    "Fit".to_string()
+                                } else {
+                                    format!("{}%", (view.zoom * 100.0).round() as i32)
+                                };
+                                let bg = view.background;
+                                d.child(image_zoom_controls(zoom_label, &t, cx))
+                                    .child(image_background_toggle(bg, &t, cx))
+                            })
                             .when(!self.is_detached, |d| {
                                 d.child(
                                     div()
@@ -1260,52 +1574,7 @@ impl Render for FileViewer {
                                 )
                             })
                             .when(!tab_loading && !has_error && show_image, |d| {
-                                let body = div()
-                                    .id("file-image")
-                                    .flex_1()
-                                    .min_h_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .overflow_hidden()
-                                    .bg(rgb(t.bg_secondary))
-                                    .p(px(16.0));
-                                let muted = t.text_muted;
-                                let body = match image_data.clone() {
-                                    Some(image) => body.child(
-                                        img(image)
-                                            .object_fit(ObjectFit::Contain)
-                                            .max_w_full()
-                                            .max_h_full()
-                                            // Without this, GPUI silently
-                                            // renders an empty box when the
-                                            // raster decoder rejects the
-                                            // bytes (corrupt, truncated,
-                                            // 0-byte, or mis-extensioned
-                                            // file). SVG goes through a
-                                            // separate pre-rasterizer that
-                                            // surfaces errors via error_message;
-                                            // raster decodes happen lazily
-                                            // inside GPUI's asset cache.
-                                            .with_fallback(move || {
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .text_size(px(14.0))
-                                                    .text_color(rgb(muted))
-                                                    .child("Cannot decode image")
-                                                    .into_any_element()
-                                            }),
-                                    ),
-                                    None => body.child(
-                                        div()
-                                            .text_size(ui_text_sm(cx))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Image not available"),
-                                    ),
-                                };
-                                d.child(body)
+                                d.child(self.render_image_preview(&t, cx))
                             })
                             .when(!tab_loading && !has_error && show_font, |d| {
                                 d.child(render_font_preview(font_data.clone(), &t, cx))

@@ -5,7 +5,7 @@ use crate::selection::{copy_to_clipboard, Selection1DExtension, Selection2DNonEm
 use gpui::*;
 use okena_core::send_payload::{CodeBlock, SendPayload};
 
-use super::{DisplayMode, FileViewer, FileViewerEvent};
+use super::{DisplayMode, FileViewer, FileViewerEvent, PreviewBackground};
 
 impl FileViewer {
     /// Toggle between source and preview display modes. Only meaningful for
@@ -207,6 +207,106 @@ impl FileViewer {
 
     pub(super) fn end_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
         self.active_tab_mut().scrollbar_drag = None;
+        cx.notify();
+    }
+
+    // ── Image zoom / pan / background ────────────────────────────────────
+
+    /// Multiply the active tab's image zoom by `factor` (e.g. 1.25 in,
+    /// 1/1.25 out). Leaves auto-fit mode.
+    pub(super) fn image_zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+        let tab = self.active_tab_mut();
+        if !tab.is_image {
+            return;
+        }
+        tab.image_view.zoom_by(factor);
+        cx.notify();
+    }
+
+    /// Set the active tab's image zoom to an explicit factor (1.0 = 100%).
+    pub(super) fn image_set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        let tab = self.active_tab_mut();
+        if !tab.is_image {
+            return;
+        }
+        tab.image_view.set_zoom(zoom);
+        cx.notify();
+    }
+
+    /// Reset the active tab's image view to fit-to-pane.
+    pub(super) fn image_fit(&mut self, cx: &mut Context<Self>) {
+        let tab = self.active_tab_mut();
+        if !tab.is_image {
+            return;
+        }
+        tab.image_view.reset_to_fit();
+        cx.notify();
+    }
+
+    /// Begin a pan drag at the given screen-space position.
+    pub(super) fn image_start_pan(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.active_tab_mut();
+        if !tab.is_image {
+            return;
+        }
+        // Panning only matters once we've left auto-fit, so promote to
+        // explicit zoom on first drag.
+        if tab.image_view.auto_fit {
+            tab.image_view.auto_fit = false;
+            tab.image_view.zoom = 1.0;
+        }
+        tab.image_view.is_panning = true;
+        tab.image_view.pan_anchor = Some(position);
+        tab.image_view.pan_anchor_offset = tab.image_view.pan;
+        cx.notify();
+    }
+
+    /// Continue a pan drag — translate by (current - anchor).
+    pub(super) fn image_update_pan(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.active_tab_mut();
+        if !tab.is_image || !tab.image_view.is_panning {
+            return;
+        }
+        let Some(anchor) = tab.image_view.pan_anchor else {
+            return;
+        };
+        tab.image_view.pan = gpui::Point::new(
+            tab.image_view.pan_anchor_offset.x + (position.x - anchor.x),
+            tab.image_view.pan_anchor_offset.y + (position.y - anchor.y),
+        );
+        cx.notify();
+    }
+
+    /// End a pan drag.
+    pub(super) fn image_end_pan(&mut self, cx: &mut Context<Self>) {
+        let tab = self.active_tab_mut();
+        if !tab.is_image {
+            return;
+        }
+        tab.image_view.is_panning = false;
+        tab.image_view.pan_anchor = None;
+        cx.notify();
+    }
+
+    /// Set the preview background explicitly (header button click).
+    pub(super) fn image_set_background(
+        &mut self,
+        background: PreviewBackground,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.active_tab_mut();
+        if !tab.is_image {
+            return;
+        }
+        tab.image_view.background = background;
         cx.notify();
     }
 }
