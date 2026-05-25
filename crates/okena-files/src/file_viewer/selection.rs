@@ -8,10 +8,12 @@ use okena_core::send_payload::{CodeBlock, SendPayload};
 use super::{DisplayMode, FileViewer, FileViewerEvent};
 
 impl FileViewer {
-    /// Toggle between source and preview display modes.
+    /// Toggle between source and preview display modes. Only meaningful for
+    /// tabs that actually have both views — markdown (rendered ↔ source) and
+    /// SVG (rasterized image ↔ XML).
     pub(super) fn toggle_display_mode(&mut self, cx: &mut Context<Self>) {
         let tab = self.active_tab_mut();
-        if !tab.is_markdown {
+        if !tab.is_markdown && !tab.is_svg {
             return;
         }
         tab.display_mode = match tab.display_mode {

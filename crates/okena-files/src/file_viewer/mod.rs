@@ -20,12 +20,17 @@ use context_menu::{DeleteConfirmState, FileRenameState, FileTreeContextMenu, Tab
 use gpui::*;
 use okena_markdown::{MarkdownDocument, MarkdownSelection};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 use syntect::parsing::SyntaxSet;
 
-/// Maximum file size to load (5MB)
+/// Maximum file size to load for text/markdown (5MB)
 const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024;
+
+/// Maximum file size to load for image previews (20MB — image decoders
+/// handle larger files comfortably than the text/syntect path).
+const MAX_IMAGE_FILE_SIZE: u64 = 20 * 1024 * 1024;
 
 /// Maximum number of lines to display
 const MAX_LINES: usize = 10000;
@@ -86,6 +91,53 @@ pub(super) struct FileViewerTab {
     /// Per-line git blame for this file. Lazy-loaded when the user toggles
     /// the blame gutter on.
     pub blame: BlameLoadState,
+    /// Monotonic counter bumped each time `spawn_tab_load` schedules a fresh
+    /// async load for this tab. The bg task captures the generation it was
+    /// scheduled at and `apply_loaded_content` is skipped if a newer load
+    /// has been queued in the meantime, so a slow earlier load can't
+    /// clobber a faster later one with stale content.
+    pub load_generation: u64,
+    /// True for files previewed as images (png/jpg/gif/webp/svg/...). When
+    /// set, `image_data` carries the bytes and the source/markdown rendering
+    /// paths are bypassed.
+    pub is_image: bool,
+    /// True for SVG files specifically. SVG is the one image format that
+    /// also has a meaningful source view — the loader keeps the raw XML in
+    /// `content`/`highlighted_lines` so the user can flip between Preview
+    /// (rendered) and Source (highlighted XML) via the same toggle markdown
+    /// uses.
+    pub is_svg: bool,
+    /// Decoded image data wrapped for GPUI's `img()` element. Populated by
+    /// the async loader for image tabs.
+    pub image_data: Option<DecodedImage>,
+    /// True for font files (otf/ttf/woff/woff2). When set, `font_data`
+    /// carries parsed metadata and the source/image rendering paths are
+    /// bypassed in favour of the font-preview branch.
+    pub is_font: bool,
+    /// Parsed font metadata + family name. The TTF bytes themselves are
+    /// registered with GPUI's text system on apply (kept inside the system,
+    /// not on the tab) so the preview pane can render sample text in the
+    /// font.
+    pub font_data: Option<Arc<FontData>>,
+}
+
+/// Decoded image payload. Raster formats let GPUI's asset cache handle the
+/// RGBA→BGRA swap; SVGs are pre-rasterized to BGRA ourselves because GPUI's
+/// built-in `ImageDecoder` calls `render_single_frame(.., to_bgra=false)` for
+/// SVG, leaving R/B swapped and the preview inverted.
+#[derive(Clone)]
+pub enum DecodedImage {
+    Raster(Arc<Image>),
+    Rendered(Arc<RenderImage>),
+}
+
+impl From<DecodedImage> for ImageSource {
+    fn from(value: DecodedImage) -> Self {
+        match value {
+            DecodedImage::Raster(image) => ImageSource::Image(image),
+            DecodedImage::Rendered(rendered) => ImageSource::Render(rendered),
+        }
+    }
 }
 
 /// Lifecycle of a tab's blame data.
@@ -96,6 +148,72 @@ pub enum BlameLoadState {
     Loading,
     Loaded(std::sync::Arc<Vec<BlameLine>>),
     Error(BlameError),
+}
+
+/// Map an extension to a `gpui::ImageFormat` for files we can preview as
+/// images. Returns `None` for non-image extensions.
+pub(super) fn image_format_for_path(path: &Path) -> Option<ImageFormat> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => ImageFormat::Png,
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        "gif" => ImageFormat::Gif,
+        "webp" => ImageFormat::Webp,
+        "bmp" => ImageFormat::Bmp,
+        "tif" | "tiff" => ImageFormat::Tiff,
+        "ico" => ImageFormat::Ico,
+        "svg" => ImageFormat::Svg,
+        _ => return None,
+    })
+}
+
+/// Font container format we know how to load.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FontFormat {
+    /// OpenType / TrueType — fed straight to ttf-parser and registered as-is.
+    OpenType,
+    /// WOFF2 — Brotli-compressed OpenType, decompressed back to TTF before
+    /// parsing and font-system registration.
+    Woff2,
+    /// WOFF (v1) — zlib-compressed per-table OpenType. We surface the file
+    /// but reject decoding for now (rare in practice; adding decoder is a
+    /// follow-up).
+    Woff,
+}
+
+/// Detect whether `path`'s extension is one of the font formats we preview.
+pub(super) fn font_format_for_path(path: &Path) -> Option<FontFormat> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "ttf" | "otf" => FontFormat::OpenType,
+        "woff2" => FontFormat::Woff2,
+        "woff" => FontFormat::Woff,
+        _ => return None,
+    })
+}
+
+/// Parsed metadata for a font preview, plus the OpenType bytes that GPUI's
+/// text system needs to actually render text in the font. Wrapped in `Arc`
+/// on the tab so freshness reloads can swap it cheaply.
+#[derive(Clone)]
+pub struct FontData {
+    /// Family name from the OpenType `name` table (e.g. "JetBrains Mono"),
+    /// used as the `Font::family` for sample-text rendering.
+    pub family_name: String,
+    /// Full font name from the `name` table (e.g. "JetBrains Mono Bold Italic").
+    pub full_name: String,
+    /// Subfamily / style description ("Regular", "Bold", "Italic", ...).
+    pub style: String,
+    /// Font version string from the `name` table.
+    pub version: String,
+    /// Number of glyphs in the font.
+    pub num_glyphs: u16,
+    /// EM square units (typically 1000 for OTF, 2048 for TTF).
+    pub units_per_em: u16,
+    /// OS/2 `usWeightClass` — 100 (Thin) through 900 (Black).
+    pub weight_class: u16,
+    /// Whether the font advertises italic style.
+    pub is_italic: bool,
 }
 
 impl FileViewerTab {
@@ -122,12 +240,22 @@ impl FileViewerTab {
             modified_at: None,
             loading: false,
             blame: BlameLoadState::NotLoaded,
+            load_generation: 0,
+            is_image: false,
+            is_svg: false,
+            image_data: None,
+            is_font: false,
+            font_data: None,
         }
     }
 
     /// Create a tab in loading state (content will be filled asynchronously).
     fn new_loading(relative_path: String, file_path: PathBuf) -> Self {
-        let is_markdown = Self::is_markdown_file(&file_path);
+        let image_format = image_format_for_path(&file_path);
+        let is_image = image_format.is_some();
+        let is_svg = image_format == Some(ImageFormat::Svg);
+        let is_font = !is_image && font_format_for_path(&file_path).is_some();
+        let is_markdown = !is_image && !is_font && Self::is_markdown_file(&file_path);
         Self {
             file_path,
             relative_path,
@@ -137,7 +265,7 @@ impl FileViewerTab {
             line_num_width: 3,
             error_message: None,
             selection: Selection::default(),
-            display_mode: if is_markdown {
+            display_mode: if is_markdown || is_svg {
                 DisplayMode::Preview
             } else {
                 DisplayMode::Source
@@ -153,6 +281,12 @@ impl FileViewerTab {
             modified_at: None,
             loading: true,
             blame: BlameLoadState::NotLoaded,
+            load_generation: 0,
+            is_image,
+            is_svg,
+            image_data: None,
+            is_font,
+            font_data: None,
         }
     }
 
@@ -302,6 +436,11 @@ pub struct FileViewer {
     pub(super) blame_visible: bool,
     /// Right-click context menu over a non-empty text selection.
     pub(super) selection_context_menu: Option<Point<Pixels>>,
+    /// Monotonic counter used to stamp each `spawn_tab_load` invocation.
+    /// Each background task captures the value it was scheduled at and only
+    /// applies its result if the tab's recorded generation still matches,
+    /// so a slow earlier load can't overwrite a faster later one.
+    next_load_generation: u64,
 }
 
 impl FileViewer {
@@ -366,6 +505,7 @@ impl FileViewer {
             blame_provider,
             blame_visible,
             selection_context_menu: None,
+            next_load_generation: 0,
         };
 
         // Kick off the root directory listing and any expanded ancestors so
@@ -421,6 +561,7 @@ impl FileViewer {
             blame_provider,
             blame_visible,
             selection_context_menu: None,
+            next_load_generation: 0,
         };
         viewer.fetch_initial_dirs(cx);
         viewer
@@ -455,17 +596,20 @@ impl FileViewer {
         // Re-fetch directory listings so the sidebar reflects added/removed files
         self.refresh_file_tree_async(cx);
 
+        let svg_renderer = cx.svg_renderer();
         for tab in &mut self.tabs {
             if tab.is_empty() {
                 continue;
             }
             // Reload externally modified files (also re-highlights)
-            if tab.reload_if_changed(&self.syntax_set, self.is_dark) {
+            if tab.reload_if_changed(&self.syntax_set, self.is_dark, &svg_renderer) {
                 tab.blame = BlameLoadState::NotLoaded;
                 continue;
             }
-            // Theme changed — re-highlight without reloading
-            if rehighlight {
+            // Theme changed — re-highlight without reloading. Raster image
+            // and font tabs have no highlighted content; SVG tabs do (the
+            // source-view XML), so they need the rehighlight too.
+            if rehighlight && !tab.is_font && (!tab.is_image || tab.is_svg) {
                 tab.do_highlight_content(
                     &tab.file_path.clone(),
                     &self.syntax_set,
@@ -600,6 +744,7 @@ impl FileViewer {
         let is_markdown = tab.is_markdown;
         let syntax_set = self.syntax_set.clone();
         let is_dark = self.is_dark;
+        let svg_renderer = cx.svg_renderer();
 
         self.freshness_check_in_flight = true;
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
@@ -612,12 +757,21 @@ impl FileViewer {
                         is_markdown,
                         &syntax_set,
                         is_dark,
+                        &svg_renderer,
                     )
                 })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 this.freshness_check_in_flight = false;
-                let reloaded = matches!(result, Ok(Some(_)));
+                let reloaded = matches!(result, loading::FreshnessOutcome::Reloaded(_));
+                // Register fresh font bytes with the platform text system
+                // before apply, mirroring spawn_tab_load. add_fonts is
+                // idempotent so a no-change font reload is a cheap no-op.
+                if let loading::FreshnessOutcome::Reloaded(reload) = &result
+                    && let loading::FreshnessKind::Font { ttf_bytes, .. } = &reload.kind
+                {
+                    register_font_bytes(cx, ttf_bytes);
+                }
                 // Re-find the tab by relative_path; concurrent reorders/closes
                 // mean the index may have shifted since we scheduled the check.
                 if let Some(tab) =
@@ -820,28 +974,81 @@ impl FileViewer {
 
     /// Spawn a background task to load file content for a tab. The tab is
     /// identified by `relative_path` so concurrent reorders don't bind us to
-    /// a stale index.
-    fn spawn_tab_load(&self, relative_path: String, cx: &mut Context<Self>) {
+    /// a stale index, AND by a per-load generation token so a slow earlier
+    /// load can't overwrite a faster later one for the same path.
+    fn spawn_tab_load(&mut self, relative_path: String, cx: &mut Context<Self>) {
+        self.next_load_generation = self.next_load_generation.wrapping_add(1);
+        let generation = self.next_load_generation;
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.relative_path == relative_path)
+        {
+            tab.load_generation = generation;
+        }
         let fs = self.project_fs.clone();
         let rel = relative_path.clone();
+        // Image / font detection is driven purely by extension, so we can
+        // decide the load strategy off-thread without holding the tab borrow.
+        let asset_path = PathBuf::from(&relative_path);
+        let is_image = image_format_for_path(&asset_path).is_some();
+        let is_font = !is_image && font_format_for_path(&asset_path).is_some();
+        let svg_renderer = cx.svg_renderer();
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let result: Result<String, String> = cx
+            let result: Result<loading::LoadedContent, String> = cx
                 .background_executor()
                 .spawn(async move {
-                    let size = fs.file_size(&rel)?;
-                    if size > MAX_FILE_SIZE {
-                        return Err(format!(
-                            "File too large ({:.1} MB). Maximum size is 5 MB.",
-                            size as f64 / 1024.0 / 1024.0
-                        ));
+                    if is_image {
+                        // Don't do a separate file_size round-trip — the
+                        // server enforces MAX_IMAGE_FILE_SIZE inside
+                        // read_file_bytes (TOCTOU close), and for local
+                        // projects build_image_content rejects oversize
+                        // bytes too.
+                        let bytes = fs.read_file_bytes(&rel)?;
+                        if bytes.len() as u64 > MAX_IMAGE_FILE_SIZE {
+                            return Err(format!(
+                                "Image too large ({:.1} MB). Maximum size is 20 MB.",
+                                bytes.len() as f64 / 1024.0 / 1024.0
+                            ));
+                        }
+                        loading::build_image_content(&asset_path, bytes, &svg_renderer)
+                    } else if is_font {
+                        let bytes = fs.read_file_bytes(&rel)?;
+                        if bytes.len() as u64 > loading::MAX_FONT_FILE_SIZE {
+                            return Err(format!(
+                                "Font too large ({:.1} MB). Maximum size is 20 MB.",
+                                bytes.len() as f64 / 1024.0 / 1024.0
+                            ));
+                        }
+                        loading::build_font_content(&asset_path, bytes)
+                    } else {
+                        let size = fs.file_size(&rel)?;
+                        if size > MAX_FILE_SIZE {
+                            return Err(format!(
+                                "File too large ({:.1} MB). Maximum size is 5 MB.",
+                                size as f64 / 1024.0 / 1024.0
+                            ));
+                        }
+                        fs.read_file(&rel).map(loading::LoadedContent::Text)
                     }
-                    fs.read_file(&rel)
                 })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 if let Some(tab) =
                     this.tabs.iter_mut().find(|t| t.relative_path == relative_path)
                 {
+                    // Drop stale results: a newer spawn_tab_load has been
+                    // queued for this tab (closed-and-reopened, navigated
+                    // away and back, etc.) and its result is what the user
+                    // is waiting for.
+                    if tab.load_generation != generation {
+                        return;
+                    }
+                    // Register font bytes with the platform text system
+                    // BEFORE applying, so the family name is resolvable by
+                    // the time render runs. add_fonts is idempotent on
+                    // re-registration (same internal name resolves), so
+                    // closing and reopening the same font is cheap.
+                    if let Ok(loading::LoadedContent::Font { ttf_bytes, .. }) = &result {
+                        register_font_bytes(cx, ttf_bytes);
+                    }
                     tab.apply_loaded_content(result, &this.syntax_set, this.is_dark);
                     tab.blame = BlameLoadState::NotLoaded;
                     cx.notify();
@@ -885,6 +1092,17 @@ pub enum FileViewerEvent {
     /// User clicked "Send to terminal" on a selection. Carries the structured
     /// payload; the host formats it (relative to terminal CWD) before pasting.
     SendToTerminal(okena_core::send_payload::SendPayload),
+}
+
+/// Register a font's OpenType bytes with the active text system so any
+/// subsequent render of `Font { family: family_name, .. }` resolves to it.
+/// GPUI's `add_fonts` is idempotent on a re-registration (same internal
+/// name resolves), so this is safe to call on every freshness reload.
+fn register_font_bytes(cx: &mut App, ttf_bytes: &Arc<Vec<u8>>) {
+    let bytes: Vec<u8> = ttf_bytes.as_ref().clone();
+    if let Err(e) = cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(bytes)]) {
+        log::warn!("Failed to register font with text system: {}", e);
+    }
 }
 
 impl EventEmitter<FileViewerEvent> for FileViewer {}

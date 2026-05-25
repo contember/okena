@@ -24,7 +24,7 @@ use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use std::sync::Arc;
 
 use super::context_menu::TreeNodeTarget;
-use super::{DisplayMode, FileViewer, SIDEBAR_WIDTH};
+use super::{DisplayMode, FileViewer, FontData, SIDEBAR_WIDTH};
 
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
@@ -786,8 +786,26 @@ impl Render for FileViewer {
         let has_error = tab.error_message.is_some();
         let error_message = tab.error_message.clone();
         let is_markdown = tab.is_markdown;
+        let is_image = tab.is_image;
+        let is_svg = tab.is_svg;
+        let is_font = tab.is_font;
+        let image_data = tab.image_data.clone();
+        let font_data = tab.font_data.clone();
         let display_mode = tab.display_mode;
         let is_preview_mode = display_mode == DisplayMode::Preview;
+        // Body view selectors. Each tab renders exactly one of these branches:
+        //   * show_image   — raster image, or SVG in Preview mode
+        //   * show_font    — font preview (sample text + metadata)
+        //   * show_md_preview — markdown rendered preview
+        //   * show_source  — text source / markdown source / SVG XML source
+        // Markdown / image / font are mutually exclusive (the loader picks
+        // one), so these four are also mutually exclusive in practice.
+        let show_image = is_image && (!is_svg || is_preview_mode);
+        let show_font = is_font;
+        let show_md_preview = is_markdown && is_preview_mode;
+        let show_source = !show_image && !show_font && !show_md_preview;
+        // Whether the header should expose the Preview/Source toggle.
+        let supports_view_toggle = is_markdown || is_svg;
         let sidebar_visible = self.sidebar_visible;
         let show_tabs = self.tabs.len() > 1;
 
@@ -871,7 +889,7 @@ impl Render for FileViewer {
         outer
             .track_focus(&focus_handle)
             .key_context("FileViewer")
-            .when(!is_preview_mode, |d| d.cursor(CursorStyle::IBeam))
+            .when(show_source, |d| d.cursor(CursorStyle::IBeam))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| {
                 // Dismiss overlays in priority order before default close behavior
                 if this.selection_context_menu.is_some() {
@@ -925,14 +943,21 @@ impl Render for FileViewer {
                 let tab = this.active_tab();
                 let is_preview = tab.display_mode == DisplayMode::Preview;
                 let is_md = tab.is_markdown;
+                let is_img = tab.is_image;
+                let is_svg_tab = tab.is_svg;
+                let is_font_tab = tab.is_font;
+                // SVG in preview mode behaves like a raster image (no source).
+                // In source mode the highlighted XML is shown, so selection
+                // / search / copy / select-all all work normally.
+                let is_img_view = is_img && (!is_svg_tab || is_preview);
 
                 match key {
                     "f" if modifiers.platform || modifiers.control => {
-                        if !is_preview {
+                        if !is_preview && !is_img_view && !is_font_tab {
                             this.open_search(window, cx);
                         }
                     }
-                    "tab" if is_md && !modifiers.control && !modifiers.shift => {
+                    "tab" if (is_md || is_svg_tab) && !modifiers.control && !modifiers.shift => {
                         this.toggle_display_mode(cx);
                     }
                     "tab" if modifiers.control && modifiers.shift => {
@@ -952,14 +977,18 @@ impl Render for FileViewer {
                         this.toggle_sidebar(cx);
                     }
                     "c" if modifiers.platform || modifiers.control => {
-                        if is_preview {
+                        if is_img_view || is_font_tab {
+                            // No text selection while previewing an image or font.
+                        } else if is_preview {
                             this.copy_markdown_selection(cx);
                         } else {
                             this.copy_selection(cx);
                         }
                     }
                     "a" if modifiers.platform || modifiers.control => {
-                        if is_preview {
+                        if is_img_view || is_font_tab {
+                            // Nothing to select.
+                        } else if is_preview {
                             this.select_all_markdown(cx);
                         } else {
                             this.select_all(cx);
@@ -1085,7 +1114,7 @@ impl Render for FileViewer {
                     .child(
                         h_flex()
                             .gap(px(12.0))
-                            .when(self.blame_provider.is_some(), |d| {
+                            .when(self.blame_provider.is_some() && !is_image && !is_font, |d| {
                                 let on = self.blame_visible;
                                 d.child(
                                     div()
@@ -1116,7 +1145,7 @@ impl Render for FileViewer {
                                         ),
                                 )
                             })
-                            .when(is_markdown, |d| {
+                            .when(supports_view_toggle, |d| {
                                 d.child(
                                     div()
                                         .id("display-mode-toggle")
@@ -1230,7 +1259,80 @@ impl Render for FileViewer {
                                         ),
                                 )
                             })
-                            .when(!tab_loading && !has_error && !is_preview_mode, |d| {
+                            .when(!tab_loading && !has_error && show_image, |d| {
+                                let body = div()
+                                    .id("file-image")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .overflow_hidden()
+                                    .bg(rgb(t.bg_secondary))
+                                    .p(px(16.0));
+                                let muted = t.text_muted;
+                                let body = match image_data.clone() {
+                                    Some(image) => body.child(
+                                        img(image)
+                                            .object_fit(ObjectFit::Contain)
+                                            .max_w_full()
+                                            .max_h_full()
+                                            // Without this, GPUI silently
+                                            // renders an empty box when the
+                                            // raster decoder rejects the
+                                            // bytes (corrupt, truncated,
+                                            // 0-byte, or mis-extensioned
+                                            // file). SVG goes through a
+                                            // separate pre-rasterizer that
+                                            // surfaces errors via error_message;
+                                            // raster decodes happen lazily
+                                            // inside GPUI's asset cache.
+                                            .with_fallback(move || {
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(14.0))
+                                                    .text_color(rgb(muted))
+                                                    .child("Cannot decode image")
+                                                    .into_any_element()
+                                            }),
+                                    ),
+                                    None => body.child(
+                                        div()
+                                            .text_size(ui_text_sm(cx))
+                                            .text_color(rgb(t.text_muted))
+                                            .child("Image not available"),
+                                    ),
+                                };
+                                d.child(body)
+                            })
+                            .when(!tab_loading && !has_error && show_font, |d| {
+                                d.child(render_font_preview(font_data.clone(), &t, cx))
+                            })
+                            .when(!tab_loading && !has_error && show_source, |d| {
+                                // SVG in Source mode with no decoded XML (loader
+                                // got non-UTF-8 bytes) would render as a blank
+                                // pane with zero lines — surface a placeholder
+                                // instead of a silent empty box.
+                                if is_svg && line_count == 0 {
+                                    return d.child(
+                                        div()
+                                            .flex_1()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .bg(rgb(t.bg_secondary))
+                                            .child(
+                                                div()
+                                                    .text_size(ui_text_sm(cx))
+                                                    .text_color(rgb(t.text_muted))
+                                                    .child(
+                                                        "SVG source is not valid UTF-8 — switch back to Preview.",
+                                                    ),
+                                            ),
+                                    );
+                                }
                                 let tc = theme_colors.clone();
                                 let view_clone = view.clone();
                                 d.child(
@@ -1271,7 +1373,7 @@ impl Render for FileViewer {
                                         ),
                                 )
                             })
-                            .when(!tab_loading && !has_error && is_preview_mode, |d| {
+                            .when(!tab_loading && !has_error && show_md_preview, |d| {
                                 let Some(list_state) = markdown_list_state.clone() else {
                                     return d;
                                 };
@@ -1762,4 +1864,97 @@ impl FileViewer {
                 .into_any_element(),
         )
     }
+}
+
+/// Render the font-preview body: a pangram in descending sizes followed by
+/// a metadata table. `data` is None while the loader is still running or
+/// if the font failed to parse (caller already gates on error state, so
+/// None here means the font Arc was somehow dropped — render a placeholder).
+fn render_font_preview(
+    data: Option<Arc<FontData>>,
+    t: &ThemeColors,
+    cx: &mut Context<FileViewer>,
+) -> impl IntoElement {
+    let Some(data) = data else {
+        return div()
+            .id("font-empty")
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(t.bg_secondary))
+            .child(
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("Font not available"),
+            )
+            .into_any_element();
+    };
+
+    let family: SharedString = data.family_name.clone().into();
+    let sample = "The quick brown fox jumps over the lazy dog";
+    let sample_sizes_px: [f32; 5] = [48.0, 32.0, 24.0, 18.0, 14.0];
+
+    let sample_block = v_flex()
+        .gap(px(20.0))
+        .children(sample_sizes_px.iter().map(|&size| {
+            div()
+                .text_size(px(size))
+                .text_color(rgb(t.text_primary))
+                .font_family(family.clone())
+                .child(sample.to_string())
+        }));
+
+    let metadata_rows: Vec<(&str, String)> = vec![
+        ("Family", data.family_name.clone()),
+        ("Full name", data.full_name.clone()),
+        ("Style", data.style.clone()),
+        ("Weight class", data.weight_class.to_string()),
+        ("Italic", if data.is_italic { "yes" } else { "no" }.to_string()),
+        ("Glyphs", data.num_glyphs.to_string()),
+        ("Units per em", data.units_per_em.to_string()),
+        ("Version", if data.version.is_empty() { "—".to_string() } else { data.version.clone() }),
+    ];
+
+    let metadata_block = v_flex()
+        .gap(px(6.0))
+        .children(metadata_rows.into_iter().map(|(label, value)| {
+            h_flex()
+                .gap(px(16.0))
+                .child(
+                    div()
+                        .w(px(120.0))
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.text_primary))
+                        .child(value),
+                )
+        }));
+
+    div()
+        .id("font-preview")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .bg(rgb(t.bg_secondary))
+        .child(
+            v_flex()
+                .gap(px(32.0))
+                .p(px(32.0))
+                .child(sample_block)
+                .child(
+                    div()
+                        .h(px(1.0))
+                        .bg(rgb(t.border))
+                        .w_full(),
+                )
+                .child(metadata_block),
+        )
+        .into_any_element()
 }
