@@ -897,13 +897,24 @@ impl FileViewer {
                 }
                 // Re-find the tab by relative_path; concurrent reorders/closes
                 // mean the index may have shifted since we scheduled the check.
+                // Capture the previously-installed image so we can evict its
+                // sprite-atlas tile / asset-cache entry AFTER apply assigns
+                // the new one — apply runs on `&mut FileViewerTab` and can't
+                // see `cx: &mut App`.
+                let mut old_image: Option<DecodedImage> = None;
                 if let Some(tab) =
                     this.tabs.iter_mut().find(|t| t.relative_path == relative_path)
                 {
+                    if reloaded {
+                        old_image = tab.image_data.take();
+                    }
                     tab.apply_freshness_reload(result);
                     if reloaded {
                         tab.blame = BlameLoadState::NotLoaded;
                     }
+                }
+                if let Some(decoded) = old_image {
+                    release_image_assets(decoded, cx);
                 }
                 if reloaded {
                     if this.blame_visible {
@@ -1002,14 +1013,23 @@ impl FileViewer {
                             // were rasterizing — otherwise the stale
                             // raster would overwrite the new bitmap.
                             if Arc::as_ptr(svg_bytes) as usize == dispatched_bytes_id {
-                                *image = new_image;
+                                // Replace the bitmap, then evict the old
+                                // sprite-atlas tile so the GPU memory
+                                // gets reclaimed (cx.drop_image is the
+                                // only path; the Arc drop on its own
+                                // leaves the tile resident).
+                                let old_image = std::mem::replace(image, new_image);
                                 *rendered_scale = target_scale;
+                                cx.drop_image(old_image, None);
                                 cx.notify();
                                 should_chase = true;
+                            } else {
+                                // Bytes mismatch — image_data was replaced
+                                // by a freshness reload. The new bitmap
+                                // (the freshness reload's 1× raster) is
+                                // already on the tab; drop our raster.
+                                cx.drop_image(new_image, None);
                             }
-                            // Bytes mismatch — the freshness reload's own
-                            // 1× bitmap is what's now displayed; let any
-                            // subsequent zoom action kick a fresh raster.
                         }
                         (Err(_), Some(DecodedImage::Rendered {
                             rendered_scale,
@@ -1113,7 +1133,11 @@ impl FileViewer {
 
         // If current tab is empty (no file loaded), replace it
         if self.active_tab().is_empty() {
+            let old_image = self.tabs[self.active_tab].image_data.take();
             self.tabs[self.active_tab] = new_tab;
+            if let Some(decoded) = old_image {
+                release_image_assets(decoded, cx);
+            }
             self.spawn_tab_load(relative_path, cx);
             cx.notify();
             return;
@@ -1123,34 +1147,49 @@ impl FileViewer {
         let current = self.active_tab().relative_path.clone();
         self.history.push(&current);
 
-        self.active_tab = Self::insert_tab_after_active(&mut self.tabs, self.active_tab, new_tab);
+        let (new_active, evicted) =
+            Self::insert_tab_after_active(&mut self.tabs, self.active_tab, new_tab);
+        self.active_tab = new_active;
+        // Release any image assets owned by the evicted tab — otherwise
+        // its sprite-atlas tile / decoded asset cache entry would linger
+        // after the tab is gone (an SVG that had been zoomed to 16× is
+        // tens of MB of GPU memory).
+        if let Some(mut tab) = evicted
+            && let Some(decoded) = tab.image_data.take()
+        {
+            release_image_assets(decoded, cx);
+        }
 
         self.spawn_tab_load(relative_path, cx);
         cx.notify();
     }
 
-    /// Insert `new_tab` directly after the active tab and return the new
-    /// active index (the inserted tab). When already at `MAX_TABS`, the oldest
-    /// tab is evicted first to make room — never the active tab, so the file
-    /// the user is looking at is preserved. Evicting a tab before the active
-    /// one shifts the active index left by one.
+    /// Insert `new_tab` directly after the active tab and return
+    /// `(new_active_index, evicted_tab)`. When already at `MAX_TABS`, the
+    /// oldest tab is evicted first to make room — never the active tab,
+    /// so the file the user is looking at is preserved. Evicting a tab
+    /// before the active one shifts the active index left by one.
+    ///
+    /// The evicted tab is returned (not dropped here) so the caller can
+    /// release any GPU-side image assets it owned before letting it drop.
     fn insert_tab_after_active(
         tabs: &mut Vec<FileViewerTab>,
         active: usize,
         new_tab: FileViewerTab,
-    ) -> usize {
+    ) -> (usize, Option<FileViewerTab>) {
         let mut active = active;
+        let mut evicted = None;
         if tabs.len() >= MAX_TABS {
             // Oldest tab is index 0; skip it only if it's the active tab.
             let evict = if active == 0 { 1 } else { 0 };
-            tabs.remove(evict);
+            evicted = Some(tabs.remove(evict));
             if evict < active {
                 active -= 1;
             }
         }
         let insert_at = active + 1;
         tabs.insert(insert_at, new_tab);
-        insert_at
+        (insert_at, evicted)
     }
 
     /// Mark all ancestor folders of `relative_path` as expanded and ensure
@@ -1170,7 +1209,10 @@ impl FileViewer {
             return;
         }
 
-        self.tabs.remove(index);
+        let mut removed = self.tabs.remove(index);
+        if let Some(decoded) = removed.image_data.take() {
+            release_image_assets(decoded, cx);
+        }
 
         if index == self.active_tab {
             // Closed the active tab: prefer the tab to the right (same index),
@@ -1189,18 +1231,28 @@ impl FileViewer {
     pub(super) fn close_other_tabs(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             let kept = self.tabs.remove(index);
-            self.tabs.clear();
+            let mut dropped: Vec<FileViewerTab> = self.tabs.drain(..).collect();
             self.tabs.push(kept);
             self.active_tab = 0;
+            for mut tab in dropped.drain(..) {
+                if let Some(decoded) = tab.image_data.take() {
+                    release_image_assets(decoded, cx);
+                }
+            }
             cx.notify();
         }
     }
 
     /// Close all tabs, leaving an empty viewer state.
     pub(super) fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
-        self.tabs.clear();
+        let mut dropped: Vec<FileViewerTab> = self.tabs.drain(..).collect();
         self.tabs.push(FileViewerTab::new_empty());
         self.active_tab = 0;
+        for mut tab in dropped.drain(..) {
+            if let Some(decoded) = tab.image_data.take() {
+                release_image_assets(decoded, cx);
+            }
+        }
         cx.notify();
     }
 
@@ -1253,7 +1305,11 @@ impl FileViewer {
 
         let file_path = Self::resolve_absolute(&self.project_fs, &relative_path);
         let new_tab = FileViewerTab::new_loading(relative_path.clone(), file_path);
+        let old_image = self.tabs[self.active_tab].image_data.take();
         self.tabs[self.active_tab] = new_tab;
+        if let Some(decoded) = old_image {
+            release_image_assets(decoded, cx);
+        }
         self.spawn_tab_load(relative_path, cx);
         cx.notify();
     }
@@ -1317,6 +1373,7 @@ impl FileViewer {
                 })
                 .await;
             let _ = entity.update(cx, |this, cx| {
+                let mut old_image: Option<DecodedImage> = None;
                 if let Some(tab) =
                     this.tabs.iter_mut().find(|t| t.relative_path == relative_path)
                 {
@@ -1328,16 +1385,25 @@ impl FileViewer {
                         return;
                     }
                     // Register font bytes with the platform text system
-                    // BEFORE applying, so the family name is resolvable by
-                    // the time render runs. add_fonts is idempotent on
-                    // re-registration (same internal name resolves), so
-                    // closing and reopening the same font is cheap.
+                    // BEFORE applying so the family name is resolvable by
+                    // the time render runs. register_font_bytes dedups on
+                    // a byte hash so a re-register of the same font is a
+                    // no-op (without that, GPUI's add_fonts pushes every
+                    // call into the platform font source and never frees).
                     if let Ok(loading::LoadedContent::Font { ttf_bytes, .. }) = &result {
                         register_font_bytes(cx, ttf_bytes);
                     }
+                    // Capture the previously-installed image so we can
+                    // evict its sprite-atlas tile after the new one is in
+                    // place — apply_loaded_content runs on `&mut tab`
+                    // alone and can't see `cx: &mut App`.
+                    old_image = tab.image_data.take();
                     tab.apply_loaded_content(result, &this.syntax_set, this.is_dark);
                     tab.blame = BlameLoadState::NotLoaded;
                     cx.notify();
+                }
+                if let Some(decoded) = old_image {
+                    release_image_assets(decoded, cx);
                 }
                 if this.blame_visible {
                     this.spawn_blame_load_for_active(cx);
@@ -1380,14 +1446,71 @@ pub enum FileViewerEvent {
     SendToTerminal(okena_core::send_payload::SendPayload),
 }
 
+/// Release the GPU-side cache entries backing a `DecodedImage` before the
+/// owning `Arc` is dropped.
+///
+/// Without this, replacing `image_data` (on tab close, freshness reload,
+/// or an SVG re-raster) only drops the CPU-side `Arc`; the corresponding
+/// sprite-atlas tile / asset-cache entry stays resident in GPU memory.
+/// Repeatedly zooming an SVG (which kicks a fresh rasterization per 1.1×
+/// past the rendered scale) and external-edit cycles can each leak tens
+/// of MB of GPU memory over a session if this isn't called.
+pub(super) fn release_image_assets(decoded: DecodedImage, cx: &mut App) {
+    match decoded {
+        DecodedImage::Raster { image, .. } => {
+            // `Image::remove_asset` removes the decoded `RenderImage`
+            // produced by `ImageDecoder` from the asset cache; the
+            // underlying sprite-atlas tile is dropped along with it.
+            image.remove_asset(cx);
+        }
+        DecodedImage::Rendered { image, .. } => {
+            // Rendered SVG bitmaps live as `Arc<RenderImage>` directly in
+            // the sprite atlas; `cx.drop_image` is the only path that
+            // removes them across all windows.
+            cx.drop_image(image, None);
+        }
+    }
+}
+
 /// Register a font's OpenType bytes with the active text system so any
 /// subsequent render of `Font { family: family_name, .. }` resolves to it.
-/// GPUI's `add_fonts` is idempotent on a re-registration (same internal
-/// name resolves), so this is safe to call on every freshness reload.
+///
+/// GPUI's `add_fonts` does NOT dedup internally — every call pushes a
+/// fresh `Handle::from_memory` into the platform text system's font
+/// source. Without our own gate, every freshness reload of a font tab
+/// (and every reopen of the same file) leaks the full payload again.
+/// We hash the bytes and short-circuit if we've already registered an
+/// identical font this session.
 fn register_font_bytes(cx: &mut App, ttf_bytes: &Arc<Vec<u8>>) {
+    use std::collections::HashSet;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Mutex, OnceLock};
+    static REGISTERED: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+
+    let registered = REGISTERED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ttf_bytes.as_ref().hash(&mut hasher);
+    let hash = hasher.finish();
+    {
+        let mut guard = match registered.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if !guard.insert(hash) {
+            return;
+        }
+    }
+
     let bytes: Vec<u8> = ttf_bytes.as_ref().clone();
     if let Err(e) = cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(bytes)]) {
         log::warn!("Failed to register font with text system: {}", e);
+        // Roll back the dedup entry so a transient registration failure
+        // doesn't permanently block a retry from re-attempting it.
+        let mut guard = match registered.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.remove(&hash);
     }
 }
 
@@ -1420,8 +1543,10 @@ mod tests {
     #[::core::prelude::v1::test]
     fn insert_tab_below_limit_inserts_after_active() {
         let mut tabs = vec![tab("a"), tab("b"), tab("c")];
-        let active = FileViewer::insert_tab_after_active(&mut tabs, 0, tab("new"));
+        let (active, evicted) =
+            FileViewer::insert_tab_after_active(&mut tabs, 0, tab("new"));
         assert_eq!(active, 1);
+        assert!(evicted.is_none());
         assert_eq!(paths(&tabs), ["a", "new", "b", "c"]);
     }
 
@@ -1430,10 +1555,12 @@ mod tests {
         let mut tabs: Vec<FileViewerTab> =
             (0..MAX_TABS).map(|i| tab(&format!("f{i}"))).collect();
         // Active is somewhere in the middle.
-        let active = FileViewer::insert_tab_after_active(&mut tabs, 10, tab("new"));
+        let (active, evicted) =
+            FileViewer::insert_tab_after_active(&mut tabs, 10, tab("new"));
         assert_eq!(tabs.len(), MAX_TABS);
         // Oldest (index 0) was evicted; everything shifted left by one, so the
         // active file f10 stays active and the new tab lands right after it.
+        assert_eq!(evicted.expect("oldest tab returned").relative_path, "f0");
         assert_eq!(tabs[0].relative_path, "f1");
         assert_eq!(tabs[active - 1].relative_path, "f10");
         assert_eq!(tabs[active].relative_path, "new");
@@ -1444,10 +1571,12 @@ mod tests {
         let mut tabs: Vec<FileViewerTab> =
             (0..MAX_TABS).map(|i| tab(&format!("f{i}"))).collect();
         // Active IS the oldest tab — must not evict it.
-        let active = FileViewer::insert_tab_after_active(&mut tabs, 0, tab("new"));
+        let (active, evicted) =
+            FileViewer::insert_tab_after_active(&mut tabs, 0, tab("new"));
         assert_eq!(tabs.len(), MAX_TABS);
         assert_eq!(active, 1);
         // f0 (active) preserved at index 0; f1 (next oldest) evicted.
+        assert_eq!(evicted.expect("next-oldest tab returned").relative_path, "f1");
         assert_eq!(tabs[0].relative_path, "f0");
         assert_eq!(tabs[1].relative_path, "new");
         assert_eq!(tabs[2].relative_path, "f2");
