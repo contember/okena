@@ -947,6 +947,10 @@ impl FileViewer {
     }
 }
 
+/// Click handler captured by the small `−` / `+` chiclets — boxed so the
+/// helper can take heterogeneous closures by value.
+type ZoomButtonHandler = Box<dyn Fn(&mut FileViewer, &mut Context<FileViewer>)>;
+
 /// Header chiclet: `−` / `Fit | 100%` / `+`. Click on the label toggles
 /// between Fit and 100%. Buttons step zoom by 1.25× / 0.8×.
 fn image_zoom_controls(
@@ -954,7 +958,11 @@ fn image_zoom_controls(
     t: &ThemeColors,
     cx: &mut Context<FileViewer>,
 ) -> impl IntoElement {
-    let button = move |id: &'static str, glyph: &'static str, t: &ThemeColors, cx: &mut Context<FileViewer>, on_click: Box<dyn Fn(&mut FileViewer, &mut Context<FileViewer>)>| {
+    let button = move |id: &'static str,
+                       glyph: &'static str,
+                       t: &ThemeColors,
+                       cx: &mut Context<FileViewer>,
+                       on_click: ZoomButtonHandler| {
         let t_text_muted = t.text_muted;
         let t_bg_hover = t.bg_hover;
         div()
