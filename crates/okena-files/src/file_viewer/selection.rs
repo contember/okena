@@ -246,7 +246,12 @@ impl FileViewer {
         cx.notify();
     }
 
-    /// Begin a pan drag at the given screen-space position.
+    /// Record a potential pan drag at `position`. Does NOT promote the
+    /// view out of auto-fit yet — a single click anywhere on a fit-mode
+    /// image (e.g. to focus the pane, or the first half of a double-click
+    /// reset) would otherwise snap the image from Fit to 100% before the
+    /// user has even moved the mouse. Promotion happens in
+    /// `image_update_pan` on the first non-zero movement.
     pub(super) fn image_start_pan(
         &mut self,
         position: gpui::Point<gpui::Pixels>,
@@ -256,19 +261,16 @@ impl FileViewer {
         if !tab.is_image {
             return;
         }
-        // Panning only matters once we've left auto-fit, so promote to
-        // explicit zoom on first drag.
-        if tab.image_view.auto_fit {
-            tab.image_view.auto_fit = false;
-            tab.image_view.zoom = 1.0;
-        }
         tab.image_view.is_panning = true;
         tab.image_view.pan_anchor = Some(position);
         tab.image_view.pan_anchor_offset = tab.image_view.pan;
         cx.notify();
     }
 
-    /// Continue a pan drag — translate by (current - anchor).
+    /// Continue a pan drag — translate by (current - anchor). On the
+    /// first frame with a non-zero delta we also promote the view out of
+    /// auto-fit (and zoom to 1.0 if we hadn't left fit yet) so a stationary
+    /// click that never moved leaves the view untouched.
     pub(super) fn image_update_pan(
         &mut self,
         position: gpui::Point<gpui::Pixels>,
@@ -281,9 +283,27 @@ impl FileViewer {
         let Some(anchor) = tab.image_view.pan_anchor else {
             return;
         };
+        let dx = position.x - anchor.x;
+        let dy = position.y - anchor.y;
+        if f32::from(dx) == 0.0 && f32::from(dy) == 0.0 {
+            return;
+        }
+        if tab.image_view.auto_fit {
+            tab.image_view.auto_fit = false;
+            tab.image_view.zoom = 1.0;
+            tab.image_view.pan_anchor_offset = gpui::Point::default();
+        }
+        // Clamp pan magnitude. Without this the user can drag the image
+        // arbitrarily far off-pane (the container is overflow_hidden, so
+        // it just vanishes) with no obvious recovery affordance. ±10000 px
+        // per axis is generous for any realistic display while preventing
+        // a runaway momentum drift from sending the image to infinity.
+        const PAN_HARDCAP: f32 = 10_000.0;
+        let raw_x = f32::from(tab.image_view.pan_anchor_offset.x + dx);
+        let raw_y = f32::from(tab.image_view.pan_anchor_offset.y + dy);
         tab.image_view.pan = gpui::Point::new(
-            tab.image_view.pan_anchor_offset.x + (position.x - anchor.x),
-            tab.image_view.pan_anchor_offset.y + (position.y - anchor.y),
+            gpui::px(raw_x.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
+            gpui::px(raw_y.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
         );
         cx.notify();
     }

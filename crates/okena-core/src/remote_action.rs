@@ -18,36 +18,46 @@ const BYTES_TIMEOUT_SECS: u64 = 90;
 /// `src/workspace/actions/execute/files.rs`.
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 
-fn build_client(timeout_secs: u64) -> reqwest::blocking::Client {
-    #[allow(
-        clippy::expect_used,
-        reason = "reqwest client build only fails on TLS backend init — nothing recoverable at this call site"
-    )]
+/// Build a reqwest blocking client. Returns Err on TLS backend init
+/// failure (corrupt cert store, sandboxed Keychain denial, FIPS mode
+/// rejecting default ciphers, container without ca-certificates). Caller
+/// is expected to surface the error to the user — a panic here would
+/// abort the whole app at first remote probe and OnceLock-poison every
+/// retry.
+fn build_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()
-        .expect("Failed to build HTTP client")
+        .map_err(|e| format!("Cannot initialise HTTP client: {}", e))
 }
 
-/// Fast-action client (terminal control, listings, metadata).
-fn shared_client() -> &'static reqwest::blocking::Client {
+/// Cached fast-action client. We store the build result so a TLS init
+/// failure surfaces as a recoverable error rather than poisoning the
+/// OnceLock and panicking every retry.
+fn shared_client() -> Result<&'static reqwest::blocking::Client, String> {
     use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| build_client(FAST_TIMEOUT_SECS))
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    match CLIENT.get_or_init(|| build_client(FAST_TIMEOUT_SECS)) {
+        Ok(c) => Ok(c),
+        Err(e) => Err(e.clone()),
+    }
 }
 
-/// Bytes-action client with a longer timeout, for ReadFileBytes specifically.
-fn bytes_client() -> &'static reqwest::blocking::Client {
+/// Cached bytes-action client with a longer timeout, for ReadFileBytes.
+fn bytes_client() -> Result<&'static reqwest::blocking::Client, String> {
     use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| build_client(BYTES_TIMEOUT_SECS))
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    match CLIENT.get_or_init(|| build_client(BYTES_TIMEOUT_SECS)) {
+        Ok(c) => Ok(c),
+        Err(e) => Err(e.clone()),
+    }
 }
 
 /// Pick the right client for the action. Bytes-bearing actions get the
 /// larger timeout so a slow remote doesn't surface as a generic transport
 /// error mid-download.
-fn client_for(action: &ActionRequest) -> &'static reqwest::blocking::Client {
+fn client_for(action: &ActionRequest) -> Result<&'static reqwest::blocking::Client, String> {
     match action {
         ActionRequest::ReadFileBytes { .. } => bytes_client(),
         _ => shared_client(),
@@ -62,7 +72,7 @@ pub fn post_action(
     action: ActionRequest,
 ) -> Result<Option<serde_json::Value>, String> {
     let url = format!("http://{}:{}/v1/actions", host, port);
-    let client = client_for(&action);
+    let client = client_for(&action)?;
     let resp = client
         .post(&url)
         .bearer_auth(token)

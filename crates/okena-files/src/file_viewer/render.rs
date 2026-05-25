@@ -887,7 +887,18 @@ impl FileViewer {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 let delta = event.delta.pixel_delta(px(17.0));
                 let dy = f32::from(delta.y);
-                if dy.abs() < f32::EPSILON {
+                // Reject non-finite deltas (a hostile remote bridge or
+                // momentum-extrapolation overflow can hand us NaN/inf;
+                // `NaN < EPSILON` is false so the old guard let them
+                // through and poisoned zoom into NaN).
+                if !dy.is_finite() {
+                    return;
+                }
+                // Filter the macOS kinetic-momentum tail (deltas in the
+                // 0.01–0.5 range continuing for ~1 s after the user
+                // stops scrolling — they would otherwise keep nudging
+                // zoom and respawning the SVG re-raster pipeline).
+                if dy.abs() < 0.5 {
                     return;
                 }
                 // Exponential: positive dy zooms in, negative out. ±100 px ≈ 1.2× / 0.83×.
@@ -905,6 +916,17 @@ impl FileViewer {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                // If the user released the button outside the container
+                // we never saw the on_mouse_up — clear sticky pan state
+                // on the next move that arrives without a pressed Left
+                // button so the image doesn't follow the cursor with no
+                // button held.
+                if event.pressed_button != Some(MouseButton::Left) {
+                    if this.active_tab().image_view.is_panning {
+                        this.image_end_pan(cx);
+                    }
+                    return;
+                }
                 this.image_update_pan(event.position, cx);
             }))
             .on_mouse_up(
@@ -1251,6 +1273,10 @@ impl Render for FileViewer {
                 // In source mode the highlighted XML is shown, so selection
                 // / search / copy / select-all all work normally.
                 let is_img_view = is_img && (!is_svg_tab || is_preview);
+                // Image-zoom chords only apply when the user is actually
+                // looking at the image (SVG in Source mode shows XML; we
+                // don't want Cmd+= to silently zoom a hidden preview).
+                let img_zoom_chord = is_img_view;
 
                 match key {
                     "f" if modifiers.platform || modifiers.control => {
@@ -1298,13 +1324,13 @@ impl Render for FileViewer {
                     "w" if modifiers.platform || modifiers.control => {
                         this.close_active_tab(cx);
                     }
-                    "0" if (modifiers.platform || modifiers.control) && is_img => {
+                    "0" if (modifiers.platform || modifiers.control) && img_zoom_chord => {
                         this.image_fit(cx);
                     }
-                    "=" | "+" if (modifiers.platform || modifiers.control) && is_img => {
+                    "=" | "+" if (modifiers.platform || modifiers.control) && img_zoom_chord => {
                         this.image_zoom_by(1.25, cx);
                     }
-                    "-" if (modifiers.platform || modifiers.control) && is_img => {
+                    "-" if (modifiers.platform || modifiers.control) && img_zoom_chord => {
                         this.image_zoom_by(1.0 / 1.25, cx);
                     }
                     "r" if !modifiers.platform && !modifiers.control => {

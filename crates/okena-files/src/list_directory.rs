@@ -28,10 +28,26 @@ pub fn list_directory(
     relative_path: &str,
     show_ignored: bool,
 ) -> Result<Vec<DirEntry>, String> {
+    // Canonicalize the join target and verify it stays inside the project
+    // root — `relative_path` may carry `..` segments or even be absolute
+    // (Path::join with an absolute argument replaces). Without this guard
+    // a caller passing `../../etc` would list arbitrary directories. The
+    // read_file / read_file_bytes path enforces the same invariant via
+    // LocalProjectFs::resolve; this is the listing-side mirror.
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve project path: {}", e))?;
     let target = if relative_path.is_empty() {
-        project_root.to_path_buf()
+        canonical_root.clone()
     } else {
-        project_root.join(relative_path)
+        let joined = canonical_root.join(relative_path);
+        let canonical = joined
+            .canonicalize()
+            .map_err(|e| format!("Cannot read directory: {}", e))?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err("path traversal not allowed".to_string());
+        }
+        canonical
     };
 
     let metadata = std::fs::metadata(&target)
@@ -39,6 +55,10 @@ pub fn list_directory(
     if !metadata.is_dir() {
         return Err(format!("Not a directory: {}", target.display()));
     }
+    // Subsequent code references `project_root` — keep using the
+    // canonical root for ignore overrides so anchored patterns resolve
+    // the same way as inside resolve().
+    let project_root = canonical_root.as_path();
 
     let mut walk_builder = WalkBuilder::new(&target);
     walk_builder

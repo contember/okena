@@ -909,6 +909,19 @@ impl FileViewer {
                     if this.blame_visible {
                         this.spawn_blame_load_for_active(cx);
                     }
+                    // The freshness reload of an SVG always rebuilds the
+                    // bitmap at rendered_scale=1.0, but image_view.zoom
+                    // persists across the reload. Without this kick the
+                    // user's previously-tuned high-zoom view stays
+                    // pixelated until they touch the wheel.
+                    if let Some(tab) = this
+                        .tabs
+                        .iter()
+                        .find(|t| t.relative_path == relative_path)
+                        && tab.is_svg
+                    {
+                        this.maybe_rerender_svg_for(relative_path.clone(), cx);
+                    }
                     cx.notify();
                 }
             });
@@ -926,10 +939,30 @@ impl FileViewer {
     /// raster if the user has zoomed further in the meantime.
     pub(super) fn maybe_rerender_svg(&mut self, cx: &mut Context<Self>) {
         let relative_path = self.active_tab().relative_path.clone();
+        self.maybe_rerender_svg_for(relative_path, cx);
+    }
+
+    /// Re-raster the SVG on the tab identified by `relative_path` (not
+    /// necessarily the active tab). Used both as the entry point from
+    /// zoom actions (which pass the active tab) and from the apply
+    /// callback's chase-loop recursion, where the user may have switched
+    /// tabs mid-raster and `self.active_tab()` would target the wrong
+    /// path.
+    pub(super) fn maybe_rerender_svg_for(
+        &mut self,
+        relative_path: String,
+        cx: &mut Context<Self>,
+    ) {
         let svg_renderer = cx.svg_renderer();
         let Some((bytes, target_scale)) = self.compute_rerender_target(&relative_path) else {
             return;
         };
+        // Capture the source bytes' Arc identity so we can detect — at
+        // apply time — that image_data was swapped to a different SVG
+        // (freshness reload, tab-replace) while our raster was in flight.
+        // Without this guard the stale bitmap would overwrite the fresh
+        // image, showing pre-edit pixels for the post-edit file.
+        let dispatched_bytes_id = Arc::as_ptr(&bytes) as usize;
 
         if let Some(tab) = self
             .tabs
@@ -948,28 +981,61 @@ impl FileViewer {
                         .map_err(|e| format!("Cannot re-rasterize SVG: {}", e))
                 })
                 .await;
+            let path_for_callback = relative_path.clone();
             let _ = entity.update(cx, |this, cx| {
+                let mut should_chase = false;
                 if let Some(tab) = this
                     .tabs
                     .iter_mut()
                     .find(|t| t.relative_path == relative_path)
                 {
                     tab.image_view.svg_rerender_in_flight = false;
-                    if let Ok(new_image) = result
-                        && let Some(DecodedImage::Rendered {
+                    match (result, tab.image_data.as_mut()) {
+                        (Ok(new_image), Some(DecodedImage::Rendered {
                             image,
                             rendered_scale,
+                            svg_bytes,
                             ..
-                        }) = &mut tab.image_data
-                    {
-                        *image = new_image;
-                        *rendered_scale = target_scale;
-                        cx.notify();
+                        })) => {
+                            // Discard the result if image_data was
+                            // replaced (different SVG bytes) while we
+                            // were rasterizing — otherwise the stale
+                            // raster would overwrite the new bitmap.
+                            if Arc::as_ptr(svg_bytes) as usize == dispatched_bytes_id {
+                                *image = new_image;
+                                *rendered_scale = target_scale;
+                                cx.notify();
+                                should_chase = true;
+                            }
+                            // Bytes mismatch — the freshness reload's own
+                            // 1× bitmap is what's now displayed; let any
+                            // subsequent zoom action kick a fresh raster.
+                        }
+                        (Err(_), Some(DecodedImage::Rendered {
+                            rendered_scale,
+                            svg_bytes,
+                            ..
+                        })) => {
+                            // Pin rendered_scale to the failed target so
+                            // compute_rerender_target stops requesting
+                            // the same raster on every chase tick. The
+                            // bitmap stays at its previous resolution
+                            // (the user keeps seeing whatever crisp /
+                            // soft state they had before). Only apply
+                            // this pin to the SVG we dispatched against.
+                            if Arc::as_ptr(svg_bytes) as usize == dispatched_bytes_id {
+                                *rendered_scale = target_scale;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                // The user may have kept zooming while we were rasterizing
-                // — check whether we still need to chase a higher target.
-                this.maybe_rerender_svg(cx);
+                // Recurse against the captured relative_path, not the
+                // active tab — the user may have switched tabs while the
+                // raster ran.
+                if should_chase {
+                    this.maybe_rerender_svg_for(path_for_callback, cx);
+                }
             });
         })
         .detach();

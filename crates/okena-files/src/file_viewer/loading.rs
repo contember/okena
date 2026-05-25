@@ -205,6 +205,23 @@ pub(super) fn compute_freshness_reload(
     })
 }
 
+/// Map the `image` crate's content-sniffed format onto GPUI's `ImageFormat`.
+/// `image::ImageFormat` covers more formats than GPUI knows; we return
+/// `None` for anything GPUI can't render so the caller can fall back to
+/// the extension-derived format.
+fn image_format_from_image_crate(format: image::ImageFormat) -> Option<ImageFormat> {
+    Some(match format {
+        image::ImageFormat::Png => ImageFormat::Png,
+        image::ImageFormat::Jpeg => ImageFormat::Jpeg,
+        image::ImageFormat::Gif => ImageFormat::Gif,
+        image::ImageFormat::WebP => ImageFormat::Webp,
+        image::ImageFormat::Bmp => ImageFormat::Bmp,
+        image::ImageFormat::Tiff => ImageFormat::Tiff,
+        image::ImageFormat::Ico => ImageFormat::Ico,
+        _ => return None,
+    })
+}
+
 /// Decode raw image bytes into a `DecodedImage` based on file extension.
 /// Used by both the initial async load and freshness reloads for image tabs.
 ///
@@ -273,15 +290,25 @@ pub(super) fn build_image_content(
         }
         _ => {
             // Probe intrinsic dimensions without decoding the full pixel
-            // buffer; image::ImageReader reads only the header.
-            let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            // buffer; image::ImageReader reads only the header. Trust the
+            // content-derived format over the extension-derived one so a
+            // `.png` that's actually JPEG bytes (common after "Save As")
+            // decodes through the right codec rather than failing silently
+            // inside GPUI's lazy decoder with the user looking at a sized
+            // but blank "Cannot decode image" box.
+            let reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
                 .with_guessed_format()
-                .map_err(|e| format!("Cannot read image header: {}", e))?
+                .map_err(|e| format!("Cannot read image header: {}", e))?;
+            let guessed = reader.format();
+            let (width, height) = reader
                 .into_dimensions()
                 .map_err(|e| format!("Cannot read image dimensions: {}", e))?;
+            let effective_format = guessed
+                .and_then(image_format_from_image_crate)
+                .unwrap_or(format);
             Ok(LoadedContent::Image {
                 decoded: DecodedImage::Raster {
-                    image: Arc::new(Image::from_bytes(format, bytes)),
+                    image: Arc::new(Image::from_bytes(effective_format, bytes)),
                     width,
                     height,
                 },
