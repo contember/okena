@@ -160,7 +160,7 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     folder_pink: 0xe06c9f,
     metric_normal: 0x0dbc79,   // term_green
     metric_warning: 0xe5e510,  // term_yellow
-    metric_critical: 0xcd3131, // term_red
+    metric_critical: 0xf14c4c, // term_bright_red (cd3131 too dim on dark bg)
     diff_added_bg: 0x2ea043,
     diff_removed_bg: 0xf85149,
     diff_added_fg: 0x3fb950,
