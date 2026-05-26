@@ -15,11 +15,18 @@ use std::sync::Arc;
 /// Desktop-specific handler that creates `Terminal` objects and manages the registry.
 pub struct DesktopConnectionHandler {
     terminals: TerminalsRegistry,
+    /// Coalescing doorbell rung on every chunk of remote output so the manager's
+    /// activity pump wakes and repaints server-driven sidebar indicators. See
+    /// `RemoteConnectionManager::start_terminal_activity_pump`.
+    activity_tx: async_channel::Sender<()>,
 }
 
 impl DesktopConnectionHandler {
-    pub fn new(terminals: TerminalsRegistry) -> Self {
-        Self { terminals }
+    pub fn new(terminals: TerminalsRegistry, activity_tx: async_channel::Sender<()>) -> Self {
+        Self {
+            terminals,
+            activity_tx,
+        }
     }
 }
 
@@ -56,6 +63,10 @@ impl ConnectionHandler for DesktopConnectionHandler {
         let terminal = self.terminals.lock().get(prefixed_id).cloned();
         if let Some(terminal) = terminal {
             terminal.enqueue_output(data);
+            // Ring the doorbell so the GPUI-side activity pump wakes and
+            // repaints bell/idle indicators. Capacity 1: a full channel means a
+            // wake is already pending, which will drain this terminal too.
+            let _ = self.activity_tx.try_send(());
         }
     }
 
@@ -116,8 +127,9 @@ impl RemoteConnection {
         runtime: Arc<tokio::runtime::Runtime>,
         terminals: TerminalsRegistry,
         event_tx: async_channel::Sender<ConnectionEvent>,
+        activity_tx: async_channel::Sender<()>,
     ) -> Self {
-        let handler = Arc::new(DesktopConnectionHandler::new(terminals));
+        let handler = Arc::new(DesktopConnectionHandler::new(terminals, activity_tx));
         let client = RemoteClient::new(config, runtime, handler, event_tx);
         Self { client }
     }

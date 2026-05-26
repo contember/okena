@@ -5,7 +5,7 @@ mod sidebar;
 mod terminal_actions;
 
 use crate::git::watcher::GitStatusWatcher;
-use crate::remote_client::manager::RemoteConnectionManager;
+use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::{TerminalBackend, LocalBackend};
 use crate::terminal::pty_manager::PtyManager;
@@ -481,6 +481,20 @@ impl WindowView {
             let sidebar_for_observe = self.sidebar.clone();
             cx.observe(&manager, move |_this, _rm, cx| {
                 sidebar_for_observe.update(cx, |_, cx| cx.notify());
+            }).detach();
+
+            // Repaint the sidebar on remote terminal activity (bell / idle).
+            // The sidebar reads these flags straight from the TerminalsRegistry,
+            // which GPUI's dependency tracking can't see, so incoming server
+            // output would otherwise only surface on local input (issue #128).
+            // This rides a dedicated event rather than cx.notify() so the
+            // high-frequency output cadence doesn't trigger the project-sync
+            // observer above.
+            let sidebar_for_activity = self.sidebar.clone();
+            cx.subscribe(&manager, move |_this, _rm, event, cx| match event {
+                RemoteManagerEvent::TerminalActivity => {
+                    sidebar_for_activity.update(cx, |_, cx| cx.notify());
+                }
             }).detach();
         }
 

@@ -1,5 +1,6 @@
 use crate::connection::RemoteConnection;
 use okena_terminal::backend::TerminalBackend;
+use okena_terminal::terminal::Terminal;
 use okena_workspace::toast::ToastManager;
 use okena_terminal::TerminalsRegistry;
 use okena_workspace::settings::{load_settings, update_remote_connections};
@@ -14,6 +15,21 @@ use gpui::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Lightweight events emitted by [`RemoteConnectionManager`] that must NOT go
+/// through `cx.notify()`.
+///
+/// `cx.notify()` on the manager fans out to the project-sync observer
+/// (`WindowView::sync_remote_projects_into_workspace`), which clones every
+/// connection's full `StateResponse` and diffs it into the workspace. That is
+/// the right cost for a discrete state change, but ruinous at the cadence of
+/// terminal output. These events let high-frequency, repaint-only signals
+/// reach just the views that care (the sidebar) without triggering that sync.
+pub enum RemoteManagerEvent {
+    /// A remote terminal produced output / changed derived state (bell, idle).
+    /// Subscribers should repaint indicators but must not re-sync project state.
+    TerminalActivity,
+}
+
 /// GPUI Entity managing all remote connections.
 ///
 /// Observed by the Sidebar for rendering remote projects,
@@ -26,6 +42,11 @@ pub struct RemoteConnectionManager {
     /// Channel for events coming from tokio tasks
     event_tx: async_channel::Sender<ConnectionEvent>,
 
+    /// Coalescing doorbell rung by the tokio reader whenever a remote terminal
+    /// produces output. Capacity 1: a wake already pending absorbs further
+    /// output until the GPUI side drains, so output bursts collapse into a
+    /// single repaint pass. Handed to every connection's `ConnectionHandler`.
+    activity_tx: async_channel::Sender<()>,
 }
 
 impl RemoteConnectionManager {
@@ -63,12 +84,93 @@ impl RemoteConnectionManager {
         })
         .detach();
 
-        Self {
+        // Coalescing doorbell for remote terminal output (see field docs).
+        let (activity_tx, activity_rx) = async_channel::bounded::<()>(1);
+
+        let manager = Self {
             connections: HashMap::new(),
             terminals,
             runtime,
             event_tx,
-        }
+            activity_tx,
+        };
+        manager.start_terminal_activity_pump(activity_rx, cx);
+        manager
+    }
+
+    /// Drive sidebar repaints from incoming remote terminal output — reactively,
+    /// woken by the `activity_rx` doorbell rather than by polling.
+    ///
+    /// Remote output arrives on a tokio task that only buffers bytes via
+    /// `Terminal::enqueue_output` — it never touches GPUI. The per-pane dirty
+    /// loop (`TerminalPane::start_remote_dirty_check_loop`) repaints the
+    /// *focused* terminal grid, but two server-driven indicators are left
+    /// stale until unrelated local input forces a global repaint (issue #128):
+    ///
+    /// 1. **Background (unmounted) terminals never get parsed.** A sidebar
+    ///    entry whose pane isn't mounted has no per-pane loop, so its pending
+    ///    bytes are never drained — `has_bell()` stays false and the bell
+    ///    badge never appears.
+    /// 2. **The sidebar is never notified.** It reads bell/idle straight from
+    ///    the `TerminalsRegistry` (a plain `Arc<Mutex<..>>`, invisible to
+    ///    GPUI's automatic per-entity dependency tracking), so nothing tells
+    ///    it to re-render when a terminal's derived state changes.
+    ///
+    /// Each `enqueue_output` rings the capacity-1 doorbell (`try_send`, so
+    /// bursts coalesce). On every wake this drains+parses pending output for all
+    /// remote terminals on the GPUI thread (fixing #1) and watches
+    /// `content_generation` to confirm something actually advanced — regardless
+    /// of whether the per-pane loop also drained it. When so it emits
+    /// `RemoteManagerEvent::TerminalActivity`, which repaints every window's
+    /// sidebar via the subscription in `WindowView::set_remote_manager`
+    /// (fixing #2). Idle ⇒ the task simply parks on `recv()`, no CPU.
+    fn start_terminal_activity_pump(
+        &self,
+        activity_rx: async_channel::Receiver<()>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            // Per-terminal `content_generation` snapshots from the previous
+            // wake. A terminal whose generation advanced (or that appeared /
+            // disappeared) means derived state the sidebar reads may have
+            // changed.
+            let mut last_generations: HashMap<String, u64> = HashMap::new();
+
+            while activity_rx.recv().await.is_ok() {
+                let result = this.update(cx, |this, cx| {
+                    let terminals: Vec<(String, Arc<Terminal>)> = {
+                        let registry = this.terminals.lock();
+                        registry
+                            .iter()
+                            .filter(|(id, _)| id.starts_with("remote:"))
+                            .map(|(id, terminal)| (id.clone(), terminal.clone()))
+                            .collect()
+                    };
+
+                    let mut next_generations = HashMap::with_capacity(terminals.len());
+                    for (id, terminal) in &terminals {
+                        // Parse on the GPUI thread so bell/idle flags are
+                        // current even for terminals with no mounted pane.
+                        // No-op when the pending buffer is empty.
+                        terminal.process_pending_output();
+                        next_generations.insert(id.clone(), terminal.content_generation());
+                    }
+                    let changed = activity_changed(&last_generations, &next_generations);
+                    last_generations = next_generations;
+
+                    if changed {
+                        // Emit (not notify): repaint the sidebar's bell/idle
+                        // indicators without dragging in the heavy project-sync
+                        // observer that fires on `cx.notify()`.
+                        cx.emit(RemoteManagerEvent::TerminalActivity);
+                    }
+                });
+                if result.is_err() {
+                    break; // Entity dropped
+                }
+            }
+        })
+        .detach();
     }
 
     /// Check if a connection to the given host:port already exists.
@@ -98,6 +200,7 @@ impl RemoteConnectionManager {
             self.runtime.clone(),
             self.terminals.clone(),
             self.event_tx.clone(),
+            self.activity_tx.clone(),
         );
         conn.connect();
         self.connections.insert(id, conn);
@@ -182,6 +285,7 @@ impl RemoteConnectionManager {
                     self.runtime.clone(),
                     self.terminals.clone(),
                     self.event_tx.clone(),
+                    self.activity_tx.clone(),
                 );
                 conn.connect();
                 self.connections.insert(id, conn);
@@ -427,6 +531,25 @@ impl RemoteConnectionManager {
     }
 }
 
+impl EventEmitter<RemoteManagerEvent> for RemoteConnectionManager {}
+
+/// Decide whether the terminal-activity pump should repaint, given the previous
+/// and current per-terminal `content_generation` snapshots.
+///
+/// Returns true when any terminal's generation advanced (new output parsed) or
+/// when a terminal appeared/disappeared. A pure helper so the change-detection
+/// branches stay testable without a live GPUI/tokio stack.
+fn activity_changed(last: &HashMap<String, u64>, current: &HashMap<String, u64>) -> bool {
+    // A pure removal (terminal gone, none added) won't show up when scanning
+    // `current`, so compare counts first.
+    if last.len() != current.len() {
+        return true;
+    }
+    current
+        .iter()
+        .any(|(id, generation)| last.get(id) != Some(generation))
+}
+
 fn now_unix_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -436,7 +559,41 @@ fn now_unix_timestamp() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::RemoteConnectionManager;
+    use super::{activity_changed, RemoteConnectionManager};
+
+    fn gens(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
+        pairs.iter().map(|(id, g)| (id.to_string(), *g)).collect()
+    }
+
+    #[test]
+    fn activity_changed_detects_generation_advance() {
+        let last = gens(&[("a", 1), ("b", 5)]);
+        let current = gens(&[("a", 1), ("b", 6)]); // b produced output
+        assert!(activity_changed(&last, &current));
+    }
+
+    #[test]
+    fn activity_changed_false_when_idle() {
+        let last = gens(&[("a", 1), ("b", 5)]);
+        let current = gens(&[("a", 1), ("b", 5)]);
+        assert!(!activity_changed(&last, &current));
+    }
+
+    #[test]
+    fn activity_changed_detects_added_and_removed_terminals() {
+        let last = gens(&[("a", 1)]);
+        assert!(activity_changed(&last, &gens(&[("a", 1), ("b", 1)]))); // added
+        assert!(activity_changed(&last, &gens(&[]))); // removed
+    }
+
+    #[test]
+    fn activity_changed_detects_swap_at_equal_count() {
+        // One terminal removed, another added in the same tick — counts match
+        // but the new id isn't in the previous snapshot.
+        let last = gens(&[("a", 3)]);
+        let current = gens(&[("b", 3)]);
+        assert!(activity_changed(&last, &current));
+    }
     use okena_terminal::TerminalsRegistry;
     use gpui::AppContext as _;
     use okena_core::client::RemoteConnectionConfig;
