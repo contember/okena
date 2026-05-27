@@ -117,10 +117,10 @@ fn build_process_tree_macos() -> HashMap<u32, Vec<u32>> {
     let mut tree: HashMap<u32, Vec<u32>> = HashMap::new();
     for line in stdout.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() >= 2 {
-            if let (Ok(pid), Ok(ppid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>()) {
-                tree.entry(ppid).or_default().push(pid);
-            }
+        if fields.len() >= 2
+            && let (Ok(pid), Ok(ppid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>())
+        {
+            tree.entry(ppid).or_default().push(pid);
         }
     }
     tree

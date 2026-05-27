@@ -609,15 +609,16 @@ impl Render for TerminalContent {
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     if this.try_forward_mouse_press(1, event.position, &event.modifiers) {
                         cx.notify();
-                        return;
-                    }
-                    #[cfg(target_os = "linux")]
-                    if let Some(ref terminal) = this.terminal
-                        && let Some(item) = cx.read_from_primary()
+                    } else {
+                        #[cfg(target_os = "linux")]
+                        if let Some(ref terminal) = this.terminal
+                            && let Some(item) = cx.read_from_primary()
                             && let Some(text) = item.text()
-                                && !text.is_empty() {
-                                    terminal.send_paste(&text);
-                                }
+                            && !text.is_empty()
+                        {
+                            terminal.send_paste(&text);
+                        }
+                    }
                 }),
             )
             .on_mouse_up(

@@ -976,6 +976,12 @@ impl Okena {
 
 }
 
+impl Render for Okena {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.main_window.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::claude_pty_extra_env;
@@ -1003,11 +1009,5 @@ mod tests {
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].0, "CLAUDE_CONFIG_DIR");
         assert_eq!(env[0].1, custom_dir.to_string_lossy());
-    }
-}
-
-impl Render for Okena {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.main_window.clone())
     }
 }

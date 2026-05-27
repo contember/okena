@@ -1304,12 +1304,12 @@ fn find_pids_for_unix_sockets_lsof(
     for line in stdout.lines() {
         if let Some(pid_str) = line.strip_prefix('p') {
             current_pid = pid_str.parse().ok();
-        } else if let Some(name) = line.strip_prefix('n') {
-            if let Some(pid) = current_pid {
-                let path = std::path::PathBuf::from(name);
-                if socket_paths.contains(&path) {
-                    result.entry(path).or_default().push(pid);
-                }
+        } else if let Some(name) = line.strip_prefix('n')
+            && let Some(pid) = current_pid
+        {
+            let path = std::path::PathBuf::from(name);
+            if socket_paths.contains(&path) {
+                result.entry(path).or_default().push(pid);
             }
         }
     }
@@ -1345,4 +1345,3 @@ fn first_proc_child(pid: u32) -> Option<u32> {
 fn first_proc_child(_pid: u32) -> Option<u32> {
     None
 }
-

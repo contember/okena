@@ -276,10 +276,10 @@ impl Workspace {
                 .collect();
 
         for project in &mut self.data.projects {
-            if visible_ids.iter().any(|id| id == &project.id) {
-                if let Some(layout) = project.layout.as_mut() {
-                    layout.transpose();
-                }
+            if visible_ids.iter().any(|id| id == &project.id)
+                && let Some(layout) = project.layout.as_mut()
+            {
+                layout.transpose();
             }
         }
 

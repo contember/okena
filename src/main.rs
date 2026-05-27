@@ -85,6 +85,7 @@ fn quit(_: &Quit, cx: &mut App) {
 
 /// About action handler - shows native macOS about panel
 #[cfg(target_os = "macos")]
+#[allow(clippy::manual_c_str_literals)]
 fn about(_: &About, _cx: &mut App) {
     use std::ffi::c_void;
 
