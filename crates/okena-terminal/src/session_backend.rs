@@ -171,7 +171,7 @@ impl ResolvedBackend {
         session_name: &str,
         cwd: &str,
         command: Option<&str>,
-        extra_env: &[(String, String)],
+        extra_env: &[(String, Option<String>)],
     ) -> Option<(String, Vec<String>)> {
         match self {
             Self::None => None,
@@ -200,15 +200,28 @@ impl ResolvedBackend {
                 // pre-existing tmux server whose global env predates Okena.
                 let env_args: String = extra_env
                     .iter()
-                    .map(|(k, v)| format!(" -e {}", shell_escape(&format!("{k}={v}"))))
+                    .filter_map(|(k, v)| {
+                        v.as_ref()
+                            .map(|val| format!(" -e {}", shell_escape(&format!("{k}={val}"))))
+                    })
+                    .collect();
+                // For removals there is no `-e` equivalent: clear the var from the
+                // session environment so later splits/panes don't inherit a stale
+                // value. (The very first pane is handled by `env_remove` on the
+                // tmux client, which a freshly-started server inherits.)
+                let unset_args: String = extra_env
+                    .iter()
+                    .filter(|(_, v)| v.is_none())
+                    .map(|(k, _)| format!(" \\; set-environment -u {}", shell_escape(k)))
                     .collect();
                 let tmux_cmd = format!(
-                    "tmux new-session -A{} -s {} -c {}{} \\; set status off \\; set mouse on \\; set default-terminal xterm-256color \\; set terminal-features 'xterm-256color:RGB' \\; set -as terminal-overrides ',xterm-256color:Tc' \\; set-window-option automatic-rename off \\; rename-window {}",
+                    "tmux new-session -A{} -s {} -c {}{} \\; set status off \\; set mouse on \\; set default-terminal xterm-256color \\; set terminal-features 'xterm-256color:RGB' \\; set -as terminal-overrides ',xterm-256color:Tc' \\; set-window-option automatic-rename off \\; rename-window {}{}",
                     env_args,
                     shell_escape(session_name),
                     shell_escape(cwd),
                     initial_program,
-                    shell_escape(&window_name)
+                    shell_escape(&window_name),
+                    unset_args
                 );
                 Some((
                     "sh".to_string(),
@@ -967,7 +980,7 @@ mod tests {
     #[test]
     fn test_tmux_build_command_with_extra_env() {
         let backend = ResolvedBackend::Tmux;
-        let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/tmp/foo".to_string())];
+        let env = vec![("CLAUDE_CONFIG_DIR".to_string(), Some("/tmp/foo".to_string()))];
         let (_, args) = backend
             .build_command("tm-test", "/tmp", None, &env)
             .unwrap();
@@ -980,6 +993,26 @@ mod tests {
         let env_pos = args[1].find("-e ").unwrap();
         let s_pos = args[1].find("-s ").unwrap();
         assert!(env_pos < s_pos, "expected -e before -s in: {}", args[1]);
+    }
+
+    #[test]
+    fn test_tmux_build_command_unsets_env() {
+        let backend = ResolvedBackend::Tmux;
+        let env = vec![("CLAUDE_CONFIG_DIR".to_string(), None)];
+        let (_, args) = backend
+            .build_command("tm-test", "/tmp", None, &env)
+            .unwrap();
+        // A removal has no `-e` flag but clears the var from the session env.
+        assert!(
+            !args[1].contains("-e "),
+            "removal must not emit an -e flag, got: {}",
+            args[1]
+        );
+        assert!(
+            args[1].contains("set-environment -u 'CLAUDE_CONFIG_DIR'"),
+            "expected session-env unset, got: {}",
+            args[1]
+        );
     }
 
     #[test]
