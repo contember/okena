@@ -915,10 +915,18 @@ impl FileViewer {
                     if this.active_tab().image_view.auto_fit {
                         return;
                     }
-                    if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                    // Shift+scroll maps vertical wheel to horizontal pan —
+                    // standard mouse-wheel convention for users without a
+                    // tilt wheel or horizontal trackpad gesture.
+                    let (pan_dx, pan_dy) = if event.modifiers.shift && dx.abs() < 0.5 {
+                        (dy, 0.0)
+                    } else {
+                        (dx, dy)
+                    };
+                    if pan_dx.abs() < 0.5 && pan_dy.abs() < 0.5 {
                         return;
                     }
-                    this.image_pan_by(gpui::point(px(dx), px(dy)), cx);
+                    this.image_pan_by(gpui::point(px(pan_dx), px(pan_dy)), cx);
                 }
             }))
             .on_mouse_down(
