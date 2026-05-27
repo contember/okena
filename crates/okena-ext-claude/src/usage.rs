@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Refresh interval for usage data
 const USAGE_INTERVAL: Duration = Duration::from_secs(300);
@@ -149,33 +149,80 @@ fn keychain_service_name(claude_dir: &Path) -> String {
     }
 }
 
-fn read_access_token(claude_dir: &Path) -> Option<String> {
-    fn extract_token(json_str: &str) -> Option<String> {
-        let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
-        v["claudeAiOauth"]["accessToken"].as_str().map(String::from)
+#[cfg(target_os = "macos")]
+fn suffixed_keychain_service_name(claude_dir: &Path) -> String {
+    const BASE: &str = "Claude Code-credentials";
+    let canonical = claude_dir.canonicalize().unwrap_or_else(|_| claude_dir.to_path_buf());
+    let mut h = Sha256::new();
+    h.update(canonical.to_string_lossy().as_bytes());
+    let d = h.finalize();
+    format!("{BASE}-{:02x}{:02x}{:02x}{:02x}", d[0], d[1], d[2], d[3])
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_service_names(claude_dir: &Path) -> Vec<String> {
+    let primary = keychain_service_name(claude_dir);
+    let suffixed = suffixed_keychain_service_name(claude_dir);
+    if primary == suffixed {
+        vec![primary]
+    } else {
+        vec![primary, suffixed]
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn extract_access_token(json_str: &str, now_ms: u64) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let oauth = &v["claudeAiOauth"];
+    let token = oauth["accessToken"].as_str()?.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    if let Some(expires_at) = oauth["expiresAt"].as_u64()
+        && expires_at <= now_ms
+    {
+        return None;
+    }
+
+    Some(token.to_string())
+}
+
+fn read_access_token(claude_dir: &Path) -> Option<String> {
+    let now = now_ms();
 
     // Try credentials file first
     if let Some(token) = std::fs::read_to_string(claude_dir.join(".credentials.json"))
         .ok()
-        .and_then(|content| extract_token(&content))
+        .and_then(|content| extract_access_token(&content, now))
     {
         return Some(token);
     }
 
-    // macOS: fall back to Keychain using the per-config-dir service name
+    // macOS: fall back to Keychain using per-config-dir service names. Claude
+    // Code can create both the default service and the suffixed service when
+    // CLAUDE_CONFIG_DIR explicitly points at ~/.claude, so try both.
     #[cfg(target_os = "macos")]
     {
         let user = std::env::var("USER").ok()?;
-        let service = keychain_service_name(claude_dir);
-        let output = okena_core::process::safe_output(
-            okena_core::process::command("security")
-                .args(["find-generic-password", "-s", &service, "-a", &user, "-w"]),
-        )
-        .ok()?;
-        if output.status.success() {
-            let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return extract_token(&content);
+        for service in keychain_service_names(claude_dir) {
+            let output = okena_core::process::safe_output(
+                okena_core::process::command("security")
+                    .args(["find-generic-password", "-s", &service, "-a", &user, "-w"]),
+            )
+            .ok()?;
+            if output.status.success() {
+                let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if let Some(token) = extract_access_token(&content, now) {
+                    return Some(token);
+                }
+            }
         }
     }
 
@@ -1037,6 +1084,42 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_access_token_rejects_empty_token() {
+        let creds = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "" }
+        });
+
+        assert!(extract_access_token(&creds.to_string(), 1_000).is_none());
+    }
+
+    #[test]
+    fn test_extract_access_token_rejects_expired_token() {
+        let creds = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "expired-token",
+                "expiresAt": 999
+            }
+        });
+
+        assert!(extract_access_token(&creds.to_string(), 1_000).is_none());
+    }
+
+    #[test]
+    fn test_extract_access_token_accepts_unexpired_token() {
+        let creds = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "fresh-token",
+                "expiresAt": 1_001
+            }
+        });
+
+        assert_eq!(
+            extract_access_token(&creds.to_string(), 1_000).as_deref(),
+            Some("fresh-token")
+        );
+    }
+
+    #[test]
     fn test_parse_iso8601_to_epoch() {
         // 2025-01-01T00:00:00Z = 1735689600
         let epoch = parse_iso8601_to_epoch("2025-01-01T00:00:00.000Z").unwrap();
@@ -1120,6 +1203,18 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn test_keychain_service_names_default_include_suffixed_fallback() {
+        let default_dir = dirs::home_dir().unwrap().join(".claude");
+        if default_dir.exists() {
+            let names = keychain_service_names(&default_dir);
+            assert_eq!(names.len(), 2);
+            assert_eq!(names[0], "Claude Code-credentials");
+            assert!(names[1].starts_with("Claude Code-credentials-"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn test_keychain_service_custom() {
         // Pin the SHA-256 algorithm against a known empirical example:
         // sha256("/Users/pcavezzan/.claude-stonal")[..8 hex] = "d4c0f9c1"
@@ -1138,5 +1233,15 @@ mod tests {
         );
         assert_eq!(service, expected);
         assert_ne!(service, "Claude Code-credentials", "custom dir must get a suffix");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_keychain_service_names_custom_has_single_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = keychain_service_names(dir.path());
+
+        assert_eq!(names.len(), 1);
+        assert!(names[0].starts_with("Claude Code-credentials-"));
     }
 }

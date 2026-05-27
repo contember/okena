@@ -27,30 +27,60 @@ use gpui::*;
 use okena_core::api::ApiGitStatus;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch as tokio_watch;
 
-/// Push the resolved Claude config directory into the PTY manager as CLAUDE_CONFIG_DIR
-/// so `claude` invocations inside Okena terminals read the per-profile account.
+fn is_default_claude_dir(claude_dir: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let default_dir = home.join(".claude");
+    let canonical_default = default_dir.canonicalize().unwrap_or(default_dir);
+    let canonical_dir = claude_dir
+        .canonicalize()
+        .unwrap_or_else(|_| claude_dir.to_path_buf());
+    canonical_dir == canonical_default
+}
+
+fn claude_pty_extra_env(
+    claude_dir: &Path,
+    multi_profile: bool,
+    parent_has_claude_config_dir: bool,
+) -> Vec<(String, String)> {
+    if is_default_claude_dir(claude_dir) {
+        return Vec::new();
+    }
+
+    if !multi_profile && parent_has_claude_config_dir {
+        return Vec::new();
+    }
+
+    vec![(
+        "CLAUDE_CONFIG_DIR".to_string(),
+        claude_dir.to_string_lossy().into_owned(),
+    )]
+}
+
+/// Push the resolved non-default Claude config directory into the PTY manager as
+/// CLAUDE_CONFIG_DIR so `claude` invocations inside Okena terminals read the
+/// per-profile account.
 ///
 /// Multi-profile users get an unconditional override (otherwise account isolation
 /// would silently break for anyone with `CLAUDE_CONFIG_DIR` exported in their
-/// shell rc). Single-profile users who have explicitly exported the var in their
-/// own environment keep it — there's no profile boundary to enforce.
+/// shell rc). Default `~/.claude` is left unset so Claude Code uses its canonical
+/// Keychain service instead of creating a suffixed duplicate for the same path.
 fn sync_claude_pty_env(pty_manager: &Arc<PtyManager>, cx: &App) {
     let multi_profile = okena_core::profiles::all_profiles()
         .map(|p| p.len() > 1)
         .unwrap_or(false);
-    if !multi_profile && std::env::var("CLAUDE_CONFIG_DIR").is_ok() {
-        pty_manager.set_extra_env(Vec::new());
-        return;
-    }
-
     let claude_dir = resolve_claude_dir(cx);
-    pty_manager.set_extra_env(vec![
-        ("CLAUDE_CONFIG_DIR".to_string(), claude_dir.to_string_lossy().into_owned()),
-    ]);
+    pty_manager.set_extra_env(claude_pty_extra_env(
+        &claude_dir,
+        multi_profile,
+        std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
+    ));
 }
 
 /// Set up an observer that loads/unloads service configs when projects change.
@@ -944,6 +974,36 @@ impl Okena {
         }).detach();
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claude_pty_extra_env;
+
+    #[test]
+    fn default_claude_dir_is_not_exported_to_pty() {
+        let default_dir = dirs::home_dir().unwrap().join(".claude");
+
+        assert!(claude_pty_extra_env(&default_dir, false, false).is_empty());
+        assert!(claude_pty_extra_env(&default_dir, true, false).is_empty());
+    }
+
+    #[test]
+    fn single_profile_keeps_parent_claude_config_dir() {
+        let custom_dir = std::env::temp_dir().join("okena-custom-claude-dir");
+
+        assert!(claude_pty_extra_env(&custom_dir, false, true).is_empty());
+    }
+
+    #[test]
+    fn custom_claude_dir_is_exported_to_pty() {
+        let custom_dir = std::env::temp_dir().join("okena-custom-claude-dir");
+        let env = claude_pty_extra_env(&custom_dir, true, true);
+
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].0, "CLAUDE_CONFIG_DIR");
+        assert_eq!(env[0].1, custom_dir.to_string_lossy());
+    }
 }
 
 impl Render for Okena {
