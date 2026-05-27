@@ -48,29 +48,38 @@ fn claude_pty_extra_env(
     claude_dir: &Path,
     multi_profile: bool,
     parent_has_claude_config_dir: bool,
-) -> Vec<(String, String)> {
+) -> Vec<(String, Option<String>)> {
+    // Default `~/.claude`: actively remove CLAUDE_CONFIG_DIR from the PTY rather
+    // than just leaving it unset. This keeps Claude Code on its canonical Keychain
+    // service (an explicit CLAUDE_CONFIG_DIR=~/.claude makes it create a suffixed
+    // duplicate) *and* prevents a stale value — e.g. one exported in the shell
+    // that launched Okena and inherited by our process — from leaking into the
+    // terminal and silently pointing `claude` at the wrong account.
     if is_default_claude_dir(claude_dir) {
-        return Vec::new();
+        return vec![("CLAUDE_CONFIG_DIR".to_string(), None)];
     }
 
+    // Single-profile user who manages CLAUDE_CONFIG_DIR themselves: there's no
+    // profile boundary to enforce, so leave their exported value untouched.
     if !multi_profile && parent_has_claude_config_dir {
         return Vec::new();
     }
 
     vec![(
         "CLAUDE_CONFIG_DIR".to_string(),
-        claude_dir.to_string_lossy().into_owned(),
+        Some(claude_dir.to_string_lossy().into_owned()),
     )]
 }
 
-/// Push the resolved non-default Claude config directory into the PTY manager as
+/// Push the resolved Claude config directory into the PTY manager as
 /// CLAUDE_CONFIG_DIR so `claude` invocations inside Okena terminals read the
 /// per-profile account.
 ///
-/// Multi-profile users get an unconditional override (otherwise account isolation
-/// would silently break for anyone with `CLAUDE_CONFIG_DIR` exported in their
-/// shell rc). Default `~/.claude` is left unset so Claude Code uses its canonical
-/// Keychain service instead of creating a suffixed duplicate for the same path.
+/// Non-default dirs get an unconditional override for multi-profile users
+/// (otherwise account isolation would silently break for anyone with
+/// `CLAUDE_CONFIG_DIR` exported in their shell rc). The default `~/.claude` is
+/// actively *unset* instead so Claude Code uses its canonical Keychain service
+/// rather than creating a suffixed duplicate for the same path.
 fn sync_claude_pty_env(pty_manager: &Arc<PtyManager>, cx: &App) {
     let multi_profile = okena_core::profiles::all_profiles()
         .map(|p| p.len() > 1)
@@ -987,11 +996,18 @@ mod tests {
     use super::claude_pty_extra_env;
 
     #[test]
-    fn default_claude_dir_is_not_exported_to_pty() {
+    fn default_claude_dir_unsets_pty_env() {
         let default_dir = dirs::home_dir().unwrap().join(".claude");
 
-        assert!(claude_pty_extra_env(&default_dir, false, false).is_empty());
-        assert!(claude_pty_extra_env(&default_dir, true, false).is_empty());
+        // The default dir must produce an explicit removal so a stale inherited
+        // CLAUDE_CONFIG_DIR can't leak in — regardless of profile count or whether
+        // the parent process happened to have the var set.
+        for &(multi, parent) in &[(false, false), (true, false), (false, true), (true, true)] {
+            let env = claude_pty_extra_env(&default_dir, multi, parent);
+            assert_eq!(env.len(), 1, "multi={multi} parent={parent}");
+            assert_eq!(env[0].0, "CLAUDE_CONFIG_DIR");
+            assert_eq!(env[0].1, None, "default dir must unset, not set");
+        }
     }
 
     #[test]
@@ -1008,6 +1024,6 @@ mod tests {
 
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].0, "CLAUDE_CONFIG_DIR");
-        assert_eq!(env[0].1, custom_dir.to_string_lossy());
+        assert_eq!(env[0].1.as_deref(), Some(custom_dir.to_string_lossy().as_ref()));
     }
 }

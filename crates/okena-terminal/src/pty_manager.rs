@@ -167,9 +167,11 @@ pub struct PtyManager {
     /// Optional sink for streaming PTY output to external consumers (e.g. remote clients).
     /// Publishing happens directly from reader threads to avoid UI event loop latency.
     output_sink: Arc<Mutex<Option<Arc<dyn PtyOutputSink>>>>,
-    /// Extra environment variables injected into every spawned PTY.
-    /// Only variables not already set in the spawning process are injected.
-    extra_env: Mutex<Vec<(String, String)>>,
+    /// Extra environment overrides applied to every spawned PTY. `Some(val)` sets
+    /// the variable; `None` removes it from the inherited environment so a stale
+    /// value (e.g. a `CLAUDE_CONFIG_DIR` exported in the user's shell that launched
+    /// Okena) cannot leak into the terminal.
+    extra_env: Mutex<Vec<(String, Option<String>)>>,
     /// Sender for the shared teardown worker pool. `kill`/`cleanup_exited` enqueue
     /// jobs here instead of spawning a detached thread per call. Wrapped in `Option`
     /// only so `Drop` can `take()` it and close the channel, signaling workers to
@@ -278,10 +280,10 @@ impl PtyManager {
         *self.output_sink.lock() = Some(sink);
     }
 
-    /// Set extra environment variables to inject into every spawned PTY.
-    /// Variables already present in the process environment are not overwritten.
-    /// Replaces any previously configured extra env.
-    pub fn set_extra_env(&self, env: Vec<(String, String)>) {
+    /// Set the extra environment overrides applied to every spawned PTY.
+    /// `Some(val)` sets the variable; `None` removes it from the inherited
+    /// environment. Replaces any previously configured overrides.
+    pub fn set_extra_env(&self, env: Vec<(String, Option<String>)>) {
         *self.extra_env.lock() = env;
     }
 
@@ -347,11 +349,15 @@ impl PtyManager {
         #[cfg(windows)]
         let (mut cmd, wsl_distro, wsl_backend) = self.build_terminal_command(terminal_id, cwd, shell);
 
-        // Inject caller-configured env vars into the PTY unconditionally.
+        // Apply caller-configured env overrides to the PTY unconditionally.
         // These are profile-scoped values (e.g. CLAUDE_CONFIG_DIR) that must
         // override whatever the user's shell rc or the parent process has set.
+        // `None` removes the variable so a stale inherited value cannot leak in.
         for (key, val) in &*self.extra_env.lock() {
-            cmd.env(key, val);
+            match val {
+                Some(val) => cmd.env(key, val),
+                None => cmd.env_remove(key),
+            }
         }
 
         // Spawn the process
