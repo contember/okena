@@ -886,24 +886,40 @@ impl FileViewer {
         container
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 let delta = event.delta.pixel_delta(px(17.0));
+                let dx = f32::from(delta.x);
                 let dy = f32::from(delta.y);
                 // Reject non-finite deltas (a hostile remote bridge or
                 // momentum-extrapolation overflow can hand us NaN/inf;
-                // `NaN < EPSILON` is false so the old guard let them
-                // through and poisoned zoom into NaN).
-                if !dy.is_finite() {
+                // those would otherwise poison zoom into NaN).
+                if !dx.is_finite() || !dy.is_finite() {
                     return;
                 }
-                // Filter the macOS kinetic-momentum tail (deltas in the
-                // 0.01–0.5 range continuing for ~1 s after the user
-                // stops scrolling — they would otherwise keep nudging
-                // zoom and respawning the SVG re-raster pipeline).
-                if dy.abs() < 0.5 {
-                    return;
+                let zoom_modifier = event.modifiers.platform || event.modifiers.control;
+                if zoom_modifier {
+                    // Filter the kinetic-momentum tail (sub-pixel deltas
+                    // continuing for ~1 s after the user stopped) — they
+                    // would otherwise keep nudging zoom and respawning
+                    // the SVG re-raster pipeline.
+                    if dy.abs() < 0.5 {
+                        return;
+                    }
+                    // Exponential: positive dy zooms in, negative out.
+                    // ±100 px ≈ 1.2× / 0.83×.
+                    let factor = (dy / 250.0).exp();
+                    this.image_zoom_by(factor, cx);
+                } else {
+                    // Plain scroll = classic pan. Skip on auto-fit (the
+                    // image already fills the pane and there's nothing
+                    // to reveal) so a stray trackpad gesture doesn't
+                    // accidentally promote out of fit mode.
+                    if this.active_tab().image_view.auto_fit {
+                        return;
+                    }
+                    if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                        return;
+                    }
+                    this.image_pan_by(gpui::point(px(dx), px(dy)), cx);
                 }
-                // Exponential: positive dy zooms in, negative out. ±100 px ≈ 1.2× / 0.83×.
-                let factor = (dy / 250.0).exp();
-                this.image_zoom_by(factor, cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,

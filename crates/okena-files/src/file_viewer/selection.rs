@@ -308,6 +308,29 @@ impl FileViewer {
         cx.notify();
     }
 
+    /// Translate the image by `delta` pixels — used by classic wheel-scroll
+    /// (without the Cmd/Ctrl zoom modifier). Honors the same hard-cap that
+    /// drag-pan does so a runaway momentum scroll can't send the image off
+    /// to infinity.
+    pub(super) fn image_pan_by(
+        &mut self,
+        delta: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.active_tab_mut();
+        if !tab.is_image {
+            return;
+        }
+        const PAN_HARDCAP: f32 = 10_000.0;
+        let raw_x = f32::from(tab.image_view.pan.x + delta.x);
+        let raw_y = f32::from(tab.image_view.pan.y + delta.y);
+        tab.image_view.pan = gpui::Point::new(
+            gpui::px(raw_x.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
+            gpui::px(raw_y.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
+        );
+        cx.notify();
+    }
+
     /// End a pan drag.
     pub(super) fn image_end_pan(&mut self, cx: &mut Context<Self>) {
         let tab = self.active_tab_mut();
