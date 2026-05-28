@@ -184,7 +184,7 @@ impl ProjectSwitcher {
         .py(px(10.0))
         .border_b_1()
         .border_color(rgb(t.border))
-        .when(closed_everywhere, |d| d.opacity(0.55))
+        .when(closed_everywhere, |d| d.opacity(0.78))
         .when(open.open_here && !is_selected, |d| {
             d.bg(with_alpha(t.border_active, 0.07))
         })
