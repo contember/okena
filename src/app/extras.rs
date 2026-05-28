@@ -26,7 +26,7 @@
 
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WorkspaceData};
-use crate::views::window::WindowView;
+use crate::views::window::{WindowView, WindowViewEvent};
 use gpui::*;
 #[cfg(not(target_os = "linux"))]
 use gpui_component::Root;
@@ -197,6 +197,99 @@ impl Okena {
         }
     }
 
+    /// Route a [`WindowViewEvent`] raised by any window to the right handler.
+    pub(super) fn handle_window_view_event(
+        &mut self,
+        _view: Entity<WindowView>,
+        event: &WindowViewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            WindowViewEvent::JumpToProject { origin, project_id } => {
+                self.jump_to_project_terminal(*origin, project_id, cx);
+            }
+        }
+    }
+
+    /// Focus the first visible terminal of an already-open project, activating
+    /// the window it lives in. Prefers `origin` (the window the request came
+    /// from), then main, then any extra. No-op if the project is open nowhere
+    /// or has no terminals — the layout is never changed, this is purely a
+    /// "click into the first terminal" across windows.
+    fn jump_to_project_terminal(
+        &mut self,
+        origin: WindowId,
+        project_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+
+        // The project must have a layout (i.e. at least one terminal) to enter.
+        let path = match workspace
+            .read(cx)
+            .project(project_id)
+            .and_then(|p| p.layout.as_ref())
+        {
+            Some(layout) => layout.find_visible_terminal_path(),
+            None => return,
+        };
+
+        // Choose the target window: the first one (origin-first) where the
+        // project is currently visible.
+        let mut order = vec![origin, WindowId::Main];
+        order.extend(self.extra_window_handles.keys().copied());
+        let target = order.into_iter().find(|wid| {
+            workspace
+                .read(cx)
+                .data()
+                .window(*wid)
+                .is_some_and(|w| !w.hidden_project_ids.contains(project_id))
+        });
+        let Some(target) = target else { return };
+
+        // Resolve the target window's view + OS handle.
+        let (view, handle) = match target {
+            WindowId::Main => (self.main_window.clone(), self.main_window_handle),
+            id => match (self.extra_windows.get(&id), self.extra_window_handles.get(&id)) {
+                (Some(v), Some(h)) => (v.clone(), *h),
+                _ => return,
+            },
+        };
+
+        // Point that window's FocusManager at the first visible terminal.
+        let focus_manager = view.read(cx).focus_manager();
+        let pid = project_id.to_string();
+        focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.set_focused_terminal(fm, pid, path, cx);
+            });
+            cx.notify();
+        });
+
+        // Bring the target OS window to the front and force it to re-render, so
+        // the target terminal pane self-focuses on its next render (it focuses
+        // when the FocusManager points at it). `refresh` bypasses the pane's
+        // element cache, which a bare FocusManager notify would not.
+        //
+        // Caveat — raising the *window* is best-effort and platform-dependent:
+        //   - X11: `activate_window` sends `_NET_ACTIVE_WINDOW`, so the window
+        //     actually comes to the front.
+        //   - Wayland (esp. GNOME/Mutter): the compositor blocks programmatic
+        //     focus stealing. gpui's `activate()` requests an xdg-activation
+        //     token on the *target* (unfocused) surface, which Mutter rejects —
+        //     it only flags "demands attention" (a dock/taskbar blink). The
+        //     terminal still gets focused, so once the user switches to that
+        //     window they land in the right pane. A real cross-window raise on
+        //     Wayland would need xdg-activation token handoff from the focused
+        //     window, which gpui does not expose; users who want auto-raise can
+        //     use a GNOME "focus stealing" extension or run on X11.
+        // (App-level `cx.activate` is a no-op on Linux, so it doesn't help here.)
+        let _ = handle.update(cx, |_, window, _| {
+            window.activate_window();
+            window.refresh();
+        });
+    }
+
     /// Open an OS window for the given extra `WindowId::Extra(uuid)` and
     /// register the resulting `Entity<WindowView>` in `Okena.extra_windows`.
     /// Wires an `on_window_should_close` hook so closing the OS window drops
@@ -292,6 +385,10 @@ impl Okena {
                         // is focused (PRD cri 13). The handle is removed on
                         // close below.
                         this.extra_window_handles.insert(window_id, handle);
+
+                        // Same cross-window event channel main is wired with, so
+                        // a "jump into project" can target this window too.
+                        cx.subscribe(&view_for_okena, Okena::handle_window_view_event).detach();
 
                         // Wire the per-window UI to the shared singletons
                         // main was wired with at startup. Without this, the

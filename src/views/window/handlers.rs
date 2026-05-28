@@ -300,6 +300,15 @@ impl WindowView {
                     cx.notify();
                 });
             }
+            OverlayManagerEvent::JumpToProject(project_id) => {
+                // Defer the cross-window work to Okena, which owns every
+                // window's view + OS handle. `origin` is this window so it is
+                // preferred when the project is open in more than one place.
+                cx.emit(super::WindowViewEvent::JumpToProject {
+                    origin: self.window_id,
+                    project_id: project_id.clone(),
+                });
+            }
             OverlayManagerEvent::ToggleProjectVisibility(project_id) => {
                 let window_id = self.window_id;
                 let workspace = self.workspace.clone();

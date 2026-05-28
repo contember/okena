@@ -293,6 +293,11 @@ impl Okena {
             WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, terminals_for_main, window, cx)
         });
 
+        // Listen for cross-window requests (e.g. "jump into a project's terminal"
+        // from the Switch Project overlay). Okena is the only place that holds
+        // every window's view + OS handle, so it executes these.
+        cx.subscribe(&main_window, Self::handle_window_view_event).detach();
+
         // Create service manager for project-scoped background processes
         let local_backend_for_services: Arc<dyn crate::terminal::backend::TerminalBackend> =
             Arc::new(crate::terminal::backend::LocalBackend::new(pty_manager.clone()));

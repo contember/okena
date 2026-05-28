@@ -630,6 +630,12 @@ fn main() {
         });
         cx.set_global(GlobalTheme(theme_entity.clone()));
 
+        // Shared, cross-window hover state for the Switch Project overlay.
+        // Hovering a project row publishes its id here; every window observes it
+        // to ring-highlight the matching project panel (incl. other windows).
+        let project_hover = cx.new(|_| crate::views::project_hover::ProjectHoverState::new());
+        cx.set_global(crate::views::project_hover::GlobalProjectHover(project_hover));
+
         // Register theme provider for okena-files crate
         cx.set_global(okena_files::theme::GlobalThemeProvider(|cx| {
             crate::theme::theme(cx)

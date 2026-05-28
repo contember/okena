@@ -16,5 +16,6 @@ pub mod layout;
 pub mod overlay_manager;
 pub mod overlays;
 pub mod panels;
+pub mod project_hover;
 pub mod window;
 pub mod sidebar_controller;

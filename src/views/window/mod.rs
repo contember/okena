@@ -73,6 +73,19 @@ pub fn notify_pane_weaks<T: 'static>(
 /// shared `Workspace` via its own `window_id`. The single OS window opened
 /// today hosts a `WindowView` for `WindowId::Main`; slice 05 spawns extras
 /// that mint distinct `WindowId::Extra(uuid)`s.
+/// Events a `WindowView` raises to the `Okena` coordinator, which alone owns
+/// every window's view + OS handle and can therefore act across windows.
+#[derive(Clone)]
+pub enum WindowViewEvent {
+    /// Jump into an open project's first terminal: activate the window where it
+    /// is open (`origin` preferred) and focus its first visible terminal,
+    /// leaving the layout untouched.
+    JumpToProject {
+        origin: WindowId,
+        project_id: String,
+    },
+}
+
 pub struct WindowView {
     /// Identifies which window-scoped slot on the shared `Workspace` this
     /// view addresses (folder filter, hidden set, widths, collapse, focus
@@ -228,6 +241,17 @@ impl WindowView {
                 this.process_pending_send_to_terminal(cx);
             }
         }).detach();
+
+        // Observe the shared project-hover state so this window re-renders its
+        // project panels when the hovered project changes — including hovers
+        // driven from another window's Switch Project overlay (multi-window
+        // panel highlight).
+        if let Some(hover) = cx
+            .try_global::<crate::views::project_hover::GlobalProjectHover>()
+            .map(|g| g.0.clone())
+        {
+            cx.observe(&hover, |_this, _hover, cx| cx.notify()).detach();
+        }
 
         // Create focus handle for global keybindings
         let focus_handle = cx.focus_handle();
@@ -778,6 +802,8 @@ impl WindowView {
 }
 
 impl_focusable!(WindowView);
+
+impl EventEmitter<WindowViewEvent> for WindowView {}
 
 #[cfg(test)]
 mod tests {

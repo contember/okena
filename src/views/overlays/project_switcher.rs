@@ -6,20 +6,21 @@
 //! - Type to filter projects
 
 use crate::keybindings::Cancel;
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_ms};
 use crate::views::components::list_overlay::FilterResult;
 use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
     modal_header, search_input_area, ListOverlayAction, ListOverlayConfig, ListOverlayState,
 };
+use crate::views::project_hover::set_hovered_project;
 use crate::workspace::state::{ProjectData, WindowId, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use okena_ui::empty_state::empty_state;
 use okena_ui::selectable_list::selectable_list_item;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Events emitted by the ProjectSwitcher overlay.
 #[derive(Clone)]
@@ -30,17 +31,30 @@ pub enum ProjectSwitcherEvent {
     FocusProject(String),
     /// Toggle visibility of a project
     ToggleVisibility(String),
+    /// Jump into an already-open project: focus its first terminal without
+    /// changing the layout, switching to another window if that's where it's
+    /// open. Only emitted for projects open somewhere.
+    JumpToProject(String),
 }
 
 impl EventEmitter<ProjectSwitcherEvent> for ProjectSwitcher {}
+
+/// Per-project visibility across all windows, projected for a switcher row.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct ProjectOpenState {
+    /// Visible (not hidden) in the window the switcher was opened from.
+    open_here: bool,
+    /// Number of *other* windows where the project is visible.
+    open_elsewhere: usize,
+}
 
 /// Project switcher overlay for quick project navigation.
 pub struct ProjectSwitcher {
     focus_handle: FocusHandle,
     state: ListOverlayState<ProjectData>,
-    /// Snapshot of `main_window.hidden_project_ids` taken at construction
-    /// time. The visibility eye-icon derives from membership here.
-    hidden_project_ids: HashSet<String>,
+    /// Per-project open state across every window, snapshotted at construction.
+    /// Drives the row's open/closed treatment and the multi-window marker.
+    open_states: HashMap<String, ProjectOpenState>,
 }
 
 impl ProjectSwitcher {
@@ -56,15 +70,21 @@ impl ProjectSwitcher {
                 p
             })
             .collect();
-        // Snapshot the calling window's hidden set (falling back to main if the
-        // targeted extra has been dropped). The eye-icon in the row reflects
-        // visibility in THIS window, not main.
-        let hidden_project_ids = ws
-            .data()
-            .window(window_id)
-            .unwrap_or(&ws.data().main_window)
-            .hidden_project_ids
-            .clone();
+        // Snapshot per-project open state across every window so each row can
+        // distinguish "open here" / "open in another window" / "closed
+        // everywhere". `here` is the window the switcher was opened from.
+        let data = ws.data();
+        let mut windows: Vec<(WindowId, &HashSet<String>)> =
+            vec![(WindowId::Main, &data.main_window.hidden_project_ids)];
+        windows.extend(
+            data.extra_windows
+                .iter()
+                .map(|w| (WindowId::Extra(w.id), &w.hidden_project_ids)),
+        );
+        let open_states = projects
+            .iter()
+            .map(|p| (p.id.clone(), compute_open_state(&p.id, window_id, &windows)))
+            .collect();
 
         let config = ListOverlayConfig::new("Switch Project")
             .subtitle("Type to search, Enter to focus, Space to toggle visibility")
@@ -84,7 +104,7 @@ impl ProjectSwitcher {
         Self {
             focus_handle,
             state,
-            hidden_project_ids,
+            open_states,
         }
     }
 
@@ -104,6 +124,18 @@ impl ProjectSwitcher {
         }
     }
 
+    /// Jump into the selected project's first terminal (Tab). No-op unless the
+    /// project is open in some window — Tab is a "go to" for open projects, not
+    /// an "open"; closed projects keep the modal open so the choice is obvious.
+    fn jump_into_selected(&self, cx: &mut Context<Self>) {
+        if let Some(project) = self.state.selected_item() {
+            let open = self.open_states.get(&project.id).copied().unwrap_or_default();
+            if open.open_here || open.open_elsewhere > 0 {
+                cx.emit(ProjectSwitcherEvent::JumpToProject(project.id.clone()));
+            }
+        }
+    }
+
     fn filter_projects(&mut self) {
         let filtered = ranked_project_filter(&self.state.items, &self.state.search_query);
         self.state.set_filtered(filtered);
@@ -118,13 +150,30 @@ impl ProjectSwitcher {
         let t = theme(cx);
         let project = &self.state.items[project_index];
         let is_selected = display_index == self.state.selected_index;
+        let project_id = project.id.clone();
         let name = project.name.clone();
         let path = project.path.clone();
-        let show_in_overview = project_visibility(project, &self.hidden_project_ids);
+        let open = self.open_states.get(&project.id).copied().unwrap_or_default();
         let is_worktree = project.worktree_info.is_some();
         let folder_color = t.get_folder_color(project.folder_color);
         let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
             .and_then(|s| s.branch);
+
+        // Variant C treatment: a project open in *this* window gets a tinted
+        // background + bold name + a bright accent eye; one closed everywhere is
+        // dimmed with an eye-off; one open only in another window stays legible
+        // and carries an "other window" marker (multi-window awareness).
+        let closed_everywhere = !open.open_here && open.open_elsewhere == 0;
+        let name_weight = if open.open_here {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::MEDIUM
+        };
+        let name_color = if closed_everywhere {
+            t.text_muted
+        } else {
+            t.text_primary
+        };
 
         selectable_list_item(
             ElementId::Name(format!("project-{}", display_index).into()),
@@ -135,6 +184,10 @@ impl ProjectSwitcher {
         .py(px(10.0))
         .border_b_1()
         .border_color(rgb(t.border))
+        .when(closed_everywhere, |d| d.opacity(0.55))
+        .when(open.open_here && !is_selected, |d| {
+            d.bg(with_alpha(t.border_active, 0.07))
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _, _window, cx| {
@@ -142,6 +195,13 @@ impl ProjectSwitcher {
                 this.focus_selected(cx);
             }),
         )
+        .on_hover(cx.listener(move |_this, hovered: &bool, _window, cx| {
+            // Publish the hovered project so every window can ring-highlight its
+            // matching panel; clearing happens centrally when the modal closes.
+            if *hovered {
+                set_hovered_project(Some(project_id.clone()), cx);
+            }
+        }))
         .child(
             // Folder icon with project color
             div()
@@ -171,8 +231,8 @@ impl ProjectSwitcher {
                         .child(
                             div()
                                 .text_size(ui_text(13.0, cx))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(t.text_primary))
+                                .font_weight(name_weight)
+                                .text_color(rgb(name_color))
                                 .child(name),
                         )
                         .when(is_worktree, |d| d.child(badge("worktree", &t)))
@@ -209,29 +269,70 @@ impl ProjectSwitcher {
                         .child(path),
                 ),
         )
-        .child(
-            // Visibility indicator
-            div()
-                .w(px(20.0))
-                .h(px(20.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    svg()
-                        .path(if show_in_overview {
-                            "icons/eye.svg"
-                        } else {
-                            "icons/eye-off.svg"
-                        })
-                        .size(px(14.0))
-                        .text_color(if show_in_overview {
-                            rgb(t.text_secondary)
-                        } else {
-                            rgb(t.text_muted)
+        .child(self.render_open_indicator(open, &t, cx))
+    }
+
+    /// Right-hand visibility indicator for a switcher row.
+    ///
+    /// - open in this window → bright accent eye (plus an "other window" marker
+    ///   when it is also open elsewhere),
+    /// - open only in another window → just the "other window" marker,
+    /// - closed everywhere → a muted eye-off.
+    fn render_open_indicator(
+        &self,
+        open: ProjectOpenState,
+        t: &crate::theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        h_flex()
+            .gap(px(6.0))
+            .items_center()
+            // "Open in another window" marker (with a count when more than one).
+            .when(open.open_elsewhere > 0, |d| {
+                d.child(
+                    h_flex()
+                        .gap(px(2.0))
+                        .items_center()
+                        .child(
+                            svg()
+                                .path("icons/external-link.svg")
+                                .size(px(13.0))
+                                .text_color(rgb(t.text_secondary)),
+                        )
+                        .when(open.open_elsewhere > 1, |d| {
+                            d.child(
+                                div()
+                                    .text_size(ui_text_ms(cx))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child(open.open_elsewhere.to_string()),
+                            )
                         }),
-                ),
-        )
+                )
+            })
+            // Primary eye / eye-off, shown when it carries meaning for this
+            // window (suppressed for "open only elsewhere", where the marker
+            // already tells the story).
+            .when(open.open_here || open.open_elsewhere == 0, |d| {
+                let on = open.open_here;
+                d.child(
+                    div()
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            svg()
+                                .path(if on { "icons/eye.svg" } else { "icons/eye-off.svg" })
+                                .size(px(14.0))
+                                .text_color(if on {
+                                    rgb(t.border_active)
+                                } else {
+                                    rgb(t.text_muted)
+                                }),
+                        ),
+                )
+            })
     }
 }
 
@@ -256,10 +357,29 @@ fn ranked_project_filter(items: &[ProjectData], query: &str) -> Vec<FilterResult
         .collect()
 }
 
-/// Pure visibility projection for the eye-icon column. A project is
-/// "shown in overview" iff it is absent from the per-window hidden set.
-fn project_visibility(project: &ProjectData, hidden_project_ids: &HashSet<String>) -> bool {
-    !hidden_project_ids.contains(&project.id)
+/// Project visibility across every window, projected for a switcher row.
+///
+/// `windows` is the full set of `(WindowId, hidden_set)` pairs (main + extras).
+/// A project is "open" in a window iff its id is absent from that window's
+/// hidden set. `open_here` reflects the `here` window; `open_elsewhere` counts
+/// the other windows where it is open.
+fn compute_open_state(
+    project_id: &str,
+    here: WindowId,
+    windows: &[(WindowId, &HashSet<String>)],
+) -> ProjectOpenState {
+    let mut state = ProjectOpenState::default();
+    for (id, hidden) in windows {
+        if hidden.contains(project_id) {
+            continue; // hidden in this window
+        }
+        if *id == here {
+            state.open_here = true;
+        } else {
+            state.open_elsewhere += 1;
+        }
+    }
+    state
 }
 
 fn project_match_score(project: &ProjectData, query: &str) -> Option<i32> {
@@ -365,7 +485,11 @@ impl Render for ProjectSwitcher {
                 this.close(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                match handle_list_overlay_key(&mut this.state, event, &[("space", "toggle")]) {
+                match handle_list_overlay_key(
+                    &mut this.state,
+                    event,
+                    &[("space", "toggle"), ("tab", "jump")],
+                ) {
                     ListOverlayAction::Close => this.close(cx),
                     ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
                         this.state.scroll_to_selected();
@@ -378,6 +502,9 @@ impl Render for ProjectSwitcher {
                     }
                     ListOverlayAction::Custom(action) if action == "toggle" => {
                         this.toggle_visibility_selected(cx);
+                    }
+                    ListOverlayAction::Custom(action) if action == "jump" => {
+                        this.jump_into_selected(cx);
                     }
                     _ => {}
                 }
@@ -418,6 +545,7 @@ impl Render for ProjectSwitcher {
                     .child(keyboard_hints_footer(
                         &[
                             ("Enter", "focus"),
+                            ("Tab", "go to terminal"),
                             ("Space", "toggle visibility"),
                             ("Esc", "close"),
                         ],
@@ -431,10 +559,11 @@ impl_focusable!(ProjectSwitcher);
 
 #[cfg(test)]
 mod tests {
-    use super::{project_match_score, project_visibility, ranked_project_filter};
+    use super::{compute_open_state, project_match_score, ranked_project_filter};
     use crate::terminal::shell_config::ShellType;
     use crate::theme::FolderColor;
     use crate::workspace::settings::HooksConfig;
+    use crate::workspace::state::WindowId;
     use crate::workspace::state::{HookTerminalEntry, LayoutNode, ProjectData, WorktreeMetadata};
     use std::collections::{HashMap, HashSet};
 
@@ -480,23 +609,30 @@ mod tests {
         assert!(nested_score > shallow_score);
     }
 
-    /// Regression: visibility indicator must derive from the per-window
-    /// hidden set. With the legacy `ProjectData.show_in_overview` field
-    /// removed entirely, this test pins the post-deletion contract.
+    /// Open state must be derived per-window: "here", "another window", and
+    /// "closed everywhere" are the three distinct cases the row renders.
     #[test]
-    fn project_visibility_reads_from_hidden_set() {
-        let project = make_project("p1", "/p1");
-        let hidden: HashSet<String> = ["p1".to_string()].into_iter().collect();
-        assert!(
-            !project_visibility(&project, &hidden),
-            "membership in hidden set must read as not-visible",
-        );
+    fn open_state_distinguishes_here_elsewhere_and_closed() {
+        let here = WindowId::Main;
+        let other = WindowId::Extra(uuid::Uuid::new_v4());
+        // main (here): p_other + p_closed hidden; other: p_here + p_closed hidden.
+        let main_hidden: HashSet<String> =
+            ["p_other".to_string(), "p_closed".to_string()].into_iter().collect();
+        let other_hidden: HashSet<String> =
+            ["p_here".to_string(), "p_closed".to_string()].into_iter().collect();
+        let windows = vec![(here, &main_hidden), (other, &other_hidden)];
 
-        let other = make_project("p2", "/p2");
-        assert!(
-            project_visibility(&other, &hidden),
-            "absent from hidden set must read as visible",
-        );
+        let here_only = compute_open_state("p_here", here, &windows);
+        assert!(here_only.open_here && here_only.open_elsewhere == 0);
+
+        let elsewhere_only = compute_open_state("p_other", here, &windows);
+        assert!(!elsewhere_only.open_here && elsewhere_only.open_elsewhere == 1);
+
+        let both = compute_open_state("p_both", here, &windows);
+        assert!(both.open_here && both.open_elsewhere == 1);
+
+        let closed = compute_open_state("p_closed", here, &windows);
+        assert!(!closed.open_here && closed.open_elsewhere == 0);
     }
 
     #[test]

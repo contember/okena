@@ -126,6 +126,10 @@ pub enum OverlayManagerEvent {
     /// Project switcher: Focus a specific project
     FocusProject(String),
 
+    /// Project switcher: jump into an open project's first terminal (Tab),
+    /// switching windows if needed, without changing the layout.
+    JumpToProject(String),
+
     /// Project switcher: Toggle project overview visibility
     ToggleProjectVisibility(String),
 
@@ -271,6 +275,11 @@ impl OverlayManager {
             self.active_modal = None;
             self.modal_type_id = None;
             self.detach_active_modal_fn = None;
+            // Clear any project-panel hover highlight published by the Switch
+            // Project overlay. Harmless for other modals (only the switcher ever
+            // sets it), and this is the single choke point all closes funnel
+            // through (Esc, click-outside, focus-select).
+            crate::views::project_hover::set_hovered_project(None, cx);
             let workspace = self.workspace.clone();
             self.focus_manager.update(cx, |fm, cx| {
                 workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
@@ -513,6 +522,10 @@ impl OverlayManager {
                     }
                     ProjectSwitcherEvent::FocusProject(project_id) => {
                         cx.emit(OverlayManagerEvent::FocusProject(project_id.clone()));
+                        this.close_modal(cx);
+                    }
+                    ProjectSwitcherEvent::JumpToProject(project_id) => {
+                        cx.emit(OverlayManagerEvent::JumpToProject(project_id.clone()));
                         this.close_modal(cx);
                     }
                     ProjectSwitcherEvent::ToggleVisibility(project_id) => {

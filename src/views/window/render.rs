@@ -255,6 +255,12 @@ impl WindowView {
         };
         let pixel_widths = Self::to_pixel_widths(&widths, container_size, settings.min_column_width);
 
+        // Project currently hovered in the Switch Project overlay (any window).
+        // Its panel gets an accent ring here so a hover also reveals where the
+        // project lives — across every window it is open in.
+        let hovered_project = crate::views::project_hover::hovered_project(cx);
+        let ring_color = theme(cx).border_active;
+
         // Build interleaved columns and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
 
@@ -262,14 +268,28 @@ impl WindowView {
             let pixel_size = pixel_widths.get(i).copied().unwrap_or(200.0);
 
             if let Some(col) = self.project_columns.get(project_id).cloned() {
+                let is_hovered = hovered_project.as_deref() == Some(project_id.as_str());
                 let col_element = div()
                     // Fixed size along the grid axis, stretch on the cross axis.
                     .when(is_rows, |d| d.h(px(pixel_size)).w_full())
                     .when(!is_rows, |d| d.w(px(pixel_size)).h_full())
                     .flex_shrink_0()
+                    .relative()
                     .child(AnyView::from(col).cached(
                         StyleRefinement::default().size_full()
                     ))
+                    // Accent ring drawn as a non-occluding overlay so it adds no
+                    // layout shift and does not intercept clicks on the panel.
+                    .when(is_hovered, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .border_2()
+                                .border_color(rgb(ring_color))
+                                .rounded(px(4.0)),
+                        )
+                    })
                     .into_any_element();
 
                 elements.push(col_element);
