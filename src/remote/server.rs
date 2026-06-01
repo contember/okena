@@ -63,6 +63,19 @@ impl RemoteServer {
         let port = listener.local_addr()?.port();
         log::info!("Remote control server listening on {}:{}", bind_addr, port);
 
+        // Warn loudly when bound to a non-loopback address: the remote server has no
+        // TLS, so the pairing token and all terminal I/O travel the network in cleartext.
+        if !bind_addr.is_loopback() {
+            log::warn!(
+                "Remote control server is bound to a NON-LOOPBACK address ({}:{}).\n\
+                 The connection is UNENCRYPTED (http/ws): the pairing token and all terminal\n\
+                 I/O (including passwords, SSH keys, and any typed secrets) are sent in cleartext\n\
+                 and visible to anyone on the network. Only do this on a trusted network, or\n\
+                 tunnel it over SSH/WireGuard.",
+                bind_addr, port
+            );
+        }
+
         // Write remote.json
         if let Err(e) = write_remote_json(port) {
             log::warn!("Failed to write remote.json: {}", e);
