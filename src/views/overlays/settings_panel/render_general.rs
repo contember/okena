@@ -54,7 +54,7 @@ impl SettingsPanel {
                                     div()
                                         .text_size(ui_text_sm(cx))
                                         .text_color(rgb(t.text_muted))
-                                        .child("IP address to bind the remote server (e.g. 0.0.0.0 for all interfaces)"),
+                                        .child("IP address to bind the remote server. Binding beyond 127.0.0.1 exposes it UNENCRYPTED on the network (token + terminal I/O in cleartext) — only use on a trusted network or behind an SSH/WireGuard tunnel."),
                                 ),
                         )
                         .child(
