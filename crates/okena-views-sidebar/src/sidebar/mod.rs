@@ -158,6 +158,14 @@ pub struct Sidebar {
     pub(crate) send_remote_action: Option<SendRemoteActionFn>,
     /// Callback to get remote folder ID for reordering
     pub(crate) get_remote_folder: Option<GetRemoteFolderFn>,
+    /// Last computed activity-view ordering `(tier, project_id)`. Reused while
+    /// the pointer is inside the sidebar (hover-freeze) so rows don't reshuffle
+    /// out from under the cursor; recomputed once the pointer leaves.
+    pub(crate) activity_order_cache: Vec<(crate::activity_order::ActivityTier, String)>,
+    /// True while the pointer is hovering the sidebar scroll area. Freezes the
+    /// activity-view ordering so a finishing command / bell doesn't reshuffle
+    /// rows mid-interaction.
+    pub(crate) activity_pointer_inside: bool,
 }
 
 impl Sidebar {
@@ -207,6 +215,8 @@ impl Sidebar {
             get_remote_connections: None,
             send_remote_action: None,
             get_remote_folder: None,
+            activity_order_cache: Vec::new(),
+            activity_pointer_inside: false,
         }
     }
 
@@ -429,6 +439,15 @@ impl Sidebar {
         let focus_manager = self.focus_manager.clone();
         let window_id = self.window_id;
 
+        let activity_mode = self
+            .workspace
+            .read(cx)
+            .data()
+            .window(window_id)
+            .map(|w| w.project_sort_mode.is_activity())
+            .unwrap_or(false);
+        let toggle_color = if activity_mode { t.border_active } else { t.text_secondary };
+
         div()
             .h(px(28.0))
             .px(px(12.0))
@@ -453,6 +472,30 @@ impl Sidebar {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_secondary))
                     .child("PROJECTS"),
+            )
+            .child(
+                // Sort-by-activity toggle. Highlighted when active. Stops click
+                // propagation so flipping the mode doesn't also clear focus via
+                // the header's on_click above.
+                div()
+                    .id("sort-mode-toggle")
+                    .cursor_pointer()
+                    .px(px(4.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .child(
+                        svg()
+                            .path("icons/focus.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(toggle_color)),
+                    )
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.toggle_project_sort_mode(window_id, cx);
+                        });
+                    })),
             )
     }
 }
@@ -510,6 +553,9 @@ pub struct SidebarProjectInfo {
     pub is_creating: bool,
     /// Whether this project is itself a worktree
     pub is_worktree: bool,
+    /// Whether this project is pinned (shows a pin marker; drives the pinned
+    /// tier in the activity-sorted view).
+    pub pinned: bool,
 }
 
 impl SidebarProjectInfo {
@@ -567,6 +613,7 @@ impl SidebarProjectInfo {
             is_closing: false,
             is_creating: false,
             is_worktree: project.worktree_info.is_some(),
+            pinned: project.pinned,
         }
     }
 }

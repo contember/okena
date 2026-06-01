@@ -166,6 +166,15 @@ impl Sidebar {
                 }));
                 sidebar_name_or_badge(name_label, &project_name, hide_terminal_badge, project.terminal_ids.len(), &t, cx)
             })
+            // 3b. Pin marker
+            .when(project.pinned, |d| {
+                d.child(
+                    svg()
+                        .path("icons/bookmark.svg")
+                        .size(px(11.0))
+                        .text_color(rgb(t.text_secondary)),
+                )
+            })
             // 4. Idle dot
             .when(idle_count > 0 && !is_busy, |d| d.child(sidebar_idle_dot(&t)))
             // 5. Worktree badge (Project style only)
