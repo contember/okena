@@ -149,6 +149,24 @@ impl Workspace {
         self.access_history.touch(project_id);
     }
 
+    /// Record meaningful activity for a project: stamp `last_activity_at` with
+    /// the current unix-millis and persist it (drives the activity-sorted
+    /// sidebar view). Called on focus, a finished command (OSC 133 ;D), and a
+    /// bell/notification from one of the project's terminals — deliberately NOT
+    /// on raw terminal output, since output volume is not "activity". A no-op
+    /// for an unknown project id. Uses `notify_data` so the change is persisted
+    /// (debounced) and the sidebar re-renders to reorder.
+    pub fn bump_activity(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if let Some(project) = self.project_mut(project_id) {
+            project.last_activity_at = Some(now);
+            self.notify_data(cx);
+        }
+    }
+
     /// Get projects sorted by last access time (most recent first)
     pub fn projects_by_recency(&self) -> Vec<&ProjectData> {
         let mut projects: Vec<&ProjectData> = self.data.projects.iter().collect();
@@ -331,6 +349,23 @@ impl Workspace {
             w.project_layout = w.project_layout.toggled();
         }
         self.notify_data(cx);
+    }
+
+    /// Flip the sidebar project sort mode (manual ↔ activity) for a window.
+    /// Persisted via `notify_data`.
+    pub fn toggle_project_sort_mode(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+        if self.data.toggle_project_sort_mode(window_id).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Toggle whether a project is pinned to the top of the activity-sorted
+    /// view. No-op for an unknown project id. Persisted via `notify_data`.
+    pub fn toggle_project_pinned(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if let Some(project) = self.project_mut(project_id) {
+            project.pinned = !project.pinned;
+            self.notify_data(cx);
+        }
     }
 
     /// Spawn a fresh extra window onto `extra_windows` and return its id.
@@ -905,6 +940,8 @@ mod workspace_tests {
             service_terminals: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
         }
     }
 
@@ -1666,6 +1703,8 @@ mod gpui_tests {
             service_terminals: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
         }
     }
 
