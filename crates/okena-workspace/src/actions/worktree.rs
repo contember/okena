@@ -193,6 +193,8 @@ impl Workspace {
             service_terminals: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
         };
 
         let new_project_hooks = project.hooks.clone();
@@ -336,6 +338,8 @@ impl Workspace {
             connection_id: None,
             service_terminals: HashMap::new(),
             hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
         };
 
         // Multi-window new-project visibility rule (PRD user story 14):

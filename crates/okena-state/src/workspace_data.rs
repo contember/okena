@@ -176,6 +176,20 @@ pub struct ProjectData {
     /// Hook terminals displayed in the service panel (persisted across restarts)
     #[serde(default)]
     pub hook_terminals: HashMap<String, HookTerminalEntry>,
+    /// Whether this project is pinned to the top of the activity-sorted view.
+    /// Pinned projects keep their stable manual order; only non-pinned projects
+    /// are reordered by activity. See [`crate::window_state::ProjectSortMode`].
+    #[serde(default)]
+    pub pinned: bool,
+    /// Unix-millis timestamp of the project's last meaningful activity
+    /// (focus, a finished command, or a bell/notification from one of its
+    /// terminals). Drives the ordering of the activity-sorted view. `None`
+    /// means no activity has been recorded yet (e.g. a freshly loaded
+    /// workspace). Persisted so the activity view is sensible right after a
+    /// restart rather than all-equal. NOT bumped on raw terminal output —
+    /// output volume is deliberately not treated as activity.
+    #[serde(default)]
+    pub last_activity_at: Option<u64>,
 }
 
 impl ProjectData {
@@ -250,6 +264,8 @@ mod tests {
             service_terminals: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
         }
     }
 
