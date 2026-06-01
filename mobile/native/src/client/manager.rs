@@ -55,8 +55,66 @@ impl ConnectionManager {
         MANAGER.get().expect("ConnectionManager not initialized")
     }
 
+    /// Tear down a connection and remove it from the map.
+    ///
+    /// Removing the `MobileConnection` drops its `RemoteClient`, whose `Drop`
+    /// aborts the background WS task and closes the event channel. We also call
+    /// `disconnect()` first (idempotent) to remove this connection's terminals,
+    /// and explicitly abort the `_event_task` JoinHandle. Closing the event
+    /// channel (via the dropped `RemoteClient`'s `event_tx`) already unblocks
+    /// `process_events`, but aborting is a belt-and-suspenders cleanup.
+    ///
+    /// Removing a non-existent id is a no-op.
+    pub fn remove_connection(&self, conn_id: &str) {
+        // Take ownership out of the map under the write lock, then release the
+        // lock before running teardown/Drop so we never hold the connections
+        // write lock across the per-connection client lock or the task abort.
+        let connection = self.connections.write().remove(conn_id);
+
+        let Some(connection) = connection else {
+            return;
+        };
+
+        // Abort WS task + drop terminals for this connection (idempotent).
+        connection.client.write().disconnect();
+
+        // Abort the event-processor task. `process_events` also exits on its own
+        // once the entry is gone from the map and the event channel is closed by
+        // the dropped RemoteClient, so this is just immediate cleanup.
+        if let Some(task) = connection._event_task.as_ref() {
+            task.abort();
+        }
+
+        // `connection` is dropped here, dropping the RemoteClient (whose Drop
+        // aborts the WS task again, harmlessly) and the JoinHandle.
+    }
+
     /// Create a new connection and return its ID.
+    ///
+    /// If a connection already exists for the same `host:port`, it is torn down
+    /// and removed first so that reconnecting to the same server replaces the
+    /// stale entry rather than accumulating a new one (which would leak the old
+    /// RemoteClient, its WS task, and its event-processor task).
     pub fn add_connection(&self, host: &str, port: u16, saved_token: Option<String>) -> String {
+        // Replace any existing connection targeting the same server. We collect
+        // matching ids first (read lock), then remove them (which takes its own
+        // write lock) — never holding a lock across the teardown.
+        let stale_ids: Vec<String> = {
+            let connections = self.connections.read();
+            connections
+                .iter()
+                .filter(|(_, conn)| {
+                    let cfg = conn.client.read();
+                    let cfg = cfg.config();
+                    cfg.host == host && cfg.port == port
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in stale_ids {
+            self.remove_connection(&id);
+        }
+
         let config = RemoteConnectionConfig {
             id: uuid::Uuid::new_v4().to_string(),
             name: format!("{}:{}", host, port),
