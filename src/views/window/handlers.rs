@@ -160,8 +160,8 @@ impl WindowView {
             .iter()
             .filter_map(|id| self.build_project_fs(id, cx).map(|fs| fs.project_id()))
             .collect();
-        self.overlay_manager.update(cx, |om, _cx| {
-            om.prune_file_viewer_cache(&valid_keys);
+        self.overlay_manager.update(cx, |om, cx| {
+            om.prune_file_viewer_cache(&valid_keys, cx);
         });
     }
 

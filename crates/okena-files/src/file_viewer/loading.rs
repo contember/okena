@@ -233,6 +233,14 @@ fn image_format_from_image_crate(format: image::ImageFormat) -> Option<ImageForm
 /// pathological inputs.
 const MAX_SVG_PIXELS: u64 = 64 * 1024 * 1024;
 
+/// Megapixel budget for a decoded raster image. The on-disk file is capped
+/// at `MAX_IMAGE_FILE_SIZE` (20 MB), but that bounds the *compressed* size —
+/// a small PNG/WebP can carry enormous pixel dimensions (a "decompression
+/// bomb") that GPUI would expand into a multi-GB RGBA buffer when it decodes.
+/// We probe the header dimensions and refuse anything past this ceiling, the
+/// same 64 MP (~256 MB RGBA) limit the SVG path uses.
+const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+
 /// SVGs are pre-rasterized via the supplied `SvgRenderer` (with the BGRA
 /// channel swap GPUI's built-in decoder skips for SVG) and the raw XML is
 /// returned as `source` so the user can flip to a highlighted source view.
@@ -302,6 +310,18 @@ pub(super) fn build_image_content(
             let (width, height) = reader
                 .into_dimensions()
                 .map_err(|e| format!("Cannot read image dimensions: {}", e))?;
+            // Refuse decompression-bomb dimensions before handing the bytes
+            // to GPUI's lazy decoder, which would otherwise allocate
+            // width × height × 4 bytes of RGBA on the render thread.
+            let pixels = (width as u64).saturating_mul(height as u64);
+            if pixels == 0 || pixels > MAX_IMAGE_PIXELS {
+                return Err(format!(
+                    "Image dimensions out of range ({}×{}). Max {} megapixels.",
+                    width,
+                    height,
+                    MAX_IMAGE_PIXELS / 1024 / 1024
+                ));
+            }
             let effective_format = guessed
                 .and_then(image_format_from_image_crate)
                 .unwrap_or(format);

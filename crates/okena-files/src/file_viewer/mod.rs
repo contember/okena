@@ -1046,8 +1046,22 @@ impl FileViewer {
                                 *rendered_scale = target_scale;
                             }
                         }
-                        _ => {}
+                        (Ok(new_image), _) => {
+                            // Tab still exists but no longer shows a Rendered
+                            // SVG (a freshness reload swapped it to a raster /
+                            // text view). Our freshly-rasterized bitmap has
+                            // nowhere to go — drop_image it so its atlas tile
+                            // is reclaimed instead of leaking for the session.
+                            cx.drop_image(new_image, None);
+                        }
+                        (Err(_), _) => {}
                     }
+                } else if let Ok(new_image) = result {
+                    // Tab was closed / reordered away while the raster ran.
+                    // The render succeeded but has no home; release its atlas
+                    // tile rather than leaking it (RenderImage has no Drop —
+                    // drop_image is the only path that frees the tile).
+                    cx.drop_image(new_image, None);
                 }
                 // Recurse against the captured relative_path, not the
                 // active tab — the user may have switched tabs while the
@@ -1080,6 +1094,8 @@ impl FileViewer {
         let DecodedImage::Rendered {
             svg_bytes,
             rendered_scale,
+            width,
+            height,
             ..
         } = tab.image_data.as_ref()?
         else {
@@ -1091,10 +1107,27 @@ impl FileViewer {
         if zoom <= *rendered_scale * 1.1 {
             return None;
         }
-        // Cap to keep memory bounded. At 16× a 100×100 SVG produces a
-        // 3200×3200 RGBA bitmap (~40 MB) which is the absolute ceiling
-        // before the user notices the allocator.
-        let target = (zoom * 1.25).clamp(1.0, 16.0);
+        // Two ceilings on the raster scale:
+        //   * a flat 16× cap (a 100×100 icon → 3200×3200 ≈ 40 MB), and
+        //   * an absolute-pixel cap, because the flat cap alone is only safe
+        //     for small SVGs. The rendered pixmap is
+        //     intrinsic × (scale × SMOOTH_SVG_SCALE_FACTOR=2)² pixels, so a
+        //     large-but-valid SVG (intrinsic up to MAX_SVG_PIXELS = 64 MP)
+        //     zoomed to 16× would otherwise demand tens of GB of RGBA. Bound
+        //     the final pixmap to ~256 MP (~1 GB), matching the initial-load
+        //     worst case.
+        const MAX_SVG_RENDER_PIXELS: u64 = 256 * 1024 * 1024;
+        let intrinsic = (*width as u64).saturating_mul(*height as u64).max(1);
+        // intrinsic × (target × 2)² ≤ budget  ⇒  target ≤ √(budget/intrinsic) / 2
+        let max_by_pixels =
+            ((MAX_SVG_RENDER_PIXELS as f64 / intrinsic as f64).sqrt() as f32 / 2.0).max(1.0);
+        let target = (zoom * 1.25).clamp(1.0, 16.0).min(max_by_pixels);
+        // If the pixel ceiling holds target at (or below) what we already
+        // rendered, a sharper raster isn't possible — bail so the chase loop
+        // stops instead of re-rendering the same scale forever.
+        if target <= *rendered_scale * 1.05 {
+            return None;
+        }
         Some((svg_bytes.clone(), target))
     }
 
@@ -1253,6 +1286,21 @@ impl FileViewer {
             }
         }
         cx.notify();
+    }
+
+    /// Release every tab's GPU-side image asset. Called when the whole
+    /// viewer entity is about to be dropped — chiefly cache eviction on
+    /// project close — where the per-tab close paths that normally call
+    /// `release_image_assets` never run. Without this, an `Arc<RenderImage>`
+    /// dropped on entity teardown leaves its sprite-atlas tile resident
+    /// (RenderImage has no `Drop`), and decoded raster assets stay cached,
+    /// for the rest of the session.
+    pub fn release_all_image_assets(&mut self, cx: &mut App) {
+        for tab in &mut self.tabs {
+            if let Some(decoded) = tab.image_data.take() {
+                release_image_assets(decoded, cx);
+            }
+        }
     }
 
     /// Switch to a tab by index.

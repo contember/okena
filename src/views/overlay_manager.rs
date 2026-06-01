@@ -1396,9 +1396,25 @@ impl OverlayManager {
     pub fn prune_file_viewer_cache(
         &mut self,
         valid_keys: &std::collections::HashSet<String>,
+        cx: &mut Context<Self>,
     ) {
+        // Collect the viewers about to be evicted and release their GPU
+        // image assets first. The cache is the only thing keeping these
+        // entities alive; once dropped, their RenderImage atlas tiles /
+        // decoded raster assets are only reclaimable via an explicit
+        // drop_image / remove_asset, which the per-tab close paths never
+        // get a chance to run here.
+        let evicted: Vec<Entity<FileViewer>> = self
+            .cached_file_viewers
+            .iter()
+            .filter(|(key, _)| !valid_keys.contains(*key))
+            .map(|(_, viewer)| viewer.clone())
+            .collect();
         self.cached_file_viewers
             .retain(|key, _| valid_keys.contains(key));
+        for viewer in evicted {
+            viewer.update(cx, |viewer, cx| viewer.release_all_image_assets(cx));
+        }
     }
 
     /// Subscribe to a FileViewer's events: Close hides modal (keeps cache),
