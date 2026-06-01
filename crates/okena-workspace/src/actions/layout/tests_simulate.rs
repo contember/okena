@@ -34,47 +34,11 @@ fn simulate_add_tab(node: &mut LayoutNode) {
     };
 }
 
-/// Simulate close_terminal: remove child at index, replacing parent with sibling if 2 children
+/// Simulate close_terminal: delegate to the same LayoutNode::remove_at_path the
+/// production close path uses, so this simulation can never drift from it.
+/// (Empty path returns false here — production sets layout to None in that case.)
 fn simulate_close(layout: &mut LayoutNode, path: &[usize]) -> bool {
-    if path.is_empty() {
-        return false; // would set layout to None in real code
-    }
-    let parent_path = &path[..path.len() - 1];
-    let child_index = path[path.len() - 1];
-
-    if let Some(parent) = layout.get_at_path_mut(parent_path) {
-        match parent {
-            LayoutNode::Split { children, sizes, .. } => {
-                if children.len() <= 2 {
-                    let remaining_index = if child_index == 0 { 1 } else { 0 };
-                    if let Some(remaining) = children.get(remaining_index).cloned() {
-                        *parent = remaining;
-                        return true;
-                    }
-                } else {
-                    children.remove(child_index);
-                    if child_index < sizes.len() {
-                        sizes.remove(child_index);
-                    }
-                    return true;
-                }
-            }
-            LayoutNode::Tabs { children, .. } => {
-                if children.len() <= 2 {
-                    let remaining_index = if child_index == 0 { 1 } else { 0 };
-                    if let Some(remaining) = children.get(remaining_index).cloned() {
-                        *parent = remaining;
-                        return true;
-                    }
-                } else {
-                    children.remove(child_index);
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
+    layout.remove_at_path(path).is_some()
 }
 
 #[test]

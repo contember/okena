@@ -192,6 +192,82 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::TestAppContext) {
+    // Tabs with 3 children, active tab = index 1 (t2). Closing a tab *before*
+    // the active one (index 0, t1) must keep the active tab on the SAME content
+    // (t2), which now lives at index 0.
+    let mut project = make_project("p1");
+    project.layout = Some(LayoutNode::Tabs {
+        children: vec![
+            LayoutNode::Terminal {
+                terminal_id: Some("t1".to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            },
+            LayoutNode::Terminal {
+                terminal_id: Some("t2".to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            },
+            LayoutNode::Terminal {
+                terminal_id: Some("t3".to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            },
+        ],
+        active_tab: 1,
+    });
+    let data = make_workspace_data(vec![project], vec!["p1"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    // Capture which terminal the active tab points at before the close.
+    let active_id_before = workspace.read_with(cx, |ws: &Workspace, _cx| {
+        match ws.project("p1").unwrap().layout.as_ref().unwrap() {
+            LayoutNode::Tabs { children, active_tab } => match &children[*active_tab] {
+                LayoutNode::Terminal { terminal_id: Some(id), .. } => id.clone(),
+                _ => panic!("Expected terminal"),
+            },
+            _ => panic!("Expected tabs"),
+        }
+    });
+    assert_eq!(active_id_before, "t2");
+
+    // Close tab at index 0 (before the active one).
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.close_terminal("p1", &[0], cx);
+    });
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+        match layout {
+            LayoutNode::Tabs { children, active_tab } => {
+                assert_eq!(children.len(), 2);
+                // active_tab decremented from 1 -> 0 so it still points at t2.
+                assert_eq!(*active_tab, 0);
+                match &children[*active_tab] {
+                    LayoutNode::Terminal { terminal_id: Some(id), .. } => {
+                        assert_eq!(id, &active_id_before);
+                    }
+                    _ => panic!("Expected terminal"),
+                }
+                let ids: Vec<_> = children.iter().filter_map(|c| match c {
+                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
+                    _ => None,
+                }).collect();
+                assert_eq!(ids, vec!["t2", "t3"]);
+            }
+            _ => panic!("Expected tabs"),
+        }
+    });
+}
+
+#[gpui::test]
 fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
     let mut project = make_project("p1");
     project.layout = Some(LayoutNode::Tabs {

@@ -17,46 +17,33 @@ impl Workspace {
                     return self.cleanup_orphaned_metadata(project_id);
                 }
 
-                let parent_path = &path[..path.len() - 1];
-                let child_index = path[path.len() - 1];
+                // Focus-preservation: if the parent is a Tabs container and we're
+                // closing a tab *before* the active one, remove_at_path only clamps
+                // active_tab when it runs past the end. To keep the active tab on the
+                // same logical content, we must decrement active_tab ourselves after
+                // the structural removal. Detect that case before mutating.
+                let (parent_path, child_index) = path.split_at(path.len() - 1);
+                let child_index = child_index[0];
+                let needs_tab_decrement = matches!(
+                    layout.get_at_path(parent_path),
+                    Some(LayoutNode::Tabs { active_tab, .. }) if child_index < *active_tab
+                );
 
-                if let Some(parent) = layout.get_at_path_mut(parent_path) {
-                    match parent {
-                        LayoutNode::Split { children, sizes, .. } => {
-                            if children.len() <= 2 {
-                                let remaining_index = if child_index == 0 { 1 } else { 0 };
-                                if let Some(remaining) = children.get(remaining_index).cloned() {
-                                    *parent = remaining;
-                                }
-                            } else {
-                                children.remove(child_index);
-                                if child_index < sizes.len() {
-                                    sizes.remove(child_index);
-                                }
-                            }
-                            self.notify_data(cx);
-                            return self.cleanup_orphaned_metadata(project_id);
-                        }
-                        LayoutNode::Tabs { children, active_tab } => {
-                            if children.len() <= 2 {
-                                let remaining_index = if child_index == 0 { 1 } else { 0 };
-                                if let Some(remaining) = children.get(remaining_index).cloned() {
-                                    *parent = remaining;
-                                }
-                            } else {
-                                children.remove(child_index);
-                                // Adjust active_tab to stay valid
-                                if *active_tab >= children.len() {
-                                    *active_tab = children.len() - 1;
-                                } else if *active_tab > child_index {
-                                    *active_tab -= 1;
-                                }
-                            }
-                            self.notify_data(cx);
-                            return self.cleanup_orphaned_metadata(project_id);
-                        }
-                        _ => {}
+                // Delegate the tree mutation (remove child, collapse a parent left
+                // with a single child, clamp active_tab) to the shared, unit-tested
+                // LayoutNode::remove_at_path. It returns the removed node, or None
+                // for an invalid path (out-of-range index / Terminal parent).
+                if layout.remove_at_path(path).is_some() {
+                    // After removal the parent may have collapsed (single child left)
+                    // or no longer be a Tabs — skip those; only adjust a surviving Tabs.
+                    if needs_tab_decrement
+                        && let Some(LayoutNode::Tabs { children, active_tab }) =
+                            layout.get_at_path_mut(parent_path)
+                    {
+                        *active_tab = active_tab.saturating_sub(1).min(children.len().saturating_sub(1));
                     }
+                    self.notify_data(cx);
+                    return self.cleanup_orphaned_metadata(project_id);
                 }
             }
         vec![]
