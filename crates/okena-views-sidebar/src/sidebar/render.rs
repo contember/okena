@@ -2,14 +2,252 @@
 //! helper that lays out per-project terminal / service / hook groups.
 
 use super::{GroupKind, Sidebar, SidebarItem, SidebarProjectInfo, SidebarServiceInfo};
+use crate::activity_order::{order_by_activity, ActivityEntry, ActivityTier};
 use crate::drag::{FolderDrag, ProjectDrag};
 use gpui::*;
 use okena_ui::theme::theme;
+use okena_ui::tokens::ui_text_ms;
 use okena_workspace::requests::SidebarRequest;
-use okena_workspace::state::ProjectData;
+use okena_workspace::state::{ProjectData, Workspace};
 use std::collections::{HashMap, HashSet};
 
 impl Sidebar {
+    /// Build the `project_id -> services` map from the local `ServiceManager`
+    /// plus remote project snapshots. Shared by the manual and activity render
+    /// paths. Reads only — takes the live `workspace` borrow and a `&App` so it
+    /// composes with the immutable borrows already held during render.
+    pub(crate) fn collect_project_services(
+        &self,
+        workspace: &Workspace,
+        cx: &App,
+    ) -> HashMap<String, Vec<SidebarServiceInfo>> {
+        let mut project_services: HashMap<String, Vec<SidebarServiceInfo>> =
+            if let Some(ref sm) = self.service_manager {
+                let sm = sm.read(cx);
+                workspace.data().projects.iter()
+                    .filter(|p| sm.has_services(&p.id))
+                    .map(|p| {
+                        let services = sm.services_for_project(&p.id)
+                            .into_iter()
+                            .filter(|inst| !inst.is_extra)
+                            .map(|inst| SidebarServiceInfo {
+                                name: inst.definition.name.clone(),
+                                status: inst.status.clone(),
+                                ports: inst.detected_ports.clone(),
+                                port_host: "localhost".to_string(),
+                                is_docker: matches!(inst.kind, okena_services::manager::ServiceKind::DockerCompose { .. }),
+                            })
+                            .collect();
+                        (p.id.clone(), services)
+                    })
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+
+        // Also populate services from remote project data (for projects not covered by local ServiceManager)
+        for project in &workspace.data().projects {
+            let Some(snapshot) = workspace.remote_snapshot(&project.id) else { continue };
+            if !snapshot.services.is_empty() && !project_services.contains_key(&project.id) {
+                let port_host = snapshot.host.clone().unwrap_or_else(|| "localhost".to_string());
+                let services = snapshot.services.iter()
+                    .filter(|api_svc| !api_svc.is_extra)
+                    .map(|api_svc| {
+                        SidebarServiceInfo {
+                            name: api_svc.name.clone(),
+                            status: okena_services::manager::ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
+                            ports: api_svc.ports.clone(),
+                            port_host: port_host.clone(),
+                            is_docker: api_svc.kind == "docker_compose",
+                        }
+                    }).collect();
+                project_services.insert(project.id.clone(), services);
+            }
+        }
+        project_services
+    }
+
+    /// Outer sidebar chrome shared by the manual and activity render paths:
+    /// header, projects header, and the scrolling body holding `flat_elements`
+    /// plus the remote section. Tracks pointer-inside for the activity view's
+    /// hover-freeze.
+    pub(crate) fn render_sidebar_container(
+        &mut self,
+        flat_elements: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        div()
+            .relative()
+            .w_full()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(t.bg_secondary))
+            .track_focus(&self.focus_handle)
+            .key_context("Sidebar")
+            .on_action(cx.listener(Self::handle_sidebar_up))
+            .on_action(cx.listener(Self::handle_sidebar_down))
+            .on_action(cx.listener(Self::handle_sidebar_confirm))
+            .on_action(cx.listener(Self::handle_sidebar_toggle_expand))
+            .on_action(cx.listener(Self::handle_sidebar_escape))
+            .child(self.render_header(cx))
+            .child(self.render_projects_header(cx))
+            .child(
+                div()
+                    .id("sidebar-scroll")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
+                    // Freeze the activity ordering while the pointer is over the
+                    // list so a finishing command / bell doesn't reshuffle rows
+                    // under the cursor. Transition-only, so this is cheap.
+                    .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                        if this.activity_pointer_inside != *hovered {
+                            this.activity_pointer_inside = *hovered;
+                            cx.notify();
+                        }
+                    }))
+                    .children(flat_elements)
+                    .child(self.render_remote_section(cx)),
+            )
+    }
+
+    /// A section header for one activity tier (PINNED / NEEDS ATTENTION /
+    /// RUNNING / RECENT). Non-interactive — purely a visual divider.
+    fn render_activity_tier_header(&self, tier: ActivityTier, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        // A small colored dot echoes the per-row indicators for the two
+        // attention-worthy tiers; pinned/recent get none.
+        let dot_color = match tier {
+            ActivityTier::Attention => Some(t.border_active),
+            ActivityTier::Running => Some(t.border_idle),
+            ActivityTier::Pinned | ActivityTier::Rest => None,
+        };
+        div()
+            .h(px(22.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .children(dot_color.map(|color| div().size(px(6.0)).rounded_full().bg(rgb(color))))
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(t.text_secondary))
+                    .child(tier.label()),
+            )
+    }
+
+    /// Build the flat element list for `ProjectSortMode::Activity`: every
+    /// project as a peer (folders and worktree nesting ignored), grouped into
+    /// activity tiers with section headers. Self-contained — reads its own
+    /// workspace borrow and does not touch the manual path's state.
+    fn build_activity_flat_elements(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        // Phase 1 — gather owned per-project infos + activity inputs while the
+        // workspace borrow and the terminals lock are held, then release both
+        // before the &mut self render calls below.
+        let project_services;
+        let mut infos: HashMap<String, SidebarProjectInfo>;
+        let manual_index: HashMap<String, usize>;
+        let entries: Vec<ActivityEntry>;
+        {
+            let workspace = self.workspace.read(cx);
+            project_services = self.collect_project_services(workspace, cx);
+            let terminals = self.terminals.lock();
+            let mut e = Vec::new();
+            let mut m = HashMap::new();
+            let mut idx_map = HashMap::new();
+            for (idx, project) in workspace.data().projects.iter().enumerate() {
+                let mut info = SidebarProjectInfo::from_project(project, workspace, self.window_id);
+                info.is_closing = workspace.is_project_closing(&project.id);
+                info.is_creating = workspace.is_creating_project(&project.id);
+                let has_attention = info.terminal_ids.iter().any(|tid| {
+                    terminals.get(tid.as_str()).is_some_and(|t| t.has_bell() || t.has_notification())
+                });
+                // "Running" uses cached atomics only (no live /proc read per
+                // render): a terminal the user has driven that is not sitting at
+                // an idle prompt is treated as actively running a command. The
+                // `waiting_for_input` flag is the same background-computed signal
+                // the manual view's idle dot uses.
+                let is_running = info.terminal_ids.iter().any(|tid| {
+                    terminals.get(tid.as_str()).is_some_and(|t| {
+                        t.had_user_input() && !t.is_waiting_for_input()
+                    })
+                });
+                e.push(ActivityEntry {
+                    id: project.id.clone(),
+                    pinned: project.pinned,
+                    manual_index: idx,
+                    last_activity_at: project.last_activity_at,
+                    has_attention,
+                    is_running,
+                });
+                idx_map.insert(project.id.clone(), idx);
+                m.insert(project.id.clone(), info);
+            }
+            entries = e;
+            manual_index = idx_map;
+            infos = m;
+        }
+        for (id, info) in infos.iter_mut() {
+            if let Some(services) = project_services.get(id) {
+                info.services = services.clone();
+            }
+        }
+
+        // Phase 2 — ordering. Reuse the cached order while the pointer is inside
+        // (hover-freeze), dropping any project that has since gone; otherwise
+        // recompute and refresh the cache.
+        let ordering: Vec<(ActivityTier, String)> =
+            if self.activity_pointer_inside && !self.activity_order_cache.is_empty() {
+                self.activity_order_cache
+                    .iter()
+                    .filter(|(_, id)| infos.contains_key(id))
+                    .cloned()
+                    .collect()
+            } else {
+                let ord: Vec<(ActivityTier, String)> = order_by_activity(entries)
+                    .into_iter()
+                    .map(|(tier, entry)| (tier, entry.id))
+                    .collect();
+                self.activity_order_cache = ord.clone();
+                ord
+            };
+
+        // Phase 3 — render rows with a section header whenever the tier changes.
+        let focused_project_id = self.focus_manager.read(cx).focused_project_id().cloned();
+        let mut flat_elements: Vec<AnyElement> = Vec::new();
+        // Cursor-key navigation is not wired for the activity view yet; rows
+        // render without the keyboard cursor highlight. `flat_idx` is still
+        // threaded for render_expanded_children's internal accounting.
+        let mut flat_idx: usize = 0;
+        let mut last_tier: Option<ActivityTier> = None;
+        for (tier, id) in ordering {
+            if last_tier != Some(tier) {
+                flat_elements.push(self.render_activity_tier_header(tier, cx).into_any_element());
+                last_tier = Some(tier);
+            }
+            let Some(info) = infos.get(&id) else { continue };
+            let is_focused_project = focused_project_id.as_ref() == Some(&id);
+            let idx = manual_index.get(&id).copied().unwrap_or(0);
+            flat_elements.push(
+                self.render_project_item(info, idx, false, is_focused_project, window, cx)
+                    .into_any_element(),
+            );
+            flat_idx += 1;
+            if self.expanded_projects.contains(&id) {
+                self.render_expanded_children(info, 20.0, 34.0, "", None, &mut flat_idx, &mut flat_elements, cx);
+            }
+        }
+        flat_elements
+    }
+
     /// Render expanded children (terminals group + services group) for a project.
     /// Returns elements and advances flat_idx.
     // GPUI render helper: params are render inputs and traversal state.
@@ -147,6 +385,21 @@ impl Render for Sidebar {
             self.cursor_index = None;
         }
 
+        // Activity-sorted view is a separate, self-contained build path that
+        // ignores project_order and folders. Branch early so the manual path
+        // below stays untouched.
+        let sort_mode = self
+            .workspace
+            .read(cx)
+            .data()
+            .window(self.window_id)
+            .map(|w| w.project_sort_mode)
+            .unwrap_or_default();
+        if sort_mode.is_activity() {
+            let flat_elements = self.build_activity_flat_elements(window, cx);
+            return self.render_sidebar_container(flat_elements, cx);
+        }
+
         let workspace = self.workspace.read(cx);
 
         // Collect all projects for lookup
@@ -177,49 +430,8 @@ impl Render for Sidebar {
             }
         }
 
-        // Collect services from ServiceManager for all projects
-        let mut project_services: HashMap<String, Vec<SidebarServiceInfo>> = if let Some(ref sm) = self.service_manager {
-            let sm = sm.read(cx);
-            workspace.data().projects.iter()
-                .filter(|p| sm.has_services(&p.id))
-                .map(|p| {
-                    let services = sm.services_for_project(&p.id)
-                        .into_iter()
-                        .filter(|inst| !inst.is_extra)
-                        .map(|inst| SidebarServiceInfo {
-                            name: inst.definition.name.clone(),
-                            status: inst.status.clone(),
-                            ports: inst.detected_ports.clone(),
-                            port_host: "localhost".to_string(),
-                            is_docker: matches!(inst.kind, okena_services::manager::ServiceKind::DockerCompose { .. }),
-                        })
-                        .collect();
-                    (p.id.clone(), services)
-                })
-                .collect()
-        } else {
-            HashMap::new()
-        };
-
-        // Also populate services from remote project data (for projects not covered by local ServiceManager)
-        for project in &workspace.data().projects {
-            let Some(snapshot) = workspace.remote_snapshot(&project.id) else { continue };
-            if !snapshot.services.is_empty() && !project_services.contains_key(&project.id) {
-                let port_host = snapshot.host.clone().unwrap_or_else(|| "localhost".to_string());
-                let services = snapshot.services.iter()
-                    .filter(|api_svc| !api_svc.is_extra)
-                    .map(|api_svc| {
-                        SidebarServiceInfo {
-                            name: api_svc.name.clone(),
-                            status: okena_services::manager::ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
-                            ports: api_svc.ports.clone(),
-                            port_host: port_host.clone(),
-                            is_docker: api_svc.kind == "docker_compose",
-                        }
-                    }).collect();
-                project_services.insert(project.id.clone(), services);
-            }
-        }
+        // Collect services (local ServiceManager + remote snapshots) for all projects
+        let mut project_services = self.collect_project_services(workspace, cx);
 
         // Build sidebar items from project_order
         let mut items: Vec<SidebarItem> = Vec::new();
@@ -538,30 +750,6 @@ impl Render for Sidebar {
                 .into_any_element()
         );
 
-        div()
-            .relative()
-            .w_full()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(t.bg_secondary))
-            .track_focus(&self.focus_handle)
-            .key_context("Sidebar")
-            .on_action(cx.listener(Self::handle_sidebar_up))
-            .on_action(cx.listener(Self::handle_sidebar_down))
-            .on_action(cx.listener(Self::handle_sidebar_confirm))
-            .on_action(cx.listener(Self::handle_sidebar_toggle_expand))
-            .on_action(cx.listener(Self::handle_sidebar_escape))
-            .child(self.render_header(cx))
-            .child(self.render_projects_header(cx))
-            .child(
-                div()
-                    .id("sidebar-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_handle)
-                    .children(flat_elements)
-                    .child(self.render_remote_section(cx)),
-            )
+        self.render_sidebar_container(flat_elements, cx)
     }
 }

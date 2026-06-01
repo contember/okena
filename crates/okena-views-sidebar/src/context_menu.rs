@@ -153,6 +153,17 @@ impl ContextMenu {
         });
     }
 
+    /// Toggle the project's pinned state directly on the workspace, then close.
+    /// Self-contained (no event round-trip) since pinning is a single persisted
+    /// bool flip — see [`okena_workspace::state::Workspace::toggle_project_pinned`].
+    fn toggle_pinned(&self, cx: &mut Context<Self>) {
+        let project_id = self.request.project_id.clone();
+        self.workspace.update(cx, |ws, cx| {
+            ws.toggle_project_pinned(&project_id, cx);
+        });
+        self.close(cx);
+    }
+
     fn configure_hooks(&self, cx: &mut Context<Self>) {
         cx.emit(ContextMenuEvent::ConfigureHooks {
             project_id: self.request.project_id.clone(),
@@ -231,6 +242,7 @@ impl Render for ContextMenu {
         let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
         let is_worktree = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
+        let is_pinned = project.map(|p| p.pinned).unwrap_or(false);
         let is_git_repo = okena_git::is_git_repo(std::path::Path::new(&project_path));
         let project_path_for_worktree = project_path.clone();
         let project_path_for_rename_dir = project_path.clone();
@@ -313,6 +325,19 @@ impl Render for ContextMenu {
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.focus_project(cx);
                             })),
+                    )
+                    // Pin / Unpin (anchors the project to the top of the
+                    // activity-sorted view; harmless in manual mode)
+                    .child(
+                        menu_item(
+                            "context-menu-toggle-pinned",
+                            "icons/bookmark.svg",
+                            if is_pinned { "Unpin" } else { "Pin to top" },
+                            &t,
+                        )
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.toggle_pinned(cx);
+                        })),
                     )
                     // Hide / Show Project (label + icon depend on extras presence and per-window hidden state)
                     .child(
