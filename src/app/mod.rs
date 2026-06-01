@@ -918,6 +918,9 @@ impl Okena {
                     // so background tabs and detached windows are covered too.
                     if !dirty_terminal_ids.is_empty() {
                         this.process_terminal_notifications(&dirty_terminal_ids, cx);
+                        // Stamp project activity for any command that finished
+                        // this batch (OSC 133 ;D), independent of bell/OSC alerts.
+                        this.process_command_finished_activity(&dirty_terminal_ids, cx);
                     }
 
                     if !exit_events.is_empty() {
