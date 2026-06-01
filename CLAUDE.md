@@ -20,7 +20,7 @@ On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid 
 
 ```
 src/                        # Desktop app — main binary, GPUI views, app coordinator
-crates/                     # Library crates (20 crates, see below)
+crates/                     # Library crates (23 crates, see below)
 mobile/                     # Mobile app (Flutter + Rust FFI)
 web/                        # Web client (React + TypeScript + xterm.js)
 assets/                     # Fonts, icons (assets/icons/*.svg referenced as icons/*.svg)
@@ -53,6 +53,7 @@ Most logic lives in `crates/`. The `src/` modules are thin re-exports (`pub use 
 | `okena-extensions` | Extension system |
 | `okena-ext-claude` | Claude AI extension |
 | `okena-ext-codex` | Codex extension |
+| `okena-ext-github` | GitHub status extension |
 | `okena-ext-updater` | Self-update system |
 | `okena-core` | Shared types, API client, key handling |
 
