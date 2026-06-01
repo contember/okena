@@ -13,9 +13,8 @@ use std::time::SystemTime;
 use syntect::parsing::SyntaxSet;
 
 /// Max font file size (in source-on-disk bytes). Fonts are typically much
-/// smaller than images; 20 MB is comfortably above any realistic OpenType /
-/// WOFF2 file and stops us hammering ttf-parser / woff2 with multi-GB
-/// inputs.
+/// smaller than images; 20 MB is comfortably above any realistic OpenType
+/// file and stops us hammering ttf-parser with multi-GB inputs.
 pub(super) const MAX_FONT_FILE_SIZE: u64 = 20 * 1024 * 1024;
 
 /// Content produced by the async loader. Text, image, and font tabs share
@@ -319,8 +318,9 @@ pub(super) fn build_image_content(
 }
 
 /// Parse a font file and return the metadata + OpenType bytes ready for
-/// GPUI's text-system registration. WOFF2 input is decompressed first;
-/// WOFF1 is currently rejected with a user-visible error.
+/// GPUI's text-system registration. Only raw OpenType (TTF/OTF) is decoded;
+/// WOFF/WOFF2 are rejected with a user-visible error (decompressing them
+/// would require a dependency we deliberately don't pull in).
 pub(super) fn build_font_content(
     path: &Path,
     bytes: Vec<u8>,
@@ -333,17 +333,9 @@ pub(super) fn build_font_content(
     })?;
     let ttf_bytes: Vec<u8> = match format {
         FontFormat::OpenType => bytes,
-        FontFormat::Woff2 => {
-            // woff2 0.3 takes `&mut impl bytes::Buf`. `&[u8]` already
-            // implements `Buf`, so a mutable reference to a borrowed slice
-            // is the cheapest reader.
-            let mut slice: &[u8] = &bytes;
-            woff2::convert_woff2_to_ttf(&mut slice)
-                .map_err(|e| format!("Cannot decompress WOFF2: {:?}", e))?
-        }
         FontFormat::Woff => {
             return Err(
-                "WOFF preview is not supported yet — only WOFF2, OTF, and TTF are."
+                "WOFF/WOFF2 preview is not supported yet — only OTF and TTF are."
                     .to_string(),
             );
         }

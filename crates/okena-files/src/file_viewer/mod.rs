@@ -293,12 +293,12 @@ pub(super) fn image_format_for_path(path: &Path) -> Option<ImageFormat> {
 pub(super) enum FontFormat {
     /// OpenType / TrueType — fed straight to ttf-parser and registered as-is.
     OpenType,
-    /// WOFF2 — Brotli-compressed OpenType, decompressed back to TTF before
-    /// parsing and font-system registration.
-    Woff2,
-    /// WOFF (v1) — zlib-compressed per-table OpenType. We surface the file
-    /// but reject decoding for now (rare in practice; adding decoder is a
-    /// follow-up).
+    /// WOFF / WOFF2 — compressed web-font containers. We detect them so the
+    /// viewer can show a clear "not supported" message instead of falling
+    /// back to a generic binary-file error, but we don't decode them:
+    /// decompression (zlib for WOFF1, Brotli for WOFF2) would pull in a
+    /// sizable dependency tree for a format that's rare on disk. Adding a
+    /// decoder is a follow-up.
     Woff,
 }
 
@@ -307,8 +307,7 @@ pub(super) fn font_format_for_path(path: &Path) -> Option<FontFormat> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "ttf" | "otf" => FontFormat::OpenType,
-        "woff2" => FontFormat::Woff2,
-        "woff" => FontFormat::Woff,
+        "woff" | "woff2" => FontFormat::Woff,
         _ => return None,
     })
 }
