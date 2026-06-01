@@ -59,6 +59,16 @@ impl Terminal {
             .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Consume the one-shot "a command finished (OSC 133 ;D) since last drain"
+    /// edge. Returns true if a command completed since the previous call, then
+    /// resets it. The PTY event loop uses this to bump the owning project's
+    /// activity timestamp once per finished command (drives the activity-sorted
+    /// sidebar view). Shells without OSC 133 shell integration never raise it.
+    pub fn take_pending_command_finished(&self) -> bool {
+        self.command_finished_pending
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Mark that this pane raised an OSC 9/777 desktop notification. Drives the
     /// pane's attention border until focus clears it. Set by the app when it
     /// actually fires a notification, so it inherits the user's settings and

@@ -30,13 +30,16 @@ impl Terminal {
         // byte where each mark arrives. `advance_until_terminated` stops
         // the prompt sidecar at every OSC 133 so the main processor can
         // catch up before we read `grid.cursor.point`.
-        advance_with_prompt_marks(
+        let command_finished = advance_with_prompt_marks(
             &mut *term,
             &mut processor,
             &mut prompt_sidecar,
             &mut prompt_tracker,
             data,
         );
+        if command_finished {
+            self.command_finished_pending.store(true, Ordering::Relaxed);
+        }
 
         let history_after = term.grid().history_size();
         prompt_tracker.on_history_changed(
@@ -104,13 +107,16 @@ impl Terminal {
 
         let history_before = term.grid().history_size();
         sidecar.advance(&data);
-        advance_with_prompt_marks(
+        let command_finished = advance_with_prompt_marks(
             &mut *term,
             &mut processor,
             &mut prompt_sidecar,
             &mut prompt_tracker,
             &data,
         );
+        if command_finished {
+            self.command_finished_pending.store(true, Ordering::Relaxed);
+        }
         let history_after = term.grid().history_size();
         prompt_tracker.on_history_changed(
             history_before,
