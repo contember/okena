@@ -540,6 +540,10 @@ impl LayoutNode {
             }
         }
 
+        if let LayoutNode::Tabs { children, active_tab } = self {
+            *active_tab = (*active_tab).min(children.len().saturating_sub(1));
+        }
+
         if let LayoutNode::Split { sizes, children, .. } = self
             && sizes.len() != children.len() {
                 sizes.truncate(children.len());
@@ -1264,6 +1268,20 @@ mod tests {
         let mut node = tabs(vec![terminal("t1")]);
         node.normalize();
         assert!(matches!(node, LayoutNode::Terminal { .. }));
+    }
+
+    #[test]
+    fn normalize_out_of_range_active_tab_clamps() {
+        let mut node = LayoutNode::Tabs {
+            children: vec![terminal("t1"), terminal("t2")],
+            active_tab: 5,
+        };
+        node.normalize();
+        if let LayoutNode::Tabs { children, active_tab } = &node {
+            assert_eq!(*active_tab, children.len() - 1);
+        } else {
+            panic!("Expected tabs after normalize");
+        }
     }
 
     #[test]
