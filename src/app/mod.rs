@@ -644,6 +644,17 @@ impl Okena {
         let terminals = self.terminals.clone();
         let pty_manager = self.pty_manager.clone();
 
+        // Per-turn work budget. A single high-bandwidth terminal (cat hugefile,
+        // `yes`, a runaway build log) can keep this loop draining the channel
+        // forever, starving input/render/resize for ALL terminals (they all
+        // funnel through this one loop on the GPUI thread). Once we've parsed
+        // this many bytes in one drain pass we stop, yield to the executor so
+        // input/render get scheduled, then loop back — the remaining events
+        // stay in the bounded channel and are picked up next turn (nothing is
+        // dropped). 256 KiB is a few render frames' worth of throughput while
+        // staying small enough to keep the UI responsive under sustained load.
+        const MAX_BYTES_PER_TURN: usize = 256 * 1024;
+
         cx.spawn(async move |this: WeakEntity<Okena>, cx| {
             loop {
                 let event = match pty_events.recv().await {
@@ -657,12 +668,20 @@ impl Okena {
                 let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
                 let mut dirty_terminal_ids: Vec<String> = Vec::new();
 
+                // Bytes parsed so far in this drain pass (across batched events).
+                let mut bytes_this_turn: usize = 0;
+
                 // Process first event (broadcasting handled by PtyOutputSink in reader threads)
                 match &event {
                     PtyEvent::Data { terminal_id, data } => {
-                        let terminals_guard = terminals.lock();
-                        if let Some(terminal) = terminals_guard.get(terminal_id) {
-                            terminal.process_output(data);
+                        // Hold the registry lock only for the HashMap lookup —
+                        // clone the Arc<Terminal> out and drop the guard before
+                        // the (potentially long) ANSI parse, so send_input /
+                        // resize / kill on OTHER terminals don't block behind it.
+                        let term = terminals.lock().get(terminal_id).cloned();
+                        if let Some(term) = term {
+                            bytes_this_turn += data.len();
+                            term.process_output(data);
                         }
                         dirty_terminal_ids.push(terminal_id.clone());
                     }
@@ -675,13 +694,22 @@ impl Okena {
                     }
                 }
 
-                // Drain any additional pending events (batch processing)
-                while let Ok(event) = pty_events.try_recv() {
+                // Drain any additional pending events (batch processing), but
+                // stop once we exceed the per-turn byte budget so we yield back
+                // to the executor instead of monopolizing the GPUI thread.
+                while bytes_this_turn < MAX_BYTES_PER_TURN {
+                    let event = match pty_events.try_recv() {
+                        Ok(event) => event,
+                        Err(_) => break,
+                    };
                     match &event {
                         PtyEvent::Data { terminal_id, data } => {
-                            let terminals_guard = terminals.lock();
-                            if let Some(terminal) = terminals_guard.get(terminal_id) {
-                                terminal.process_output(data);
+                            // Clone the Arc out and drop the registry guard
+                            // before parsing (see note above).
+                            let term = terminals.lock().get(terminal_id).cloned();
+                            if let Some(term) = term {
+                                bytes_this_turn += data.len();
+                                term.process_output(data);
                             }
                             dirty_terminal_ids.push(terminal_id.clone());
                         }
@@ -882,6 +910,13 @@ impl Okena {
                         }
                     }
                 });
+
+                // Cooperatively yield to the executor between drain passes so
+                // input, rendering, resize, and other terminals' parsing get
+                // scheduled even under a sustained high-bandwidth stream. The
+                // next recv().await picks up any events left in the channel, so
+                // the loop always makes progress and nothing is dropped.
+                smol::future::yield_now().await;
             }
         })
         .detach();
