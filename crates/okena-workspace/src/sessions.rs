@@ -3,7 +3,20 @@ use crate::state::WorkspaceData;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Atomically write `content` to `path` using tmp + fsync + rename so a crash
+/// or disk-full mid-write never leaves a truncated file at the canonical path.
+fn atomic_write_json(path: &Path, content: &str) -> std::io::Result<()> {
+    let tmp_path = path.with_extension("json.tmp");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)
+}
 
 use super::persistence::{
     get_config_dir, migrate_legacy_json, migrate_workspace, validate_workspace_data,
@@ -114,7 +127,7 @@ pub fn save_session(name: &str, data: &WorkspaceData) -> Result<()> {
 
     let path = get_session_path(name);
     let content = serde_json::to_string_pretty(data)?;
-    std::fs::write(&path, content)?;
+    atomic_write_json(&path, &content)?;
 
     Ok(())
 }
@@ -190,7 +203,7 @@ pub fn export_workspace(data: &WorkspaceData, path: &std::path::Path) -> Result<
     };
 
     let content = serde_json::to_string_pretty(&exported)?;
-    std::fs::write(path, content)?;
+    atomic_write_json(path, &content)?;
 
     Ok(())
 }
