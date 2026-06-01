@@ -812,7 +812,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 }
                                 "state_changed" => {
                                     log::info!("State changed on remote server");
-                                    let client = reqwest::Client::new();
+                                    // Reuse the session HTTP client (built once at
+                                    // Step 3) so connection pooling / keep-alive is
+                                    // preserved across state_changed events instead
+                                    // of rebuilding a client per event.
                                     match client
                                         .get(format!("{}/v1/state", base_url))
                                         .header(
