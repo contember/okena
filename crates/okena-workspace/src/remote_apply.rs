@@ -192,6 +192,8 @@ pub fn apply_remote_snapshot(
                         service_terminals: HashMap::new(),
                         default_shell: None,
                         hook_terminals: HashMap::new(),
+                        pinned: false,
+                        last_activity_at: None,
                     });
                 }
                 // Update the transient remote snapshot regardless of create/update path.

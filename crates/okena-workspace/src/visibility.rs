@@ -235,6 +235,8 @@ mod tests {
             service_terminals: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
         }
     }
 
