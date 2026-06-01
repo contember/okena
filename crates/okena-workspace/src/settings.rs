@@ -698,9 +698,14 @@ fn save_settings_locked(settings: &AppSettings) -> Result<()> {
 
     let content = serde_json::to_string_pretty(&to_save)?;
 
-    // Atomic write: write to temp file, set permissions, then rename
+    // Atomic write: tmp + fsync + rename ensures the file is never partial.
     let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &content)?;
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
