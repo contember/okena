@@ -328,8 +328,17 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
         let mut data: WorkspaceData = match serde_json::from_str(&content) {
             Ok(data) => data,
             Err(e) => {
-                // Back up the corrupted file so the user can recover manually
-                let backup_path = path.with_extension("json.bak");
+                // Back up the corrupted file so the user can recover manually,
+                // but NEVER clobber an existing .bak — with rename-based backups
+                // that .bak is the last surviving good copy. Only promote the
+                // corrupt file to .bak when no backup exists; otherwise stash it
+                // alongside as .corrupt for manual inspection.
+                let bak_path = path.with_extension("json.bak");
+                let backup_path = if bak_path.exists() {
+                    path.with_extension("json.corrupt")
+                } else {
+                    bak_path
+                };
                 if let Err(backup_err) = std::fs::copy(&path, &backup_path) {
                     log::error!("Failed to back up corrupted workspace to {:?}: {}", backup_path, backup_err);
                 } else {
@@ -395,22 +404,30 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
 
     let local_data = data.without_remote_projects();
 
-    // Layer 2: refuse to save an empty workspace (likely a bug, not user intent)
-    if local_data.projects.is_empty() {
-        log::error!(
-            "Refusing to save workspace with 0 local projects — this is likely a bug. \
-             Blocking all future saves to protect data on disk."
+    // Layer 2: refuse to save an empty workspace ONLY if we started from a
+    // fallback default this session. If load succeeded (LOADED_FROM_DEFAULT is
+    // false), an empty workspace is a genuine user action (they deleted their
+    // last project) and must be allowed to persist. If load failed, an empty
+    // workspace is likely a startup glitch — skip the save to protect the good
+    // file on disk. Crucially, do NOT latch LOADED_FROM_DEFAULT here: a single
+    // empty save must not permanently disable all future persistence.
+    if local_data.projects.is_empty() && LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
+        log::warn!(
+            "Skipping save of empty workspace — loaded from fallback default this session, \
+             protecting file on disk."
         );
-        LOADED_FROM_DEFAULT.store(true, Ordering::Relaxed);
         return Ok(());
     }
 
     let json = serde_json::to_string_pretty(&local_data)?;
 
-    // Layer 3: rolling backup — always keep the previous version as .bak
+    // Layer 3: rolling backup — move the current file to .bak via an atomic
+    // rename (not a copy). A rename never produces a truncated .bak, so the
+    // backup is always a complete previous version even if we crash mid-save.
+    // Skip when there's nothing to back up yet (first save).
     if path.exists() {
         let backup_path = path.with_extension("json.bak");
-        if let Err(e) = std::fs::copy(&path, &backup_path) {
+        if let Err(e) = std::fs::rename(&path, &backup_path) {
             log::warn!("Failed to create workspace backup: {}", e);
         }
     }
