@@ -11,6 +11,7 @@ pub enum RemoteContextMenuEvent {
     Close,
     Reconnect { connection_id: String },
     Pair { connection_id: String },
+    UpgradeToTls { connection_id: String },
     RemoveConnection { connection_id: String },
 }
 
@@ -23,6 +24,8 @@ pub struct RemoteContextMenu {
     connection_id: String,
     connection_name: String,
     is_pairing: bool,
+    /// Whether the connection currently uses TLS (false → offer Upgrade).
+    tls: bool,
     position: Point<Pixels>,
     focus_handle: FocusHandle,
 }
@@ -32,6 +35,7 @@ impl RemoteContextMenu {
         connection_id: String,
         connection_name: String,
         is_pairing: bool,
+        tls: bool,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -40,6 +44,7 @@ impl RemoteContextMenu {
             connection_id,
             connection_name,
             is_pairing,
+            tls,
             position,
             focus_handle,
         }
@@ -57,6 +62,12 @@ impl RemoteContextMenu {
 
     fn pair(&self, cx: &mut Context<Self>) {
         cx.emit(RemoteContextMenuEvent::Pair {
+            connection_id: self.connection_id.clone(),
+        });
+    }
+
+    fn upgrade_to_tls(&self, cx: &mut Context<Self>) {
+        cx.emit(RemoteContextMenuEvent::UpgradeToTls {
             connection_id: self.connection_id.clone(),
         });
     }
@@ -115,6 +126,14 @@ impl Render for RemoteContextMenu {
                                         this.reconnect(cx);
                                     })),
                             )
+                            .when(!self.tls, |el| {
+                                el.child(
+                                    menu_item("remote-ctx-upgrade", "icons/keyboard.svg", "Upgrade to TLS", &t)
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.upgrade_to_tls(cx);
+                                        })),
+                                )
+                            })
                             .child(menu_separator(&t))
                             .child(
                                 menu_item_with_color(

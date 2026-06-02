@@ -107,6 +107,9 @@ impl Sidebar {
         let conn_id_for_ctx = config.id.clone();
         let conn_name_for_ctx = config.name.clone();
         let is_pairing = matches!(status, ConnectionStatus::Pairing | ConnectionStatus::Error(_) | ConnectionStatus::Disconnected);
+        // Flag plain-http connections so the user can spot (and upgrade) them.
+        let insecure = !config.tls;
+        let conn_tls = config.tls;
 
         div()
             .id(ElementId::Name(
@@ -126,6 +129,7 @@ impl Sidebar {
                             connection_id: conn_id_for_ctx.clone(),
                             connection_name: conn_name_for_ctx.clone(),
                             is_pairing,
+                            tls: conn_tls,
                             position: event.position,
                         },
                         cx,
@@ -154,6 +158,13 @@ impl Sidebar {
                     .text_color(rgb(t.text_muted))
                     .child(format!("{} — {}", host_port, status_text)),
             )
+            // Warning badge for unencrypted connections (right-click → Upgrade).
+            .children(insecure.then(|| {
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.term_yellow))
+                    .child("⚠ no TLS")
+            }))
     }
 
     fn render_add_connection_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
