@@ -77,7 +77,11 @@ impl RemoteServer {
         };
         let cert_fingerprint = tls_material.as_ref().map(|m| m.fingerprint.clone());
 
-        let scheme = if tls_enabled { "https/wss" } else { "http/ws" };
+        let scheme = if tls_enabled {
+            "http+https dual-stack"
+        } else {
+            "http/ws"
+        };
         log::info!(
             "Remote control server listening on {}:{} ({})",
             bind_addr,
@@ -124,38 +128,29 @@ impl RemoteServer {
                 remote_subscribed_terminals,
                 next_connection_id,
             );
-            let make_service =
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>();
-
             let serve_result = if let Some(material) = tls_material {
-                // TLS path: axum-server over rustls, with graceful shutdown
-                // driven by the same watch channel via an axum_server::Handle.
-                let handle = axum_server::Handle::new();
-                let handle_for_shutdown = handle.clone();
-                tokio::spawn(async move {
-                    shutdown_signal(shutdown_rx_clone).await;
-                    handle_for_shutdown
-                        .graceful_shutdown(Some(std::time::Duration::from_secs(5)));
-                });
-
-                match axum_server::tls_rustls::RustlsConfig::from_pem_file(
-                    &material.cert_path,
-                    &material.key_path,
-                )
-                .await
-                {
-                    Ok(rustls_config) => match listener.into_std() {
-                        Ok(std_listener) => {
-                            axum_server::from_tcp_rustls(std_listener, rustls_config)
-                                .handle(handle)
-                                .serve(make_service)
-                                .await
-                        }
-                        Err(e) => Err(e),
-                    },
-                    Err(e) => Err(e),
+                // TLS enabled → dual-stack: accept BOTH http and TLS on this one
+                // port so already-paired plain-http clients keep working while
+                // new/auto clients negotiate TLS.
+                match crate::remote::tls::server_config(&material) {
+                    Ok(tls_config) => {
+                        crate::remote::serve::serve_dual_stack(
+                            listener,
+                            app,
+                            tls_config,
+                            shutdown_signal(shutdown_rx_clone),
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        log::error!("Failed to build TLS server config: {e:#}");
+                        Err(std::io::Error::other(e.to_string()))
+                    }
                 }
             } else {
+                // TLS disabled → plain http only.
+                let make_service =
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>();
                 axum::serve(listener, make_service)
                     .with_graceful_shutdown(shutdown_signal(shutdown_rx_clone))
                     .await

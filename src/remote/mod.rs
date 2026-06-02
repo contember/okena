@@ -2,6 +2,7 @@ pub mod auth;
 pub mod bridge;
 pub mod pty_broadcaster;
 pub mod routes;
+pub mod serve;
 pub mod server;
 pub mod tls;
 pub mod types;

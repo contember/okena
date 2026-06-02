@@ -11,10 +11,11 @@
 //! re-verify.
 
 use anyhow::{Context, Result};
-use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Paths + fingerprint of the server's persisted self-signed certificate.
 pub struct TlsMaterial {
@@ -91,6 +92,27 @@ fn atomic_write(path: &Path, bytes: &[u8], _mode: u32) -> std::io::Result<()> {
     std::fs::rename(&tmp_path, path)
 }
 
+/// Build a rustls `ServerConfig` from the persisted self-signed cert + key,
+/// using the aws_lc_rs provider (matches the client side).
+pub fn server_config(material: &TlsMaterial) -> Result<Arc<rustls::ServerConfig>> {
+    let certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_file_iter(&material.cert_path)
+            .with_context(|| format!("reading certificate {:?}", material.cert_path))?
+            .collect::<std::result::Result<_, _>>()
+            .context("parsing certificate chain")?;
+    let key = PrivateKeyDer::from_pem_file(&material.key_path)
+        .with_context(|| format!("reading private key {:?}", material.key_path))?;
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("rustls default protocol versions")?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("installing server certificate")?;
+    Ok(Arc::new(config))
+}
+
 /// Lowercase-hex SHA-256 of a DER-encoded certificate.
 pub fn fingerprint_hex(der: &[u8]) -> String {
     use std::fmt::Write;
@@ -144,21 +166,20 @@ mod handshake_tests {
     use axum::Router;
     use axum::routing::get;
 
-    async fn spawn_tls_server(material: &TlsMaterial) -> std::net::SocketAddr {
+    /// Start the real dual-stack server (both http + TLS on one port).
+    async fn spawn_dual_stack(material: &TlsMaterial) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let std_listener = listener.into_std().unwrap();
-        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-            &material.cert_path,
-            &material.key_path,
-        )
-        .await
-        .unwrap();
+        let tls = super::server_config(material).unwrap();
         let app = Router::new().route("/health", get(|| async { "ok" }));
         tokio::spawn(async move {
-            let _ = axum_server::from_tcp_rustls(std_listener, config)
-                .serve(app.into_make_service())
-                .await;
+            let _ = crate::remote::serve::serve_dual_stack(
+                listener,
+                app,
+                tls,
+                std::future::pending::<()>(),
+            )
+            .await;
         });
         addr
     }
@@ -179,14 +200,27 @@ mod handshake_tests {
     }
 
     #[tokio::test]
-    async fn pin_tofu_capture_match_and_mismatch_over_real_handshake() {
+    async fn dual_stack_serves_http_and_pinned_https_on_one_port() {
         // Server providers may consult the process-default CryptoProvider.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let dir = tempfile::tempdir().unwrap();
         let material = load_or_generate(dir.path()).unwrap();
-        let addr = spawn_tls_server(&material).await;
-        let url = format!("https://127.0.0.1:{}/health", addr.port());
+        let addr = spawn_dual_stack(&material).await;
+        let port = addr.port();
+        let url = format!("https://127.0.0.1:{}/health", port);
+
+        // 0) Plain HTTP on the SAME port still works (back-compat for existing
+        //    plain-http clients after the server enables TLS).
+        let http_url = format!("http://127.0.0.1:{}/health", port);
+        let http_client = reqwest::Client::new();
+        assert!(
+            get_with_retry(&http_client, &http_url)
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false),
+            "plain http must work on the dual-stack port"
+        );
 
         // 1) TOFU (no pin): handshake succeeds and the client captures exactly
         //    the server's cert fingerprint.
