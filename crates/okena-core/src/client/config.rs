@@ -18,4 +18,28 @@ pub struct RemoteConnectionConfig {
     /// Unix timestamp when the token was obtained (for refresh scheduling)
     #[serde(default)]
     pub token_obtained_at: Option<i64>,
+    /// Connect over TLS (https/wss). Default false for backward compatibility
+    /// with existing plain-http connections.
+    #[serde(default)]
+    pub tls: bool,
+    /// SHA-256 fingerprint (lowercase hex) of the server's TLS certificate,
+    /// pinned on first connect (TOFU). When set, the client refuses any cert
+    /// whose fingerprint differs — defeating an active MITM. `None` until the
+    /// first successful TLS handshake captures it.
+    #[serde(default)]
+    pub pinned_cert_sha256: Option<String>,
+}
+
+impl RemoteConnectionConfig {
+    /// `http://host:port` or `https://host:port` depending on `tls`.
+    pub fn base_url(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{}://{}:{}", scheme, self.host, self.port)
+    }
+
+    /// `ws://host:port/v1/stream` or `wss://…` depending on `tls`.
+    pub fn ws_url(&self) -> String {
+        let scheme = if self.tls { "wss" } else { "ws" };
+        format!("{}://{}:{}/v1/stream", scheme, self.host, self.port)
+    }
 }

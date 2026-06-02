@@ -6,7 +6,7 @@ license = "MIT"
 
 [features]
 default = []
-client = ["dep:tokio", "dep:reqwest", "dep:tokio-tungstenite", "dep:async-channel", "dep:futures"]
+client = ["dep:tokio", "dep:reqwest", "dep:tokio-tungstenite", "dep:async-channel", "dep:futures", "dep:rustls", "dep:rustls-pki-types", "dep:sha2"]
 blocking-http = ["dep:reqwest", "reqwest/blocking"]
 # Exposes `process::testing` (command bus mock) to downstream crates' tests.
 test-support = []
@@ -25,6 +25,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"], optional = true }
 async-channel = { version = "2.3", optional = true }
 futures = { version = "0.3", optional = true }
+# Client TLS with certificate pinning (TOFU). aws_lc_rs matches reqwest's default
+# rustls backend so a single CryptoProvider is shared across reqwest + tungstenite.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "tls12", "logging", "std"], optional = true }
+rustls-pki-types = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -2,6 +2,7 @@ pub mod config;
 pub mod connection;
 pub mod id;
 pub mod state;
+pub mod tls;
 pub mod types;
 
 pub use config::RemoteConnectionConfig;

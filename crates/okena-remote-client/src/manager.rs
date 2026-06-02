@@ -406,21 +406,30 @@ impl RemoteConnectionManager {
             ConnectionEvent::TokenObtained {
                 connection_id,
                 token,
+                cert_fingerprint,
             } => {
                 let now = now_unix_timestamp();
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
                     conn.config_mut().saved_token = Some(token.clone());
                     conn.config_mut().token_obtained_at = Some(now);
+                    // Pin the cert on first successful TLS pairing (TOFU).
+                    if cert_fingerprint.is_some() {
+                        conn.config_mut().pinned_cert_sha256 = cert_fingerprint.clone();
+                    }
                 }
-                // Persist token to settings (off GPUI thread)
+                // Persist token (+ pinned cert) to settings (off GPUI thread)
                 let cid = connection_id.clone();
                 let tok = token.clone();
+                let fp = cert_fingerprint.clone();
                 cx.background_executor()
                     .spawn(async move {
                         let _ = update_remote_connections(|conns| {
                             if let Some(saved) = conns.iter_mut().find(|c| c.id == cid) {
                                 saved.saved_token = Some(tok);
                                 saved.token_obtained_at = Some(now);
+                                if fp.is_some() {
+                                    saved.pinned_cert_sha256 = fp;
+                                }
                             }
                         });
                     })
@@ -609,6 +618,8 @@ mod tests {
             port,
             saved_token: None,
             token_obtained_at: None,
+            tls: false,
+            pinned_cert_sha256: None,
         }
     }
 

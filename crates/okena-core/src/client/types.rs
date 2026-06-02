@@ -57,6 +57,9 @@ pub enum ConnectionEvent {
     TokenObtained {
         connection_id: String,
         token: String,
+        /// SHA-256 fingerprint (lowercase hex) of the server cert observed during
+        /// the (TLS) pairing handshake, to be pinned. `None` for plain-http pairs.
+        cert_fingerprint: Option<String>,
     },
     /// Remote state snapshot received
     StateReceived {
