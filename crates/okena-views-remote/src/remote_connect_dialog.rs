@@ -24,6 +24,9 @@ pub struct RemoteConnectDialog {
     initial_focus_done: bool,
     /// Connect over TLS (https/wss) with cert pinning. Toggled in the dialog UI.
     use_tls: bool,
+    /// Config (with token + captured pin) held back during fingerprint
+    /// verification — emitted as Connected only once the user confirms.
+    pending_config: Option<RemoteConnectionConfig>,
 }
 
 #[derive(Clone)]
@@ -34,12 +37,25 @@ enum ConnectionDialogStatus {
     TestFailed(String),
     Connecting,
     ConnectFailed(String),
+    /// Paired over TLS; awaiting the user to verify the captured cert
+    /// fingerprint matches the host before the pin is trusted/saved.
+    VerifyFingerprint(String),
 }
 
 impl ConnectionDialogStatus {
     fn is_busy(&self) -> bool {
         matches!(self, Self::Testing | Self::Connecting)
     }
+}
+
+/// Format a 64-char hex fingerprint as colon-separated byte pairs for readable
+/// out-of-band comparison (e.g. `ab:cd:ef:…`).
+fn format_fingerprint(fp: &str) -> String {
+    fp.as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).unwrap_or("??"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 pub enum RemoteConnectDialogEvent {
@@ -77,12 +93,21 @@ impl RemoteConnectDialog {
             status: ConnectionDialogStatus::Idle,
             initial_focus_done: false,
             use_tls: false,
+            pending_config: None,
         }
     }
 
     fn close(&self, cx: &mut Context<Self>) {
         if !self.status.is_busy() {
             cx.emit(RemoteConnectDialogEvent::Close);
+        }
+    }
+
+    /// User confirmed the verified fingerprint — emit the held-back config so the
+    /// connection (with its now-trusted pin) is saved and connected.
+    fn confirm_fingerprint(&mut self, cx: &mut Context<Self>) {
+        if let Some(config) = self.pending_config.take() {
+            cx.emit(RemoteConnectDialogEvent::Connected { config });
         }
     }
 
@@ -266,14 +291,29 @@ impl RemoteConnectDialog {
                             let mut config = config;
                             config.saved_token = Some(pair_resp.token);
                             // Pin the cert fingerprint captured during the TLS
-                            // handshake (TOFU) so the persisted connection enforces
-                            // it on every future connect.
-                            if config.tls {
-                                config.pinned_cert_sha256 =
-                                    observed.lock().ok().and_then(|g| g.clone());
-                            }
-                            let _ = this.update(cx, |_this, cx| {
-                                cx.emit(RemoteConnectDialogEvent::Connected { config });
+                            // handshake (TOFU).
+                            let captured = if config.tls {
+                                let fp = observed.lock().ok().and_then(|g| g.clone());
+                                config.pinned_cert_sha256 = fp.clone();
+                                fp
+                            } else {
+                                None
+                            };
+                            let _ = this.update(cx, |this, cx| match captured {
+                                // TLS: hold the config back and ask the user to
+                                // verify the fingerprint against the host before we
+                                // trust the pin and persist the connection.
+                                Some(fp) => {
+                                    this.pending_config = Some(config);
+                                    this.status =
+                                        ConnectionDialogStatus::VerifyFingerprint(fp);
+                                    cx.notify();
+                                }
+                                // Plain http (or no cert captured): nothing to
+                                // verify, connect immediately as before.
+                                None => {
+                                    cx.emit(RemoteConnectDialogEvent::Connected { config });
+                                }
                             });
                         }
                         Err(e) => {
@@ -358,10 +398,37 @@ impl Render for RemoteConnectDialog {
                 .text_color(rgb(t.term_red))
                 .child(format!("Failed: {}", err))
                 .into_any_element(),
+            ConnectionDialogStatus::VerifyFingerprint(fp) => div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .child("Paired. Verify this certificate fingerprint matches the one shown on the host (Settings → Remote Server), then confirm:"),
+                )
+                .child(
+                    div()
+                        .bg(rgb(t.bg_secondary))
+                        .border_1()
+                        .border_color(rgb(t.border))
+                        .rounded(px(4.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.text_primary))
+                        .child(format_fingerprint(fp)),
+                )
+                .into_any_element(),
         };
+
+        let verifying = matches!(self.status, ConnectionDialogStatus::VerifyFingerprint(_));
 
         let connect_label = if matches!(self.status, ConnectionDialogStatus::Connecting) {
             "Connecting..."
+        } else if verifying {
+            "Confirm & Connect"
         } else {
             "Connect"
         };
@@ -505,7 +572,17 @@ impl Render for RemoteConnectDialog {
                                         button_primary("confirm-connect-btn", connect_label, &t)
                                             .when(!is_busy, |el| {
                                                 el.on_click(cx.listener(|this, _, _window, cx| {
-                                                    this.connect(cx);
+                                                    // After a TLS pair the same primary
+                                                    // button confirms the verified pin;
+                                                    // otherwise it kicks off connect.
+                                                    if matches!(
+                                                        this.status,
+                                                        ConnectionDialogStatus::VerifyFingerprint(_)
+                                                    ) {
+                                                        this.confirm_fingerprint(cx);
+                                                    } else {
+                                                        this.connect(cx);
+                                                    }
                                                 }))
                                             })
                                             .when(is_busy, |el| el.opacity(0.5)),
