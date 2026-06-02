@@ -357,6 +357,11 @@ impl ConnectionManager {
                             cert_fingerprint.clone();
                     }
                 }
+                ConnectionEvent::TlsUpgraded { cert_fingerprint, .. } => {
+                    let mut client = conn.client.write();
+                    client.config_mut().tls = true;
+                    client.config_mut().pinned_cert_sha256 = cert_fingerprint.clone();
+                }
                 ConnectionEvent::TokenRefreshed { token, .. } => {
                     conn.client.read().update_shared_token(&token);
                     conn.client.write().config_mut().saved_token = Some(token.clone());

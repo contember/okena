@@ -387,6 +387,7 @@ impl RemoteConnectionManager {
         let event_label: &'static str = match &event {
             ConnectionEvent::StatusChanged { .. } => "StatusChanged",
             ConnectionEvent::TokenObtained { .. } => "TokenObtained",
+            ConnectionEvent::TlsUpgraded { .. } => "TlsUpgraded",
             ConnectionEvent::StateReceived { .. } => "StateReceived",
             ConnectionEvent::SubscriptionMappings { .. } => "SubscriptionMappings",
             ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
@@ -452,6 +453,28 @@ impl RemoteConnectionManager {
                                 if fp.is_some() {
                                     saved.pinned_cert_sha256 = fp;
                                 }
+                            }
+                        });
+                    })
+                    .detach();
+                cx.notify();
+            }
+            ConnectionEvent::TlsUpgraded {
+                connection_id,
+                cert_fingerprint,
+            } => {
+                if let Some(conn) = self.connections.get_mut(&connection_id) {
+                    conn.config_mut().tls = true;
+                    conn.config_mut().pinned_cert_sha256 = cert_fingerprint.clone();
+                }
+                let cid = connection_id.clone();
+                let fp = cert_fingerprint.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = update_remote_connections(|conns| {
+                            if let Some(saved) = conns.iter_mut().find(|c| c.id == cid) {
+                                saved.tls = true;
+                                saved.pinned_cert_sha256 = fp;
                             }
                         });
                     })

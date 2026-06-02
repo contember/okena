@@ -306,8 +306,10 @@ pub struct AppSettings {
 
     /// Serve the remote control server over TLS (https/wss) using a persisted
     /// self-signed certificate. Clients pin the cert fingerprint on pairing.
-    /// Default off for backward compatibility with existing plain-http pairings.
-    #[serde(default)]
+    /// Default ON (incl. for existing configs missing the key): the server is
+    /// dual-stack, so enabling TLS does not break already-paired plain-http
+    /// clients — they keep working while new/auto clients negotiate TLS.
+    #[serde(default = "default_true")]
     pub remote_tls_enabled: bool,
 
     /// Minimum project column width in pixels (default: 400)
@@ -893,23 +895,24 @@ mod tests {
     }
 
     #[test]
-    fn remote_tls_secure_by_default_for_fresh_install_only() {
+    fn remote_tls_on_by_default_including_existing_configs() {
         // Fresh install (no settings.json) uses AppSettings::default() → TLS on.
         assert!(
             AppSettings::default().remote_tls_enabled,
             "fresh installs should default to TLS on"
         );
-        // Existing settings.json predates the key → serde per-field default → off,
-        // so an already-configured plain-http user is NOT silently switched to TLS.
+        // Existing settings.json predates the key → defaults to ON too. Safe
+        // because the server is dual-stack (still accepts plain http), so
+        // already-paired clients don't break.
         let existing: AppSettings = serde_json::from_str(r#"{"version": 2}"#).unwrap();
         assert!(
-            !existing.remote_tls_enabled,
-            "existing configs without the key must stay non-TLS"
+            existing.remote_tls_enabled,
+            "existing configs without the key default to TLS on (dual-stack server)"
         );
-        // An explicit value is of course respected.
+        // An explicit opt-out is still respected.
         let explicit: AppSettings =
-            serde_json::from_str(r#"{"version": 2, "remote_tls_enabled": true}"#).unwrap();
-        assert!(explicit.remote_tls_enabled);
+            serde_json::from_str(r#"{"version": 2, "remote_tls_enabled": false}"#).unwrap();
+        assert!(!explicit.remote_tls_enabled);
     }
 
     #[test]

@@ -61,6 +61,12 @@ pub enum ConnectionEvent {
         /// the (TLS) pairing handshake, to be pinned. `None` for plain-http pairs.
         cert_fingerprint: Option<String>,
     },
+    /// A previously plain-http connection auto-detected TLS on connect and
+    /// upgraded; persist tls=true and the pinned fingerprint to the config.
+    TlsUpgraded {
+        connection_id: String,
+        cert_fingerprint: Option<String>,
+    },
     /// Remote state snapshot received
     StateReceived {
         connection_id: String,

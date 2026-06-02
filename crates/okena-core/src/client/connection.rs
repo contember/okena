@@ -157,50 +157,77 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.ws_tx = Some(ws_tx.clone());
 
         let task = self.runtime.spawn(async move {
-            let base_url = config.base_url();
+            let mut config = config;
             let observed = crate::client::tls::new_observed();
 
-            // Step 1: Health check
-            let client = crate::client::tls::build_reqwest_client(
-                config.tls,
-                config.pinned_cert_sha256.clone(),
-                observed.clone(),
+            // Step 1: detect scheme + health check. A pinned/TLS connection only
+            // tries TLS (never downgrade). A legacy plain connection prefers TLS
+            // (auto-upgrade) but falls back to plain http so it keeps working
+            // against a server that hasn't enabled TLS.
+            let schemes: &[bool] = if config.tls { &[true] } else { &[true, false] };
+            let mut chosen: Option<(bool, reqwest::Client, String)> = None;
+            for &tls in schemes {
+                let client = crate::client::tls::build_reqwest_client(
+                    tls,
+                    config.pinned_cert_sha256.clone(),
+                    observed.clone(),
+                );
+                let scheme = if tls { "https" } else { "http" };
+                let base_url = format!("{}://{}:{}", scheme, config.host, config.port);
+                let ok = matches!(
+                    client
+                        .get(format!("{}/health", base_url))
+                        .timeout(std::time::Duration::from_secs(5))
+                        .send()
+                        .await,
+                    Ok(resp) if resp.status().is_success()
+                );
+                if ok {
+                    chosen = Some((tls, client, base_url));
+                    break;
+                }
+            }
+
+            let (detected_tls, client, base_url) = match chosen {
+                Some(v) => v,
+                None => {
+                    let msg = format!("Cannot reach server {}:{}", config.host, config.port);
+                    log::warn!("{}", msg);
+                    let _ = event_tx
+                        .send(ConnectionEvent::StatusChanged {
+                            connection_id: config.id.clone(),
+                            status: ConnectionStatus::Error(msg),
+                        })
+                        .await;
+                    return;
+                }
+            };
+            log::info!(
+                "Remote server {}:{} is healthy ({})",
+                config.host,
+                config.port,
+                if detected_tls { "TLS" } else { "plain http" }
             );
-            match client
-                .get(format!("{}/health", base_url))
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    log::info!(
-                        "Remote server {}:{} is healthy",
-                        config.host,
-                        config.port
-                    );
-                }
-                Ok(resp) => {
-                    let msg = format!("Health check failed: HTTP {}", resp.status());
-                    log::warn!("{}", msg);
-                    let _ = event_tx
-                        .send(ConnectionEvent::StatusChanged {
-                            connection_id: config.id.clone(),
-                            status: ConnectionStatus::Error(msg),
-                        })
-                        .await;
-                    return;
-                }
-                Err(e) => {
-                    let msg = format!("Cannot reach server: {}", e);
-                    log::warn!("{}", msg);
-                    let _ = event_tx
-                        .send(ConnectionEvent::StatusChanged {
-                            connection_id: config.id.clone(),
-                            status: ConnectionStatus::Error(msg),
-                        })
-                        .await;
-                    return;
-                }
+
+            // Auto-upgrade: a previously-plain connection that reached the server
+            // over TLS adopts TLS and pins the cert (TOFU), and asks the manager
+            // to persist the upgrade so the sidebar reflects it and the pin is
+            // enforced next time.
+            if detected_tls && !config.tls {
+                config.tls = true;
+                let fp = observed.lock().ok().and_then(|g| g.clone());
+                config.pinned_cert_sha256 = fp.clone();
+                log::info!(
+                    "Auto-upgraded {}:{} to TLS",
+                    config.host,
+                    config.port
+                );
+                let _ = event_tx
+                    .send(ConnectionEvent::TlsUpgraded {
+                        connection_id: config.id.clone(),
+                        cert_fingerprint: fp,
+                    })
+                    .await;
             }
 
             // Step 2: Validate saved token (if any)
