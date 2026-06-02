@@ -144,6 +144,9 @@ pub enum OverlayManagerEvent {
     /// Remote context menu: open pair dialog
     RemotePair { connection_id: String, connection_name: String },
 
+    /// Remote context menu: flip the connection to TLS, then re-pair to pin the cert
+    RemoteUpgradeToTls { connection_id: String, connection_name: String },
+
     /// Remote pair dialog: user submitted a code
     RemotePaired { connection_id: String, code: String },
 
@@ -904,6 +907,7 @@ impl OverlayManager {
         connection_id: String,
         connection_name: String,
         is_pairing: bool,
+        tls: bool,
         position: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
@@ -912,7 +916,7 @@ impl OverlayManager {
 
         let conn_name = connection_name.clone();
         let menu = cx.new(|cx| {
-            RemoteContextMenu::new(connection_id, connection_name, is_pairing, position, cx)
+            RemoteContextMenu::new(connection_id, connection_name, is_pairing, tls, position, cx)
         });
 
         cx.subscribe(&menu, move |this, _, event: &RemoteContextMenuEvent, cx| {
@@ -929,6 +933,13 @@ impl OverlayManager {
                 RemoteContextMenuEvent::Pair { connection_id } => {
                     this.hide_remote_context_menu(cx);
                     cx.emit(OverlayManagerEvent::RemotePair {
+                        connection_id: connection_id.clone(),
+                        connection_name: conn_name.clone(),
+                    });
+                }
+                RemoteContextMenuEvent::UpgradeToTls { connection_id } => {
+                    this.hide_remote_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::RemoteUpgradeToTls {
                         connection_id: connection_id.clone(),
                         connection_name: conn_name.clone(),
                     });

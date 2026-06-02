@@ -245,6 +245,28 @@ impl RemoteConnectionManager {
         }
     }
 
+    /// Flip a saved connection's TLS flag and persist it, clearing any stale pin
+    /// so the next pairing captures a fresh one. Does not reconnect/re-pair — the
+    /// caller typically follows this by opening the pair dialog.
+    pub fn set_connection_tls(&mut self, connection_id: &str, tls: bool, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.get_mut(connection_id) {
+            conn.config_mut().tls = tls;
+            conn.config_mut().pinned_cert_sha256 = None;
+        }
+        let id = connection_id.to_string();
+        cx.background_executor()
+            .spawn(async move {
+                let _ = update_remote_connections(|conns| {
+                    if let Some(c) = conns.iter_mut().find(|c| c.id == id) {
+                        c.tls = tls;
+                        c.pinned_cert_sha256 = None;
+                    }
+                });
+            })
+            .detach();
+        cx.notify();
+    }
+
     /// Get all connections for sidebar rendering.
     pub fn connections(
         &self,

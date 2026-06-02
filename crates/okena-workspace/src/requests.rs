@@ -93,6 +93,8 @@ pub enum OverlayRequest {
         connection_id: String,
         connection_name: String,
         is_pairing: bool,
+        /// Whether the connection currently uses TLS (drives the Upgrade item).
+        tls: bool,
         position: gpui::Point<gpui::Pixels>,
     },
 }

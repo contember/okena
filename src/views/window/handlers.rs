@@ -366,6 +366,18 @@ impl WindowView {
                     om.show_remote_pair_dialog(connection_id.clone(), connection_name.clone(), cx);
                 });
             }
+            OverlayManagerEvent::RemoteUpgradeToTls { connection_id, connection_name } => {
+                // Flip the saved connection to TLS, then open the pair dialog: the
+                // re-pair runs over TLS and pins the server cert (TOFU).
+                if let Some(ref rm) = self.remote_manager {
+                    rm.update(cx, |rm, cx| {
+                        rm.set_connection_tls(connection_id, true, cx);
+                    });
+                }
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_remote_pair_dialog(connection_id.clone(), connection_name.clone(), cx);
+                });
+            }
             OverlayManagerEvent::RemotePaired { connection_id, code } => {
                 if let Some(ref rm) = self.remote_manager {
                     rm.update(cx, |rm, cx| {
@@ -694,10 +706,10 @@ impl WindowView {
                         });
                     }
                 }
-                OverlayRequest::RemoteConnectionContextMenu { connection_id, connection_name, is_pairing, position } => {
+                OverlayRequest::RemoteConnectionContextMenu { connection_id, connection_name, is_pairing, tls, position } => {
                     if !self.overlay_manager.read(cx).has_remote_context_menu() {
                         self.overlay_manager.update(cx, |om, cx| {
-                            om.show_remote_context_menu(connection_id, connection_name, is_pairing, position, cx);
+                            om.show_remote_context_menu(connection_id, connection_name, is_pairing, tls, position, cx);
                         });
                     }
                 }
