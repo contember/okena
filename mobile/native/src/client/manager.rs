@@ -95,7 +95,13 @@ impl ConnectionManager {
     /// and removed first so that reconnecting to the same server replaces the
     /// stale entry rather than accumulating a new one (which would leak the old
     /// RemoteClient, its WS task, and its event-processor task).
-    pub fn add_connection(&self, host: &str, port: u16, saved_token: Option<String>) -> String {
+    pub fn add_connection(
+        &self,
+        host: &str,
+        port: u16,
+        saved_token: Option<String>,
+        tls: bool,
+    ) -> String {
         // Replace any existing connection targeting the same server. We collect
         // matching ids first (read lock), then remove them (which takes its own
         // write lock) — never holding a lock across the teardown.
@@ -122,7 +128,7 @@ impl ConnectionManager {
             port,
             saved_token,
             token_obtained_at: None,
-            tls: false,
+            tls,
             pinned_cert_sha256: None,
         };
         let conn_id = config.id.clone();
