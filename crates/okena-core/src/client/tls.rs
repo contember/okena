@@ -145,9 +145,14 @@ fn provider() -> Arc<CryptoProvider> {
 fn pinned_client_config(pinned: Option<String>, observed: ObservedFingerprint) -> rustls::ClientConfig {
     let provider = provider();
     let verifier = Arc::new(PinnedCertVerifier::new(pinned, observed, provider.clone()));
-    rustls::ClientConfig::builder_with_provider(provider)
+    #[allow(
+        clippy::expect_used,
+        reason = "aws_lc_rs default provider always supports the default protocol versions"
+    )]
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .expect("rustls default protocol versions")
+        .expect("aws_lc_rs default provider supports default protocol versions");
+    builder
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth()
