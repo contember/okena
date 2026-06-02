@@ -15,6 +15,8 @@ pub struct RemoteServer {
     shutdown_tx: watch::Sender<bool>,
     runtime: Option<tokio::runtime::Runtime>,
     port: u16,
+    /// SHA-256 fingerprint (lowercase hex) of the TLS cert, when TLS is enabled.
+    cert_fingerprint: Option<String>,
 }
 
 impl RemoteServer {
@@ -33,6 +35,7 @@ impl RemoteServer {
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
         next_connection_id: Arc<AtomicU64>,
+        tls_enabled: bool,
     ) -> anyhow::Result<Self> {
         let _slow = okena_core::timing::SlowGuard::new("RemoteServer::start");
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -61,23 +64,48 @@ impl RemoteServer {
         })?;
 
         let port = listener.local_addr()?.port();
-        log::info!("Remote control server listening on {}:{}", bind_addr, port);
 
-        // Warn loudly when bound to a non-loopback address: the remote server has no
-        // TLS, so the pairing token and all terminal I/O travel the network in cleartext.
-        if !bind_addr.is_loopback() {
+        // Load (or generate) the persisted self-signed cert when TLS is enabled.
+        // If cert setup fails we deliberately do NOT silently fall back to plain
+        // http — that would defeat the point — so the error propagates and the
+        // server stays off until the user fixes it.
+        let tls_material = if tls_enabled {
+            let dir = crate::workspace::persistence::config_dir();
+            Some(crate::remote::tls::load_or_generate(&dir)?)
+        } else {
+            None
+        };
+        let cert_fingerprint = tls_material.as_ref().map(|m| m.fingerprint.clone());
+
+        let scheme = if tls_enabled { "https/wss" } else { "http/ws" };
+        log::info!(
+            "Remote control server listening on {}:{} ({})",
+            bind_addr,
+            port,
+            scheme
+        );
+        if let Some(fp) = &cert_fingerprint {
+            log::info!(
+                "Remote TLS certificate fingerprint (verify this on the client when pairing):\n  {}",
+                fp
+            );
+        }
+
+        // Warn loudly when bound to a non-loopback address WITHOUT TLS: the
+        // pairing token and all terminal I/O would travel the network in cleartext.
+        if !bind_addr.is_loopback() && !tls_enabled {
             log::warn!(
-                "Remote control server is bound to a NON-LOOPBACK address ({}:{}).\n\
+                "Remote control server is bound to a NON-LOOPBACK address ({}:{}) WITHOUT TLS.\n\
                  The connection is UNENCRYPTED (http/ws): the pairing token and all terminal\n\
                  I/O (including passwords, SSH keys, and any typed secrets) are sent in cleartext\n\
-                 and visible to anyone on the network. Only do this on a trusted network, or\n\
-                 tunnel it over SSH/WireGuard.",
+                 and visible to anyone on the network. Enable TLS in settings, only use this on a\n\
+                 trusted network, or tunnel it over SSH/WireGuard.",
                 bind_addr, port
             );
         }
 
         // Write remote.json
-        if let Err(e) = write_remote_json(port) {
+        if let Err(e) = write_remote_json(port, tls_enabled) {
             log::warn!("Failed to write remote.json: {}", e);
         }
 
@@ -96,13 +124,42 @@ impl RemoteServer {
                 remote_subscribed_terminals,
                 next_connection_id,
             );
+            let make_service =
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>();
 
-            let serve_result = axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(shutdown_signal(shutdown_rx_clone))
-            .await;
+            let serve_result = if let Some(material) = tls_material {
+                // TLS path: axum-server over rustls, with graceful shutdown
+                // driven by the same watch channel via an axum_server::Handle.
+                let handle = axum_server::Handle::new();
+                let handle_for_shutdown = handle.clone();
+                tokio::spawn(async move {
+                    shutdown_signal(shutdown_rx_clone).await;
+                    handle_for_shutdown
+                        .graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+                });
+
+                match axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                    &material.cert_path,
+                    &material.key_path,
+                )
+                .await
+                {
+                    Ok(rustls_config) => match listener.into_std() {
+                        Ok(std_listener) => {
+                            axum_server::from_tcp_rustls(std_listener, rustls_config)
+                                .handle(handle)
+                                .serve(make_service)
+                                .await
+                        }
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                }
+            } else {
+                axum::serve(listener, make_service)
+                    .with_graceful_shutdown(shutdown_signal(shutdown_rx_clone))
+                    .await
+            };
 
             match serve_result {
                 Ok(()) => log::info!("Remote control server shut down"),
@@ -114,12 +171,18 @@ impl RemoteServer {
             shutdown_tx,
             runtime: Some(runtime),
             port,
+            cert_fingerprint,
         })
     }
 
     /// Get the port the server is listening on.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// SHA-256 fingerprint (lowercase hex) of the TLS cert, when TLS is enabled.
+    pub fn cert_fingerprint(&self) -> Option<String> {
+        self.cert_fingerprint.clone()
     }
 
     /// Stop the server gracefully.
@@ -162,7 +225,7 @@ fn remote_json_path() -> std::path::PathBuf {
 }
 
 /// Write remote.json atomically (temp file + rename).
-fn write_remote_json(port: u16) -> anyhow::Result<()> {
+fn write_remote_json(port: u16, tls_enabled: bool) -> anyhow::Result<()> {
     let path = remote_json_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -171,6 +234,7 @@ fn write_remote_json(port: u16) -> anyhow::Result<()> {
     let content = serde_json::json!({
         "port": port,
         "pid": std::process::id(),
+        "tls": tls_enabled,
     });
 
     let tmp_path = path.with_extension("tmp");

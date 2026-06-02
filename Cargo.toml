@@ -96,6 +96,12 @@ pulldown-cmark = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 semver = "1"
 
+# Remote server TLS (self-signed cert + rustls-served axum)
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
+rustls-pki-types = "1"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+
 # Remote control server
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
 axum = { version = "0.8", features = ["ws"] }
@@ -109,6 +115,7 @@ data-encoding = "2.6"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
+tempfile = "3"
 
 # Pin core-text to 21.0.x to avoid core-graphics 0.24/0.25 conflict in zed-font-kit
 [target.'cfg(target_os = "macos")'.dependencies]

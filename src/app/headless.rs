@@ -56,6 +56,7 @@ impl HeadlessApp {
         pty_manager: Arc<PtyManager>,
         pty_events: Receiver<PtyEvent>,
         listen_addr: IpAddr,
+        tls_enabled: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         // Create workspace entity
@@ -236,7 +237,7 @@ impl HeadlessApp {
         .detach();
 
         // Start remote server
-        app.start_remote_server(bridge_tx, listen_addr, &remote_info);
+        app.start_remote_server(bridge_tx, listen_addr, tls_enabled, &remote_info);
 
         app
     }
@@ -246,6 +247,7 @@ impl HeadlessApp {
         &mut self,
         bridge_tx: bridge::BridgeSender,
         listen_addr: IpAddr,
+        tls_enabled: bool,
         remote_info: &RemoteInfo,
     ) {
         match RemoteServer::start(
@@ -257,10 +259,12 @@ impl HeadlessApp {
             self.git_status_tx.clone(),
             self.remote_subscribed_terminals.clone(),
             self.next_remote_connection_id.clone(),
+            tls_enabled,
         ) {
             Ok(server) => {
                 let port = server.port();
-                remote_info.set_active(port, self.auth_store.clone());
+                let fingerprint = server.cert_fingerprint();
+                remote_info.set_active(port, self.auth_store.clone(), fingerprint);
                 log::info!("Remote server started on port {}", port);
 
                 let code = self.auth_store.get_or_create_code();

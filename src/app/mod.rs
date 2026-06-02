@@ -198,6 +198,8 @@ pub struct Okena {
     pub(crate) state_version: Arc<tokio_watch::Sender<u64>>,
     remote_info: RemoteInfo,
     listen_addr: IpAddr,
+    /// Serve the remote server over TLS (mirrors settings.remote_tls_enabled).
+    remote_tls_enabled: bool,
     /// Whether the listen address was forced via CLI --listen flag
     force_remote: bool,
     /// Service manager for project-scoped background processes
@@ -227,6 +229,12 @@ impl Okena {
                 .remote_listen_address.parse::<IpAddr>()
                 .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         });
+        let remote_tls_enabled = cx
+            .global::<GlobalSettings>()
+            .0
+            .read(cx)
+            .get()
+            .remote_tls_enabled;
         // Create workspace entity
         let workspace = cx.new(|_cx| Workspace::new(workspace_data));
         cx.set_global(GlobalWorkspace(workspace.clone()));
@@ -408,6 +416,7 @@ impl Okena {
             state_version: state_version.clone(),
             remote_info: remote_info.clone(),
             listen_addr,
+            remote_tls_enabled,
             force_remote,
             service_manager: service_manager.clone(),
             remote_manager: remote_manager.clone(),
@@ -570,23 +579,31 @@ impl Okena {
             let enabled = s.remote_server_enabled;
             let running = this.remote_server.is_some();
 
+            let tls_enabled = s.remote_tls_enabled;
+
             if enabled && !running {
                 // Update listen_addr from settings if not forced via CLI
                 if !this.force_remote
                     && let Ok(addr) = s.remote_listen_address.parse::<IpAddr>() {
                         this.listen_addr = addr;
                     }
+                this.remote_tls_enabled = tls_enabled;
                 this.start_remote_server(bridge_tx_for_observer.clone());
             } else if !enabled && running {
                 this.stop_remote_server();
             } else if enabled && running && !this.force_remote {
-                // Check if address changed while server is running
-                if let Ok(new_addr) = s.remote_listen_address.parse::<IpAddr>()
-                    && new_addr != this.listen_addr {
-                        this.listen_addr = new_addr;
-                        this.stop_remote_server();
-                        this.start_remote_server(bridge_tx_for_observer.clone());
+                // Restart if the listen address OR the TLS toggle changed.
+                let new_addr = s.remote_listen_address.parse::<IpAddr>().ok();
+                let addr_changed = new_addr.is_some_and(|a| a != this.listen_addr);
+                let tls_changed = tls_enabled != this.remote_tls_enabled;
+                if addr_changed || tls_changed {
+                    if let Some(a) = new_addr {
+                        this.listen_addr = a;
                     }
+                    this.remote_tls_enabled = tls_enabled;
+                    this.stop_remote_server();
+                    this.start_remote_server(bridge_tx_for_observer.clone());
+                }
             }
         })
         .detach();
@@ -608,10 +625,13 @@ impl Okena {
             self.git_status_tx.clone(),
             self.remote_subscribed_terminals.clone(),
             self.next_remote_connection_id.clone(),
+            self.remote_tls_enabled,
         ) {
             Ok(server) => {
                 let port = server.port();
-                self.remote_info.set_active(port, self.auth_store.clone());
+                let fingerprint = server.cert_fingerprint();
+                self.remote_info
+                    .set_active(port, self.auth_store.clone(), fingerprint);
                 log::info!("Remote server started on port {}", port);
 
                 let code = self.auth_store.get_or_create_code();

@@ -279,7 +279,14 @@ fn run_headless(listen_addr: IpAddr) {
         // Must be stored in a global to keep the entity alive — dropping the handle
         // would release the entity and cancel all spawned tasks + drop RemoteServer.
         let headless = cx.new(|cx| {
-            HeadlessApp::new(workspace_data, pty_manager, pty_events, listen_addr, cx)
+            HeadlessApp::new(
+                workspace_data,
+                pty_manager,
+                pty_events,
+                listen_addr,
+                app_settings.remote_tls_enabled,
+                cx,
+            )
         });
         cx.set_global(GlobalHeadless(headless));
     });

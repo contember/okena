@@ -304,6 +304,12 @@ pub struct AppSettings {
     #[serde(default = "default_remote_listen_address")]
     pub remote_listen_address: String,
 
+    /// Serve the remote control server over TLS (https/wss) using a persisted
+    /// self-signed certificate. Clients pin the cert fingerprint on pairing.
+    /// Default off for backward compatibility with existing plain-http pairings.
+    #[serde(default)]
+    pub remote_tls_enabled: bool,
+
     /// Minimum project column width in pixels (default: 400)
     #[serde(default = "default_min_column_width")]
     pub min_column_width: f32,
@@ -409,6 +415,7 @@ impl Default for AppSettings {
             diff_view_mode: DiffViewMode::default(),
             remote_server_enabled: false,
             remote_listen_address: default_remote_listen_address(),
+            remote_tls_enabled: false,
             min_column_width: default_min_column_width(),
             diff_ignore_whitespace: false,
             blame_visible: false,
