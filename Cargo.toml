@@ -96,11 +96,14 @@ pulldown-cmark = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 semver = "1"
 
-# Remote server TLS (self-signed cert + rustls-served axum)
+# Remote server TLS (self-signed cert + dual-stack http/https on one port)
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
 rustls-pki-types = "1"
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+tower-service = "0.3"
 
 # Remote control server
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
