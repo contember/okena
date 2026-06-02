@@ -415,7 +415,11 @@ impl Default for AppSettings {
             diff_view_mode: DiffViewMode::default(),
             remote_server_enabled: false,
             remote_listen_address: default_remote_listen_address(),
-            remote_tls_enabled: false,
+            // Secure-by-default for FRESH installs (AppSettings::default()).
+            // Existing settings.json files predate this key; serde's per-field
+            // `#[serde(default)]` fills them with `false`, so already-configured
+            // users keep their plain-http behavior until they opt in / upgrade.
+            remote_tls_enabled: true,
             min_column_width: default_min_column_width(),
             diff_ignore_whitespace: false,
             blame_visible: false,
@@ -886,6 +890,26 @@ mod tests {
         let config = HooksConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn remote_tls_secure_by_default_for_fresh_install_only() {
+        // Fresh install (no settings.json) uses AppSettings::default() → TLS on.
+        assert!(
+            AppSettings::default().remote_tls_enabled,
+            "fresh installs should default to TLS on"
+        );
+        // Existing settings.json predates the key → serde per-field default → off,
+        // so an already-configured plain-http user is NOT silently switched to TLS.
+        let existing: AppSettings = serde_json::from_str(r#"{"version": 2}"#).unwrap();
+        assert!(
+            !existing.remote_tls_enabled,
+            "existing configs without the key must stay non-TLS"
+        );
+        // An explicit value is of course respected.
+        let explicit: AppSettings =
+            serde_json::from_str(r#"{"version": 2, "remote_tls_enabled": true}"#).unwrap();
+        assert!(explicit.remote_tls_enabled);
     }
 
     #[test]
