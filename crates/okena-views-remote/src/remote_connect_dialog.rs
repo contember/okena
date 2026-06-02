@@ -22,8 +22,6 @@ pub struct RemoteConnectDialog {
     code_input: Entity<SimpleInputState>,
     status: ConnectionDialogStatus,
     initial_focus_done: bool,
-    /// Connect over TLS (https/wss) with cert pinning. Toggled in the dialog UI.
-    use_tls: bool,
     /// Config (with token + captured pin) held back during fingerprint
     /// verification — emitted as Connected only once the user confirms.
     pending_config: Option<RemoteConnectionConfig>,
@@ -56,6 +54,59 @@ fn format_fingerprint(fp: &str) -> String {
         .map(|pair| std::str::from_utf8(pair).unwrap_or("??"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+/// Result of auto-detecting how to reach a server.
+struct Detected {
+    tls: bool,
+    base_url: String,
+    version: Option<String>,
+}
+
+/// Probe `/health` over TLS first, then plain http (auto mode). Prefers the
+/// secure scheme; falls back so existing plain-http servers still connect.
+/// `observed` captures the TLS cert fingerprint when the TLS probe succeeds.
+async fn detect_scheme(
+    runtime: &Arc<tokio::runtime::Runtime>,
+    host: String,
+    port: u16,
+    observed: okena_core::client::tls::ObservedFingerprint,
+) -> Result<Detected, String> {
+    for tls in [true, false] {
+        let host = host.clone();
+        let observed = observed.clone();
+        let probe = runtime
+            .spawn(async move {
+                let client =
+                    okena_core::client::tls::build_reqwest_client(tls, None, observed);
+                let scheme = if tls { "https" } else { "http" };
+                let base_url = format!("{}://{}:{}", scheme, host, port);
+                let resp = client
+                    .get(format!("{}/health", base_url))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await;
+                (base_url, resp)
+            })
+            .await;
+
+        if let Ok((base_url, Ok(resp))) = probe
+            && resp.status().is_success()
+        {
+            let version = resp
+                .text()
+                .await
+                .ok()
+                .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+                .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(String::from));
+            return Ok(Detected {
+                tls,
+                base_url,
+                version,
+            });
+        }
+    }
+    Err("Cannot reach server over TLS or plain http".to_string())
 }
 
 pub enum RemoteConnectDialogEvent {
@@ -92,7 +143,6 @@ impl RemoteConnectDialog {
             code_input,
             status: ConnectionDialogStatus::Idle,
             initial_focus_done: false,
-            use_tls: false,
             pending_config: None,
         }
     }
@@ -132,32 +182,18 @@ impl RemoteConnectDialog {
         let runtime = self.runtime(cx);
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let result = runtime
-                .spawn(async move {
-                    let client = reqwest::Client::new();
-                    let url = format!("http://{}:{}/health", host, port_num);
-                    client
-                        .get(&url)
-                        .timeout(std::time::Duration::from_secs(5))
-                        .send()
-                        .await
-                })
-                .await;
-
-            let status = match result {
-                Ok(Ok(resp)) if resp.status().is_success() => {
-                    let body = resp.text().await.unwrap_or_default();
-                    let version = serde_json::from_str::<serde_json::Value>(&body)
-                        .ok()
-                        .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(String::from))
-                        .unwrap_or_else(|| "unknown".to_string());
-                    ConnectionDialogStatus::TestSuccess(version)
+            let observed = okena_core::client::tls::new_observed();
+            let status = match detect_scheme(&runtime, host, port_num, observed).await {
+                Ok(d) => {
+                    let version = d.version.unwrap_or_else(|| "unknown".to_string());
+                    let label = if d.tls {
+                        format!("{version}, TLS")
+                    } else {
+                        format!("{version}, plaintext")
+                    };
+                    ConnectionDialogStatus::TestSuccess(label)
                 }
-                Ok(Ok(resp)) => {
-                    ConnectionDialogStatus::TestFailed(format!("HTTP {}", resp.status()))
-                }
-                Ok(Err(e)) => ConnectionDialogStatus::TestFailed(format!("{}", e)),
-                Err(e) => ConnectionDialogStatus::TestFailed(format!("{}", e)),
+                Err(e) => ConnectionDialogStatus::TestFailed(e),
             };
 
             let _ = this.update(cx, |this, cx| {
@@ -199,63 +235,34 @@ impl RemoteConnectDialog {
             port,
             saved_token: None,
             token_obtained_at: None,
-            tls: self.use_tls,
+            tls: false, // set by auto-detection below
             pinned_cert_sha256: None,
         };
 
         let runtime = self.runtime(cx);
-        let base_url = config.base_url();
-        let use_tls = config.tls;
         // TOFU: no pin yet on a brand-new connection. The verifier records the
         // observed cert fingerprint into this slot during the TLS handshake so we
         // can pin it onto the config before emitting Connected.
         let observed = okena_core::client::tls::new_observed();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let health_result = runtime
-                .spawn({
-                    let base_url = base_url.clone();
-                    let observed = observed.clone();
-                    async move {
-                        let client = okena_core::client::tls::build_reqwest_client(
-                            use_tls, None, observed,
-                        );
-                        client
-                            .get(format!("{}/health", base_url))
-                            .timeout(std::time::Duration::from_secs(5))
-                            .send()
-                            .await
-                    }
-                })
-                .await;
+            let mut config = config;
 
-            match health_result {
-                Ok(Ok(resp)) if resp.status().is_success() => {}
-                Ok(Ok(resp)) => {
-                    let msg = format!("Server returned HTTP {}", resp.status());
-                    let _ = this.update(cx, |this, cx| {
-                        this.status = ConnectionDialogStatus::ConnectFailed(msg);
-                        cx.notify();
-                    });
-                    return;
-                }
-                Ok(Err(e)) => {
-                    let msg = format!("Cannot reach server: {}", e);
-                    let _ = this.update(cx, |this, cx| {
-                        this.status = ConnectionDialogStatus::ConnectFailed(msg);
-                        cx.notify();
-                    });
-                    return;
-                }
-                Err(e) => {
-                    let msg = format!("Internal error: {}", e);
-                    let _ = this.update(cx, |this, cx| {
-                        this.status = ConnectionDialogStatus::ConnectFailed(msg);
-                        cx.notify();
-                    });
-                    return;
-                }
-            }
+            // Auto-detect the scheme (TLS first, plain-http fallback) and adopt it.
+            let detected =
+                match detect_scheme(&runtime, host.clone(), port, observed.clone()).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.status = ConnectionDialogStatus::ConnectFailed(e);
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
+            let use_tls = detected.tls;
+            let base_url = detected.base_url;
+            config.tls = use_tls;
 
             let pair_result = runtime
                 .spawn({
@@ -483,42 +490,6 @@ impl Render for RemoteConnectDialog {
                                     input_container(&t, None).child(
                                         SimpleInput::new(&self.port_input).text_size(ui_text_md(cx)),
                                     ),
-                                ),
-                            )
-                            .child(
-                                labeled_input("Encrypt:", &t).child(
-                                    div()
-                                        .id("tls-toggle")
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.use_tls = !this.use_tls;
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            div()
-                                                .size(px(16.0))
-                                                .border_1()
-                                                .border_color(rgb(t.border))
-                                                .rounded(px(3.0))
-                                                .bg(if self.use_tls {
-                                                    rgb(t.text_primary)
-                                                } else {
-                                                    rgb(t.bg_secondary)
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(ui_text_sm(cx))
-                                                .text_color(rgb(t.text_muted))
-                                                .child(if self.use_tls {
-                                                    "TLS on — pins the server certificate on first connect"
-                                                } else {
-                                                    "TLS off — connection is unencrypted (plaintext)"
-                                                }),
-                                        ),
                                 ),
                             )
                             .child(
