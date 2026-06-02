@@ -179,14 +179,22 @@ impl RemoteConnectDialog {
         };
 
         let runtime = self.runtime(cx);
-        let base_url = format!("http://{}:{}", host, port);
+        let base_url = config.base_url();
+        let use_tls = config.tls;
+        // TOFU: no pin yet on a brand-new connection. The verifier records the
+        // observed cert fingerprint into this slot during the TLS handshake so we
+        // can pin it onto the config before emitting Connected.
+        let observed = okena_core::client::tls::new_observed();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let health_result = runtime
                 .spawn({
                     let base_url = base_url.clone();
+                    let observed = observed.clone();
                     async move {
-                        let client = reqwest::Client::new();
+                        let client = okena_core::client::tls::build_reqwest_client(
+                            use_tls, None, observed,
+                        );
                         client
                             .get(format!("{}/health", base_url))
                             .timeout(std::time::Duration::from_secs(5))
@@ -228,8 +236,11 @@ impl RemoteConnectDialog {
                 .spawn({
                     let base_url = base_url.clone();
                     let code = code.clone();
+                    let observed = observed.clone();
                     async move {
-                        let client = reqwest::Client::new();
+                        let client = okena_core::client::tls::build_reqwest_client(
+                            use_tls, None, observed,
+                        );
                         let pair_body = serde_json::json!({ "code": code });
                         client
                             .post(format!("{}/v1/pair", base_url))
@@ -254,6 +265,13 @@ impl RemoteConnectDialog {
                         Ok(pair_resp) => {
                             let mut config = config;
                             config.saved_token = Some(pair_resp.token);
+                            // Pin the cert fingerprint captured during the TLS
+                            // handshake (TOFU) so the persisted connection enforces
+                            // it on every future connect.
+                            if config.tls {
+                                config.pinned_cert_sha256 =
+                                    observed.lock().ok().and_then(|g| g.clone());
+                            }
                             let _ = this.update(cx, |_this, cx| {
                                 cx.emit(RemoteConnectDialogEvent::Connected { config });
                             });
@@ -398,6 +416,42 @@ impl Render for RemoteConnectDialog {
                                     input_container(&t, None).child(
                                         SimpleInput::new(&self.port_input).text_size(ui_text_md(cx)),
                                     ),
+                                ),
+                            )
+                            .child(
+                                labeled_input("Encrypt:", &t).child(
+                                    div()
+                                        .id("tls-toggle")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.use_tls = !this.use_tls;
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .size(px(16.0))
+                                                .border_1()
+                                                .border_color(rgb(t.border))
+                                                .rounded(px(3.0))
+                                                .bg(if self.use_tls {
+                                                    rgb(t.text_primary)
+                                                } else {
+                                                    rgb(t.bg_secondary)
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(t.text_muted))
+                                                .child(if self.use_tls {
+                                                    "TLS on — pins the server certificate on first connect"
+                                                } else {
+                                                    "TLS off — connection is unencrypted (plaintext)"
+                                                }),
+                                        ),
                                 ),
                             )
                             .child(

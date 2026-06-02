@@ -161,6 +161,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Enable/disable TLS for the remote server
+    pub fn set_remote_tls_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.remote_tls_enabled = value;
+        self.save_and_notify(cx);
+    }
+
 
     /// Set per-extension settings blob (opaque JSON value).
     pub fn set_extension_setting(&mut self, extension_id: &str, value: serde_json::Value, cx: &mut Context<Self>) {

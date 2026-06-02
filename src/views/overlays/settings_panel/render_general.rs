@@ -1,3 +1,4 @@
+use crate::remote::GlobalRemoteInfo;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_md};
@@ -9,6 +10,16 @@ use gpui_component::{h_flex, v_flex};
 
 use super::components::*;
 use super::SettingsPanel;
+
+/// Format a 64-char hex fingerprint as colon-separated byte pairs for readable
+/// out-of-band comparison (e.g. `ab:cd:ef:…`).
+fn format_fingerprint(fp: &str) -> String {
+    fp.as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).unwrap_or("??"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
 
 impl SettingsPanel {
     pub(super) fn render_general(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -66,6 +77,52 @@ impl SettingsPanel {
                                 .child(SimpleInput::new(&self.listen_address_input).text_size(ui_text_md(cx))),
                         ),
                 )
+                .child(self.render_toggle(
+                    "remote-tls", "Encrypt with TLS", s.remote_tls_enabled, true,
+                    |state, val, cx| state.set_remote_tls_enabled(val, cx), cx,
+                ))
+                .when(s.remote_tls_enabled, |d| {
+                    // Show the server cert fingerprint so the user can verify it
+                    // against the value the client pinned during pairing.
+                    let fingerprint = cx
+                        .try_global::<GlobalRemoteInfo>()
+                        .and_then(|info| info.0.cert_fingerprint());
+                    d.child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_size(ui_text(13.0, cx))
+                                    .text_color(rgb(t.text_primary))
+                                    .child("Certificate fingerprint (SHA-256)"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_muted))
+                                    .child("When pairing a new device, verify this matches the fingerprint shown on the client before trusting it."),
+                            )
+                            .child(
+                                div()
+                                    .bg(rgb(t.bg_secondary))
+                                    .border_1()
+                                    .border_color(rgb(t.border))
+                                    .rounded(px(4.0))
+                                    .px(px(8.0))
+                                    .py(px(6.0))
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_primary))
+                                    .child(match fingerprint {
+                                        Some(fp) => format_fingerprint(&fp),
+                                        None => "(server not running — start it to view)".to_string(),
+                                    }),
+                            ),
+                    )
+                })
             })
             .child(self.render_number_stepper(
                 "min-col-width", "Min Column Width", s.min_column_width,
