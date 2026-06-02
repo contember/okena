@@ -18,16 +18,20 @@ impl Workspace {
                 }
 
                 // Focus-preservation: if the parent is a Tabs container and we're
-                // closing a tab *before* the active one, remove_at_path only clamps
-                // active_tab when it runs past the end. To keep the active tab on the
-                // same logical content, we must decrement active_tab ourselves after
-                // the structural removal. Detect that case before mutating.
+                // closing a tab *before* the active one, the active tab shifts left
+                // by one (its content moves to index active_tab - 1). Capture the
+                // original active_tab here so we can set the new index absolutely
+                // after removal — we must NOT decrement the post-removal value,
+                // because remove_at_path already clamps active_tab when it was the
+                // last tab, and an additional decrement would overshoot by one.
                 let (parent_path, child_index) = path.split_at(path.len() - 1);
                 let child_index = child_index[0];
-                let needs_tab_decrement = matches!(
-                    layout.get_at_path(parent_path),
-                    Some(LayoutNode::Tabs { active_tab, .. }) if child_index < *active_tab
-                );
+                let prev_active_tab = match layout.get_at_path(parent_path) {
+                    Some(LayoutNode::Tabs { active_tab, .. }) if child_index < *active_tab => {
+                        Some(*active_tab)
+                    }
+                    _ => None,
+                };
 
                 // Delegate the tree mutation (remove child, collapse a parent left
                 // with a single child, clamp active_tab) to the shared, unit-tested
@@ -36,11 +40,11 @@ impl Workspace {
                 if layout.remove_at_path(path).is_some() {
                     // After removal the parent may have collapsed (single child left)
                     // or no longer be a Tabs — skip those; only adjust a surviving Tabs.
-                    if needs_tab_decrement
+                    if let Some(prev_active_tab) = prev_active_tab
                         && let Some(LayoutNode::Tabs { children, active_tab }) =
                             layout.get_at_path_mut(parent_path)
                     {
-                        *active_tab = active_tab.saturating_sub(1).min(children.len().saturating_sub(1));
+                        *active_tab = (prev_active_tab - 1).min(children.len().saturating_sub(1));
                     }
                     self.notify_data(cx);
                     return self.cleanup_orphaned_metadata(project_id);

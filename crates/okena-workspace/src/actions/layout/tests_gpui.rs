@@ -268,6 +268,54 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
 }
 
 #[gpui::test]
+fn test_close_before_last_active_tab_preserves_focus_gpui(cx: &mut gpui::TestAppContext) {
+    // Regression: when the active tab is the LAST one, remove_at_path's own
+    // out-of-range clamp already shifts active_tab left by one. close_terminal
+    // must NOT decrement again on top of that, or focus overshoots to the wrong
+    // tab. Tabs [t1,t2,t3], active = 2 (t3, last); closing index 0 must keep the
+    // active tab on t3 (now at index 1), NOT land on t2.
+    let term = |id: &str| LayoutNode::Terminal {
+        terminal_id: Some(id.to_string()),
+        minimized: false,
+        detached: false,
+        shell_type: ShellType::Default,
+        zoom_level: 1.0,
+    };
+    let mut project = make_project("p1");
+    project.layout = Some(LayoutNode::Tabs {
+        children: vec![term("t1"), term("t2"), term("t3")],
+        active_tab: 2,
+    });
+    let data = make_workspace_data(vec![project], vec!["p1"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    // Close tab at index 0 (before the active last tab).
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.close_terminal("p1", &[0], cx);
+    });
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        match ws.project("p1").unwrap().layout.as_ref().unwrap() {
+            LayoutNode::Tabs { children, active_tab } => {
+                assert_eq!(children.len(), 2);
+                // active_tab shifts 2 -> 1 (single shift), still pointing at t3.
+                assert_eq!(*active_tab, 1);
+                match &children[*active_tab] {
+                    LayoutNode::Terminal { terminal_id: Some(id), .. } => assert_eq!(id, "t3"),
+                    _ => panic!("Expected terminal"),
+                }
+                let ids: Vec<_> = children.iter().filter_map(|c| match c {
+                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
+                    _ => None,
+                }).collect();
+                assert_eq!(ids, vec!["t2", "t3"]);
+            }
+            _ => panic!("Expected tabs"),
+        }
+    });
+}
+
+#[gpui::test]
 fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
     let mut project = make_project("p1");
     project.layout = Some(LayoutNode::Tabs {
