@@ -262,6 +262,12 @@ pub struct AppSettings {
     /// Number of scrollback lines (default: 10000)
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: u32,
+    /// Grace period, in seconds, before a *busy* terminal (one with a running
+    /// foreground process) is actually killed when closed. During this window
+    /// the pane is removed but the PTY keeps running and a toast offers "Undo".
+    /// `0` disables the feature entirely (close kills immediately, as before).
+    #[serde(default = "default_terminal_close_grace_secs")]
+    pub terminal_close_grace_secs: u32,
 
     // Shell settings
     /// Default shell type for new terminals
@@ -394,6 +400,7 @@ impl Default for AppSettings {
             cursor_style: CursorShape::default(),
             cursor_blink: default_cursor_blink(),
             scrollback_lines: default_scrollback_lines(),
+            terminal_close_grace_secs: default_terminal_close_grace_secs(),
             default_shell: ShellType::default(),
             show_shell_selector: false,
             session_backend: SessionBackend::default(),
@@ -462,6 +469,10 @@ fn default_cursor_blink() -> bool {
 
 fn default_scrollback_lines() -> u32 {
     10000
+}
+
+fn default_terminal_close_grace_secs() -> u32 {
+    5
 }
 
 fn default_file_opener() -> String {
@@ -602,6 +613,8 @@ fn clamp_settings(settings: &mut AppSettings) {
     settings.ui_font_size = settings.ui_font_size.clamp(8.0, 24.0);
     settings.file_font_size = settings.file_font_size.clamp(8.0, 24.0);
     settings.scrollback_lines = settings.scrollback_lines.clamp(100, 100_000);
+    // 0 = disabled; otherwise cap the grace window at a sane upper bound.
+    settings.terminal_close_grace_secs = settings.terminal_close_grace_secs.min(60);
 }
 
 /// Migrate settings from older versions to the current version

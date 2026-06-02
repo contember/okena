@@ -447,6 +447,25 @@ impl Okena {
         })
         .detach();
 
+        // Flush soft-closed terminals on quit. Their grace timer can't fire once
+        // the app is gone, so tear the PTYs down here — otherwise a terminal
+        // closed seconds before quitting would leak its persistent (dtach/tmux)
+        // session. on_app_quit fires for every exit path.
+        cx.on_app_quit(move |this: &mut Self, cx| {
+            let ids = this
+                .workspace
+                .update(cx, |ws, _| ws.drain_pending_closes());
+            if !ids.is_empty() {
+                let mut reg = this.terminals.lock();
+                for tid in &ids {
+                    this.pty_manager.kill(tid);
+                    reg.remove(tid);
+                }
+            }
+            async {}
+        })
+        .detach();
+
         // Set up observer for detached terminals
         cx.observe(&workspace, move |this, workspace, cx| {
             this.handle_detached_terminals_changed(workspace, cx);

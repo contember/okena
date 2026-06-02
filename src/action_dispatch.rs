@@ -170,6 +170,16 @@ impl ActionDispatcher {
                 let window_id = *window_id;
                 focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
+                        // Interactive close of a busy terminal goes through the
+                        // grace-period soft close (undo toast); if it doesn't
+                        // apply, fall through to the immediate close.
+                        if let ActionRequest::CloseTerminal { project_id, terminal_id } = &action
+                            && crate::soft_close::try_begin(
+                                ws, fm, &*backend, project_id, terminal_id, cx,
+                            )
+                        {
+                            return;
+                        }
                         execute_action(action, ws, window_id, fm, &*backend, &terminals, cx);
                     });
                     cx.notify();

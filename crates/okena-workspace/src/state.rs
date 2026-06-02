@@ -51,6 +51,25 @@ pub struct Workspace {
     data_replacement_epoch: u64,
     /// Terminal IDs queued for killing by the app layer (drained by Okena observer).
     pending_terminal_kills: Vec<String>,
+    /// Terminals closed with the grace-period "soft close": removed from the
+    /// layout but their PTY is kept alive until the grace timer fires (or the
+    /// user undoes / force-closes). Holds the snapshots needed to restore.
+    pub(crate) pending_closes: Vec<PendingClose>,
+}
+
+/// A terminal that was soft-closed and is waiting out its grace period.
+///
+/// The PTY is still alive in the registry; only the layout entry was removed.
+/// `pre_close_layout` / `post_close_layout` snapshot the owning project's tree
+/// before and right after the close so undo can either restore the exact prior
+/// tree (when nothing else changed) or fall back to re-appending the pane.
+#[derive(Clone, Debug)]
+pub struct PendingClose {
+    pub terminal_id: String,
+    pub project_id: String,
+    pub toast_id: String,
+    pub pre_close_layout: Option<LayoutNode>,
+    pub post_close_layout: Option<LayoutNode>,
 }
 
 impl Workspace {
@@ -63,6 +82,7 @@ impl Workspace {
             data_version: 0,
             data_replacement_epoch: 0,
             pending_terminal_kills: Vec::new(),
+            pending_closes: Vec::new(),
         }
     }
 
@@ -95,6 +115,9 @@ impl Workspace {
     pub fn replace_data(&mut self, focus_manager: &mut FocusManager, data: WorkspaceData, cx: &mut Context<Self>) {
         self.data = data;
         self.data_replacement_epoch += 1;
+        // Snapshots in pending_closes refer to the old data — drop them so an
+        // undo can't restore into a wholesale-replaced workspace.
+        self.pending_closes.clear();
         focus_manager.clear_all();
         cx.notify();
         cx.refresh_windows();

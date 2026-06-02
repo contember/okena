@@ -1,10 +1,19 @@
 // Re-export Toast, ToastLevel, and ToastManager from workspace (shared data types)
-pub use crate::workspace::toast::{Toast, ToastLevel, ToastManager};
+pub use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastLevel, ToastManager};
 
 use crate::theme::theme;
-use crate::ui::tokens::{RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, ICON_SM, ui_text_ms};
+use crate::ui::tokens::{RADIUS_MD, RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, ICON_SM, ui_text_ms};
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::time::Duration;
+
+/// Emitted when a clickable toast action is clicked. The owning view (WindowView)
+/// subscribes and routes it (e.g. soft-close undo / close-now).
+#[derive(Clone, Debug)]
+pub struct ToastActionEvent {
+    pub toast_id: String,
+    pub action_id: String,
+}
 
 /// Tick interval for the overlay's animation/prune loop
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
@@ -80,8 +89,13 @@ impl ToastOverlay {
                             cx.notify();
                         }
                     }
-                    // Also re-render during fade-in animations
-                    if this.toasts.iter().any(|t| toast_opacity(t) < 1.0) {
+                    // Re-render during fade-in animations and while any toast is
+                    // counting down (so its progress bar advances smoothly).
+                    if this
+                        .toasts
+                        .iter()
+                        .any(|t| toast_opacity(t) < 1.0 || !t.actions.is_empty())
+                    {
                         cx.notify();
                     }
                 });
@@ -98,6 +112,8 @@ impl ToastOverlay {
 }
 
 
+impl EventEmitter<ToastActionEvent> for ToastOverlay {}
+
 impl Render for ToastOverlay {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.toasts.is_empty() {
@@ -105,6 +121,10 @@ impl Render for ToastOverlay {
         }
 
         let t = theme(cx);
+        let text_size = ui_text_ms(cx);
+        // Own the toasts so `self` isn't borrowed across the `cx.listener` calls
+        // the action buttons need.
+        let toasts = self.toasts.clone();
 
         div()
             .absolute()
@@ -114,11 +134,13 @@ impl Render for ToastOverlay {
             .flex()
             .flex_col()
             .gap(SPACE_XS)
-            .children(self.toasts.iter().map(|toast| {
+            .children(toasts.into_iter().map(|toast| {
                 let accent_color = toast.level.accent_color(&t);
                 let icon_char = toast.level.icon_char();
-                let opacity = toast_opacity(toast);
+                let opacity = toast_opacity(&toast);
                 let toast_id = toast.id.clone();
+                let has_countdown = !toast.actions.is_empty();
+                let remaining = toast.remaining_fraction();
 
                 div()
                     .id(SharedString::from(format!("toast-{}", toast.id)))
@@ -129,69 +151,155 @@ impl Render for ToastOverlay {
                     .rounded(RADIUS_STD)
                     .shadow_xl()
                     .flex()
+                    .flex_col()
                     .overflow_hidden()
-                    // Accent stripe
-                    .child(
-                        div()
-                            .w(px(ACCENT_WIDTH))
-                            .h_full()
-                            .bg(rgb(accent_color))
-                            .flex_shrink_0(),
-                    )
-                    // Content
+                    // Main row: accent stripe + content column
                     .child(
                         div()
                             .flex()
                             .flex_row()
-                            .items_start()
-                            .flex_1()
-                            .overflow_x_hidden()
-                            .gap(SPACE_SM)
-                            .px(SPACE_MD)
-                            .py(SPACE_SM)
-                            // Icon
+                            // Accent stripe
                             .child(
                                 div()
-                                    .text_color(rgb(accent_color))
-                                    .text_size(ui_text_ms(cx))
-                                    .flex_shrink_0()
-                                    .mt(px(1.0))
-                                    .child(icon_char),
+                                    .w(px(ACCENT_WIDTH))
+                                    .h_full()
+                                    .bg(rgb(accent_color))
+                                    .flex_shrink_0(),
                             )
-                            // Message
+                            // Content column (message row + optional actions row)
                             .child(
                                 div()
+                                    .flex()
+                                    .flex_col()
                                     .flex_1()
-                                    .min_w(px(0.))
                                     .overflow_x_hidden()
-                                    .whitespace_normal()
-                                    .text_size(ui_text_ms(cx))
-                                    .text_color(rgb(t.text_primary))
-                                    .child(toast.message.clone()),
-                            )
-                            // Close button
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("toast-close-{}", toast.id)))
-                                    .cursor_pointer()
-                                    .flex_shrink_0()
-                                    .rounded(RADIUS_STD)
-                                    .p(px(2.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .gap(SPACE_XS)
+                                    .px(SPACE_MD)
+                                    .py(SPACE_SM)
+                                    // Message row
                                     .child(
-                                        svg()
-                                            .path("icons/close.svg")
-                                            .size(ICON_SM)
-                                            .text_color(rgb(t.text_muted)),
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_start()
+                                            .gap(SPACE_SM)
+                                            // Icon
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(accent_color))
+                                                    .text_size(text_size)
+                                                    .flex_shrink_0()
+                                                    .mt(px(1.0))
+                                                    .child(icon_char),
+                                            )
+                                            // Message
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w(px(0.))
+                                                    .overflow_x_hidden()
+                                                    .whitespace_normal()
+                                                    .text_size(text_size)
+                                                    .text_color(rgb(t.text_primary))
+                                                    .child(toast.message.clone()),
+                                            )
+                                            // Close (dismiss) button
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "toast-close-{}",
+                                                        toast.id
+                                                    )))
+                                                    .cursor_pointer()
+                                                    .flex_shrink_0()
+                                                    .rounded(RADIUS_STD)
+                                                    .p(px(2.0))
+                                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                    .child(
+                                                        svg()
+                                                            .path("icons/close.svg")
+                                                            .size(ICON_SM)
+                                                            .text_color(rgb(t.text_muted)),
+                                                    )
+                                                    .on_click(move |_, _window, cx| {
+                                                        ToastManager::dismiss(&toast_id, cx);
+                                                    }),
+                                            ),
                                     )
-                                    .on_click(move |_, _window, cx| {
-                                        ToastManager::dismiss(&toast_id, cx);
+                                    // Actions row (Undo / Close now / …)
+                                    .when(has_countdown, |el| {
+                                        el.child(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .justify_end()
+                                                .gap(SPACE_XS)
+                                                .children(toast.actions.iter().map(|action| {
+                                                    let toast_id = toast.id.clone();
+                                                    let action_id = action.id.clone();
+                                                    let on_click = cx.listener(
+                                                        move |_this, _ev: &ClickEvent, _window, cx| {
+                                                            cx.emit(ToastActionEvent {
+                                                                toast_id: toast_id.clone(),
+                                                                action_id: action_id.clone(),
+                                                            });
+                                                        },
+                                                    );
+                                                    action_button(
+                                                        &toast.id, action, &t, text_size, on_click,
+                                                    )
+                                                })),
+                                        )
                                     }),
                             ),
                     )
+                    // Countdown progress bar (only for toasts with actions)
+                    .when(has_countdown, |el| {
+                        el.child(
+                            div()
+                                .w_full()
+                                .h(px(2.0))
+                                .bg(rgb(t.border))
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(remaining))
+                                        .bg(rgb(accent_color)),
+                                ),
+                        )
+                    })
             }))
             .into_any_element()
     }
+}
+
+/// Render a single clickable toast action button. The `on_click` handler is
+/// built by the caller (via `cx.listener`) so this stays free of the context
+/// lifetime.
+fn action_button(
+    toast_id: &str,
+    action: &ToastAction,
+    t: &crate::theme::ThemeColors,
+    text_size: Pixels,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let label_color = match action.style {
+        ToastActionStyle::Primary => t.term_blue,
+        ToastActionStyle::Danger => t.error,
+        ToastActionStyle::Default => t.text_secondary,
+    };
+
+    div()
+        .id(SharedString::from(format!("toast-action-{}-{}", toast_id, action.id)))
+        .cursor_pointer()
+        .px(SPACE_SM)
+        .py(px(2.0))
+        .rounded(RADIUS_MD)
+        .text_size(text_size)
+        .text_color(rgb(label_color))
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .child(action.label.clone())
+        .on_click(on_click)
 }
 
 #[cfg(test)]

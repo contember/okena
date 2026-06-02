@@ -96,6 +96,7 @@ impl SettingsState {
 
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
+    setting_setter!(set_terminal_close_grace_secs, terminal_close_grace_secs, u32, 0, 60);
     setting_setter!(set_show_focused_border, show_focused_border, bool);
     setting_setter!(set_color_tinted_background, color_tinted_background, bool);
     setting_setter!(set_detached_overlays_by_default, detached_overlays_by_default, bool);

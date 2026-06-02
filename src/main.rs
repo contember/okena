@@ -16,6 +16,7 @@ mod remote;
 mod remote_client;
 mod services;
 mod settings;
+mod soft_close;
 #[cfg(target_os = "linux")]
 mod simple_root;
 mod terminal;

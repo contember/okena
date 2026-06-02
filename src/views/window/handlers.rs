@@ -191,6 +191,41 @@ impl WindowView {
 
 impl WindowView {
     /// Handle events from the OverlayManager that require WindowView access.
+    /// Handle a click on a toast action button (soft-close undo / close-now).
+    pub(super) fn handle_toast_action(
+        &mut self,
+        _: Entity<crate::views::panels::toast::ToastOverlay>,
+        event: &crate::views::panels::toast::ToastActionEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::soft_close::{decode_action, KILL_PREFIX, UNDO_PREFIX};
+        use crate::workspace::toast::ToastManager;
+
+        if let Some((_project_id, terminal_id)) = decode_action(&event.action_id, UNDO_PREFIX) {
+            // The PTY is only restorable if it's still in the registry — if the
+            // shell exited on its own during the grace window there's nothing to
+            // bring back, and `undo_soft_close` just drops the pending record.
+            let alive = self.terminals.lock().contains_key(terminal_id.as_str());
+            let ws = self.workspace.clone();
+            let fm = self.focus_manager.clone();
+            fm.update(cx, |fm, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.undo_soft_close(fm, &terminal_id, alive, cx);
+                });
+                cx.notify();
+            });
+            ToastManager::dismiss(&event.toast_id, cx);
+        } else if let Some((_project_id, terminal_id)) =
+            decode_action(&event.action_id, KILL_PREFIX)
+        {
+            let ws = self.workspace.clone();
+            ws.update(cx, |ws, cx| {
+                ws.finalize_soft_close(&terminal_id, cx);
+            });
+            ToastManager::dismiss(&event.toast_id, cx);
+        }
+    }
+
     pub(super) fn handle_overlay_manager_event(
         &mut self,
         _: Entity<OverlayManager>,

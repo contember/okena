@@ -1,6 +1,6 @@
 //! ToastManager — GPUI Global wrapper around the `Toast` data type from `okena-state`.
 
-pub use okena_state::{Toast, ToastLevel};
+pub use okena_state::{Toast, ToastAction, ToastActionStyle, ToastLevel};
 
 use gpui::{App, Global};
 use parking_lot::Mutex;

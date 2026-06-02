@@ -18,7 +18,7 @@ fn default_zoom_level() -> f32 {
 }
 
 /// Recursive layout tree node
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum LayoutNode {
     Terminal {
@@ -224,6 +224,58 @@ impl LayoutNode {
                     }
                 }
                 None
+            }
+        }
+    }
+
+    /// Find the `Terminal` node with the given id, returning a reference to it.
+    /// Unlike `find_terminal_path`, this hands back the node itself so callers
+    /// can clone its visual state (shell_type, zoom_level) — used by soft-close
+    /// undo to reconstruct a closed pane.
+    pub fn find_terminal_node(&self, target_id: &str) -> Option<&LayoutNode> {
+        match self {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                if terminal_id.as_deref() == Some(target_id) {
+                    Some(self)
+                } else {
+                    None
+                }
+            }
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                children.iter().find_map(|c| c.find_terminal_node(target_id))
+            }
+        }
+    }
+
+    /// Append a node as a sibling at the root of this layout.
+    ///
+    /// Used by soft-close undo when the original position can no longer be
+    /// restored (the tree changed during the grace window): rather than guess a
+    /// merge, the recovered terminal is dropped into the top-level group.
+    /// - Split: pushed as a new child, sizes rebalanced equally.
+    /// - Tabs: pushed as a new tab and activated.
+    /// - bare Terminal: wrapped together with `node` into a horizontal Split.
+    pub fn append_to_root(&mut self, node: LayoutNode) {
+        match self {
+            LayoutNode::Split { children, sizes, .. } => {
+                children.push(node);
+                let n = children.len();
+                *sizes = vec![1.0 / n as f32; n];
+            }
+            LayoutNode::Tabs { children, active_tab } => {
+                children.push(node);
+                *active_tab = children.len() - 1;
+            }
+            LayoutNode::Terminal { .. } => {
+                let existing = std::mem::replace(
+                    self,
+                    LayoutNode::Tabs { children: Vec::new(), active_tab: 0 },
+                );
+                *self = LayoutNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    sizes: vec![0.5, 0.5],
+                    children: vec![existing, node],
+                };
             }
         }
     }
@@ -843,6 +895,68 @@ mod tests {
             panic!("expected nested split inside tabs");
         };
         assert_eq!(*inner, SplitDirection::Horizontal, "nested split flipped");
+    }
+
+    #[test]
+    fn find_terminal_node_returns_node_with_visual_state() {
+        let tree = hsplit(vec![
+            terminal("a"),
+            LayoutNode::Terminal {
+                terminal_id: Some("b".to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 2.5,
+            },
+        ]);
+        let node = tree.find_terminal_node("b").expect("b present");
+        let LayoutNode::Terminal { zoom_level, .. } = node else {
+            panic!("expected terminal");
+        };
+        assert_eq!(*zoom_level, 2.5);
+        assert!(tree.find_terminal_node("missing").is_none());
+    }
+
+    #[test]
+    fn append_to_root_split_pushes_and_rebalances() {
+        let mut tree = hsplit(vec![terminal("a"), terminal("b")]);
+        tree.append_to_root(terminal("c"));
+        let LayoutNode::Split { children, sizes, .. } = &tree else {
+            panic!("expected split");
+        };
+        assert_eq!(children.len(), 3);
+        assert_eq!(sizes.len(), 3);
+        for s in sizes {
+            assert!((s - 1.0 / 3.0).abs() < 1e-6, "sizes rebalanced equally");
+        }
+        assert_eq!(tree.find_terminal_path("c"), Some(vec![2]));
+    }
+
+    #[test]
+    fn append_to_root_tabs_pushes_and_activates() {
+        let mut tree = LayoutNode::Tabs {
+            children: vec![terminal("a"), terminal("b")],
+            active_tab: 0,
+        };
+        tree.append_to_root(terminal("c"));
+        let LayoutNode::Tabs { children, active_tab } = &tree else {
+            panic!("expected tabs");
+        };
+        assert_eq!(children.len(), 3);
+        assert_eq!(*active_tab, 2, "new tab activated");
+    }
+
+    #[test]
+    fn append_to_root_bare_terminal_wraps_in_split() {
+        let mut tree = terminal("a");
+        tree.append_to_root(terminal("b"));
+        let LayoutNode::Split { children, sizes, .. } = &tree else {
+            panic!("expected split after wrapping a bare terminal");
+        };
+        assert_eq!(children.len(), 2);
+        assert_eq!(sizes.len(), 2);
+        assert_eq!(tree.find_terminal_path("a"), Some(vec![0]));
+        assert_eq!(tree.find_terminal_path("b"), Some(vec![1]));
     }
 
     fn hsplit(children: Vec<LayoutNode>) -> LayoutNode {

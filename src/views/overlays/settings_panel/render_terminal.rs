@@ -46,6 +46,16 @@ impl SettingsPanel {
                             "idle-timeout", "Idle Timeout (seconds)", s.idle_timeout_secs, 1, 50.0, false,
                             |state, val, cx| state.set_idle_timeout_secs(val, cx), cx,
                         ))
+                    })
+                    .child(self.render_toggle(
+                        "close-grace", "Undo Close (busy terminals)", s.terminal_close_grace_secs > 0, true,
+                        |state, val, cx| state.set_terminal_close_grace_secs(if val { 5 } else { 0 }, cx), cx,
+                    ))
+                    .when(s.terminal_close_grace_secs > 0, |el| {
+                        el.child(self.render_integer_stepper(
+                            "close-grace-secs", "Undo Window (seconds)", s.terminal_close_grace_secs, 1, 50.0, false,
+                            |state, val, cx| state.set_terminal_close_grace_secs(val, cx), cx,
+                        ))
                     }),
             )
     }

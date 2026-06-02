@@ -11,6 +11,7 @@ pub mod focus;
 pub mod folder;
 pub mod layout;
 pub mod project;
+pub mod soft_close;
 pub mod terminal;
 pub mod worktree;
 

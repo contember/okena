@@ -228,6 +228,9 @@ impl WindowView {
         // Subscribe to overlay manager events
         cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event).detach();
 
+        // Subscribe to toast action clicks (soft-close undo / close-now).
+        cx.subscribe(&toast_overlay, Self::handle_toast_action).detach();
+
         // Observe RequestBroker to process overlay + terminal-send requests
         // outside of render().
         cx.observe(&request_broker, |this, _broker, cx| {

@@ -17,7 +17,7 @@ mod workspace_data;
 
 pub use hooks_config::{HooksConfig, ProjectHooks, TerminalHooks, WorktreeHooks};
 pub use okena_layout::{LayoutNode, SplitDirection};
-pub use toast::{Toast, ToastLevel};
+pub use toast::{Toast, ToastAction, ToastActionStyle, ToastLevel};
 pub use transient::{DropZone, FocusedTerminalState, PendingWorktreeClose};
 pub use window_id::WindowId;
 pub use window_state::{ProjectLayoutMode, WindowBounds, WindowState};
