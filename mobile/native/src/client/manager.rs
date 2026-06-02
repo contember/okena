@@ -122,6 +122,8 @@ impl ConnectionManager {
             port,
             saved_token,
             token_obtained_at: None,
+            tls: false,
+            pinned_cert_sha256: None,
         };
         let conn_id = config.id.clone();
 
@@ -331,7 +333,11 @@ impl ConnectionManager {
                 ConnectionEvent::StatusChanged { status, .. } => {
                     *conn.status.write() = status;
                 }
-                ConnectionEvent::TokenObtained { token, .. } => {
+                ConnectionEvent::TokenObtained {
+                    token,
+                    cert_fingerprint,
+                    ..
+                } => {
                     conn.client.write().config_mut().saved_token = Some(token.clone());
                     conn.client.write().config_mut().token_obtained_at = Some(
                         std::time::SystemTime::now()
@@ -339,6 +345,11 @@ impl ConnectionManager {
                             .unwrap_or_default()
                             .as_secs() as i64,
                     );
+                    // Pin the cert on first successful TLS pairing (TOFU).
+                    if cert_fingerprint.is_some() {
+                        conn.client.write().config_mut().pinned_cert_sha256 =
+                            cert_fingerprint.clone();
+                    }
                 }
                 ConnectionEvent::TokenRefreshed { token, .. } => {
                     conn.client.read().update_shared_token(&token);

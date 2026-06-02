@@ -157,10 +157,15 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.ws_tx = Some(ws_tx.clone());
 
         let task = self.runtime.spawn(async move {
-            let base_url = format!("http://{}:{}", config.host, config.port);
+            let base_url = config.base_url();
+            let observed = crate::client::tls::new_observed();
 
             // Step 1: Health check
-            let client = reqwest::Client::new();
+            let client = crate::client::tls::build_reqwest_client(
+                config.tls,
+                config.pinned_cert_sha256.clone(),
+                observed.clone(),
+            );
             match client
                 .get(format!("{}/health", base_url))
                 .timeout(std::time::Duration::from_secs(5))
@@ -289,8 +294,13 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.status = ConnectionStatus::Connecting;
 
         let task = self.runtime.spawn(async move {
-            let base_url = format!("http://{}:{}", config.host, config.port);
-            let client = reqwest::Client::new();
+            let base_url = config.base_url();
+            let observed = crate::client::tls::new_observed();
+            let client = crate::client::tls::build_reqwest_client(
+                config.tls,
+                config.pinned_cert_sha256.clone(),
+                observed.clone(),
+            );
 
             // POST /v1/pair with the code
             let pair_body = serde_json::json!({ "code": code });
@@ -317,11 +327,17 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 *guard = Some(pair_resp.token.clone());
                             }
 
-                            // Notify manager to save the token
+                            // Capture the cert fingerprint observed during the
+                            // (TLS) pairing handshake so the manager can pin it.
+                            let cert_fingerprint =
+                                observed.lock().ok().and_then(|g| g.clone());
+
+                            // Notify manager to save the token (+ pin the cert)
                             let _ = event_tx
                                 .send(ConnectionEvent::TokenObtained {
                                     connection_id: config.id.clone(),
                                     token: pair_resp.token.clone(),
+                                    cert_fingerprint,
                                 })
                                 .await;
 
@@ -512,12 +528,25 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let stream_map: Arc<std::sync::RwLock<HashMap<String, u32>>> =
             Arc::new(std::sync::RwLock::new(HashMap::new()));
         let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
-        let ws_url = format!("ws://{}:{}/v1/stream", config.host, config.port);
+        let ws_url = config.ws_url();
+        let observed = crate::client::tls::new_observed();
 
-        // Connect WebSocket
-        let (ws_stream, _response) = tokio_tungstenite::connect_async(&ws_url)
-            .await
-            .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
+        // Connect WebSocket. With TLS we go through connect_async_tls_with_config
+        // using the pinned rustls connector; otherwise the plain ws:// path.
+        let (ws_stream, _response) = if config.tls {
+            let connector = crate::client::tls::ws_connector(
+                true,
+                config.pinned_cert_sha256.clone(),
+                observed.clone(),
+            );
+            tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
+                .await
+                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?
+        } else {
+            tokio_tungstenite::connect_async(&ws_url)
+                .await
+                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?
+        };
 
         let (mut ws_write, mut ws_read) = futures::StreamExt::split(ws_stream);
 
@@ -576,8 +605,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         }
 
         // Step 3: Fetch state via HTTP
-        let base_url = format!("http://{}:{}", config.host, config.port);
-        let client = reqwest::Client::new();
+        let base_url = config.base_url();
+        let client = crate::client::tls::build_reqwest_client(
+            config.tls,
+            config.pinned_cert_sha256.clone(),
+            observed.clone(),
+        );
         let state_resp = client
             .get(format!("{}/v1/state", base_url))
             .header("Authorization", format!("Bearer {}", token))
@@ -1035,8 +1068,12 @@ pub async fn try_refresh_token(
     }
     // If token_obtained_at is None, attempt refresh (legacy token without timestamp)
 
-    let base_url = format!("http://{}:{}", config.host, config.port);
-    let client = reqwest::Client::new();
+    let base_url = config.base_url();
+    let client = crate::client::tls::build_reqwest_client(
+        config.tls,
+        config.pinned_cert_sha256.clone(),
+        crate::client::tls::new_observed(),
+    );
 
     match client
         .post(format!("{}/v1/refresh", base_url))

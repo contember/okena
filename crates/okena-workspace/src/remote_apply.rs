@@ -372,6 +372,8 @@ mod tests {
             port: 19100,
             saved_token: None,
             token_obtained_at: None,
+            tls: false,
+            pinned_cert_sha256: None,
         }
     }
 

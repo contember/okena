@@ -22,6 +22,8 @@ pub struct RemoteConnectDialog {
     code_input: Entity<SimpleInputState>,
     status: ConnectionDialogStatus,
     initial_focus_done: bool,
+    /// Connect over TLS (https/wss) with cert pinning. Toggled in the dialog UI.
+    use_tls: bool,
 }
 
 #[derive(Clone)]
@@ -74,6 +76,7 @@ impl RemoteConnectDialog {
             code_input,
             status: ConnectionDialogStatus::Idle,
             initial_focus_done: false,
+            use_tls: false,
         }
     }
 
@@ -171,6 +174,8 @@ impl RemoteConnectDialog {
             port,
             saved_token: None,
             token_obtained_at: None,
+            tls: self.use_tls,
+            pinned_cert_sha256: None,
         };
 
         let runtime = self.runtime(cx);
