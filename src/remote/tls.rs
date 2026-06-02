@@ -135,3 +135,91 @@ mod tests {
         assert!(a.cert_path.exists() && a.key_path.exists());
     }
 }
+
+/// End-to-end TLS handshake tests for the desktop→desktop path: a real rustls
+/// server (using our generated cert) against the real okena-core pinned client.
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+    use axum::Router;
+    use axum::routing::get;
+
+    async fn spawn_tls_server(material: &TlsMaterial) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let std_listener = listener.into_std().unwrap();
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            &material.cert_path,
+            &material.key_path,
+        )
+        .await
+        .unwrap();
+        let app = Router::new().route("/health", get(|| async { "ok" }));
+        tokio::spawn(async move {
+            let _ = axum_server::from_tcp_rustls(std_listener, config)
+                .serve(app.into_make_service())
+                .await;
+        });
+        addr
+    }
+
+    /// GET with a short readiness retry while the server task spins up.
+    async fn get_with_retry(client: &reqwest::Client, url: &str) -> Result<reqwest::Response, reqwest::Error> {
+        let mut last_err = None;
+        for _ in 0..20 {
+            match client.get(url).send().await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    #[tokio::test]
+    async fn pin_tofu_capture_match_and_mismatch_over_real_handshake() {
+        // Server providers may consult the process-default CryptoProvider.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let dir = tempfile::tempdir().unwrap();
+        let material = load_or_generate(dir.path()).unwrap();
+        let addr = spawn_tls_server(&material).await;
+        let url = format!("https://127.0.0.1:{}/health", addr.port());
+
+        // 1) TOFU (no pin): handshake succeeds and the client captures exactly
+        //    the server's cert fingerprint.
+        let observed = okena_core::client::tls::new_observed();
+        let client = okena_core::client::tls::build_reqwest_client(true, None, observed.clone());
+        let resp = get_with_retry(&client, &url).await.expect("TOFU connect should succeed");
+        assert!(resp.status().is_success());
+        assert_eq!(
+            observed.lock().unwrap().as_deref(),
+            Some(material.fingerprint.as_str()),
+            "TOFU must capture the server's real fingerprint"
+        );
+
+        // 2) Correct pin: handshake succeeds.
+        let client_ok = okena_core::client::tls::build_reqwest_client(
+            true,
+            Some(material.fingerprint.clone()),
+            okena_core::client::tls::new_observed(),
+        );
+        assert!(
+            get_with_retry(&client_ok, &url).await.is_ok(),
+            "matching pin must connect"
+        );
+
+        // 3) Wrong pin: handshake is rejected (MITM / cert swap defense).
+        let client_bad = okena_core::client::tls::build_reqwest_client(
+            true,
+            Some("00".repeat(32)),
+            okena_core::client::tls::new_observed(),
+        );
+        assert!(
+            client_bad.get(&url).send().await.is_err(),
+            "mismatched pin must be rejected"
+        );
+    }
+}
