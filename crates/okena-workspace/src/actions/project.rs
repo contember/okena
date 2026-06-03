@@ -308,6 +308,14 @@ impl Workspace {
             self.queue_terminal_kills(kill_ids);
         }
 
+        // Soft-closed terminals are no longer in the layout but their PTY is
+        // still alive waiting out the grace window — kill them too and drop the
+        // pending records so the grace timer can't fire against a deleted project.
+        let soft_closed = self.drain_pending_closes_for_project(project_id);
+        if !soft_closed.is_empty() {
+            self.queue_terminal_kills(soft_closed);
+        }
+
         // Capture project info before removal for the hook
         let folder = self.folder_for_project_or_parent(project_id);
         let hook_folder_id = folder.map(|f| f.id.clone());
