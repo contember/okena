@@ -2,7 +2,7 @@
 pub use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastLevel, ToastManager};
 
 use crate::theme::theme;
-use crate::ui::tokens::{RADIUS_MD, RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, ICON_SM, ui_text_ms};
+use crate::ui::tokens::{RADIUS_MD, RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, ICON_SM, ui_text_ms, ui_text_xs};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::time::Duration;
@@ -122,6 +122,7 @@ impl Render for ToastOverlay {
 
         let t = theme(cx);
         let text_size = ui_text_ms(cx);
+        let detail_size = ui_text_xs(cx);
         // Own the toasts so `self` isn't borrowed across the `cx.listener` calls
         // the action buttons need.
         let toasts = self.toasts.clone();
@@ -192,16 +193,34 @@ impl Render for ToastOverlay {
                                                     .mt(px(1.0))
                                                     .child(icon_char),
                                             )
-                                            // Message
+                                            // Message + optional detail line
                                             .child(
                                                 div()
                                                     .flex_1()
                                                     .min_w(px(0.))
                                                     .overflow_x_hidden()
-                                                    .whitespace_normal()
-                                                    .text_size(text_size)
-                                                    .text_color(rgb(t.text_primary))
-                                                    .child(toast.message.clone()),
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(1.0))
+                                                    .child(
+                                                        div()
+                                                            .whitespace_normal()
+                                                            .text_size(text_size)
+                                                            .text_color(rgb(t.text_primary))
+                                                            .child(toast.message.clone()),
+                                                    )
+                                                    .when_some(
+                                                        toast.detail.clone(),
+                                                        |el, detail| {
+                                                            el.child(
+                                                                div()
+                                                                    .whitespace_normal()
+                                                                    .text_size(detail_size)
+                                                                    .text_color(rgb(t.text_muted))
+                                                                    .child(detail),
+                                                            )
+                                                        },
+                                                    ),
                                             )
                                             // Close (dismiss) button — only for
                                             // plain toasts. Action toasts (undo /

@@ -54,6 +54,9 @@ pub struct Toast {
     pub id: String,
     pub level: ToastLevel,
     pub message: String,
+    /// Optional secondary line rendered smaller + muted under `message`
+    /// (e.g. the project / cwd context for a soft-close toast).
+    pub detail: Option<String>,
     pub created: Instant,
     pub ttl: Duration,
     /// Optional clickable actions. When non-empty the overlay also renders a
@@ -67,6 +70,7 @@ impl Toast {
             id: uuid::Uuid::new_v4().to_string(),
             level,
             message: message.into(),
+            detail: None,
             created: Instant::now(),
             ttl: DEFAULT_TTL,
             actions: Vec::new(),
@@ -98,6 +102,12 @@ impl Toast {
     /// Attach clickable actions (rendered as buttons, with a countdown).
     pub fn with_actions(mut self, actions: Vec<ToastAction>) -> Self {
         self.actions = actions;
+        self
+    }
+
+    /// Attach a secondary line rendered smaller + muted under the message.
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 

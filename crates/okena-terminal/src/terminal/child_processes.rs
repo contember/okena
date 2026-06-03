@@ -36,3 +36,34 @@ pub fn has_child_processes(pid: u32) -> bool {
 pub fn has_child_processes(_pid: u32) -> bool {
     false
 }
+
+/// Best-effort name of the foreground command running under `pid` (the shell):
+/// the first child process's `comm` (e.g. "make", "vim", "cargo"). Linux only —
+/// reads `/proc/<child>/comm`; returns `None` elsewhere or when the shell has no
+/// child. Used to give the soft-close toast a "what am I killing" hint.
+#[cfg(target_os = "linux")]
+pub fn foreground_command(pid: u32) -> Option<String> {
+    let task_dir = format!("/proc/{pid}/task");
+    for entry in std::fs::read_dir(&task_dir).ok()?.flatten() {
+        let file_name = entry.file_name();
+        let Some(tid) = file_name.to_str() else { continue };
+        let Ok(children) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children"))
+        else {
+            continue;
+        };
+        let Some(child_pid) = children.split_whitespace().next() else { continue };
+        let Ok(comm) = std::fs::read_to_string(format!("/proc/{child_pid}/comm")) else {
+            continue;
+        };
+        let name = comm.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn foreground_command(_pid: u32) -> Option<String> {
+    None
+}

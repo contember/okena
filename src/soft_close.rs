@@ -44,6 +44,32 @@ fn truncate_label(label: &str) -> String {
     out
 }
 
+/// Home-relative, tail-preserving working directory for the toast detail line.
+/// `~`-collapses the home dir and keeps the *end* of long paths (the directory
+/// the user is actually in), since that's the useful part.
+fn shorten_cwd(path: &str) -> String {
+    let shown = match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path == home => return "~".to_string(),
+        Ok(home) if !home.is_empty() && path.starts_with(&format!("{home}/")) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path.to_string(),
+    };
+    const MAX_CHARS: usize = 30;
+    if shown.chars().count() <= MAX_CHARS {
+        return shown;
+    }
+    let tail: String = shown
+        .chars()
+        .rev()
+        .take(MAX_CHARS - 1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("\u{2026}{tail}")
+}
+
 /// Attempt to soft-close a terminal. Returns `true` if the close was handled as
 /// a soft close (caller must NOT also run the immediate close); `false` if the
 /// feature is off / the terminal is idle / not found, in which case the caller
@@ -65,8 +91,8 @@ pub fn try_begin(
     // Only soft-close *busy* terminals. The foreground shell pid resolves
     // through session backends (dtach / tmux), so "has a child" means the user
     // actually has a command running — not just the persistence wrapper.
-    let busy = backend
-        .get_foreground_shell_pid(terminal_id)
+    let fg_pid = backend.get_foreground_shell_pid(terminal_id);
+    let busy = fg_pid
         .map(okena_terminal::terminal::has_child_processes)
         .unwrap_or(false);
     if !busy {
@@ -82,22 +108,40 @@ pub fn try_begin(
         None => return false,
     };
 
-    // Build an informative message: which terminal, in which project. The
-    // terminal label follows the same precedence the tabs use — user-set custom
-    // name, else a meaningful OSC title, else the directory fallback (which we
-    // treat as "no specific label" so we don't quote a redundant name).
-    let osc_title = terminals.lock().get(terminal_id).and_then(|t| t.title());
-    let message = ws
+    // Build an informative two-line toast:
+    //
+    //   title:  Closed “make”             — what's closing
+    //   detail: okena · ~/projects/okena  — project · working directory (muted)
+    //
+    // Read the live OSC title + cwd under a single registry lock.
+    let (osc_title, cwd) = {
+        let reg = terminals.lock();
+        let term = reg.get(terminal_id);
+        (term.and_then(|t| t.title()), term.map(|t| t.current_cwd()))
+    };
+    let command = fg_pid.and_then(okena_terminal::terminal::foreground_command);
+
+    let (title, detail) = ws
         .project(project_id)
         .map(|p| {
-            let label = p.terminal_display_name(terminal_id, osc_title);
-            if label == p.directory_name() {
-                format!("Closed terminal in {}", p.name)
-            } else {
-                format!("Closed \u{201c}{}\u{201d} in {}", truncate_label(&label), p.name)
+            // Title label precedence: a meaningful display name (user-set custom
+            // name or non-prompt OSC title) wins; else the live foreground
+            // command; else a generic "Terminal closed".
+            let display = p.terminal_display_name(terminal_id, osc_title);
+            let label = if display == p.directory_name() { command } else { Some(display) };
+            let title = match label {
+                Some(l) => format!("Closed \u{201c}{}\u{201d}", truncate_label(&l)),
+                None => "Terminal closed".to_string(),
+            };
+            // Detail line: project name, plus the cwd when we have one.
+            let mut detail = p.name.clone();
+            if let Some(cwd) = &cwd {
+                detail.push_str(" \u{00b7} ");
+                detail.push_str(&shorten_cwd(cwd));
             }
+            (title, detail)
         })
-        .unwrap_or_else(|| "Terminal closed".to_string());
+        .unwrap_or_else(|| ("Terminal closed".to_string(), String::new()));
 
     let grace = Duration::from_secs(grace_secs as u64);
     let actions = vec![
@@ -112,9 +156,10 @@ pub fn try_begin(
             ToastActionStyle::Danger,
         ),
     ];
-    let toast = Toast::info(message)
-        .with_ttl(grace)
-        .with_actions(actions);
+    let toast = {
+        let base = Toast::info(title).with_ttl(grace).with_actions(actions);
+        if detail.is_empty() { base } else { base.with_detail(detail) }
+    };
     let toast_id = toast.id.clone();
 
     // Remove from the layout (PTY stays alive) and record the pending close.
@@ -141,7 +186,7 @@ pub fn try_begin(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_action, truncate_label, KILL_PREFIX, UNDO_PREFIX};
+    use super::{decode_action, shorten_cwd, truncate_label, KILL_PREFIX, UNDO_PREFIX};
 
     #[test]
     fn decode_action_round_trips() {
@@ -184,5 +229,20 @@ mod tests {
         let out = truncate_label(&long);
         assert_eq!(out.chars().count(), 42);
         assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn shorten_cwd_passes_through_short_paths() {
+        // A path not under $HOME stays as-is when short enough.
+        assert_eq!(shorten_cwd("/opt/app"), "/opt/app");
+    }
+
+    #[test]
+    fn shorten_cwd_keeps_tail_of_long_paths() {
+        let long = format!("/opt/{}/leaf", "deep/".repeat(20));
+        let out = shorten_cwd(&long);
+        assert_eq!(out.chars().count(), 30);
+        assert!(out.starts_with('\u{2026}'), "leading ellipsis");
+        assert!(out.ends_with("leaf"), "tail preserved");
     }
 }
