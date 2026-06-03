@@ -786,6 +786,17 @@ impl Okena {
                         for toast_id in &stale_toasts {
                             crate::workspace::toast::ToastManager::dismiss(toast_id, cx);
                         }
+
+                        // If an exited terminal had just been *restored* by a
+                        // soft-close undo that raced this exit, its PTY is dead
+                        // now — the registry-based `alive` check let undo bring
+                        // back a doomed pane. Tear it back out so it doesn't
+                        // linger (and respawn a fresh shell on next render).
+                        this.workspace.update(cx, |ws, cx| {
+                            for (tid, _) in &exit_events {
+                                ws.reap_restored_close(tid, cx);
+                            }
+                        });
                     }
                     // Notify dirty terminal content panes directly (batched in one update).
                     // All notifications happen in the same GPUI update → single layout pass.

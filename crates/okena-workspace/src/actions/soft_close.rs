@@ -6,7 +6,7 @@
 //! bookkeeping: recording the close, restoring it, and finalizing the kill.
 
 use crate::focus::FocusManager;
-use crate::state::{LayoutNode, PendingClose, Workspace};
+use crate::state::{LayoutNode, PendingClose, RestoredClose, Workspace};
 use gpui::*;
 
 impl Workspace {
@@ -39,6 +39,10 @@ impl Workspace {
             pre_close_layout,
             post_close_layout,
         });
+
+        // A fresh close supersedes any earlier restore-race breadcrumb for this
+        // terminal (e.g. close → undo → close again).
+        self.restored_closes.retain(|r| r.terminal_id != terminal_id);
     }
 
     /// True if the terminal is currently waiting out its grace period.
@@ -132,10 +136,46 @@ impl Workspace {
             .and_then(|p| p.layout.as_ref())
             .and_then(|l| l.find_terminal_path(terminal_id))
         {
-            self.set_focused_terminal(focus_manager, project_id, path, cx);
+            self.set_focused_terminal(focus_manager, project_id.clone(), path, cx);
         }
 
+        // Leave a breadcrumb: the `alive` check is registry-based and lags the
+        // real process exit, so the PTY we just restored might already be dead
+        // (its exit event still queued). If that exit lands, the exit handler
+        // calls `reap_restored_close` to tear this pane back out — see
+        // [`RestoredClose`].
+        self.restored_closes.retain(|r| r.terminal_id != terminal_id);
+        self.restored_closes.push(RestoredClose {
+            terminal_id: terminal_id.to_string(),
+            project_id,
+        });
+
         self.notify_data(cx);
+        true
+    }
+
+    /// A soft-close-restored terminal's shell exited — it was racing the undo and
+    /// the PTY is now dead. Consume the breadcrumb and, if the dead terminal is
+    /// still sitting in the layout, remove that pane (it can't be reconnected, and
+    /// a lingering layout node would respawn a fresh shell on the next render).
+    /// Returns true if a breadcrumb was consumed. Idempotent.
+    pub fn reap_restored_close(&mut self, terminal_id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(idx) = self
+            .restored_closes
+            .iter()
+            .position(|r| r.terminal_id == terminal_id)
+        else {
+            return false;
+        };
+        let restored = self.restored_closes.remove(idx);
+
+        if let Some(path) = self
+            .project(&restored.project_id)
+            .and_then(|p| p.layout.as_ref())
+            .and_then(|l| l.find_terminal_path(terminal_id))
+        {
+            self.close_terminal(&restored.project_id, &path, cx);
+        }
         true
     }
 
@@ -317,6 +357,56 @@ mod tests {
             let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
             assert!(layout.find_terminal_path("a").is_some(), "a is back in the tree");
             assert!(layout.find_terminal_path("b").is_some(), "b retained");
+        });
+    }
+
+    #[gpui::test]
+    fn reap_restored_close_removes_dead_pane_after_undo(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+            // Undo with the PTY reading as alive — restored into the layout.
+            assert!(ws.undo_soft_close(&mut fm, "a", true, cx));
+            assert_eq!(
+                ws.project("p1")
+                    .unwrap()
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .find_terminal_path("a"),
+                Some(vec![0]),
+                "restored into the split"
+            );
+
+            // The PTY actually died (it was racing the undo). Reaping tears the
+            // dead pane back out instead of leaving it to linger / respawn.
+            assert!(ws.reap_restored_close("a", cx));
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            assert!(layout.find_terminal_path("a").is_none(), "dead pane removed");
+            assert!(layout.find_terminal_path("b").is_some(), "sibling retained");
+
+            // Idempotent — nothing left to reap.
+            assert!(!ws.reap_restored_close("a", cx));
+        });
+    }
+
+    #[gpui::test]
+    fn re_closing_clears_stale_restore_breadcrumb(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+            assert!(ws.undo_soft_close(&mut fm, "a", true, cx));
+
+            // Soft-closing "a" again supersedes the earlier restore breadcrumb,
+            // so a later stray exit can't reap the freshly-closed pane.
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a2", cx);
+            assert!(!ws.reap_restored_close("a", cx), "breadcrumb cleared by re-close");
         });
     }
 

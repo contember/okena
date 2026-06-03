@@ -55,6 +55,9 @@ pub struct Workspace {
     /// layout but their PTY is kept alive until the grace timer fires (or the
     /// user undoes / force-closes). Holds the snapshots needed to restore.
     pub(crate) pending_closes: Vec<PendingClose>,
+    /// Terminals just brought back by an undo whose PTY might still be racing an
+    /// in-flight exit event — see [`RestoredClose`].
+    pub(crate) restored_closes: Vec<RestoredClose>,
 }
 
 /// A terminal that was soft-closed and is waiting out its grace period.
@@ -72,6 +75,21 @@ pub struct PendingClose {
     pub post_close_layout: Option<LayoutNode>,
 }
 
+/// A terminal brought back by `undo_soft_close` whose PTY may still be racing an
+/// in-flight exit event.
+///
+/// The `alive` check the undo path uses is registry-based, and the registry only
+/// drops a terminal once the app *processes* its exit event — so a shell that has
+/// already exited can still read as "alive", letting undo restore a doomed pane.
+/// If that exit then lands, `reap_restored_close` tears the now-dead pane back out
+/// of the layout (it can't be reconnected) instead of leaving it to linger — or to
+/// silently respawn a fresh shell on the next render.
+#[derive(Clone, Debug)]
+pub struct RestoredClose {
+    pub terminal_id: String,
+    pub project_id: String,
+}
+
 impl Workspace {
     pub fn new(data: WorkspaceData) -> Self {
         Self {
@@ -83,6 +101,7 @@ impl Workspace {
             data_replacement_epoch: 0,
             pending_terminal_kills: Vec::new(),
             pending_closes: Vec::new(),
+            restored_closes: Vec::new(),
         }
     }
 
@@ -116,8 +135,10 @@ impl Workspace {
         self.data = data;
         self.data_replacement_epoch += 1;
         // Snapshots in pending_closes refer to the old data — drop them so an
-        // undo can't restore into a wholesale-replaced workspace.
+        // undo can't restore into a wholesale-replaced workspace. The
+        // restore-race breadcrumbs refer to the old layout too.
         self.pending_closes.clear();
+        self.restored_closes.clear();
         focus_manager.clear_all();
         cx.notify();
         cx.refresh_windows();
