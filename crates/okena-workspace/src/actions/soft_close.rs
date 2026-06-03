@@ -148,6 +148,31 @@ impl Workspace {
             .map(|p| p.terminal_id)
             .collect()
     }
+
+    /// Drain pending soft-closes belonging to `project_id`, returning their
+    /// terminal ids. Used when a project is deleted mid-grace: the soft-closed
+    /// panes are gone from the layout, so the normal teardown wouldn't see them
+    /// — kill those PTYs explicitly and drop the now-orphaned pending records.
+    pub fn drain_pending_closes_for_project(&mut self, project_id: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        self.pending_closes.retain(|p| {
+            if p.project_id == project_id {
+                ids.push(p.terminal_id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        ids
+    }
+
+    /// A soft-closed terminal's shell exited on its own during the grace window.
+    /// Drop the pending record (the normal exit path is already reaping the PTY)
+    /// and return its toast id so the caller can dismiss the now-useless undo
+    /// toast. Returns `None` if the terminal wasn't mid soft-close.
+    pub fn cancel_pending_close(&mut self, terminal_id: &str) -> Option<String> {
+        self.take_pending_close(terminal_id).map(|p| p.toast_id)
+    }
 }
 
 #[cfg(test)]
@@ -305,6 +330,44 @@ mod tests {
             ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
             let drained = ws.drain_pending_closes();
             assert_eq!(drained, vec!["a".to_string()]);
+            assert!(!ws.has_pending_close("a"));
+        });
+    }
+
+    #[gpui::test]
+    fn cancel_pending_close_returns_toast_and_drops_record(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+
+            // Shell exited on its own → cancel returns the toast id to dismiss.
+            assert_eq!(ws.cancel_pending_close("a"), Some("toast-a".to_string()));
+            assert!(!ws.has_pending_close("a"));
+            // Idempotent — nothing left to cancel.
+            assert_eq!(ws.cancel_pending_close("a"), None);
+        });
+    }
+
+    #[gpui::test]
+    fn drain_pending_closes_for_project_filters_by_project(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+
+            // A different project's pending close must be left untouched.
+            assert!(ws.drain_pending_closes_for_project("other").is_empty());
+            assert!(ws.has_pending_close("a"));
+
+            assert_eq!(
+                ws.drain_pending_closes_for_project("p1"),
+                vec!["a".to_string()]
+            );
             assert!(!ws.has_pending_close("a"));
         });
     }

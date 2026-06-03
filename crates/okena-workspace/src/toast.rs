@@ -11,6 +11,22 @@ use std::sync::Arc;
 /// Maximum number of visible toasts
 const MAX_VISIBLE_TOASTS: usize = 5;
 
+/// Trim the queue to `MAX_VISIBLE_TOASTS`, preferring to drop the oldest toast
+/// that has **no** actions. Toasts with actions (e.g. the soft-close "Undo"
+/// toast) carry a pending operation that only resolves when the toast lives out
+/// its TTL — evicting one early would silently strip the user's undo affordance
+/// while the underlying close still goes through. Falls back to the oldest toast
+/// when every toast has actions, so the hard cap is always honoured.
+fn trim_to_cap(queue: &mut Vec<Toast>) {
+    while queue.len() > MAX_VISIBLE_TOASTS {
+        let idx = queue
+            .iter()
+            .position(|t| t.actions.is_empty())
+            .unwrap_or(0);
+        queue.remove(idx);
+    }
+}
+
 #[derive(Clone)]
 pub struct ToastManager(pub Arc<Mutex<Vec<Toast>>>);
 
@@ -43,10 +59,7 @@ impl ToastManager {
         if let Some(tm) = cx.try_global::<ToastManager>() {
             let mut queue = tm.0.lock();
             queue.push(toast);
-            // Drop oldest if over cap
-            while queue.len() > MAX_VISIBLE_TOASTS {
-                queue.remove(0);
-            }
+            trim_to_cap(&mut queue);
         }
     }
 
@@ -78,9 +91,7 @@ impl ToastManager {
                 log::debug!("[hook toast] {}", toast.message);
                 queue.push(toast);
             }
-            while queue.len() > MAX_VISIBLE_TOASTS {
-                queue.remove(0);
-            }
+            trim_to_cap(&mut queue);
         }
     }
 
@@ -96,5 +107,39 @@ impl ToastManager {
         let mut queue = self.0.lock();
         queue.retain(|t| !t.is_expired());
         queue.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{trim_to_cap, Toast, ToastAction, ToastActionStyle, MAX_VISIBLE_TOASTS};
+
+    fn action_toast(msg: &str) -> Toast {
+        Toast::info(msg)
+            .with_actions(vec![ToastAction::new("undo", "Undo", ToastActionStyle::Primary)])
+    }
+
+    #[test]
+    fn trim_keeps_action_toast_and_drops_oldest_plain() {
+        // Oldest entry is the undo toast, followed by enough plain toasts to
+        // overflow the cap by one.
+        let mut q = vec![action_toast("undo")];
+        for i in 0..MAX_VISIBLE_TOASTS {
+            q.push(Toast::info(format!("plain {i}")));
+        }
+        trim_to_cap(&mut q);
+        assert_eq!(q.len(), MAX_VISIBLE_TOASTS);
+        assert_eq!(q[0].message, "undo", "undo toast survives eviction");
+        assert!(!q[0].actions.is_empty());
+    }
+
+    #[test]
+    fn trim_falls_back_to_oldest_when_all_have_actions() {
+        let mut q: Vec<Toast> = (0..MAX_VISIBLE_TOASTS + 1)
+            .map(|i| action_toast(&format!("a{i}")))
+            .collect();
+        trim_to_cap(&mut q);
+        assert_eq!(q.len(), MAX_VISIBLE_TOASTS);
+        assert_eq!(q[0].message, "a1", "oldest action toast dropped as fallback");
     }
 }

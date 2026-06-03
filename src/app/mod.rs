@@ -772,6 +772,20 @@ impl Okena {
                                 }
                             }
                         }
+
+                        // If any exited terminal was mid soft-close, its undo toast
+                        // is now useless (the PTY is gone) and the pending record
+                        // would otherwise linger until the grace timer fired a
+                        // redundant kill — drop both now.
+                        let stale_toasts: Vec<String> = this.workspace.update(cx, |ws, _| {
+                            exit_events
+                                .iter()
+                                .filter_map(|(tid, _)| ws.cancel_pending_close(tid))
+                                .collect()
+                        });
+                        for toast_id in &stale_toasts {
+                            crate::workspace::toast::ToastManager::dismiss(toast_id, cx);
+                        }
                     }
                     // Notify dirty terminal content panes directly (batched in one update).
                     // All notifications happen in the same GPUI update → single layout pass.

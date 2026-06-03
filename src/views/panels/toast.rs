@@ -203,28 +203,36 @@ impl Render for ToastOverlay {
                                                     .text_color(rgb(t.text_primary))
                                                     .child(toast.message.clone()),
                                             )
-                                            // Close (dismiss) button
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "toast-close-{}",
-                                                        toast.id
-                                                    )))
-                                                    .cursor_pointer()
-                                                    .flex_shrink_0()
-                                                    .rounded(RADIUS_STD)
-                                                    .p(px(2.0))
-                                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                    .child(
-                                                        svg()
-                                                            .path("icons/close.svg")
-                                                            .size(ICON_SM)
-                                                            .text_color(rgb(t.text_muted)),
-                                                    )
-                                                    .on_click(move |_, _window, cx| {
-                                                        ToastManager::dismiss(&toast_id, cx);
-                                                    }),
-                                            ),
+                                            // Close (dismiss) button — only for
+                                            // plain toasts. Action toasts (undo /
+                                            // close-now) are resolved via their
+                                            // buttons or the countdown, so a third
+                                            // "dismiss" affordance would be
+                                            // ambiguous (it would hide the undo but
+                                            // still let the close go through).
+                                            .when(!has_countdown, |el| {
+                                                el.child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "toast-close-{}",
+                                                            toast.id
+                                                        )))
+                                                        .cursor_pointer()
+                                                        .flex_shrink_0()
+                                                        .rounded(RADIUS_STD)
+                                                        .p(px(2.0))
+                                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                        .child(
+                                                            svg()
+                                                                .path("icons/close.svg")
+                                                                .size(ICON_SM)
+                                                                .text_color(rgb(t.text_muted)),
+                                                        )
+                                                        .on_click(move |_, _window, cx| {
+                                                            ToastManager::dismiss(&toast_id, cx);
+                                                        }),
+                                                )
+                                            }),
                                     )
                                     // Actions row (Undo / Close now / …)
                                     .when(has_countdown, |el| {
