@@ -12,6 +12,7 @@
 //! through here — the remote API keeps immediate-close semantics.
 
 use crate::terminal::backend::TerminalBackend;
+use crate::views::window::TerminalsRegistry;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::Workspace;
 use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastManager};
@@ -31,6 +32,18 @@ pub fn decode_action(id: &str, prefix: &str) -> Option<(String, String)> {
     Some((project_id.to_string(), terminal_id.to_string()))
 }
 
+/// Cap a terminal label so the toast stays tidy (TOAST_WIDTH is ~320px). OSC
+/// titles can be arbitrarily long; truncate on a char boundary with an ellipsis.
+fn truncate_label(label: &str) -> String {
+    const MAX_CHARS: usize = 42;
+    if label.chars().count() <= MAX_CHARS {
+        return label.to_string();
+    }
+    let mut out: String = label.chars().take(MAX_CHARS - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
 /// Attempt to soft-close a terminal. Returns `true` if the close was handled as
 /// a soft close (caller must NOT also run the immediate close); `false` if the
 /// feature is off / the terminal is idle / not found, in which case the caller
@@ -39,6 +52,7 @@ pub fn try_begin(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
     backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
     project_id: &str,
     terminal_id: &str,
     cx: &mut Context<Workspace>,
@@ -68,6 +82,23 @@ pub fn try_begin(
         None => return false,
     };
 
+    // Build an informative message: which terminal, in which project. The
+    // terminal label follows the same precedence the tabs use — user-set custom
+    // name, else a meaningful OSC title, else the directory fallback (which we
+    // treat as "no specific label" so we don't quote a redundant name).
+    let osc_title = terminals.lock().get(terminal_id).and_then(|t| t.title());
+    let message = ws
+        .project(project_id)
+        .map(|p| {
+            let label = p.terminal_display_name(terminal_id, osc_title);
+            if label == p.directory_name() {
+                format!("Closed terminal in {}", p.name)
+            } else {
+                format!("Closed \u{201c}{}\u{201d} in {}", truncate_label(&label), p.name)
+            }
+        })
+        .unwrap_or_else(|| "Terminal closed".to_string());
+
     let grace = Duration::from_secs(grace_secs as u64);
     let actions = vec![
         ToastAction::new(
@@ -81,7 +112,7 @@ pub fn try_begin(
             ToastActionStyle::Danger,
         ),
     ];
-    let toast = Toast::info("Terminal closed")
+    let toast = Toast::info(message)
         .with_ttl(grace)
         .with_actions(actions);
     let toast_id = toast.id.clone();
@@ -110,7 +141,7 @@ pub fn try_begin(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_action, KILL_PREFIX, UNDO_PREFIX};
+    use super::{decode_action, truncate_label, KILL_PREFIX, UNDO_PREFIX};
 
     #[test]
     fn decode_action_round_trips() {
@@ -131,5 +162,27 @@ mod tests {
     fn decode_action_rejects_malformed() {
         assert_eq!(decode_action("soft_close_undo:onlyone", UNDO_PREFIX), None);
         assert_eq!(decode_action("garbage", UNDO_PREFIX), None);
+    }
+
+    #[test]
+    fn truncate_label_leaves_short_labels_untouched() {
+        assert_eq!(truncate_label("vim main.rs"), "vim main.rs");
+    }
+
+    #[test]
+    fn truncate_label_caps_long_labels_with_ellipsis() {
+        let long = "a".repeat(60);
+        let out = truncate_label(&long);
+        assert_eq!(out.chars().count(), 42);
+        assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn truncate_label_respects_char_boundaries() {
+        // Multi-byte chars must not be split mid-codepoint.
+        let long = "é".repeat(60);
+        let out = truncate_label(&long);
+        assert_eq!(out.chars().count(), 42);
+        assert!(out.ends_with('\u{2026}'));
     }
 }

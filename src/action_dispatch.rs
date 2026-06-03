@@ -177,7 +177,7 @@ impl ActionDispatcher {
                         match &action {
                             ActionRequest::CloseTerminal { project_id, terminal_id } => {
                                 if crate::soft_close::try_begin(
-                                    ws, fm, &*backend, project_id, terminal_id, cx,
+                                    ws, fm, &*backend, &terminals, project_id, terminal_id, cx,
                                 ) {
                                     return;
                                 }
@@ -188,7 +188,7 @@ impl ActionDispatcher {
                                 let mut remaining = Vec::new();
                                 for terminal_id in terminal_ids {
                                     if !crate::soft_close::try_begin(
-                                        ws, fm, &*backend, project_id, terminal_id, cx,
+                                        ws, fm, &*backend, &terminals, project_id, terminal_id, cx,
                                     ) {
                                         remaining.push(terminal_id.clone());
                                     }
