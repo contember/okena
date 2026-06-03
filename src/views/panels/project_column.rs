@@ -497,6 +497,17 @@ impl ProjectColumn {
             ("icons/eye-off.svg", "Hide Project")
         };
 
+        // Whether this column is the currently focused (zoomed) project. When
+        // it is, the header controls stay pinned (no hover-reveal) and the
+        // focus button toggles focus back off, returning to the overview.
+        let is_focused_view =
+            self.focus_manager.read(cx).focused_project_id() == Some(&self.project_id);
+        let (focus_icon, focus_tooltip): (&'static str, &'static str) = if is_focused_view {
+            ("icons/fullscreen-exit.svg", "Exit Focus")
+        } else {
+            ("icons/fullscreen.svg", "Focus Project")
+        };
+
         let right_controls = h_flex()
             .gap(px(8.0))
             .child(self.render_hidden_taskbar(project, t, cx))
@@ -504,8 +515,13 @@ impl ProjectColumn {
                 div()
                     .flex()
                     .gap(px(2.0))
-                    .opacity(0.0)
-                    .group_hover("project-header", |s| s.opacity(1.0))
+                    // In the overview the controls reveal on header hover; in
+                    // the focused view they stay pinned so exiting focus is
+                    // always one click away.
+                    .when(!is_focused_view, |d| {
+                        d.opacity(0.0)
+                            .group_hover("project-header", |s| s.opacity(1.0))
+                    })
                     .child(
                         div()
                             .id("hide-project-btn")
@@ -559,19 +575,22 @@ impl ProjectColumn {
                                 let pid = project_id.clone();
                                 focus_manager.update(cx, |fm, cx| {
                                     workspace.update(cx, |ws, cx| {
-                                        ws.set_focused_project(fm, Some(pid), cx);
+                                        // Toggle: when already focused, clear
+                                        // focus to return to the overview.
+                                        let target = if is_focused_view { None } else { Some(pid) };
+                                        ws.set_focused_project(fm, target, cx);
                                     });
                                     cx.notify();
                                 });
                             })
                             .child(
                                 svg()
-                                    .path("icons/fullscreen.svg")
+                                    .path(focus_icon)
                                     .size(px(14.0))
                                     .text_color(rgb(t.text_secondary)),
                             )
-                            .tooltip(|_window, cx| {
-                                Tooltip::new("Focus Project").build(_window, cx)
+                            .tooltip(move |_window, cx| {
+                                Tooltip::new(focus_tooltip).build(_window, cx)
                             }),
                     ),
             )
