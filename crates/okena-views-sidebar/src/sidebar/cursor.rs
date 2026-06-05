@@ -247,8 +247,24 @@ impl Sidebar {
             || self.folder_rename.is_some()
     }
 
+    /// True when this window's sidebar is in the activity-sorted view, where
+    /// the cursor-key handlers below no-op. The keyboard cursor list is built
+    /// from the manual `project_order`+folder ordering (`build_cursor_items`),
+    /// which does not line up with the activity view's tiered, activity-sorted
+    /// rows — acting on it would scroll to and confirm rows the user sees no
+    /// highlight on. `Escape` is intentionally left active (it just clears the
+    /// cursor and restores focus, which is harmless in either mode).
+    fn is_activity_sort_mode(&self, cx: &App) -> bool {
+        self.workspace
+            .read(cx)
+            .data()
+            .window(self.window_id)
+            .map(|w| w.project_sort_mode.is_activity())
+            .unwrap_or(false)
+    }
+
     pub(super) fn handle_sidebar_up(&mut self, _: &SidebarUp, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_interactive_mode_active() { return; }
+        if self.is_interactive_mode_active() || self.is_activity_sort_mode(cx) { return; }
         let items = self.build_cursor_items(cx);
         if items.is_empty() { return; }
         match self.cursor_index {
@@ -261,7 +277,7 @@ impl Sidebar {
     }
 
     pub(super) fn handle_sidebar_down(&mut self, _: &SidebarDown, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_interactive_mode_active() { return; }
+        if self.is_interactive_mode_active() || self.is_activity_sort_mode(cx) { return; }
         let items = self.build_cursor_items(cx);
         if items.is_empty() { return; }
         match self.cursor_index {
@@ -286,7 +302,7 @@ impl Sidebar {
             self.finish_rename(cx);
             return;
         }
-        if self.is_interactive_mode_active() { return; }
+        if self.is_interactive_mode_active() || self.is_activity_sort_mode(cx) { return; }
         let items = self.build_cursor_items(cx);
         let Some(idx) = self.cursor_index else { return };
         let Some(item) = items.get(idx) else { return };
@@ -414,7 +430,7 @@ impl Sidebar {
     }
 
     pub(super) fn handle_sidebar_toggle_expand(&mut self, _: &SidebarToggleExpand, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_interactive_mode_active() { return; }
+        if self.is_interactive_mode_active() || self.is_activity_sort_mode(cx) { return; }
         let items = self.build_cursor_items(cx);
         let Some(idx) = self.cursor_index else { return };
         let Some(item) = items.get(idx) else { return };

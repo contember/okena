@@ -159,6 +159,37 @@ impl Sidebar {
         {
             let workspace = self.workspace.read(cx);
             project_services = self.collect_project_services(workspace, cx);
+
+            // Manual display rank: each project's position in the user's
+            // arranged order (`project_order` with folders expanded to their
+            // members), NOT the push order of the `projects` Vec. Drag-reorder
+            // only ever mutates `project_order`, so the Vec order diverges from
+            // the arrangement after any reorder. This rank drives the pinned
+            // tier's stable order and the within-tier tiebreaker so the
+            // activity view honors the same order the manual view shows. Folder
+            // members live in `folder.project_ids` (not `project_order`), so
+            // folders are expanded inline. Projects absent from the walk fall
+            // back after all known ones (deterministic, stable among ties).
+            let manual_rank: HashMap<String, usize> = {
+                let data = workspace.data();
+                let mut rank = HashMap::new();
+                let mut next = 0usize;
+                for id in &data.project_order {
+                    if let Some(folder) = data.folders.iter().find(|f| &f.id == id) {
+                        for pid in &folder.project_ids {
+                            if !rank.contains_key(pid) {
+                                rank.insert(pid.clone(), next);
+                                next += 1;
+                            }
+                        }
+                    } else if !rank.contains_key(id) {
+                        rank.insert(id.clone(), next);
+                        next += 1;
+                    }
+                }
+                rank
+            };
+
             let terminals = self.terminals.lock();
             let mut e = Vec::new();
             let mut m = HashMap::new();
@@ -183,11 +214,15 @@ impl Sidebar {
                 e.push(ActivityEntry {
                     id: project.id.clone(),
                     pinned: project.pinned,
-                    manual_index: idx,
+                    // Order by the user's arrangement, not Vec push order.
+                    manual_index: manual_rank.get(&project.id).copied().unwrap_or(usize::MAX),
                     last_activity_at: project.last_activity_at,
                     has_attention,
                     is_running,
                 });
+                // `idx_map` keeps the `projects` Vec index: it feeds
+                // `render_project_item`'s drag-drop target, which is a separate
+                // concern from activity ordering and unchanged by this view.
                 idx_map.insert(project.id.clone(), idx);
                 m.insert(project.id.clone(), info);
             }
