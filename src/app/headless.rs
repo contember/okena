@@ -264,12 +264,18 @@ impl HeadlessApp {
             Ok(server) => {
                 let port = server.port();
                 let fingerprint = server.cert_fingerprint();
-                remote_info.set_active(port, self.auth_store.clone(), fingerprint);
+                remote_info.set_active(port, self.auth_store.clone(), fingerprint.clone());
                 log::info!("Remote server started on port {}", port);
 
                 let code = self.auth_store.get_or_create_code();
                 println!("Remote server listening on port {port}");
                 println!("Pairing code: {code} (expires in 60s)");
+                if let Some(fp) = &fingerprint {
+                    println!(
+                        "TLS cert fingerprint (SHA-256): {}",
+                        okena_core::client::tls::format_fingerprint(fp)
+                    );
+                }
                 println!("Run `okena pair` anytime for a fresh code.");
 
                 self.remote_server = Some(server);

@@ -40,6 +40,18 @@ pub fn cli_pair() -> i32 {
     }
 
     println!("{code}");
+
+    // Show the TLS cert fingerprint (if the server has a persisted cert) so the
+    // host can read it out for the connecting client to verify out-of-band.
+    // Goes to stderr to keep stdout a clean, pipeable pairing code.
+    if let Some(fp) =
+        crate::remote::tls::read_fingerprint(&crate::workspace::persistence::config_dir())
+    {
+        eprintln!(
+            "TLS certificate fingerprint (SHA-256) — verify it matches the connecting client:"
+        );
+        eprintln!("  {}", okena_core::client::tls::format_fingerprint(&fp));
+    }
     eprintln!("Expires in 60s — run `okena pair` again for a fresh code.");
     0
 }

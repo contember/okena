@@ -1,10 +1,12 @@
 use crate::keybindings::Cancel;
 use crate::remote::auth::AuthStore;
+use crate::remote::GlobalRemoteInfo;
 use crate::theme::theme;
 use crate::views::components::{modal_backdrop, modal_content, modal_header};
-use crate::ui::tokens::{ui_text, ui_text_md};
+use crate::ui::tokens::{ui_text, ui_text_md, ui_text_sm};
 use gpui::*;
 use gpui::prelude::*;
+use okena_core::client::tls::format_fingerprint;
 use std::sync::Arc;
 
 pub struct PairingDialog {
@@ -81,6 +83,11 @@ impl Render for PairingDialog {
         let code_for_copy = code.clone();
         let expired = self.expired;
         let remaining = self.remaining_secs;
+        // TLS cert fingerprint, shown so the host can read it out for the client
+        // to verify during pairing. `None` when the server runs without TLS.
+        let fingerprint = cx
+            .try_global::<GlobalRemoteInfo>()
+            .and_then(|info| info.0.cert_fingerprint());
 
         modal_backdrop("pairing-dialog-backdrop", &t)
             .track_focus(&focus_handle)
@@ -136,6 +143,35 @@ impl Render for PairingDialog {
                                         .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child(format!("Expires in {}s", remaining)),
+                                )
+                            })
+                            // TLS certificate fingerprint (when serving over TLS)
+                            .when_some(fingerprint, |d, fp| {
+                                d.child(
+                                    div()
+                                        .w_full()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(4.0))
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(t.text_muted))
+                                                .child("TLS certificate fingerprint — verify it matches the one shown on the client:"),
+                                        )
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .bg(rgb(t.bg_secondary))
+                                                .border_1()
+                                                .border_color(rgb(t.border))
+                                                .rounded(px(4.0))
+                                                .px(px(8.0))
+                                                .py(px(6.0))
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(t.text_primary))
+                                                .child(format_fingerprint(&fp)),
+                                        ),
                                 )
                             })
                             // Buttons row

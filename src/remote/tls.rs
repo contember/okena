@@ -34,6 +34,16 @@ fn key_path(dir: &Path) -> PathBuf {
     dir.join("remote_key.pem")
 }
 
+/// Read the fingerprint of the already-persisted cert *without* generating one.
+///
+/// Used by the `okena pair` CLI to show the fingerprint for out-of-band
+/// verification. Returns `None` if no cert exists yet (TLS never enabled) or it
+/// can't be parsed — callers treat that as "no fingerprint to show".
+pub fn read_fingerprint(config_dir: &Path) -> Option<String> {
+    let der = CertificateDer::from_pem_file(cert_path(config_dir)).ok()?;
+    Some(fingerprint_hex(der.as_ref()))
+}
+
 /// Load the persisted self-signed cert, generating + persisting one on first use.
 pub fn load_or_generate(config_dir: &Path) -> Result<TlsMaterial> {
     std::fs::create_dir_all(config_dir)
