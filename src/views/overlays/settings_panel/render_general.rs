@@ -7,19 +7,10 @@ use crate::workspace::settings::HeaderDensity;
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::{h_flex, v_flex};
+use okena_core::client::tls::format_fingerprint;
 
 use super::components::*;
 use super::SettingsPanel;
-
-/// Format a 64-char hex fingerprint as colon-separated byte pairs for readable
-/// out-of-band comparison (e.g. `ab:cd:ef:…`).
-fn format_fingerprint(fp: &str) -> String {
-    fp.as_bytes()
-        .chunks(2)
-        .map(|pair| std::str::from_utf8(pair).unwrap_or("??"))
-        .collect::<Vec<_>>()
-        .join(":")
-}
 
 impl SettingsPanel {
     pub(super) fn render_general(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

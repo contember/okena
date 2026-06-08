@@ -38,6 +38,21 @@ pub fn cert_fingerprint(der: &[u8]) -> String {
     s
 }
 
+/// Format a hex fingerprint as colon-separated byte pairs for readable
+/// out-of-band comparison (e.g. `ab:cd:ef:01 23:45:67:89 …`). Pairs are grouped
+/// four-to-a-block with spaces between blocks so the long hex string can
+/// soft-wrap inside narrow containers instead of overflowing horizontally.
+pub fn format_fingerprint(fp: &str) -> String {
+    fp.as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).unwrap_or("??"))
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|group| group.join(":"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Shared slot the verifier writes the most recently observed fingerprint into,
 /// so the connection task can read it back after a successful handshake and
 /// persist a freshly-pinned cert.
@@ -236,5 +251,17 @@ mod tests {
         let fp = cert_fingerprint(b"server-cert").to_uppercase();
         let (v, _o) = verifier(Some(&fp));
         assert!(v.check(b"server-cert").is_ok());
+    }
+
+    #[test]
+    fn format_fingerprint_groups_pairs_with_colons_and_spaces() {
+        // 12 hex chars = 6 byte pairs → colons within 4-pair blocks, space between.
+        assert_eq!(format_fingerprint("aabbccddeeff"), "aa:bb:cc:dd ee:ff");
+        // A full 64-char fingerprint round-trips to the same hex when separators stripped.
+        let fp = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let formatted = format_fingerprint(fp);
+        assert_eq!(formatted.replace([':', ' '], ""), fp);
+        // Spaces every 4 pairs (8 hex chars) → 32 pairs / 4 = 8 blocks → 7 spaces.
+        assert_eq!(formatted.matches(' ').count(), 7);
     }
 }

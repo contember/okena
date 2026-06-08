@@ -1,6 +1,7 @@
 //! Remote connection dialog overlay.
 
 use crate::Cancel;
+use okena_core::client::tls::format_fingerprint;
 use okena_core::client::RemoteConnectionConfig;
 use okena_remote_client::RemoteConnectionManager;
 use okena_ui::button::{button, button_primary};
@@ -44,16 +45,6 @@ impl ConnectionDialogStatus {
     fn is_busy(&self) -> bool {
         matches!(self, Self::Testing | Self::Connecting)
     }
-}
-
-/// Format a 64-char hex fingerprint as colon-separated byte pairs for readable
-/// out-of-band comparison (e.g. `ab:cd:ef:…`).
-fn format_fingerprint(fp: &str) -> String {
-    fp.as_bytes()
-        .chunks(2)
-        .map(|pair| std::str::from_utf8(pair).unwrap_or("??"))
-        .collect::<Vec<_>>()
-        .join(":")
 }
 
 /// Result of auto-detecting how to reach a server.
@@ -379,7 +370,11 @@ impl Render for RemoteConnectDialog {
         }
 
         let status_element = match &self.status {
-            ConnectionDialogStatus::Idle => div().into_any_element(),
+            // The fingerprint verification UI is a full-width block rendered
+            // below, not an inline status next to the Test Connection button.
+            ConnectionDialogStatus::Idle | ConnectionDialogStatus::VerifyFingerprint(_) => {
+                div().into_any_element()
+            }
             ConnectionDialogStatus::Testing => div()
                 .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_secondary))
@@ -405,29 +400,38 @@ impl Render for RemoteConnectDialog {
                 .text_color(rgb(t.term_red))
                 .child(format!("Failed: {}", err))
                 .into_any_element(),
-            ConnectionDialogStatus::VerifyFingerprint(fp) => div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(
-                    div()
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_secondary))
-                        .child("Paired. Verify this certificate fingerprint matches the one shown on the host (Settings → Remote Server), then confirm:"),
-                )
-                .child(
-                    div()
-                        .bg(rgb(t.bg_secondary))
-                        .border_1()
-                        .border_color(rgb(t.border))
-                        .rounded(px(4.0))
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_primary))
-                        .child(format_fingerprint(fp)),
-                )
-                .into_any_element(),
+        };
+
+        // Full-width fingerprint verification block, shown after a TLS pair.
+        // Kept out of the Test Connection row so the long hex can wrap freely
+        // instead of overflowing the modal.
+        let verify_element = match &self.status {
+            ConnectionDialogStatus::VerifyFingerprint(fp) => Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_secondary))
+                            .child("Paired. Verify this certificate fingerprint matches the one shown on the host (Settings → Remote Server), then confirm:"),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .bg(rgb(t.bg_secondary))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .rounded(px(4.0))
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(format_fingerprint(fp)),
+                    ),
+            ),
+            _ => None,
         };
 
         let verifying = matches!(self.status, ConnectionDialogStatus::VerifyFingerprint(_));
@@ -523,6 +527,7 @@ impl Render for RemoteConnectDialog {
                                         "Enter the pairing code shown on the remote machine's status bar",
                                     ),
                             )
+                            .children(verify_element)
                             .child(
                                 div()
                                     .flex()
