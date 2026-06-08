@@ -1,0 +1,29 @@
+[package]
+name = "okena-mobile-ffi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+# cdylib + staticlib for the eventual ubrn-generated Android (NDK) / iOS
+# (xcframework) artifacts; `lib` so it can also be linked as a normal Rust
+# library (e.g. for `cargo test` and downstream tooling).
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+# Reuse the existing mobile binding logic verbatim — ConnectionManager,
+# MobileConnectionHandler, TerminalHolder and the api data structs all live
+# here. We do NOT duplicate any of it; this crate only re-expresses the FFI
+# surface via uniffi instead of flutter_rust_bridge.
+okena_mobile_native = { path = "../../mobile/native" }
+
+# Shared protocol / TLS / WS / terminal-emulation core. Needed for the request
+# enums (ActionRequest, WsClientMessage, SpecialKey, SplitDirection, DiffMode,
+# FolderColor) and the DARK_THEME used when extracting cells.
+okena-core = { path = "../okena-core", features = ["client"] }
+
+# uniffi in proc-macro mode (no UDL). `tokio` enables async export via
+# `#[uniffi::export(async_runtime = "tokio")]`.
+uniffi = { version = "0.29", features = ["tokio"] }
+
+serde_json = "1.0"
+anyhow = "1.0"
