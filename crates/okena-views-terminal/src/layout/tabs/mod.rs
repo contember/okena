@@ -269,7 +269,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             if i != active_tab {
                 path.truncate(base_len);
                 path.push(i);
-                crate::layout::navigation::deregister_pane_bounds(&self.project_id, &path);
+                crate::layout::navigation::deregister_pane_bounds(self.window_id, &self.project_id, &path);
             }
         }
 
