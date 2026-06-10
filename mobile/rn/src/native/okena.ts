@@ -437,10 +437,76 @@ export interface OkenaNative {
  * Until the module is generated, the `require` throws and we rethrow with a
  * pointer to the generation step (see mobile/rn/README.md).
  */
+/**
+ * ubrn → app-contract adapters.
+ *
+ * ubrn 0.31 represents uniffi types in a few shapes that differ from the
+ * hand-written contract above, so the boundary (`getOkenaNative`) translates:
+ *   - Data-carrying enums → tagged class instances with a PascalCase `.tag`
+ *     (`{ tag: 'Connected' }`; payload under `.inner`, e.g. Error →
+ *     `.inner.message`). App wants `{ kind: 'lowercase' }`. → `ConnectionStatus`.
+ *   - Fieldless enums → a numeric TS enum (`CursorShape.Block === 0`). App wants
+ *     the lowercase string. → `getCursor().shape`.
+ *   - Map-typed record fields → a JS `Map`. App indexes them as plain objects.
+ *     → `ProjectInfo.terminalNames`.
+ * Plain-string enums (split direction, diff mode) and all other record fields
+ * already match (camelCase), so they pass through untouched.
+ */
+function toConnectionStatus(s: {tag?: string; inner?: {message?: string}}): ConnectionStatus {
+  switch (s?.tag) {
+    case 'Disconnected':
+      return {kind: 'disconnected'};
+    case 'Connecting':
+      return {kind: 'connecting'};
+    case 'Connected':
+      return {kind: 'connected'};
+    case 'Pairing':
+      return {kind: 'pairing'};
+    case 'Error':
+      return {kind: 'error', message: s.inner?.message ?? 'Unknown error'};
+    default:
+      return {kind: 'disconnected'};
+  }
+}
+
+// Generated `CursorShape` is a numeric enum (Block=0, Underline=1, Beam=2);
+// index by it to recover the app's string union.
+const CURSOR_SHAPES: CursorShape[] = ['block', 'underline', 'beam'];
+
+function toCursorState(c: {col: number; row: number; shape: number; visible: boolean}): CursorState {
+  return {col: c.col, row: c.row, visible: c.visible, shape: CURSOR_SHAPES[c.shape] ?? 'block'};
+}
+
+// Generated records carry `terminalNames` as a JS `Map`; the app reads it as a
+// plain `Record`. Convert and pass everything else through.
+function toProjectInfo(p: ProjectInfo & {terminalNames: unknown}): ProjectInfo {
+  const names = p.terminalNames;
+  return {
+    ...p,
+    terminalNames:
+      names instanceof Map ? Object.fromEntries(names) : (names as Record<string, string>),
+  };
+}
+
 export function getOkenaNative(): OkenaNative {
   try {
-    const gen = require('../generated');
-    return (gen.default ?? gen) as OkenaNative;
+    // The local `okena-mobile-ffi` package entry (src/index.tsx) installs the
+    // JSI bindings (`installRustCrate()` + `initialize()`) on first import and
+    // re-exports every generated function at the top level. Most functions
+    // satisfy `OkenaNative` structurally as-is; the wrapper below only overrides
+    // the ones whose enum shapes need translating (see adapters above).
+    const gen = require('okena-mobile-ffi');
+    return {
+      ...gen,
+      connectionStatus: (connId: ConnId) =>
+        toConnectionStatus(gen.connectionStatus(connId)),
+      getCursor: (connId: ConnId, terminalId: TerminalId) =>
+        toCursorState(gen.getCursor(connId, terminalId)),
+      getProjects: (connId: ConnId) =>
+        (gen.getProjects(connId) as Array<ProjectInfo & {terminalNames: unknown}>).map(
+          toProjectInfo,
+        ),
+    } as OkenaNative;
   } catch (e) {
     throw new Error(
       'okena native module not generated yet — run `npm run ubrn:android` or ' +
