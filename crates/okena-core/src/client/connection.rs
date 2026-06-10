@@ -13,7 +13,7 @@ use tokio_tungstenite::tungstenite;
 /// Platform-specific operations that the generic client delegates to.
 ///
 /// Desktop creates `Terminal` objects and inserts into `TerminalsRegistry`.
-/// Mobile may create Flutter-side terminal state via FFI callbacks.
+/// Mobile creates `TerminalHolder` state via the FFI binding crate.
 pub trait ConnectionHandler: Send + Sync + 'static {
     /// Terminal discovered — create platform terminal object.
     /// `ws_sender` is for constructing a transport that sends WS commands.

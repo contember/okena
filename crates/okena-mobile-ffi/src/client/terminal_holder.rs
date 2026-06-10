@@ -247,6 +247,11 @@ impl TerminalHolder {
     }
 
     /// Take the dirty flag (returns true if it was dirty, resets to false).
+    ///
+    /// Reserved for the RN render loop's `is_dirty()`-gated repaint (migration
+    /// plan Decision C): the canvas will call this once per frame to consume the
+    /// flag. Not yet wired into the uniffi surface, hence `allow(dead_code)`.
+    #[allow(dead_code)]
     pub fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::Relaxed)
     }

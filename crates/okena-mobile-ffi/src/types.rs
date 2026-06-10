@@ -1,12 +1,13 @@
 //! uniffi `Record` / `Enum` types mirroring the data the FFI returns.
 //!
-//! uniffi derive macros cannot be placed on types from another crate, so we
-//! define our own here and convert from `okena_mobile_native`'s api/client
-//! types via `From`. The shapes match 1:1 so the conversions are mechanical.
+//! uniffi derive macros are kept off the internal `crate::api` data structs
+//! (which `TerminalHolder` and the state accessors produce), so we define the
+//! uniffi-facing mirrors here and convert from the internal ones via `From`.
+//! The shapes match 1:1 so the conversions are mechanical.
 
 use std::collections::HashMap;
 
-use okena_mobile_native::api::{
+use crate::api::{
     connection::ConnectionStatus as NativeConnectionStatus,
     state::{
         FolderInfo as NativeFolderInfo, FullscreenInfo as NativeFullscreenInfo,
@@ -21,8 +22,8 @@ use okena_mobile_native::api::{
 
 /// Connection status surfaced to the RN layer.
 ///
-/// Mirrors `okena_mobile_native::api::connection::ConnectionStatus` (which
-/// itself collapses core's `Reconnecting { attempt }` into `Connecting`).
+/// Mirrors `crate::api::connection::ConnectionStatus` (which itself collapses
+/// core's `Reconnecting { attempt }` into `Connecting`).
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum ConnectionStatus {
     Disconnected,
