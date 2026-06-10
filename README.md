@@ -119,7 +119,7 @@ The install script includes built-in auto-update support. On macOS and Linux, Ok
 
 ### Remote Control & Companion Apps
 - **Remote API** - Local HTTP/WebSocket server for remote terminal control (see `docs/remote.md`)
-- **Mobile app** - Flutter + Rust FFI companion app for Android/iOS (see `docs/mobile-status.md`)
+- **Mobile app** - React Native companion app for Android/iOS over the Rust core via uniffi (see `docs/mobile-status.md`, code in `mobile/rn`)
 - **Web client** - Browser-based terminal access via built-in web UI
 - **Secure pairing** - HMAC-SHA256 token auth with rate-limited pairing codes
 
@@ -194,7 +194,7 @@ Settings are stored in the platform's config directory (macOS: `~/Library/Applic
 | [Project Services](docs/services.md) | okena.yaml, Docker Compose integration, auto-restart |
 | [Git Worktrees](docs/worktrees.md) | Worktree management, sync watcher, path templates |
 | [Remote Control API](docs/remote.md) | HTTP/WebSocket API, pairing, authentication |
-| [Mobile Client](docs/mobile-status.md) | Flutter + Rust FFI mobile companion app |
+| [Mobile Client](docs/mobile-status.md) | React Native (uniffi) mobile companion app |
 
 ## Dependencies
 

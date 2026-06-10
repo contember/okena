@@ -67,100 +67,38 @@ jobs:
       - name: Run tests
         run: cargo test
 
-  # Mobile builds: Android APK
-  # iOS temporarily disabled: macos-latest Xcode now requires a Development Team /
-  # provisioning profile even with `flutter build ios --no-codesign`, which breaks
-  # the unsigned device build. Re-enable once codesigning is sorted.
-  build-mobile:
-    if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: android
-            artifact: okena-android
-
-    runs-on: ${{ matrix.os }}
-
+  # React Native mobile client — TypeScript checks.
+  #
+  # The native app build (uniffi-bindgen-react-native cross-compiling
+  # crates/okena-mobile-ffi to an Android NDK .so / iOS xcframework, then
+  # `react-native run-*`) needs the mobile toolchain and is NOT yet wired into
+  # CI — see mobile/rn/README.md for the device-side steps. Until then CI
+  # type-checks and lints the RN/TS sources; the Rust FFI crate itself is
+  # already covered by the `check` job's workspace build + clippy + tests.
+  mobile-rn:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile/rn
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          toolchain: "1.93"
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mobile/rn/package-lock.json
 
-      - name: Add Android Rust targets
-        if: matrix.platform == 'android'
-        run: |
-          rustup target add armv7-linux-androideabi
-          rustup target add aarch64-linux-android
-          rustup target add x86_64-linux-android
-          rustup target add i686-linux-android
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Add iOS Rust targets
-        if: matrix.platform == 'ios'
-        run: |
-          rustup target add aarch64-apple-ios
-          rustup target add x86_64-apple-ios
+      - name: Typecheck
+        run: npm run typecheck
 
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: mobile-${{ matrix.platform }}
-          workspaces: mobile/native
-
-      - name: Setup Java (Android)
-        if: matrix.platform == 'android'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-
-      - name: Flutter pub get
-        working-directory: mobile
-        run: flutter pub get
-
-      - name: Build Android APKs
-        if: matrix.platform == 'android'
-        working-directory: mobile
-        run: |
-          flutter build apk --release --split-per-abi
-          flutter build apk --release
-
-      - name: Prepare Android artifact
-        if: matrix.platform == 'android'
-        run: |
-          mkdir -p dist
-          cp mobile/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk dist/okena-arm64-v8a.apk
-          cp mobile/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk dist/okena-armeabi-v7a.apk
-          cp mobile/build/app/outputs/flutter-apk/app-x86_64-release.apk dist/okena-x86_64.apk
-          cp mobile/build/app/outputs/flutter-apk/app-release.apk dist/okena-universal.apk
-
-      - name: Build iOS (no codesign)
-        if: matrix.platform == 'ios'
-        working-directory: mobile
-        run: flutter build ios --release --no-codesign
-
-      - name: Prepare iOS artifact
-        if: matrix.platform == 'ios'
-        run: |
-          mkdir -p dist
-          cd mobile/build/ios/iphoneos
-          zip -r ../../../../dist/okena-ios.zip Runner.app
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: dist/
-          retention-days: 7
+      - name: Lint
+        run: npm run lint
 
   # Full multi-platform build: tags + manual trigger
   build:
@@ -260,7 +198,7 @@ jobs:
 
   # Create release when a tag is pushed
   release:
-    needs: [build, build-mobile]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
