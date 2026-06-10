@@ -153,7 +153,7 @@ impl ServerCertVerifier for PinnedCertVerifier {
 }
 
 fn provider() -> Arc<CryptoProvider> {
-    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+    Arc::new(rustls::crypto::ring::default_provider())
 }
 
 /// Build a rustls `ClientConfig` that pins the server cert via [`PinnedCertVerifier`].
@@ -162,11 +162,11 @@ fn pinned_client_config(pinned: Option<String>, observed: ObservedFingerprint) -
     let verifier = Arc::new(PinnedCertVerifier::new(pinned, observed, provider.clone()));
     #[allow(
         clippy::expect_used,
-        reason = "aws_lc_rs default provider always supports the default protocol versions"
+        reason = "ring default provider always supports the default protocol versions"
     )]
     let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .expect("aws_lc_rs default provider supports default protocol versions");
+        .expect("ring default provider supports default protocol versions");
     builder
         .dangerous()
         .with_custom_certificate_verifier(verifier)
