@@ -58,35 +58,35 @@ export type LayoutNode = TerminalNode | SplitNode | TabsNode;
  * `whereType<LayoutNode>()` behavior: children that fail to parse are dropped.
  */
 function parseNode(map: Record<string, unknown>): LayoutNode | null {
-  const type = map['type'];
+  const type = map.type;
   switch (type) {
     case 'terminal':
       return {
         type: 'terminal',
         terminalId:
-          typeof map['terminal_id'] === 'string'
-            ? (map['terminal_id'] as string)
+          typeof map.terminal_id === 'string'
+            ? (map.terminal_id as string)
             : undefined,
-        minimized: map['minimized'] === true,
-        detached: map['detached'] === true,
+        minimized: map.minimized === true,
+        detached: map.detached === true,
       };
     case 'split': {
-      const children = parseChildren(map['children']);
-      const rawSizes = map['sizes'];
+      const children = parseChildren(map.children);
+      const rawSizes = map.sizes;
       const sizes = Array.isArray(rawSizes)
         ? rawSizes.filter((s): s is number => typeof s === 'number')
         : [];
       return {
         type: 'split',
-        direction: map['direction'] === 'vertical' ? 'vertical' : 'horizontal',
+        direction: map.direction === 'vertical' ? 'vertical' : 'horizontal',
         sizes,
         children,
       };
     }
     case 'tabs': {
-      const children = parseChildren(map['children']);
+      const children = parseChildren(map.children);
       const activeTab =
-        typeof map['active_tab'] === 'number' ? (map['active_tab'] as number) : 0;
+        typeof map.active_tab === 'number' ? (map.active_tab as number) : 0;
       return { type: 'tabs', activeTab, children };
     }
     default:
