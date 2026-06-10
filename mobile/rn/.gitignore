@@ -4,3 +4,8 @@ android/
 ios/
 .expo/
 *.log
+
+# ubrn output: generated bindings + checked-out rust (run `npm run ubrn:android|ios`)
+src/generated/
+cpp/generated/
+rust_modules/

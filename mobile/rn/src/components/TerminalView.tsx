@@ -380,15 +380,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const resizeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialResizeSent = useRef(false);
 
-  // Resize the font in-place so metrics match the requested size.
-  useMemo(() => {
+  // Resize the fonts in-place so metrics match the requested size, then measure
+  // a cell. Kept as one memo so `measureCell` always runs after `setSize` and
+  // `fontSize` is a real (visible-to-eslint) dependency — the Skia font is
+  // mutated in place, so the `fonts` reference alone wouldn't track size changes.
+  const metrics = useMemo(() => {
     fonts.regular.setSize(fontSize);
     fonts.bold?.setSize(fontSize);
     fonts.italic?.setSize(fontSize);
     fonts.boldItalic?.setSize(fontSize);
+    return measureCell(fonts.regular);
   }, [fonts, fontSize]);
-
-  const metrics = useMemo(() => measureCell(fonts.regular), [fonts, fontSize]);
 
   // ── Layout → cols/rows → resizeLocal + debounced resizeTerminal ──────────
   const onLayout = useCallback(

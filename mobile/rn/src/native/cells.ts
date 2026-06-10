@@ -1,11 +1,10 @@
 /**
  * cells.ts — decoder for the packed visible-cell buffer.
  *
- * SCAFFOLD NOTE: this matches a binary format produced by a Rust FFI function
- * (`getVisibleCellsPacked`) that is being ADDED to `crates/okena-mobile-ffi`
- * as part of the migration (it does not exist in `mobile/native` yet). This
- * file is the authoritative spec of that wire format; the Rust encoder must
- * produce exactly these bytes.
+ * This matches the binary format produced by the Rust FFI function
+ * `get_visible_cells_packed` in `crates/okena-mobile-ffi/src/lib.rs`. This file
+ * is the authoritative spec of that wire format; the Rust encoder must produce
+ * exactly these bytes.
  *
  * Format (little-endian throughout):
  *

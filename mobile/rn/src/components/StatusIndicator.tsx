@@ -86,13 +86,7 @@ export const StatusIndicator: React.FC<{ status: ConnectionStatus }> = ({ status
         style={[
           styles.dot,
           { backgroundColor: color, opacity: pulse },
-          isConnected && {
-            shadowColor: color,
-            shadowOpacity: 0.5,
-            shadowRadius: 6,
-            shadowOffset: { width: 0, height: 0 },
-            elevation: 4,
-          },
+          isConnected && [styles.glow, { shadowColor: color }],
         ]}
       />
       <Animated.Text
@@ -115,6 +109,12 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     borderRadius: 20,
     borderWidth: StyleSheet.hairlineWidth,
+  },
+  glow: {
+    shadowOpacity: 0.5,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 4,
   },
   dot: {
     width: 6,
