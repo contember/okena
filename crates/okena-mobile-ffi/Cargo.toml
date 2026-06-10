@@ -10,20 +10,26 @@ edition = "2024"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
-# Reuse the existing mobile binding logic verbatim — ConnectionManager,
-# MobileConnectionHandler, TerminalHolder and the api data structs all live
-# here. We do NOT duplicate any of it; this crate only re-expresses the FFI
-# surface via uniffi instead of flutter_rust_bridge.
-okena_mobile_native = { path = "../../mobile/native" }
-
-# Shared protocol / TLS / WS / terminal-emulation core. Needed for the request
-# enums (ActionRequest, WsClientMessage, SpecialKey, SplitDirection, DiffMode,
-# FolderColor) and the DARK_THEME used when extracting cells.
+# Shared protocol / TLS / WS / terminal-emulation core. The `client` feature
+# pulls reqwest + tokio-tungstenite with the rustls backends (NDK-friendly — no
+# OpenSSL cross-compile), so we inherit that backend selection via unification.
 okena-core = { path = "../okena-core", features = ["client"] }
 
 # uniffi in proc-macro mode (no UDL). `tokio` enables async export via
-# `#[uniffi::export(async_runtime = "tokio")]`.
-uniffi = { version = "0.29", features = ["tokio"] }
+# `#[uniffi::export(async_runtime = "tokio")]`. Pinned to 0.31 to match the
+# `uniffi-bindgen-react-native` (ubrn) version in mobile/rn (ubrn 0.31.0-3 pins
+# `uniffi =0.31.0`, and the metadata contract version must match the bindgen).
+uniffi = { version = "0.31", features = ["tokio"] }
 
+# The connection/terminal engine carried over from the retired `mobile/native`
+# crate (ConnectionManager, MobileConnectionHandler, TerminalHolder). These are
+# its direct dependencies — no flutter_rust_bridge.
+alacritty_terminal = "0.25"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+async-channel = "2.3"
+parking_lot = "0.12"
+uuid = { version = "1.10", features = ["v4"] }
+log = "0.4"
 serde_json = "1.0"
 anyhow = "1.0"

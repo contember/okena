@@ -1,15 +1,16 @@
 //! uniffi FFI surface for the React Native mobile app.
 //!
-//! This crate is the RN-facing equivalent of `mobile/native`'s
-//! `flutter_rust_bridge` `api/` layer. It re-expresses the same ~60 functions
-//! via uniffi proc-macros (`#[uniffi::export]`, `#[derive(uniffi::Record)]`,
-//! `#[derive(uniffi::Enum)]`) so `uniffi-bindgen-react-native` (ubrn) can emit
-//! a JSI TurboModule.
+//! Exposes ~60 functions via uniffi proc-macros (`#[uniffi::export]`,
+//! `#[derive(uniffi::Record)]`, `#[derive(uniffi::Enum)]`) so
+//! `uniffi-bindgen-react-native` (ubrn) can emit a JSI TurboModule. This
+//! replaces the `flutter_rust_bridge` `api/` layer of the retired `mobile/native`
+//! crate, whose plain-Rust engine now lives here directly (see below).
 //!
-//! It does NOT reimplement any logic: every function delegates to
-//! `okena_mobile_native::client::manager::ConnectionManager`, exactly like the
-//! Flutter `api/` functions do. The `ConnectionManager`, `MobileConnectionHandler`
-//! and `TerminalHolder` are reused verbatim from `mobile/native`.
+//! The networking/emulation engine lives in `crate::client`
+//! (`ConnectionManager`, `MobileConnectionHandler`, `TerminalHolder`) and the
+//! plain state-extraction structs in `crate::api` — both carried over from the
+//! retired `mobile/native` Flutter crate (frb attributes stripped). This crate
+//! is self-contained: it does not depend on any Flutter tooling.
 //!
 //! ## Async strategy
 //! The frb api split sync vs. async based on whether the body actually awaits:
@@ -24,6 +25,8 @@
 
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+mod api;
+mod client;
 mod types;
 
 use okena_core::api::ActionRequest;
@@ -32,7 +35,7 @@ use okena_core::keys::SpecialKey;
 use okena_core::theme::DARK_THEME;
 use okena_core::types::{DiffMode, SplitDirection};
 
-use okena_mobile_native::client::manager::ConnectionManager;
+use crate::client::manager::ConnectionManager;
 
 pub use types::{
     CellData, ConnectionStatus, CursorShape, CursorState, FolderInfo, FullscreenInfo, ProjectInfo,
@@ -103,7 +106,7 @@ pub fn connection_status(conn_id: String) -> ConnectionStatus {
     // Delegate to the native api fn, which already maps okena-core's status
     // (collapsing `Reconnecting` into `Connecting`) into its own enum; we then
     // convert that into our uniffi enum.
-    okena_mobile_native::api::connection::connection_status(conn_id).into()
+    crate::api::connection::connection_status(conn_id).into()
 }
 
 /// Seconds since last WS activity (terminal output). Large value if missing.
@@ -328,7 +331,7 @@ pub fn get_selection_bounds(conn_id: String, terminal_id: String) -> Option<Sele
 /// Get all projects from the cached remote state.
 #[uniffi::export]
 pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
-    okena_mobile_native::api::state::get_projects(conn_id)
+    crate::api::state::get_projects(conn_id)
         .into_iter()
         .map(Into::into)
         .collect()
@@ -337,13 +340,13 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
 /// Get the focused project ID from the cached remote state.
 #[uniffi::export]
 pub fn get_focused_project_id(conn_id: String) -> Option<String> {
-    okena_mobile_native::api::state::get_focused_project_id(conn_id)
+    crate::api::state::get_focused_project_id(conn_id)
 }
 
 /// Get folders from the cached remote state.
 #[uniffi::export]
 pub fn get_folders(conn_id: String) -> Vec<FolderInfo> {
-    okena_mobile_native::api::state::get_folders(conn_id)
+    crate::api::state::get_folders(conn_id)
         .into_iter()
         .map(Into::into)
         .collect()
@@ -352,13 +355,13 @@ pub fn get_folders(conn_id: String) -> Vec<FolderInfo> {
 /// Get the project order from the cached remote state.
 #[uniffi::export]
 pub fn get_project_order(conn_id: String) -> Vec<String> {
-    okena_mobile_native::api::state::get_project_order(conn_id)
+    crate::api::state::get_project_order(conn_id)
 }
 
 /// Get fullscreen terminal info.
 #[uniffi::export]
 pub fn get_fullscreen_terminal(conn_id: String) -> Option<FullscreenInfo> {
-    okena_mobile_native::api::state::get_fullscreen_terminal(conn_id).map(Into::into)
+    crate::api::state::get_fullscreen_terminal(conn_id).map(Into::into)
 }
 
 /// Get layout JSON for a project.
