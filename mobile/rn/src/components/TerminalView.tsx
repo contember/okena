@@ -192,13 +192,17 @@ function fontFor(fonts: TerminalFonts, bold: boolean, italic: boolean): SkFont {
   // Variant missing → synthesize on regular. (Mutates a shared font; acceptable
   // here because painting is single-threaded and we reset below.)
   const f = fonts.regular;
-  f.setEmbolden(bold);
+  // NOTE: synthetic *bold* via `setEmbolden` is intentionally omitted. All four
+  // JetBrainsMono variants are bundled, so this fallback only runs if a variant
+  // fails to load — and `setEmbolden` is broken in react-native-skia 1.12.4: its
+  // native binding rejects the (typed `boolean`) arg with "Value is false,
+  // expected a number". Italic is still synthesized via `setSkewX` (typed
+  // `number`, works fine).
   f.setSkewX(italic ? -0.25 : 0);
   return f;
 }
 
 function resetSynthetic(font: SkFont) {
-  font.setEmbolden(false);
   font.setSkewX(0);
 }
 
