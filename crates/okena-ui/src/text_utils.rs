@@ -29,7 +29,7 @@ pub fn find_word_boundaries(text: &str, byte_col: usize) -> (usize, usize) {
 
     // Get the char at `col` (if col == text.len(), there is no char)
     let cur_char = text[col..].chars().next();
-    let on_word = cur_char.map_or(false, |c| is_word_char(c));
+    let on_word = cur_char.is_some_and(is_word_char);
 
     // Scan backwards for start (byte offset)
     let mut start = col;
@@ -40,11 +40,9 @@ pub fn find_word_boundaries(text: &str, byte_col: usize) -> (usize, usize) {
             while prev > 0 && !text.is_char_boundary(prev) {
                 prev -= 1;
             }
-            let prev_char = text[prev..].chars().next().unwrap();
-            if is_word_char(prev_char) {
-                start = prev;
-            } else {
-                break;
+            match text[prev..].chars().next() {
+                Some(prev_char) if is_word_char(prev_char) => start = prev,
+                _ => break,
             }
         }
     }
@@ -52,7 +50,9 @@ pub fn find_word_boundaries(text: &str, byte_col: usize) -> (usize, usize) {
     // Scan forwards for end (byte offset)
     let mut end = col;
     while end < text.len() {
-        let next_char = text[end..].chars().next().unwrap();
+        let Some(next_char) = text[end..].chars().next() else {
+            break;
+        };
         if is_word_char(next_char) {
             end += next_char.len_utf8();
         } else {

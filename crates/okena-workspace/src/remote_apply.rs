@@ -400,6 +400,8 @@ mod tests {
             terminal_id: Some(id.to_string()),
             minimized: false,
             detached: false,
+            cols: None,
+            rows: None,
         }
     }
 
