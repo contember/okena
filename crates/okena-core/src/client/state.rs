@@ -251,7 +251,7 @@ mod tests {
             id: "p1".into(),
             name: "p1".into(),
             path: "/tmp".into(),
-            is_visible: true,
+            show_in_overview: true,
             layout: Some(ApiLayoutNode::Split {
                 direction: SplitDirection::Horizontal,
                 sizes: vec![50.0, 50.0],
@@ -273,7 +273,11 @@ mod tests {
                 ],
             }),
             terminal_names: Default::default(),
+            git_status: None,
             folder_color: FolderColor::default(),
+            services: Vec::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
         }]);
         let sizes = collect_terminal_sizes(&state);
         assert_eq!(sizes.get("t1"), Some(&(120, 40)));
