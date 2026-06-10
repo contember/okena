@@ -1,8 +1,11 @@
 # Mobile app → React Native migration plan
 
-Status: **proposal / spike-gated.** This branch (`feat/mobile-rn`) is PR #17 (`feat/ios`)
-rebased onto current `main`. It still ships the Flutter app; this document is the plan to
-replace the Flutter UI layer with React Native while **keeping the Rust core**.
+Status: **in progress — Flutter removed, RN in place, device build pending.** The Flutter app
+(`mobile/lib` + `mobile/native`) has been deleted; the Rust engine now lives self-contained in
+`crates/okena-mobile-ffi` (uniffi), and `mobile/rn` is a complete RN 0.76 project + tooling +
+`ubrn.config.yaml`. What remains is toolchain/device-bound: generating the native host
+projects, running the ubrn cross-compile, and the Phase-0 spikes (§3) — see
+[`rn/README.md`](rn/README.md). This document is kept as the design/rationale record.
 
 Primary strategy: **RN + Rust core via uniffi**, with **native GPU rendering** of the
 terminal (no `xterm.js`). Dropping Rust entirely is a documented *fallback*, not the goal.
