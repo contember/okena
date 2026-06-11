@@ -23,6 +23,7 @@
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.1.0",
     "@shopify/react-native-skia": "^1.5.0",
+    "okena-mobile-ffi": "file:./modules/okena-mobile-ffi",
     "react": "18.3.1",
     "react-native": "0.76.5",
     "zustand": "^4.5.5"
