@@ -32,6 +32,8 @@ fn make_project(id: &str) -> ProjectData {
         service_terminals: HashMap::new(),
         default_shell: None,
         hook_terminals: HashMap::new(),
+        pinned: false,
+        last_activity_at: None,
     }
 }
 
@@ -397,6 +399,8 @@ fn make_project_with_layout(id: &str, layout: LayoutNode) -> ProjectData {
         service_terminals: HashMap::new(),
         default_shell: None,
         hook_terminals: HashMap::new(),
+        pinned: false,
+        last_activity_at: None,
     }
 }
 

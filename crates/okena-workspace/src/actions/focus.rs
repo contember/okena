@@ -159,8 +159,11 @@ impl Workspace {
         // Update FocusManager
         focus_manager.focus_terminal(project_id.clone(), layout_path.clone());
 
-        // Record project access time for recency sorting
+        // Record project access time for recency sorting, and stamp activity
+        // so the activity-sorted sidebar surfaces the project the user just
+        // moved into. `bump_activity` already notifies + persists (debounced).
         self.touch_project(&project_id);
+        self.bump_activity(&project_id, cx);
 
         cx.notify();
     }

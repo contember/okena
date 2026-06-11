@@ -584,6 +584,8 @@ mod tests {
             service_terminals: HashMap::new(),
             default_shell: None::<ShellType>,
             hook_terminals: HashMap::<String, HookTerminalEntry>::new(),
+            pinned: false,
+            last_activity_at: None,
         }
     }
 

@@ -124,6 +124,12 @@ impl Okena {
             return;
         }
 
+        // A bell or OSC alert is "activity" for the owning project regardless
+        // of the notification settings below — stamp it before any settings
+        // bail so the activity-sorted sidebar surfaces the project even when
+        // desktop notifications are disabled.
+        self.bump_activity_for_terminals(drained.iter().map(|(tid, _, _)| tid.as_str()), cx);
+
         // Read the (small) notification settings; bail if the feature is off.
         // Draining above already cleared the queues, so nothing accumulates
         // while disabled.
@@ -193,6 +199,58 @@ impl Okena {
                 );
             }
         }
+    }
+
+    /// Drain the one-shot command-finished (OSC 133 ;D) edge for each dirty
+    /// terminal and stamp activity on the owning project. Called from the PTY
+    /// event loop alongside notification draining so a finished command floats
+    /// its project up in the activity-sorted sidebar — even with no bell.
+    pub(super) fn process_command_finished_activity(
+        &mut self,
+        dirty_terminal_ids: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        // Drain edges first (cheap atomic swap); collect the terminals that
+        // actually saw a command finish. Almost every batch drains nothing.
+        let finished: Vec<String> = {
+            let reg = self.terminals.lock();
+            dirty_terminal_ids
+                .iter()
+                .filter(|tid| {
+                    reg.get(*tid)
+                        .is_some_and(|t| t.take_pending_command_finished())
+                })
+                .cloned()
+                .collect()
+        };
+        if finished.is_empty() {
+            return;
+        }
+        self.bump_activity_for_terminals(finished.iter().map(|s| s.as_str()), cx);
+    }
+
+    /// Resolve each terminal id to its owning project and bump that project's
+    /// activity timestamp once. Deduplicates projects so a batch touching
+    /// several terminals of the same project only notifies/persists once.
+    fn bump_activity_for_terminals<'a>(
+        &mut self,
+        terminal_ids: impl Iterator<Item = &'a str>,
+        cx: &mut Context<Self>,
+    ) {
+        let project_ids: std::collections::HashSet<String> = {
+            let ws = self.workspace.read(cx);
+            terminal_ids
+                .filter_map(|tid| ws.find_project_for_terminal(tid).map(|p| p.id.clone()))
+                .collect()
+        };
+        if project_ids.is_empty() {
+            return;
+        }
+        self.workspace.update(cx, |ws, cx| {
+            for pid in project_ids {
+                ws.bump_activity(&pid, cx);
+            }
+        });
     }
 
     /// True when `(project_id, path)` is the focused pane in a window that
