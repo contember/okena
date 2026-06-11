@@ -103,7 +103,7 @@ fn atomic_write(path: &Path, bytes: &[u8], _mode: u32) -> std::io::Result<()> {
 }
 
 /// Build a rustls `ServerConfig` from the persisted self-signed cert + key,
-/// using the aws_lc_rs provider (matches the client side).
+/// using the ring provider (matches the client side).
 pub fn server_config(material: &TlsMaterial) -> Result<Arc<rustls::ServerConfig>> {
     let certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_file_iter(&material.cert_path)
@@ -113,7 +113,7 @@ pub fn server_config(material: &TlsMaterial) -> Result<Arc<rustls::ServerConfig>
     let key = PrivateKeyDer::from_pem_file(&material.key_path)
         .with_context(|| format!("reading private key {:?}", material.key_path))?;
 
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .context("rustls default protocol versions")?
@@ -212,7 +212,7 @@ mod handshake_tests {
     #[tokio::test]
     async fn dual_stack_serves_http_and_pinned_https_on_one_port() {
         // Server providers may consult the process-default CryptoProvider.
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = rustls::crypto::ring::default_provider().install_default();
 
         let dir = tempfile::tempdir().unwrap();
         let material = load_or_generate(dir.path()).unwrap();

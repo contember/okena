@@ -25,9 +25,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"], optional = true }
 async-channel = { version = "2.3", optional = true }
 futures = { version = "0.3", optional = true }
-# Client TLS with certificate pinning (TOFU). aws_lc_rs matches reqwest's default
-# rustls backend so a single CryptoProvider is shared across reqwest + tungstenite.
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "tls12", "logging", "std"], optional = true }
+# Client TLS with certificate pinning (TOFU). Uses the `ring` crypto backend:
+# it's the portable provider that works on every target (notably Android/NDK,
+# where `aws_lc_rs`'s jitter-entropy init segfaults), and reqwest 0.12's
+# `rustls-tls` feature already pulls `ring` for hyper/tokio-rustls, so a single
+# CryptoProvider is shared across reqwest + tungstenite.
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"], optional = true }
 rustls-pki-types = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 
