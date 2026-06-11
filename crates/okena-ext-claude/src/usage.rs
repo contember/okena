@@ -664,17 +664,17 @@ impl ClaudeUsage {
                                         .py(px(10.0))
                                         .gap(px(7.0))
                                         .when_some(data.five_hour.as_ref(), |el, tier| {
-                                            el.child(render_tier_row(t, cx, "Session", "5h", tier, "marker-session"))
+                                            el.child(render_tier_row(t, cx, "Session", "5h", tier, "marker-session", 5))
                                         })
                                         .when_some(data.seven_day.as_ref(), |el, tier| {
-                                            el.child(render_tier_row(t, cx, "Weekly", "7d", tier, "marker-weekly"))
+                                            el.child(render_tier_row(t, cx, "Weekly", "7d", tier, "marker-weekly", 7))
                                         })
                                         .when_some(
                                             data.seven_day_sonnet
                                                 .as_ref()
                                                 .filter(|tier| tier.utilization >= 0.5),
                                             |el, tier| {
-                                                el.child(render_tier_row(t, cx, "Sonnet", "7d", tier, "marker-sonnet"))
+                                                el.child(render_tier_row(t, cx, "Sonnet", "7d", tier, "marker-sonnet", 7))
                                             },
                                         )
                                         .when_some(
@@ -682,7 +682,7 @@ impl ClaudeUsage {
                                                 .as_ref()
                                                 .filter(|tier| tier.utilization >= 0.5),
                                             |el, tier| {
-                                                el.child(render_tier_row(t, cx, "Opus", "7d", tier, "marker-opus"))
+                                                el.child(render_tier_row(t, cx, "Opus", "7d", tier, "marker-opus", 7))
                                             },
                                         )
                                         .when_some(data.extra_usage.as_ref(), |el, extra| {
@@ -753,14 +753,45 @@ fn render_popover_header(t: &ThemeColors, cx: &App) -> impl IntoElement {
         )
 }
 
-fn utilization_color(t: &ThemeColors, pct: f64) -> u32 {
-    if pct > 80.0 {
-        t.metric_critical
-    } else if pct > 60.0 {
-        t.metric_warning
-    } else {
-        t.metric_normal
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Severity {
+    Normal,
+    Warning,
+    Critical,
+}
+
+fn severity_color(t: &ThemeColors, s: Severity) -> u32 {
+    match s {
+        Severity::Normal => t.metric_normal,
+        Severity::Warning => t.metric_warning,
+        Severity::Critical => t.metric_critical,
     }
+}
+
+/// Severity from absolute utilization — how close to the hard cap.
+fn abs_severity(pct: f64) -> Severity {
+    if pct > 80.0 {
+        Severity::Critical
+    } else if pct > 60.0 {
+        Severity::Warning
+    } else {
+        Severity::Normal
+    }
+}
+
+/// Severity from pace — how far ahead usage is of where it "should" be at this
+/// point in the period. `Critical` means the user is burning budget fast enough
+/// to run out before the period resets unless they slow down.
+fn pace_severity(usage_pct: f64, time_pct: Option<f64>) -> Severity {
+    match time_pct {
+        Some(tp) if usage_pct > tp + 15.0 => Severity::Critical,
+        Some(tp) if usage_pct > tp + 5.0 => Severity::Warning,
+        _ => Severity::Normal,
+    }
+}
+
+fn utilization_color(t: &ThemeColors, pct: f64) -> u32 {
+    severity_color(t, abs_severity(pct))
 }
 
 fn render_tier_row(
@@ -770,8 +801,17 @@ fn render_tier_row(
     period: &str,
     tier: &TierUsage,
     marker_id: &'static str,
+    segments: u32,
 ) -> impl IntoElement {
     let pct = tier.utilization;
+    let pace = pace_severity(pct, tier.time_elapsed_pct);
+    // % text reflects whichever is worse: nearness to the cap, or burn pace.
+    let pct_color = severity_color(t, abs_severity(pct).max(pace));
+    let pace_msg: Option<(&str, u32)> = match pace {
+        Severity::Critical => Some(("Slow down to last the period", t.metric_critical)),
+        Severity::Warning => Some(("Ahead of pace", t.metric_warning)),
+        Severity::Normal => None,
+    };
 
     v_flex()
         .gap(px(5.0))
@@ -800,20 +840,31 @@ fn render_tier_row(
                     div()
                         .text_size(ui_text_md(cx))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(utilization_color(t, pct)))
+                        .text_color(rgb(pct_color))
                         .child(format!("{:.0}%", pct)),
                 ),
         )
-        .child(render_usage_with_time_bar(t, pct, tier.time_elapsed_pct, marker_id))
-        .when(!tier.resets_at.is_empty(), |el| {
+        .child(render_usage_with_time_bar(t, pct, tier.time_elapsed_pct, marker_id, segments))
+        .when(pace_msg.is_some() || !tier.resets_at.is_empty(), |el| {
             el.child(
                 h_flex()
-                    .justify_end()
+                    .justify_between()
+                    .items_baseline()
+                    .child(
+                        div()
+                            .text_size(ui_text_xs(cx))
+                            .font_weight(FontWeight::MEDIUM)
+                            .when_some(pace_msg, |d, (msg, col)| {
+                                d.text_color(rgb(col)).child(msg)
+                            }),
+                    )
                     .child(
                         div()
                             .text_size(ui_text_xs(cx))
                             .text_color(rgb(t.text_muted))
-                            .child(format!("resets {}", tier.resets_at)),
+                            .when(!tier.resets_at.is_empty(), |d| {
+                                d.child(format!("resets {}", tier.resets_at))
+                            }),
                     ),
             )
         })
@@ -860,14 +911,52 @@ fn render_usage_with_time_bar(
     usage_pct: f64,
     time_pct: Option<f64>,
     marker_id: &'static str,
+    segments: u32,
 ) -> impl IntoElement {
     let clamped_usage = usage_pct.clamp(0.0, 100.0) as f32;
 
-    let pace_color = match time_pct {
-        Some(tp) if usage_pct > tp + 15.0 => t.metric_critical,
-        Some(tp) if usage_pct > tp + 5.0 => t.metric_warning,
-        _ => t.metric_normal,
-    };
+    // Base fill reflects nearness to the hard cap. Any usage *beyond* the pace
+    // marker is overage — drawn on top in warning/critical — so being over the
+    // budget for this point in the period is visible directly on the bar.
+    let base_color = severity_color(t, abs_severity(usage_pct));
+    let overage = time_pct.and_then(|tp| {
+        let start = tp.clamp(0.0, 100.0) as f32;
+        let width = clamped_usage - start;
+        if width <= 0.0 {
+            return None;
+        }
+        let color = if width > 15.0 {
+            t.metric_critical
+        } else {
+            t.metric_warning
+        };
+        Some((start, width, color))
+    });
+
+    // Divider lines splitting the bar into per-day (7d) or per-hour (5h)
+    // segments, so the pace marker can be read against a time grid.
+    let dividers = (1..segments).map(move |i| {
+        div()
+            .absolute()
+            .top_0()
+            .h_full()
+            .w(px(1.0))
+            .bg(rgb(t.border))
+            .left(relative(i as f32 / segments as f32))
+    });
+
+    // Translucent band over the segment the user is currently in (today / this
+    // hour). Derived from text_primary so it lightens on dark themes and darkens
+    // on light ones.
+    let current_seg = time_pct.and_then(|tp| {
+        if segments <= 1 {
+            return None;
+        }
+        let idx = (tp / 100.0 * segments as f64).floor() as i64;
+        Some(idx.clamp(0, segments as i64 - 1) as u32)
+    });
+    let mut highlight = rgb(t.text_primary);
+    highlight.a = 0.14;
 
     div()
         .h(px(6.0))
@@ -879,9 +968,33 @@ fn render_usage_with_time_bar(
             div()
                 .h_full()
                 .rounded_full()
-                .bg(rgb(pace_color))
+                .bg(rgb(base_color))
                 .w(relative(clamped_usage / 100.0)),
         )
+        .when_some(overage, |el, (start, width, color)| {
+            el.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .h_full()
+                    .left(relative(start / 100.0))
+                    .w(relative(width / 100.0))
+                    .rounded_r(px(3.0))
+                    .bg(rgb(color)),
+            )
+        })
+        .children(dividers)
+        .when_some(current_seg, |el, seg| {
+            el.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .h_full()
+                    .left(relative(seg as f32 / segments as f32))
+                    .w(relative(1.0 / segments as f32))
+                    .bg(highlight),
+            )
+        })
         .when_some(time_pct, |el, tp| {
             let clamped_time = tp.clamp(0.0, 100.0) as f32;
             let marker_color = t.text_primary;

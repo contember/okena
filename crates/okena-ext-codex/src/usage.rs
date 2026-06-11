@@ -622,13 +622,54 @@ impl CodexUsage {
     }
 }
 
-fn utilization_color(t: &ThemeColors, pct: u64) -> u32 {
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Severity {
+    Normal,
+    Warning,
+    Critical,
+}
+
+fn severity_color(t: &ThemeColors, s: Severity) -> u32 {
+    match s {
+        Severity::Normal => t.metric_normal,
+        Severity::Warning => t.metric_warning,
+        Severity::Critical => t.metric_critical,
+    }
+}
+
+/// Severity from absolute utilization — how close to the hard cap.
+fn abs_severity(pct: u64) -> Severity {
     if pct > 80 {
-        t.metric_critical
+        Severity::Critical
     } else if pct > 60 {
-        t.metric_warning
+        Severity::Warning
     } else {
-        t.metric_normal
+        Severity::Normal
+    }
+}
+
+/// Severity from pace — how far ahead usage is of where it "should" be at this
+/// point in the period. `Critical` means the user is burning budget fast enough
+/// to run out before the period resets unless they slow down.
+fn pace_severity(usage_pct: u64, time_pct: Option<f64>) -> Severity {
+    match time_pct {
+        Some(tp) if (usage_pct as f64) > tp + 15.0 => Severity::Critical,
+        Some(tp) if (usage_pct as f64) > tp + 5.0 => Severity::Warning,
+        _ => Severity::Normal,
+    }
+}
+
+fn utilization_color(t: &ThemeColors, pct: u64) -> u32 {
+    severity_color(t, abs_severity(pct))
+}
+
+/// Number of grid segments to split a usage bar into: per-hour for windows up
+/// to a day, per-day for longer windows. 1 means no internal dividers.
+fn segments_for_window(window_seconds: u64) -> u32 {
+    match window_seconds {
+        0..=3600 => 1,
+        3601..=86400 => (window_seconds / 3600).clamp(2, 12) as u32,
+        _ => (window_seconds / 86400).clamp(2, 14) as u32,
     }
 }
 
@@ -675,6 +716,14 @@ fn render_window_row(
     let pct = window.used_percent;
     let window_label = format_window_label(window.window_seconds);
     let reset = format_reset_time(window.reset_at);
+    let pace = pace_severity(pct, window.time_elapsed_pct);
+    // % text reflects whichever is worse: nearness to the cap, or burn pace.
+    let pct_color = severity_color(t, abs_severity(pct).max(pace));
+    let pace_msg: Option<(&str, u32)> = match pace {
+        Severity::Critical => Some(("Slow down to last the period", t.metric_critical)),
+        Severity::Warning => Some(("Ahead of pace", t.metric_warning)),
+        Severity::Normal => None,
+    };
 
     v_flex()
         .gap(px(2.0))
@@ -693,7 +742,7 @@ fn render_window_row(
                         .child(
                             div()
                                 .text_size(ui_text_ms(cx))
-                                .text_color(rgb(utilization_color(t, pct)))
+                                .text_color(rgb(pct_color))
                                 .child(format!("{}%", pct)),
                         )
                         .when(!reset.is_empty(), |el| {
@@ -706,21 +755,72 @@ fn render_window_row(
                         }),
                 ),
         )
-        .child(render_usage_with_time_bar(t, pct, window.time_elapsed_pct))
+        .child(render_usage_with_time_bar(
+            t,
+            pct,
+            window.time_elapsed_pct,
+            segments_for_window(window.window_seconds),
+        ))
+        .when_some(pace_msg, |el, (msg, col)| {
+            el.child(
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(col))
+                    .child(msg),
+            )
+        })
 }
 
 fn render_usage_with_time_bar(
     t: &ThemeColors,
     usage_pct: u64,
     time_pct: Option<f64>,
+    segments: u32,
 ) -> impl IntoElement {
     let clamped_usage = (usage_pct as f32).clamp(0.0, 100.0);
 
-    let pace_color = match time_pct {
-        Some(tp) if (usage_pct as f64) > tp + 15.0 => t.metric_critical,
-        Some(tp) if (usage_pct as f64) > tp + 5.0 => t.metric_warning,
-        _ => t.metric_normal,
-    };
+    // Base fill reflects nearness to the hard cap. Any usage *beyond* the pace
+    // marker is overage — drawn on top in warning/critical — so being over the
+    // budget for this point in the period is visible directly on the bar.
+    let base_color = severity_color(t, abs_severity(usage_pct));
+    let overage = time_pct.and_then(|tp| {
+        let start = tp.clamp(0.0, 100.0) as f32;
+        let width = clamped_usage - start;
+        if width <= 0.0 {
+            return None;
+        }
+        let color = if width > 15.0 {
+            t.metric_critical
+        } else {
+            t.metric_warning
+        };
+        Some((start, width, color))
+    });
+
+    // Divider lines splitting the bar into per-hour or per-day segments so the
+    // pace marker can be read against a time grid.
+    let dividers = (1..segments).map(move |i| {
+        div()
+            .absolute()
+            .top_0()
+            .h_full()
+            .w(px(1.0))
+            .bg(rgb(t.border))
+            .left(relative(i as f32 / segments as f32))
+    });
+
+    // Translucent band over the segment the user is currently in (today / this
+    // hour). Derived from text_primary so it adapts to light and dark themes.
+    let current_seg = time_pct.and_then(|tp| {
+        if segments <= 1 {
+            return None;
+        }
+        let idx = (tp / 100.0 * segments as f64).floor() as i64;
+        Some(idx.clamp(0, segments as i64 - 1) as u32)
+    });
+    let mut highlight = rgb(t.text_primary);
+    highlight.a = 0.14;
 
     div()
         .h(px(4.0))
@@ -732,9 +832,33 @@ fn render_usage_with_time_bar(
             div()
                 .h_full()
                 .rounded(px(2.0))
-                .bg(rgb(pace_color))
+                .bg(rgb(base_color))
                 .w(relative(clamped_usage / 100.0)),
         )
+        .when_some(overage, |el, (start, width, color)| {
+            el.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .h_full()
+                    .left(relative(start / 100.0))
+                    .w(relative(width / 100.0))
+                    .rounded_r(px(2.0))
+                    .bg(rgb(color)),
+            )
+        })
+        .children(dividers)
+        .when_some(current_seg, |el, seg| {
+            el.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .h_full()
+                    .left(relative(seg as f32 / segments as f32))
+                    .w(relative(1.0 / segments as f32))
+                    .bg(highlight),
+            )
+        })
         .when_some(time_pct, |el, tp| {
             let clamped_time = tp.clamp(0.0, 100.0) as f32;
             el.child(
@@ -844,5 +968,28 @@ impl Render for CodexUsage {
             )
             .child(self.render_popover(&t, cx))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // gpui::* re-exports a `test` attribute macro that conflicts with the built-in;
+    // alias the built-in so `#[test]` works normally in this module.
+    use core::prelude::rust_2024::test;
+
+    #[test]
+    fn test_segments_for_window() {
+        // Sub-hour windows get no internal grid.
+        assert_eq!(segments_for_window(0), 1);
+        assert_eq!(segments_for_window(3600), 1);
+        // Multi-hour windows split per hour.
+        assert_eq!(segments_for_window(5 * 3600), 5);
+        // Per-hour count is capped so the bar doesn't get crowded.
+        assert_eq!(segments_for_window(86400), 12);
+        // Multi-day windows split per day.
+        assert_eq!(segments_for_window(7 * 86400), 7);
+        // Per-day count is capped as well.
+        assert_eq!(segments_for_window(30 * 86400), 14);
     }
 }
