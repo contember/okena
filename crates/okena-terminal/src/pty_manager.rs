@@ -18,7 +18,10 @@ use std::thread::JoinHandle;
 /// Implementations must be thread-safe as this is called from PTY reader threads.
 pub trait PtyOutputSink: Send + Sync {
     fn publish(&self, terminal_id: String, data: Vec<u8>);
-    fn publish_resize(&self, _terminal_id: String, _cols: u16, _rows: u16) {}
+    /// `server_owns` is true when the origin's local user currently holds resize
+    /// authority. Clients use it to stop re-asserting their own window size and
+    /// defer to the origin instead of fighting it back over the next round-trip.
+    fn publish_resize(&self, _terminal_id: String, _cols: u16, _rows: u16, _server_owns: bool) {}
 }
 
 /// Events from PTY processes
@@ -694,9 +697,13 @@ impl PtyManager {
             }) {
                 log::error!("Failed to resize PTY: {}", e);
             }
-        // Notify remote clients about the resize so they can update their grids
+        // Notify remote clients about the resize so they can update their grids.
+        // Carry the current resize authority so a client knows whether this
+        // resize comes from the origin's local user reclaiming control — in
+        // which case the client must stop re-asserting its own size.
         if let Some(sink) = self.output_sink.lock().as_ref() {
-            sink.publish_resize(terminal_id.to_string(), cols, rows);
+            let server_owns = crate::terminal::is_resize_authority_local();
+            sink.publish_resize(terminal_id.to_string(), cols, rows, server_owns);
         }
     }
 

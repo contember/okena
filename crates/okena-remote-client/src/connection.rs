@@ -70,8 +70,16 @@ impl ConnectionHandler for DesktopConnectionHandler {
         }
     }
 
-    fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16) {
+    fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16, server_owns: bool) {
         if let Some(terminal) = self.terminals.lock().get(prefixed_id) {
+            // The origin's local user just reclaimed resize authority. Mark the
+            // remote side as resize owner on this client so its TerminalElement
+            // stops re-asserting our own window size — otherwise the origin's
+            // reclaim is undone within one round-trip. The client takes control
+            // back as soon as its own user types or clicks (claim_resize_local).
+            if server_owns {
+                terminal.claim_resize_remote();
+            }
             terminal.resize_grid_only(cols, rows);
         }
     }
@@ -198,5 +206,59 @@ impl RemoteConnection {
             connection_id: self.config().id.clone(),
         });
         Arc::new(RemoteBackend::new(transport, self.config().id.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Resize authority is process-global, so authority-touching tests must run
+    // serially to avoid observing each other's writes.
+    static AUTH_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    fn handler_with_terminal(prefixed_id: &str) -> (DesktopConnectionHandler, Arc<Terminal>) {
+        let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let (activity_tx, _activity_rx) = async_channel::bounded(1);
+        let (ws_tx, _ws_rx) = async_channel::bounded(8);
+        let transport = Arc::new(RemoteTransport { ws_tx, connection_id: "conn".into() });
+        let terminal = Arc::new(Terminal::new(
+            prefixed_id.to_string(),
+            TerminalSize::default(),
+            transport,
+            String::new(),
+        ));
+        terminals.lock().insert(prefixed_id.to_string(), terminal.clone());
+        (DesktopConnectionHandler::new(terminals, activity_tx), terminal)
+    }
+
+    #[test]
+    fn server_owned_resize_makes_client_defer() {
+        let _g = AUTH_LOCK.lock();
+        let (handler, terminal) = handler_with_terminal("conn:t1");
+
+        // Client is resize owner by default and would re-assert its own size.
+        terminal.claim_resize_local();
+        assert!(terminal.is_resize_owner_local());
+
+        // The origin's local user reclaimed (server_owns=true): the client must
+        // hand resize authority to the remote side and stop fighting back, so
+        // the origin's reclaim sticks instead of being undone one round-trip later.
+        handler.resize_terminal("conn:t1", 120, 40, true);
+        assert!(!terminal.is_resize_owner_local());
+    }
+
+    #[test]
+    fn client_owned_resize_keeps_client_authority() {
+        let _g = AUTH_LOCK.lock();
+        let (handler, terminal) = handler_with_terminal("conn:t2");
+
+        terminal.claim_resize_local();
+        assert!(terminal.is_resize_owner_local());
+
+        // An echo of the client's own resize (server_owns=false) must NOT change
+        // authority — the client keeps enforcing its window size.
+        handler.resize_terminal("conn:t2", 100, 30, false);
+        assert!(terminal.is_resize_owner_local());
     }
 }

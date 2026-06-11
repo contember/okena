@@ -225,12 +225,13 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                     batch.entry(stream_id).or_default().extend_from_slice(data);
                                 }
                             }
-                            crate::remote::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows } => {
+                            crate::remote::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows, server_owns } => {
                                 if subscribed_ids.contains_key(terminal_id) {
                                     resize_msgs.push(WsOutbound::TerminalResized {
                                         terminal_id: terminal_id.clone(),
                                         cols: *cols,
                                         rows: *rows,
+                                        server_owns: *server_owns,
                                     });
                                 }
                             }
@@ -246,7 +247,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                             batch.entry(sid).or_default().extend_from_slice(data);
                                         }
                                     }
-                                    crate::remote::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows } => {
+                                    crate::remote::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows, server_owns } => {
                                         if subscribed_ids.contains_key(terminal_id) {
                                             // Keep only the latest resize per terminal
                                             resize_msgs.retain(|m| !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if id == terminal_id));
@@ -254,6 +255,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                                 terminal_id: terminal_id.clone(),
                                                 cols: *cols,
                                                 rows: *rows,
+                                                server_owns: *server_owns,
                                             });
                                         }
                                     }

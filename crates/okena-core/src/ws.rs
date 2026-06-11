@@ -63,6 +63,12 @@ pub enum WsOutbound {
         terminal_id: String,
         cols: u16,
         rows: u16,
+        /// True when the origin's local user currently holds resize authority.
+        /// Clients receiving `true` must stop re-asserting their own window
+        /// size so the origin's reclaim sticks. Defaults to `false` for
+        /// backward compatibility with servers that don't send the field.
+        #[serde(default)]
+        server_owns: bool,
     },
 }
 
@@ -181,11 +187,27 @@ mod tests {
                 terminal_id: "t1".into(),
                 cols: 120,
                 rows: 40,
+                server_owns: true,
             },
         ];
         for msg in messages {
             let json = serde_json::to_string(&msg).unwrap();
             let _parsed: WsOutbound = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn terminal_resized_server_owns_defaults_false() {
+        // Older servers omit `server_owns`; it must deserialize to false so the
+        // client keeps its prior behavior (never deferring to the origin).
+        let json = r#"{"type":"terminal_resized","terminal_id":"t1","cols":80,"rows":24}"#;
+        let parsed: WsOutbound = serde_json::from_str(json).unwrap();
+        match parsed {
+            WsOutbound::TerminalResized { server_owns, cols, rows, .. } => {
+                assert!(!server_owns);
+                assert_eq!((cols, rows), (80, 24));
+            }
+            _ => panic!("expected TerminalResized"),
         }
     }
 

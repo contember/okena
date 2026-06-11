@@ -28,9 +28,16 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]);
     /// Terminal removed — clean up platform terminal object.
     fn remove_terminal(&self, prefixed_id: &str);
-    /// Pre-resize a terminal's grid to match the server's dimensions.
-    /// Called before snapshot arrives so the ANSI data renders at the correct size.
-    fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16);
+    /// Resize a terminal's grid to match the server's dimensions.
+    ///
+    /// Called both for the initial pre-resize (before the snapshot arrives, so
+    /// ANSI data renders at the correct size) and for live server-side resize
+    /// broadcasts. `server_owns` is true only when the origin's local user
+    /// currently holds resize authority; the handler should then mark the
+    /// remote side as resize owner locally so this client stops re-asserting
+    /// its own window size and the origin's reclaim sticks. Pre-resize passes
+    /// `false`, leaving the client free to enforce its own size on connect.
+    fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16, server_owns: bool);
     /// Connection is disconnecting — remove ALL terminals for this connection.
     fn remove_all_terminals(&self, connection_id: &str);
     /// Remove terminals for this connection that are NOT in the given set of
@@ -857,7 +864,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 >(sizes.clone()) {
                                                     for (terminal_id, (cols, rows)) in &size_map {
                                                         let prefixed = make_prefixed_id(&config_id, terminal_id);
-                                                        handler_clone.resize_terminal(&prefixed, *cols, *rows);
+                                                        // Pre-resize only sizes the grid for the snapshot;
+                                                        // it must not claim authority, so the client can
+                                                        // still enforce its own window size after connect.
+                                                        handler_clone.resize_terminal(&prefixed, *cols, *rows, false);
                                                     }
                                                     log::info!("Pre-resized {} terminals to server dimensions", size_map.len());
                                                 }
@@ -1005,8 +1015,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                         value.get("cols").and_then(|v| v.as_u64()),
                                         value.get("rows").and_then(|v| v.as_u64()),
                                     ) {
+                                        // Missing field → false (older servers that
+                                        // never reclaim, preserving prior behavior).
+                                        let server_owns = value
+                                            .get("server_owns")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false);
                                         let prefixed = make_prefixed_id(&config_id, terminal_id);
-                                        handler_clone.resize_terminal(&prefixed, cols as u16, rows as u16);
+                                        handler_clone.resize_terminal(&prefixed, cols as u16, rows as u16, server_owns);
                                     }
                                 }
                                 "git_status_changed" => {

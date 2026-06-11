@@ -59,7 +59,10 @@ impl ConnectionHandler for MobileConnectionHandler {
         }
     }
 
-    fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16) {
+    fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16, _server_owns: bool) {
+        // Mobile renders via TerminalHolder, not the GPUI TerminalElement, so it
+        // has no process-global resize-authority gate to defer to — just size
+        // the grid. `_server_owns` is part of the shared trait for desktop.
         if let Some(holder) = self.terminals.read().get(prefixed_id) {
             holder.resize(cols, rows);
         }
