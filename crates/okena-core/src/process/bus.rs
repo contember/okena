@@ -50,12 +50,15 @@ pub enum Lane {
 impl Lane {
     fn workers(self) -> usize {
         match self {
-            // Sum across lanes (8 + 8 + 4 = 20) is the effective global cap on
+            // Sum across lanes (4 + 4 + 2 = 10) is the effective global cap on
             // concurrent child processes — comfortably under every platform's
-            // FD budget once the soft limit is raised at startup.
-            Lane::Interactive => 8,
-            Lane::Poll => 8,
-            Lane::Long => 4,
+            // FD budget once the soft limit is raised at startup. Kept modest
+            // because each worker is a permanently-resident OS thread; status
+            // polling is now in-process (gix), so the bus mostly runs periodic
+            // `gh` PR/CI calls and occasional git CLI fallbacks.
+            Lane::Interactive => 4,
+            Lane::Poll => 4,
+            Lane::Long => 2,
         }
     }
 
