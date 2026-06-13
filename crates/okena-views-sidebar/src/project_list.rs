@@ -591,6 +591,7 @@ impl Sidebar {
                                     this.dispatch_action_for_project(&project_id, ActionRequest::SetFullscreen {
                                         project_id: project_id.clone(),
                                         terminal_id: Some(terminal_id.clone()),
+                                        window: None,
                                     }, cx);
                                 }
                             }))

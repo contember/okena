@@ -39,6 +39,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     dispatcher.dispatch(ActionRequest::SetFullscreen {
                         project_id: self.project_id.clone(),
                         terminal_id: Some(next_id),
+                        window: None,
                     }, cx);
                 }
             }
@@ -56,6 +57,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     dispatcher.dispatch(ActionRequest::SetFullscreen {
                         project_id: self.project_id.clone(),
                         terminal_id: Some(prev_id),
+                        window: None,
                     }, cx);
                 }
             }
@@ -134,7 +136,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                             && let Some(idx) = terminals.iter().position(|id| id == tid) {
                                                 let prev = if idx == 0 { terminals.len() - 1 } else { idx - 1 };
                                                 if let Some(ref dispatcher) = dispatcher {
-                                                    dispatcher.dispatch(ActionRequest::SetFullscreen { project_id: project_id.clone(), terminal_id: Some(terminals[prev].clone()) }, cx);
+                                                    dispatcher.dispatch(ActionRequest::SetFullscreen { project_id: project_id.clone(), terminal_id: Some(terminals[prev].clone()), window: None }, cx);
                                                 }
                                             }
                                     }
@@ -156,7 +158,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                             && let Some(idx) = terminals.iter().position(|id| id == tid) {
                                                 let next = (idx + 1) % terminals.len();
                                                 if let Some(ref dispatcher) = dispatcher {
-                                                    dispatcher.dispatch(ActionRequest::SetFullscreen { project_id: project_id.clone(), terminal_id: Some(terminals[next].clone()) }, cx);
+                                                    dispatcher.dispatch(ActionRequest::SetFullscreen { project_id: project_id.clone(), terminal_id: Some(terminals[next].clone()), window: None }, cx);
                                                 }
                                             }
                                     }
@@ -171,7 +173,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                 move |_, _window, cx| {
                                     cx.stop_propagation();
                                     if let Some(ref dispatcher) = dispatcher {
-                                        dispatcher.dispatch(ActionRequest::SetFullscreen { project_id: project_id.clone(), terminal_id: None }, cx);
+                                        dispatcher.dispatch(ActionRequest::SetFullscreen { project_id: project_id.clone(), terminal_id: None, window: None }, cx);
                                     }
                                 }
                             }),

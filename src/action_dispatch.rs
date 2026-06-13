@@ -241,7 +241,7 @@ impl ActionDispatcher {
                         });
                         return;
                     }
-                    ActionRequest::SetFullscreen { project_id, terminal_id } => {
+                    ActionRequest::SetFullscreen { project_id, terminal_id, .. } => {
                         let pid = project_id.clone();
                         let tid = terminal_id.clone();
                         let focus_manager = focus_manager.clone();
@@ -265,7 +265,7 @@ impl ActionDispatcher {
                         });
                         return;
                     }
-                    ActionRequest::FocusTerminal { project_id, terminal_id } => {
+                    ActionRequest::FocusTerminal { project_id, terminal_id, .. } => {
                         let pid = project_id.clone();
                         let tid = terminal_id.clone();
                         let focus_manager = focus_manager.clone();
@@ -514,9 +514,11 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::FocusTerminal {
             project_id,
             terminal_id,
+            window,
         } => ActionRequest::FocusTerminal {
             project_id: s(&project_id),
             terminal_id: s(&terminal_id),
+            window,
         },
         ActionRequest::ReadContent { terminal_id } => ActionRequest::ReadContent {
             terminal_id: s(&terminal_id),
@@ -552,9 +554,11 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::SetFullscreen {
             project_id,
             terminal_id,
+            window,
         } => ActionRequest::SetFullscreen {
             project_id: s(&project_id),
             terminal_id: terminal_id.map(|id| s(&id)),
+            window,
         },
         ActionRequest::RenameTerminal {
             project_id,
@@ -794,9 +798,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::DeleteProject { project_id } => ActionRequest::DeleteProject {
             project_id: s(&project_id),
         },
-        ActionRequest::SetProjectShowInOverview { project_id, show } => ActionRequest::SetProjectShowInOverview {
+        ActionRequest::SetProjectShowInOverview { project_id, show, window } => ActionRequest::SetProjectShowInOverview {
             project_id: s(&project_id),
             show,
+            window,
         },
         ActionRequest::RemoveWorktreeProject { project_id, force } => ActionRequest::RemoveWorktreeProject {
             project_id: s(&project_id),

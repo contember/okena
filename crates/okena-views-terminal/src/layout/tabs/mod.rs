@@ -168,6 +168,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 dispatcher.dispatch(okena_core::api::ActionRequest::SetFullscreen {
                                     project_id: ctx_fullscreen.project_id.clone(),
                                     terminal_id: Some(tid.clone()),
+                                    window: None,
                                 }, cx);
                             }
                     }),
