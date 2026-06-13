@@ -68,6 +68,9 @@ notify-rust = "4"
 uuid = { version = "1.10", features = ["v4"] }
 dirs = "5.0"
 
+# CLI argument parsing (agent-friendly command surface)
+clap = { version = "4", features = ["derive"] }
+
 # Global allocator — see [features] for the per-target default. glibc malloc
 # fragments badly under okena's high-churn, multi-threaded small-allocation
 # workload (git-status polling + per-frame render/layout), so RSS climbs into

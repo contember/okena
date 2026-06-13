@@ -1,7 +1,11 @@
 mod commands;
+mod parser;
 mod register;
+mod resolve;
 
 use crate::workspace::persistence::config_dir;
+use clap::Parser as _;
+use parser::{Cli, Command, FolderCmd, ProjectCmd, ServiceCmd, TermCmd, WorktreeCmd};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -15,55 +19,151 @@ pub struct CliConfig {
 
 /// Try to handle a CLI subcommand. Returns `Some(exit_code)` if a subcommand
 /// was matched (caller should exit), or `None` to continue with GUI startup.
+///
+/// Gating: we only engage the CLI when `args[1]` is a known CLI subcommand (or
+/// an explicit help request). Anything else — empty args, `--profile`,
+/// `--list-profiles`, `--new-profile`, or any other GUI flag — returns `None`
+/// so GUI launch and profile handling in `main.rs` stay untouched.
 pub fn try_handle_cli() -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
-    let subcommand = args.get(1)?.as_str();
+    let first = args.get(1)?.as_str();
 
-    let rest = &args[2..];
+    // Explicit top-level help / version request → let clap render it.
+    let is_help_or_version =
+        matches!(first, "-h" | "--help" | "help" | "-V" | "--version");
 
-    let code = match subcommand {
-        "pair" => commands::cli_pair(),
-        "health" => commands::cli_health(rest),
-        "state" => commands::cli_state(),
-        "action" => {
-            let json = args.get(2).map(|s| s.as_str());
-            commands::cli_action(json)
+    // Only claim the args if the first token is one of our subcommands.
+    if !is_help_or_version && !parser::subcommand_names().contains(&first) {
+        return None;
+    }
+
+    match Cli::try_parse_from(&args) {
+        Ok(cli) => Some(dispatch(cli)),
+        Err(e) => {
+            // clap formats help/usage and version into the error; print it and
+            // use exit code 2 for genuine parse errors (0 for --help/--version).
+            let _ = e.print();
+            let code = match e.kind() {
+                clap::error::ErrorKind::DisplayHelp
+                | clap::error::ErrorKind::DisplayVersion => 0,
+                _ => 2,
+            };
+            Some(code)
         }
-        "services" => commands::cli_services(rest),
-        "service" => commands::cli_service(rest),
-        "whoami" => commands::cli_whoami(rest),
-        "--help" | "-h" | "help" => {
-            print_help();
-            0
-        }
-        _ => return None,
-    };
-
-    Some(code)
+    }
 }
 
-fn print_help() {
-    eprintln!("Usage: okena [--profile <id>] <command> [args]");
-    eprintln!();
-    eprintln!("Profile flags:");
-    eprintln!("  --profile <id>                     Use the named profile");
-    eprintln!("  --list-profiles                    List all profiles and exit");
-    eprintln!("  --new-profile <name>               Create a new profile and launch with it");
-    eprintln!();
-    eprintln!("Commands:");
-    eprintln!("  state                              Print workspace state (JSON)");
-    eprintln!("  action <json>                      Execute a raw action (JSON ActionRequest)");
-    eprintln!("  services [project] [--json]        List services and their status");
-    eprintln!("  service start <name> [project]     Start a service");
-    eprintln!("  service stop <name> [project]      Stop a service");
-    eprintln!("  service restart <name> [project]   Restart a service");
-    eprintln!("  whoami [--json]                    Identify current terminal and project");
-    eprintln!("  health [--json]                    Server health check");
-    eprintln!("  pair                               Generate a pairing code for remote clients");
-    eprintln!();
-    eprintln!("Default output is tab-separated (grep/awk friendly).");
-    eprintln!("Use --json for structured JSON output.");
-    eprintln!("Authentication is automatic on first use.");
+/// Whether a command actually honors the global `--window` flag. Used only to
+/// warn when `--window` is supplied to a command that ignores it (the flag is
+/// global so clap accepts it everywhere, but most commands target a specific
+/// terminal/project whose window is already implied).
+fn command_uses_window(cmd: &Command) -> bool {
+    match cmd {
+        Command::Project { cmd } => matches!(
+            cmd,
+            ProjectCmd::Add { .. }
+                | ProjectCmd::Show { .. }
+                | ProjectCmd::Hide { .. }
+                | ProjectCmd::Focus { .. }
+        ),
+        Command::Term { cmd } => {
+            matches!(cmd, TermCmd::Focus { .. } | TermCmd::Fullscreen { .. })
+        }
+        _ => false,
+    }
+}
+
+/// Dispatch a parsed [`Cli`] to the matching command implementation.
+fn dispatch(cli: Cli) -> i32 {
+    let window = cli.window.as_deref();
+    if cli.window.is_some() && !command_uses_window(&cli.command) {
+        eprintln!(
+            "Warning: --window is ignored by this command. Only `project add/show/hide/focus` and `term focus/fullscreen` honor it."
+        );
+    }
+    match cli.command {
+        Command::Pair => commands::cli_pair(),
+        Command::Health { json } => commands::cli_health(json),
+        Command::State => commands::cli_state(),
+        Command::Action { json } => commands::cli_action(&json),
+        Command::Services { project, json } => {
+            commands::cli_services(project.as_deref(), json)
+        }
+        Command::Service { cmd } => match cmd {
+            ServiceCmd::Start { name, project, json } => {
+                commands::cli_service("start", &name, project.as_deref(), json)
+            }
+            ServiceCmd::Stop { name, project, json } => {
+                commands::cli_service("stop", &name, project.as_deref(), json)
+            }
+            ServiceCmd::Restart { name, project, json } => {
+                commands::cli_service("restart", &name, project.as_deref(), json)
+            }
+        },
+        Command::Whoami { json } => commands::cli_whoami(json),
+        Command::Ls { json } => commands::cli_ls(json),
+
+        Command::Project { cmd } => match cmd {
+            ProjectCmd::Add {
+                path,
+                name,
+                hidden,
+                folder,
+            } => commands::cli_project_add(
+                &path,
+                name.as_deref(),
+                hidden,
+                folder.as_deref(),
+                window,
+            ),
+            ProjectCmd::Rm { project } => commands::cli_project_rm(&project),
+            ProjectCmd::Show { project } => commands::cli_project_show(&project, true, window),
+            ProjectCmd::Hide { project } => commands::cli_project_show(&project, false, window),
+            ProjectCmd::Rename { project, name } => {
+                commands::cli_project_rename(&project, &name)
+            }
+            ProjectCmd::Color { project, color } => {
+                commands::cli_project_color(&project, &color)
+            }
+            ProjectCmd::Focus { project } => commands::cli_project_focus(&project, window),
+        },
+
+        Command::Worktree { cmd } => match cmd {
+            WorktreeCmd::Add {
+                project,
+                branch,
+                new_branch,
+            } => commands::cli_worktree_add(&project, &branch, new_branch),
+            WorktreeCmd::Rm { worktree, force } => commands::cli_worktree_rm(&worktree, force),
+        },
+
+        Command::Folder { cmd } => match cmd {
+            FolderCmd::Add { name } => commands::cli_folder_add(&name),
+            FolderCmd::Rm { folder } => commands::cli_folder_rm(&folder),
+            FolderCmd::Rename { folder, name } => commands::cli_folder_rename(&folder, &name),
+        },
+
+        Command::Term { cmd } => match cmd {
+            TermCmd::Ls { project, json } => commands::cli_term_ls(project.as_deref(), json),
+            TermCmd::New { project } => commands::cli_term_new(&project),
+            TermCmd::Close { terminal } => commands::cli_term_close(&terminal),
+            TermCmd::Focus { terminal } => commands::cli_term_focus(&terminal, window),
+            TermCmd::Rename { terminal, name } => commands::cli_term_rename(&terminal, &name),
+            TermCmd::Split { terminal, direction } => {
+                commands::cli_term_split(&terminal, &direction)
+            }
+            TermCmd::Tab { terminal } => commands::cli_term_tab(&terminal),
+            TermCmd::Minimize { terminal } => commands::cli_term_minimize(&terminal),
+            TermCmd::Fullscreen { terminal, off } => {
+                commands::cli_term_fullscreen(&terminal, off, window)
+            }
+        },
+
+        Command::Send { terminal, text } => commands::cli_send(&terminal, &text),
+        Command::Run { terminal, command } => commands::cli_run(&terminal, &command),
+        Command::Key { terminal, key } => commands::cli_key(&terminal, &key),
+        Command::Read { terminal, json } => commands::cli_read(&terminal, json),
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

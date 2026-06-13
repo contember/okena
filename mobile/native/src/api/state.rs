@@ -74,7 +74,8 @@ pub async fn send_special_key(
 ) -> anyhow::Result<()> {
     let special_key: SpecialKey = serde_json::from_value(serde_json::Value::String(key.clone()))
         .map_err(|_| anyhow::anyhow!("Unknown special key: {}", key))?;
-    let text = String::from_utf8_lossy(special_key.to_bytes()).to_string();
+    let bytes = special_key.to_bytes();
+    let text = String::from_utf8_lossy(&bytes).to_string();
     let mgr = ConnectionManager::get();
     mgr.send_ws_message(
         &conn_id,
