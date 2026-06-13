@@ -174,7 +174,7 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             .on_action(cx.listener(|this, _: &ToggleFullscreen, _window, cx| {
                 let is_fullscreen = this.focus_manager.read(cx).has_fullscreen();
                 if is_fullscreen {
-                    let action = ActionRequest::SetFullscreen { project_id: this.project_id.clone(), terminal_id: None };
+                    let action = ActionRequest::SetFullscreen { project_id: this.project_id.clone(), terminal_id: None, window: None };
                     if let Some(ref dispatcher) = this.action_dispatcher { dispatcher.dispatch(action, cx); }
                 } else {
                     this.handle_fullscreen(cx);

@@ -24,6 +24,7 @@
 //! window is focused (another app is in front, or focus is unknown), the
 //! helper falls back to `WindowId::Main`.
 
+use crate::remote::types::{ApiFullscreen, ApiWindow, ApiWindowBounds};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WorkspaceData};
 use crate::views::window::{WindowView, WindowViewEvent};
@@ -195,6 +196,145 @@ impl Okena {
                 None => (WindowId::Main, self.main_window.read(cx).focus_manager()),
             },
         }
+    }
+
+    /// Resolve the `(WindowId, Entity<FocusManager>)` of a remote-bridge
+    /// action's target window.
+    ///
+    /// `target == None` reuses the focused-window default
+    /// (`focus_manager_for_active_window`, which always resolves to Some).
+    /// `Some(WindowId::Main)` always resolves to the main window.
+    /// `Some(WindowId::Extra(_))` resolves to that extra's `WindowView` if it
+    /// is currently open, or `None` if no such extra exists (so the caller can
+    /// report "window not found"). The `WindowId` flows into `execute_action`
+    /// so per-window data mutations target the addressed window.
+    pub(super) fn focus_manager_for_window(
+        &self,
+        cx: &App,
+        target: Option<WindowId>,
+    ) -> Option<(WindowId, Entity<FocusManager>)> {
+        match target {
+            None => Some(self.focus_manager_for_active_window(cx)),
+            Some(WindowId::Main) => {
+                Some((WindowId::Main, self.main_window.read(cx).focus_manager()))
+            }
+            Some(extra @ WindowId::Extra(_)) => self
+                .extra_windows
+                .get(&extra)
+                .map(|view| (extra, view.read(cx).focus_manager())),
+        }
+    }
+
+    /// Enumerate the open OS windows for `GET /v1/state`.
+    ///
+    /// Stable order: main first, then extras in `WorkspaceData.extra_windows`
+    /// Vec order (NOT `Okena.extra_windows` HashMap order) so a client sees a
+    /// deterministic list that matches persistence. For each window the result
+    /// reports its OS-focus flag, per-window focus (project + terminal),
+    /// fullscreen target, the persistent visible-project set (after
+    /// `hidden_project_ids` + `folder_filter`), the active folder filter, OS
+    /// bounds, and sidebar state.
+    pub(super) fn build_api_windows(&self, cx: &App) -> Vec<ApiWindow> {
+        let active = cx.active_window();
+        let workspace = self.workspace.read(cx);
+
+        // Drive enumeration from the persisted `extra_windows` Vec so the
+        // ordering is stable, regardless of the `Okena.extra_windows` HashMap
+        // iteration order. Main is always first.
+        let mut order: Vec<WindowId> = Vec::with_capacity(1 + workspace.data().extra_windows.len());
+        order.push(WindowId::Main);
+        order.extend(
+            workspace
+                .data()
+                .extra_windows
+                .iter()
+                .map(|w| WindowId::Extra(w.id)),
+        );
+
+        order
+            .into_iter()
+            .filter_map(|window_id| {
+                // Resolve the per-window view + OS handle. An extra present in
+                // persistence but not yet tracked on `Okena` (spawn observer
+                // hasn't run, or a close race) is skipped — it has no live
+                // window to report.
+                let (view, handle) = match window_id {
+                    WindowId::Main => (&self.main_window, Some(self.main_window_handle)),
+                    extra @ WindowId::Extra(_) => match self.extra_windows.get(&extra) {
+                        Some(v) => (v, self.extra_window_handles.get(&extra).copied()),
+                        None => return None,
+                    },
+                };
+
+                let (id, kind) = match window_id {
+                    WindowId::Main => ("main".to_string(), "main"),
+                    WindowId::Extra(uuid) => (uuid.to_string(), "extra"),
+                };
+
+                let is_active = match (active, handle) {
+                    (Some(a), Some(h)) => a == h,
+                    _ => false,
+                };
+
+                let fm = view.read(cx).focus_manager().read(cx);
+
+                // Resolve the focused terminal id: the FocusManager tracks a
+                // (project_id, layout_path) target; map the path to the
+                // terminal id at that path in the project's current layout.
+                let focused_terminal_id = fm.focused_terminal_state().and_then(|ft| {
+                    workspace
+                        .project(&ft.project_id)
+                        .and_then(|p| p.layout.as_ref())
+                        .and_then(|layout| layout.get_at_path(&ft.layout_path))
+                        .and_then(|node| match node {
+                            crate::workspace::state::LayoutNode::Terminal { terminal_id, .. } => {
+                                terminal_id.clone()
+                            }
+                            _ => None,
+                        })
+                });
+
+                let fullscreen = fm.fullscreen_state().map(|(pid, tid)| ApiFullscreen {
+                    project_id: pid.to_string(),
+                    terminal_id: tid.to_string(),
+                });
+
+                let focused_project_id = fm.focused_project_id().cloned();
+
+                // Persistent visible set: hidden_project_ids + folder_filter
+                // only (NOT the transient focus narrowing), matching what the
+                // sidebar persists rather than the momentary zoom state.
+                let visible_project_ids: Vec<String> = workspace
+                    .visible_projects(window_id, None, false)
+                    .iter()
+                    .map(|p| p.id.clone())
+                    .collect();
+
+                let window_state = workspace.data().window(window_id);
+                let folder_filter =
+                    window_state.and_then(|w| w.folder_filter.clone());
+                let bounds = window_state.and_then(|w| w.os_bounds).map(|b| ApiWindowBounds {
+                    x: b.origin_x,
+                    y: b.origin_y,
+                    width: b.width,
+                    height: b.height,
+                });
+                let sidebar_open = window_state.and_then(|w| w.sidebar_open);
+
+                Some(ApiWindow {
+                    id,
+                    kind: kind.to_string(),
+                    active: is_active,
+                    focused_project_id,
+                    focused_terminal_id,
+                    fullscreen,
+                    visible_project_ids,
+                    folder_filter,
+                    bounds,
+                    sidebar_open,
+                })
+            })
+            .collect()
     }
 
     /// Route a [`WindowViewEvent`] raised by any window to the right handler.

@@ -3,7 +3,7 @@
 #![allow(clippy::expect_used)]
 
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiProject, ApiServiceInfo, StateResponse};
+use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiProject, ApiServiceInfo, ApiWindow, StateResponse};
 use crate::services::manager::{ServiceManager, ServiceStatus};
 use crate::terminal::backend::TerminalBackend;
 use crate::views::window::TerminalsRegistry;
@@ -14,21 +14,50 @@ use okena_core::api::ApiGitStatus;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::watch as tokio_watch;
+use uuid::Uuid;
 
 use super::Okena;
 
-/// Resolver returning the focused window's `(WindowId, FocusManager)` for a
+/// Parse a wire-format window id into a [`WindowId`].
+///
+/// `"main"` maps to [`WindowId::Main`]; any other string is parsed as a UUID
+/// and, on success, wrapped in [`WindowId::Extra`]. A malformed UUID returns
+/// `None` so the caller can reject the action with an "invalid window id"
+/// error rather than silently routing it to the wrong window.
+pub(crate) fn parse_window_id(s: &str) -> Option<WindowId> {
+    if s == "main" {
+        Some(WindowId::Main)
+    } else {
+        Uuid::parse_str(s).ok().map(WindowId::Extra)
+    }
+}
+
+/// Resolver returning a window's `(WindowId, FocusManager)` for a
 /// remote-bridge action.
 ///
-/// In GUI mode the resolver consults `cx.active_window()` and yields the
-/// focused window's per-window `WindowId` + `FocusManager` (PRD cri 13);
-/// the `WindowId` lets per-window state mutations (e.g.
-/// `SetProjectShowInOverview`) land on the focused window. In headless mode
-/// it returns `(WindowId::Main, dormant FocusManager)` since there are no
-/// windows to consult.
+/// The `Option<WindowId>` argument selects the target:
+/// - `None` → the focused/active window. In GUI mode the resolver consults
+///   `cx.active_window()` and yields the focused window's per-window
+///   `WindowId` + `FocusManager` (PRD cri 13), always returning `Some`
+///   (falling back to main). In headless mode it returns
+///   `Some((WindowId::Main, dormant FocusManager))` since there are no
+///   windows to consult.
+/// - `Some(id)` → that specific window's `(WindowId, FocusManager)`, or
+///   `None` if no such window exists (so the caller can report "window not
+///   found"). The `WindowId` lets per-window state mutations (e.g.
+///   `SetProjectShowInOverview`) land on the addressed window.
 pub(crate) type FocusManagerResolver = Arc<
-    dyn Fn(&App) -> (WindowId, Entity<crate::workspace::focus::FocusManager>) + Send + Sync,
+    dyn Fn(&App, Option<WindowId>) -> Option<(WindowId, Entity<crate::workspace::focus::FocusManager>)>
+        + Send
+        + Sync,
 >;
+
+/// Resolver returning the current set of open OS windows for `GET /v1/state`.
+///
+/// GUI mode enumerates main + extras (stable order: main first, then
+/// `extra_windows` Vec order); headless mode returns a single synthetic main
+/// window. Lets the read side report exactly what the user sees.
+pub(crate) type WindowsResolver = Arc<dyn Fn(&App) -> Vec<ApiWindow> + Send + Sync>;
 
 /// Shared remote command loop used by both GUI (`Okena`) and headless (`HeadlessApp`).
 ///
@@ -48,6 +77,7 @@ pub(crate) async fn remote_command_loop(
     backend: Arc<dyn TerminalBackend>,
     workspace: Entity<Workspace>,
     focus_manager_resolver: FocusManagerResolver,
+    windows_resolver: WindowsResolver,
     terminals: TerminalsRegistry,
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
@@ -131,19 +161,55 @@ pub(crate) async fn remote_command_loop(
                     }
                     action => {
                         cx.update(|cx| {
-                            // Resolve focus_manager + window_id per-action so
-                            // the focused window's per-window state is the
+                            // Resolve the action's explicit target window (if
+                            // any) BEFORE moving `action` into `execute_action`.
+                            // An action that carries `window: Some(s)` must land
+                            // on THAT window; `None` keeps the focused-window
+                            // default. A malformed window id is rejected up
+                            // front.
+                            //
+                            // The parsed `Option<WindowId>` is Copy, so it
+                            // outlives the borrow of `action` from
+                            // `target_window()`. We capture the malformed string
+                            // into an owned `String` for the error path so
+                            // nothing borrows `action` past this point.
+                            let parsed_target = match action.target_window() {
+                                None => Ok(None),
+                                Some(s) => match parse_window_id(s) {
+                                    Some(wid) => Ok(Some(wid)),
+                                    None => Err(s.to_string()),
+                                },
+                            };
+                            let parsed_target = match parsed_target {
+                                Ok(t) => t,
+                                Err(bad) => {
+                                    return CommandResult::Err(format!("invalid window id: {bad}"));
+                                }
+                            };
+                            // Resolve focus_manager + window_id so the targeted
+                            // (or focused) window's per-window state is the
                             // target for both focus mutations and per-window
                             // data mutations (PRD cri 13 / CLI fallback).
-                            let (window_id, focus_manager) = focus_manager_resolver(cx);
-                            focus_manager.update(cx, |fm, cx| {
-                                let result = workspace.update(cx, |ws, cx| {
-                                    execute_action(action, ws, window_id, fm, &*backend, &terminals, cx)
-                                        .into_command_result()
-                                });
-                                cx.notify();
-                                result
-                            })
+                            match focus_manager_resolver(cx, parsed_target) {
+                                None => CommandResult::Err(format!(
+                                    "window not found: {}",
+                                    match parsed_target {
+                                        Some(WindowId::Main) => "main".to_string(),
+                                        Some(WindowId::Extra(uuid)) => uuid.to_string(),
+                                        None => String::new(),
+                                    }
+                                )),
+                                Some((window_id, focus_manager)) => {
+                                    focus_manager.update(cx, |fm, cx| {
+                                        let result = workspace.update(cx, |ws, cx| {
+                                            execute_action(action, ws, window_id, fm, &*backend, &terminals, cx)
+                                                .into_command_result()
+                                        });
+                                        cx.notify();
+                                        result
+                                    })
+                                }
+                            }
                         })
                     }
                 }
@@ -246,19 +312,30 @@ pub(crate) async fn remote_command_loop(
                         }
                     }).collect();
 
-                    // Per multi-window slice 03 PRD: "Remote sees a flat
-                    // workspace; multi-window is local-only for v1." Focus
-                    // state is per-window now, so the remote API exposes
-                    // None until/unless we expose a window-scoped focus.
-                    let fullscreen: Option<ApiFullscreen> = None;
+                    // Enumerate the open OS windows (main first, then extras in
+                    // persistence order) so the client sees exactly what the
+                    // user sees per-window. The back-compat flat fields
+                    // (`focused_project_id`, `fullscreen_terminal`) are derived
+                    // from the ACTIVE window so old clients still get a sensible
+                    // focused project / fullscreen.
+                    let windows = windows_resolver(cx);
+                    let focused_project_id = windows
+                        .iter()
+                        .find(|w| w.active)
+                        .and_then(|w| w.focused_project_id.clone());
+                    let fullscreen: Option<ApiFullscreen> = windows
+                        .iter()
+                        .find(|w| w.active)
+                        .and_then(|w| w.fullscreen.clone());
 
                     let resp = StateResponse {
                         state_version: sv,
                         projects,
-                        focused_project_id: None,
+                        focused_project_id,
                         fullscreen_terminal: fullscreen,
                         project_order: data.project_order.clone(),
                         folders,
+                        windows,
                     };
 
                     CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
@@ -331,11 +408,27 @@ impl Okena {
         let workspace = self.workspace.clone();
         let main_focus_manager = self.main_window.read(cx).focus_manager();
         let okena_weak = cx.entity().downgrade();
-        let focus_manager_resolver: FocusManagerResolver = Arc::new(move |cx: &App| {
-            okena_weak
+        let focus_okena_weak = okena_weak.clone();
+        let focus_manager_resolver: FocusManagerResolver =
+            Arc::new(move |cx: &App, target: Option<WindowId>| {
+                match focus_okena_weak.upgrade() {
+                    Some(okena) => okena.read(cx).focus_manager_for_window(cx, target),
+                    // Drop-race fallback (loop racing app shutdown): the live
+                    // Okena is gone, so honor only the focused/main default.
+                    None => match target {
+                        None | Some(WindowId::Main) => {
+                            Some((WindowId::Main, main_focus_manager.clone()))
+                        }
+                        Some(WindowId::Extra(_)) => None,
+                    },
+                }
+            });
+        let windows_okena_weak = okena_weak;
+        let windows_resolver: WindowsResolver = Arc::new(move |cx: &App| {
+            windows_okena_weak
                 .upgrade()
-                .map(|okena| okena.read(cx).focus_manager_for_active_window(cx))
-                .unwrap_or_else(|| (WindowId::Main, main_focus_manager.clone()))
+                .map(|okena| okena.read(cx).build_api_windows(cx))
+                .unwrap_or_default()
         });
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
@@ -344,7 +437,7 @@ impl Okena {
 
         cx.spawn(async move |_this: WeakEntity<Okena>, cx: &mut AsyncApp| {
             remote_command_loop(
-                bridge_rx, backend, workspace, focus_manager_resolver, terminals,
+                bridge_rx, backend, workspace, focus_manager_resolver, windows_resolver, terminals,
                 state_version, git_status_tx, service_manager, cx,
             ).await;
         })
@@ -385,5 +478,31 @@ mod api_project_visibility_tests {
     fn api_project_visibility_empty_hidden_set_is_visible() {
         let hidden: HashSet<String> = HashSet::new();
         assert!(api_project_visibility("p1", &hidden));
+    }
+}
+
+#[cfg(test)]
+mod parse_window_id_tests {
+    use super::parse_window_id;
+    use crate::workspace::state::WindowId;
+    use uuid::Uuid;
+
+    #[test]
+    fn main_maps_to_main_variant() {
+        assert_eq!(parse_window_id("main"), Some(WindowId::Main));
+    }
+
+    #[test]
+    fn valid_uuid_maps_to_extra() {
+        let id = Uuid::new_v4();
+        assert_eq!(parse_window_id(&id.to_string()), Some(WindowId::Extra(id)));
+    }
+
+    #[test]
+    fn garbage_returns_none() {
+        assert_eq!(parse_window_id("garbage"), None);
+        assert_eq!(parse_window_id(""), None);
+        // A near-miss UUID (one char short) is still rejected.
+        assert_eq!(parse_window_id("550e8400-e29b-41d4-a716-44665544000"), None);
     }
 }
