@@ -409,6 +409,7 @@ mod tests {
             fullscreen_terminal: None,
             project_order: order,
             folders,
+            windows: vec![],
         }
     }
 

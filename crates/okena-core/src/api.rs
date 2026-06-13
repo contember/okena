@@ -24,6 +24,50 @@ pub struct StateResponse {
     pub project_order: Vec<String>,
     #[serde(default)]
     pub folders: Vec<ApiFolder>,
+    #[serde(default)]
+    pub windows: Vec<ApiWindow>,
+}
+
+/// OS window bounds in screen pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApiWindowBounds {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// One open OS window onto the shared workspace. Multi-window state is
+/// exposed so remote/CLI clients can see what the user actually sees.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiWindow {
+    /// "main" for the main window, or the extra window's UUID string.
+    pub id: String,
+    /// "main" | "extra"
+    pub kind: String,
+    /// True if this window currently has OS focus.
+    pub active: bool,
+    /// Project focused/zoomed in this window's sidebar (per-window focus).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_project_id: Option<String>,
+    /// Terminal focused in this window, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_terminal_id: Option<String>,
+    /// Fullscreen terminal in this window, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fullscreen: Option<ApiFullscreen>,
+    /// Projects visible in this window (after hidden_project_ids + folder_filter), in display order.
+    #[serde(default)]
+    pub visible_project_ids: Vec<String>,
+    /// Active folder filter (folder id) limiting this window's projects, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_filter: Option<String>,
+    /// OS window bounds, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<ApiWindowBounds>,
+    /// Whether the sidebar is open in this window. None = use app default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_open: Option<bool>,
 }
 
 /// PR state from GitHub
@@ -245,7 +289,7 @@ pub enum ApiLayoutNode {
     },
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiFullscreen {
     pub project_id: String,
     pub terminal_id: String,
@@ -283,6 +327,9 @@ pub enum ActionRequest {
     FocusTerminal {
         project_id: String,
         terminal_id: String,
+        /// Target window ("main" or an extra window's UUID). None = the focused window.
+        #[serde(default)]
+        window: Option<String>,
     },
     ReadContent {
         terminal_id: String,
@@ -307,6 +354,9 @@ pub enum ActionRequest {
     SetFullscreen {
         project_id: String,
         terminal_id: Option<String>,
+        /// Target window ("main" or an extra window's UUID). None = the focused window.
+        #[serde(default)]
+        window: Option<String>,
     },
     RenameTerminal {
         project_id: String,
@@ -504,6 +554,9 @@ pub enum ActionRequest {
     SetProjectShowInOverview {
         project_id: String,
         show: bool,
+        /// Target window ("main" or an extra window's UUID). None = the focused window.
+        #[serde(default)]
+        window: Option<String>,
     },
     RemoveWorktreeProject {
         project_id: String,
@@ -530,6 +583,20 @@ pub enum ActionRequest {
         project_id: String,
         top_level_index: usize,
     },
+}
+
+impl ActionRequest {
+    /// The window an action explicitly targets ("main" or an extra UUID), if
+    /// any. Only the per-window actions carry this; everything else returns
+    /// None and lands on the focused window.
+    pub fn target_window(&self) -> Option<&str> {
+        match self {
+            ActionRequest::FocusTerminal { window, .. }
+            | ActionRequest::SetProjectShowInOverview { window, .. }
+            | ActionRequest::SetFullscreen { window, .. } => window.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 fn default_search_mode() -> String { "literal".to_string() }
@@ -629,6 +696,26 @@ mod tests {
                 project_ids: vec!["p2".into()],
                 folder_color: FolderColor::Red,
             }],
+            windows: vec![ApiWindow {
+                id: "main".into(),
+                kind: "main".into(),
+                active: true,
+                focused_project_id: Some("p1".into()),
+                focused_terminal_id: Some("t1".into()),
+                fullscreen: Some(ApiFullscreen {
+                    project_id: "p1".into(),
+                    terminal_id: "t1".into(),
+                }),
+                visible_project_ids: vec!["p1".into(), "p2".into()],
+                folder_filter: Some("folder1".into()),
+                bounds: Some(ApiWindowBounds {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 800.0,
+                    height: 600.0,
+                }),
+                sidebar_open: Some(true),
+            }],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();
@@ -641,6 +728,23 @@ mod tests {
         assert_eq!(parsed.folders.len(), 1);
         assert_eq!(parsed.folders[0].id, "folder1");
         assert!(matches!(parsed.folders[0].folder_color, FolderColor::Red));
+        assert_eq!(parsed.windows.len(), 1);
+        let win = &parsed.windows[0];
+        assert_eq!(win.id, "main");
+        assert_eq!(win.kind, "main");
+        assert!(win.active);
+        assert_eq!(win.focused_project_id.as_deref(), Some("p1"));
+        assert_eq!(win.focused_terminal_id.as_deref(), Some("t1"));
+        assert_eq!(win.fullscreen.as_ref().unwrap().terminal_id, "t1");
+        assert_eq!(win.visible_project_ids, vec!["p1", "p2"]);
+        assert_eq!(win.folder_filter.as_deref(), Some("folder1"));
+        assert_eq!(win.bounds, Some(ApiWindowBounds {
+            x: 10.0,
+            y: 20.0,
+            width: 800.0,
+            height: 600.0,
+        }));
+        assert_eq!(win.sidebar_open, Some(true));
     }
 
     #[test]
@@ -650,6 +754,7 @@ mod tests {
         let parsed: StateResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.project_order.len(), 0);
         assert_eq!(parsed.folders.len(), 0);
+        assert!(parsed.windows.is_empty());
         assert!(matches!(parsed.projects[0].folder_color, FolderColor::Default));
     }
 
@@ -737,6 +842,7 @@ mod tests {
             ActionRequest::FocusTerminal {
                 project_id: "p1".into(),
                 terminal_id: "t1".into(),
+                window: Some("main".into()),
             },
             ActionRequest::ReadContent {
                 terminal_id: "t1".into(),
@@ -761,10 +867,12 @@ mod tests {
             ActionRequest::SetFullscreen {
                 project_id: "p1".into(),
                 terminal_id: Some("t1".into()),
+                window: Some("main".into()),
             },
             ActionRequest::SetFullscreen {
                 project_id: "p1".into(),
                 terminal_id: None,
+                window: None,
             },
             ActionRequest::RenameTerminal {
                 project_id: "p1".into(),
@@ -905,6 +1013,7 @@ mod tests {
             ActionRequest::SetProjectShowInOverview {
                 project_id: "p1".into(),
                 show: false,
+                window: None,
             },
             ActionRequest::RemoveWorktreeProject {
                 project_id: "p1".into(),
@@ -993,5 +1102,78 @@ mod tests {
         let json_no_ports = r#"{"name":"api","status":"stopped","terminal_id":null}"#;
         let parsed: ApiServiceInfo = serde_json::from_str(json_no_ports).unwrap();
         assert!(parsed.ports.is_empty());
+    }
+
+    #[test]
+    fn api_window_round_trip() {
+        let win = ApiWindow {
+            id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            kind: "extra".into(),
+            active: false,
+            focused_project_id: Some("p1".into()),
+            focused_terminal_id: Some("t1".into()),
+            fullscreen: Some(ApiFullscreen {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+            }),
+            visible_project_ids: vec!["p1".into(), "p2".into(), "p3".into()],
+            folder_filter: Some("f1".into()),
+            bounds: Some(ApiWindowBounds {
+                x: 100.0,
+                y: 200.0,
+                width: 1280.0,
+                height: 720.0,
+            }),
+            sidebar_open: Some(false),
+        };
+        let json = serde_json::to_string(&win).unwrap();
+        let parsed: ApiWindow = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, win.id);
+        assert_eq!(parsed.kind, "extra");
+        assert!(!parsed.active);
+        assert_eq!(parsed.focused_project_id.as_deref(), Some("p1"));
+        assert_eq!(parsed.focused_terminal_id.as_deref(), Some("t1"));
+        assert_eq!(parsed.fullscreen.as_ref().unwrap().project_id, "p1");
+        assert_eq!(parsed.visible_project_ids, vec!["p1", "p2", "p3"]);
+        assert_eq!(parsed.folder_filter.as_deref(), Some("f1"));
+        assert_eq!(parsed.bounds, win.bounds);
+        assert_eq!(parsed.sidebar_open, Some(false));
+
+        // Old-shape ApiWindow JSON missing all optional fields parses with defaults.
+        let minimal = r#"{"id":"main","kind":"main","active":true}"#;
+        let parsed: ApiWindow = serde_json::from_str(minimal).unwrap();
+        assert_eq!(parsed.id, "main");
+        assert_eq!(parsed.kind, "main");
+        assert!(parsed.active);
+        assert!(parsed.focused_project_id.is_none());
+        assert!(parsed.focused_terminal_id.is_none());
+        assert!(parsed.fullscreen.is_none());
+        assert!(parsed.visible_project_ids.is_empty());
+        assert!(parsed.folder_filter.is_none());
+        assert!(parsed.bounds.is_none());
+        assert!(parsed.sidebar_open.is_none());
+    }
+
+    #[test]
+    fn action_target_window() {
+        let focus = ActionRequest::FocusTerminal {
+            project_id: "p1".into(),
+            terminal_id: "t1".into(),
+            window: Some("main".into()),
+        };
+        assert_eq!(focus.target_window(), Some("main"));
+
+        let create = ActionRequest::CreateTerminal {
+            project_id: "p1".into(),
+        };
+        assert_eq!(create.target_window(), None);
+
+        // A per-window action with no explicit target also returns None.
+        let show = ActionRequest::SetProjectShowInOverview {
+            project_id: "p1".into(),
+            show: true,
+            window: None,
+        };
+        assert_eq!(show.target_window(), None);
     }
 }

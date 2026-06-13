@@ -1,7 +1,8 @@
 #[allow(unused_imports)]
 pub use okena_core::api::{
     ActionRequest, ApiFolder, ApiFullscreen, ApiGitStatus, ApiLayoutNode, ApiProject,
-    ApiServiceInfo, ErrorResponse, HealthResponse, PairRequest, PairResponse, StateResponse,
+    ApiServiceInfo, ApiWindow, ApiWindowBounds, ErrorResponse, HealthResponse, PairRequest,
+    PairResponse, StateResponse,
 };
 #[allow(unused_imports)]
 pub use okena_core::ws::{
