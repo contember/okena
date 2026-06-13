@@ -2,6 +2,7 @@ pub mod actions;
 pub mod auth_reload;
 pub mod health;
 pub mod pair;
+pub mod paste_image;
 pub mod refresh;
 pub mod state;
 pub mod stream;
@@ -70,6 +71,11 @@ pub fn build_router(
     let protected = Router::new()
         .route("/v1/state", axum::routing::get(state::get_state))
         .route("/v1/actions", axum::routing::post(actions::post_actions))
+        .route(
+            "/v1/terminals/{terminal_id}/paste-image",
+            axum::routing::post(paste_image::post_paste_image)
+                .layer(DefaultBodyLimit::max(paste_image::IMAGE_UPLOAD_LIMIT)),
+        )
         .route("/v1/stream", axum::routing::get(stream::ws_handler))
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))

@@ -20,6 +20,9 @@ pub enum RemoteCommand {
     RenderSnapshot { terminal_id: String },
     /// Get current grid sizes (cols, rows) for multiple terminals.
     GetTerminalSizes { terminal_ids: Vec<String> },
+    /// Bracketed-paste the path of a remote-pasted image (already written to a
+    /// temp file on this host) into the target terminal.
+    PasteImage { terminal_id: String, path: String },
 }
 
 /// Result of processing a RemoteCommand.

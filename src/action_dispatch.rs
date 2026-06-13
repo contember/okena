@@ -404,6 +404,32 @@ impl ActionDispatcher {
     }
 }
 
+impl ActionDispatcher {
+    /// Upload a pasted clipboard image to the remote server (no-op for local).
+    ///
+    /// The server writes the bytes to a temp file on its own filesystem and
+    /// bracketed-pastes that path into the terminal, so a server-side TUI like
+    /// Claude Code can read it. `terminal_id` is the local (prefixed) id; the
+    /// `remote:{cid}:` prefix is stripped before upload.
+    pub fn upload_remote_paste_image(
+        &self,
+        terminal_id: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+        cx: &mut impl AppContext,
+    ) {
+        let Self::Remote { connection_id, manager, .. } = self else {
+            return;
+        };
+        let remote_terminal_id = strip_prefix(terminal_id, connection_id);
+        let cid = connection_id.clone();
+        let mime = mime.to_string();
+        manager.update(cx, |rm, cx| {
+            rm.upload_paste_image(&cid, &remote_terminal_id, &mime, bytes, cx);
+        });
+    }
+}
+
 impl okena_views_terminal::ActionDispatch for ActionDispatcher {
     fn dispatch(&self, action: ActionRequest, cx: &mut gpui::App) {
         self.dispatch(action, cx);
@@ -431,6 +457,16 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
         cx: &mut gpui::App,
     ) {
         self.add_tab(project_id, layout_path, in_group, cx);
+    }
+
+    fn upload_remote_paste_image(
+        &self,
+        terminal_id: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+        cx: &mut gpui::App,
+    ) {
+        self.upload_remote_paste_image(terminal_id, mime, bytes, cx);
     }
 }
 
