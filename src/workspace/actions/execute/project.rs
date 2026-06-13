@@ -24,7 +24,25 @@ pub(super) fn add_project(
     cx: &mut Context<Workspace>,
 ) -> ActionResult {
     let project_id = ws.add_project(name, path, true, &settings(cx).hooks, window_id, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+    // Surface the newly-created project's id alongside the spawned terminal
+    // ids so callers (e.g. the CLI `add-project` verb) can address the project
+    // they just created without re-fetching state. `spawn_uninitialized_terminals`
+    // returns `{ "terminal_ids": [...] }`; we merge `project_id` into that
+    // object, leaving its terminal-spawning behavior unchanged.
+    match spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx) {
+        ActionResult::Ok(Some(serde_json::Value::Object(mut map))) => {
+            map.insert(
+                "project_id".to_string(),
+                serde_json::Value::String(project_id),
+            );
+            ActionResult::Ok(Some(serde_json::Value::Object(map)))
+        }
+        ActionResult::Ok(_) => ActionResult::Ok(Some(serde_json::json!({
+            "project_id": project_id,
+            "terminal_ids": [],
+        }))),
+        err => err,
+    }
 }
 
 pub(super) fn reorder_in_folder(

@@ -23,7 +23,8 @@ use tokio::sync::watch as tokio_watch;
 
 use crate::terminal::backend::LocalBackend;
 
-use super::remote_commands::{remote_command_loop, FocusManagerResolver};
+use super::remote_commands::{remote_command_loop, FocusManagerResolver, WindowsResolver};
+use okena_core::api::ApiWindow;
 
 /// Headless application entity — runs workspace, PTY management, and remote
 /// server without any GUI windows. Used when running over SSH or on machines
@@ -218,8 +219,39 @@ impl HeadlessApp {
         // (per-window data mutations land on the always-present main slot).
         let focus_manager = cx.new(|_| crate::workspace::focus::FocusManager::new());
         let focus_manager_for_resolver = focus_manager.clone();
-        let focus_manager_resolver: FocusManagerResolver = Arc::new(move |_cx: &gpui::App| {
-            (WindowId::Main, focus_manager_for_resolver.clone())
+        // Headless has only the dormant main FocusManager: `None` (focused
+        // default) and `Some(Main)` both resolve to it; `Some(Extra(_))` has
+        // no window to land on, so it reports "not found".
+        let focus_manager_resolver: FocusManagerResolver =
+            Arc::new(move |_cx: &gpui::App, target: Option<WindowId>| match target {
+                None | Some(WindowId::Main) => {
+                    Some((WindowId::Main, focus_manager_for_resolver.clone()))
+                }
+                Some(WindowId::Extra(_)) => None,
+            });
+        // Headless exposes a single synthetic main window. There is no GUI, so
+        // it's always "active", has no per-window focus/fullscreen/bounds, and
+        // no hidden set — every project in `project_order` is visible.
+        let workspace_for_windows = workspace.clone();
+        let windows_resolver: WindowsResolver = Arc::new(move |cx: &gpui::App| {
+            let ws = workspace_for_windows.read(cx);
+            let visible_project_ids: Vec<String> = ws
+                .visible_projects(WindowId::Main, None, false)
+                .iter()
+                .map(|p| p.id.clone())
+                .collect();
+            vec![ApiWindow {
+                id: "main".to_string(),
+                kind: "main".to_string(),
+                active: true,
+                focused_project_id: None,
+                focused_terminal_id: None,
+                fullscreen: None,
+                visible_project_ids,
+                folder_filter: None,
+                bounds: None,
+                sidebar_open: None,
+            }]
         });
         cx.spawn({
             let workspace = workspace.clone();
@@ -229,8 +261,8 @@ impl HeadlessApp {
             let service_manager = service_manager.clone();
             async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
                 remote_command_loop(
-                    bridge_rx, local_backend, workspace, focus_manager_resolver, terminals,
-                    state_version, git_status_tx, service_manager, cx,
+                    bridge_rx, local_backend, workspace, focus_manager_resolver, windows_resolver,
+                    terminals, state_version, git_status_tx, service_manager, cx,
                 ).await;
             }
         })

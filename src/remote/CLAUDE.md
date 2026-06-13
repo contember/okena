@@ -32,3 +32,9 @@ Note: the client-side connection logic lives in `crates/okena-remote-client/`.
 - **Thread boundary**: All mutable state access happens on the GPUI thread. The tokio server only serializes/deserializes and forwards via channels.
 - **Discovery file**: `remote.json` (in config dir) contains the port and auth info so clients can auto-discover the running instance.
 - **PTY fan-out**: `PtyBroadcaster` uses tokio's `broadcast` channel so multiple WebSocket clients can subscribe to the same terminal's output independently.
+- **Window model**: `GET /v1/state` returns `windows` (`ApiWindow[]`) — each open OS window with its `active` flag, per-window focus (project + terminal), fullscreen, visible projects, folder filter, OS bounds, and sidebar state. Built by `Okena::build_api_windows` (`src/app/extras.rs`). The flat `focused_project_id`/`fullscreen_terminal` are derived from the active window for backward compatibility. Headless serves a single synthetic main window.
+- **Per-window action targeting**: `FocusTerminal`, `SetProjectShowInOverview`, and `SetFullscreen` accept an optional `window` field (`"main"` | extra UUID). The bridge parses it (`parse_window_id`) and the `FocusManagerResolver` (`Fn(&App, Option<WindowId>) -> Option<(WindowId, FocusManager)>`) routes the action to that window's `FocusManager`; `None` targets the focused/active window, a missing window yields "window not found". See `src/app/remote_commands.rs` + `src/app/extras.rs`.
+
+## Clients
+
+The `okena <subcommand>` CLI (`src/cli/`, see its CLAUDE.md) is the primary agent-facing client and talks this same API. Mobile/web clients use `crates/okena-remote-client/`.

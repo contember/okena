@@ -72,7 +72,10 @@ pub fn execute_action(
         ActionRequest::CloseTerminals { project_id, terminal_ids } => {
             terminal::close_many(ws, focus_manager, project_id, terminal_ids, backend, terminals, cx)
         }
-        ActionRequest::FocusTerminal { project_id, terminal_id } => {
+        ActionRequest::FocusTerminal { project_id, terminal_id, window: _ } => {
+            // `window` was already consumed at the bridge to resolve the target
+            // `window_id` (passed in above); the per-window FocusManager handed
+            // to `execute_action` is already the right one.
             terminal::focus(ws, focus_manager, project_id, terminal_id, cx)
         }
         ActionRequest::SendText { terminal_id, text } => {
@@ -93,7 +96,7 @@ pub fn execute_action(
         ActionRequest::ToggleMinimized { project_id, terminal_id } => {
             terminal::toggle_minimized(ws, project_id, terminal_id, cx)
         }
-        ActionRequest::SetFullscreen { project_id, terminal_id } => {
+        ActionRequest::SetFullscreen { project_id, terminal_id, window: _ } => {
             terminal::set_fullscreen(ws, focus_manager, project_id, terminal_id, cx)
         }
         ActionRequest::RenameTerminal { project_id, terminal_id, name } => {
@@ -201,7 +204,7 @@ pub fn execute_action(
         ActionRequest::DeleteProject { project_id } => {
             project::delete_project(ws, focus_manager, project_id, cx)
         }
-        ActionRequest::SetProjectShowInOverview { project_id, show } => {
+        ActionRequest::SetProjectShowInOverview { project_id, show, window: _ } => {
             project::set_show_in_overview(ws, focus_manager, window_id, project_id, show, cx)
         }
         ActionRequest::RemoveWorktreeProject { project_id, force } => {

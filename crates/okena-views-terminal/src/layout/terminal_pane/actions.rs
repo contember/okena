@@ -51,6 +51,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             let action = ActionRequest::SetFullscreen {
                 project_id: self.project_id.clone(),
                 terminal_id: Some(id.clone()),
+                window: None,
             };
             if let Some(ref dispatcher) = self.action_dispatcher {
                 dispatcher.dispatch(action, cx);
