@@ -126,6 +126,7 @@ mod tests {
             fullscreen_terminal: None,
             project_order: vec![],
             folders: vec![],
+            windows: vec![],
         }
     }
 
