@@ -45,6 +45,23 @@ pub trait ActionDispatch: Clone + 'static {
         in_group: bool,
         cx: &mut gpui::App,
     );
+
+    /// Upload a clipboard image pasted into a remote terminal.
+    ///
+    /// The temp file the terminal's process reads must live on the *server's*
+    /// filesystem, not the client's. Remote dispatchers upload the bytes so the
+    /// server materialises the file and bracketed-pastes its path. Local
+    /// dispatchers don't override this — the caller writes a local temp file
+    /// directly (see `TerminalPane::handle_paste`).
+    fn upload_remote_paste_image(
+        &self,
+        terminal_id: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+        cx: &mut gpui::App,
+    ) {
+        let _ = (terminal_id, mime, bytes, cx);
+    }
 }
 
 /// Settings namespace used in ExtensionSettingsStore.

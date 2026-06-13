@@ -117,7 +117,7 @@ hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 tower-service = "0.3"
 
 # Remote control server
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "fs"] }
 axum = { version = "0.8", features = ["ws"] }
 
 base64 = "0.22"

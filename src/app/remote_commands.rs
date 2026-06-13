@@ -290,6 +290,21 @@ pub(crate) async fn remote_command_loop(
                     }
                 })
             }
+            RemoteCommand::PasteImage { terminal_id, path } => {
+                cx.update(|cx| {
+                    let ws = workspace.read(cx);
+                    match ensure_terminal(&terminal_id, &terminals, &*backend, ws) {
+                        Some(term) => {
+                            // Bracketed paste of the server-local image path —
+                            // same as a local image paste, so the focused TUI's
+                            // own paste handler attaches it.
+                            term.send_paste(&path);
+                            CommandResult::Ok(Some(serde_json::json!({ "path": path })))
+                        }
+                        None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
+                    }
+                })
+            }
         };
 
         if let Some(reply) = msg.reply {

@@ -84,6 +84,23 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         });
         let Some(image) = image else { return };
 
+        // Remote terminals: the temp file the terminal's process reads lives on
+        // the *server's* filesystem, not ours. Upload the bytes so the server
+        // writes the file and bracketed-pastes its path; the client-local temp
+        // paths below would hand the server a path that doesn't exist on it.
+        if let Some(ref dispatcher) = self.action_dispatcher
+            && dispatcher.is_remote()
+            && let Some(ref terminal_id) = self.terminal_id
+        {
+            dispatcher.upload_remote_paste_image(
+                terminal_id,
+                image.format.mime_type(),
+                image.bytes.clone(),
+                cx,
+            );
+            return;
+        }
+
         let filename = paste_filename(&image);
 
         // WSL fast path: write the image into the distro's own /tmp via the

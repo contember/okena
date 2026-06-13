@@ -382,6 +382,89 @@ impl RemoteConnectionManager {
         });
     }
 
+    /// Upload a pasted clipboard image to the remote server, which writes it to
+    /// a temp file on its own filesystem and bracketed-pastes that path into the
+    /// terminal (so a server-side TUI like Claude Code can read it).
+    ///
+    /// `terminal_id` is the server-local id (already stripped of the
+    /// `remote:{cid}:` prefix). Mirrors [`send_action`]'s fire-and-forget HTTP
+    /// pattern: spawns on the tokio runtime, logs errors and warns on failure.
+    pub fn upload_paste_image(
+        &self,
+        connection_id: &str,
+        terminal_id: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        let config = match self.connections.get(connection_id) {
+            Some(conn) => conn.config().clone(),
+            None => {
+                log::error!("upload_paste_image: connection {} not found", connection_id);
+                return;
+            }
+        };
+        let token = match config.saved_token {
+            Some(ref t) => t.clone(),
+            None => {
+                log::error!(
+                    "upload_paste_image: no auth token for connection {}",
+                    connection_id
+                );
+                ToastManager::error("No auth token for remote connection".to_string(), cx);
+                return;
+            }
+        };
+
+        let host = config.host.clone();
+        let port = config.port;
+        let name = config.name.clone();
+        let event_tx = self.event_tx.clone();
+        let terminal_id = terminal_id.to_string();
+        let mime = mime.to_string();
+
+        self.runtime.spawn(async move {
+            let url = format!(
+                "http://{}:{}/v1/terminals/{}/paste-image",
+                host, port, terminal_id
+            );
+            let client = reqwest::Client::new();
+            let result = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Content-Type", mime)
+                .body(bytes)
+                .timeout(std::time::Duration::from_secs(15))
+                .send()
+                .await;
+
+            match result {
+                Ok(resp) if resp.status().is_success() => {
+                    log::debug!("upload_paste_image: success for {}", name);
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    log::error!(
+                        "upload_paste_image: failed ({}): {} for {}",
+                        status, body, name
+                    );
+                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
+                        connection_id: String::new(),
+                        message: format!("Image paste failed ({}): {}", status, body),
+                    });
+                }
+                Err(e) => {
+                    log::error!("upload_paste_image: request error for {}: {}", name, e);
+                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
+                        connection_id: String::new(),
+                        message: format!("Image paste request failed: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
     /// Handle an event from a connection's tokio task.
     fn handle_event(&mut self, event: ConnectionEvent, cx: &mut Context<Self>) {
         let event_label: &'static str = match &event {
