@@ -99,7 +99,18 @@ pub enum Command {
         text: Vec<String>,
     },
     /// Run a command in a terminal (sends text + Enter)
+    ///
+    /// With --wait the command finishes synchronously and the CLI exits with
+    /// its status. Because the command is a trailing arg, --wait/--timeout must
+    /// come *before* the terminal: `okena run --wait <term> <cmd>`.
     Run {
+        /// Block until the command finishes, then exit with its status.
+        /// Non-interactive commands only (appends a completion marker).
+        #[arg(long)]
+        wait: bool,
+        /// With --wait: seconds to wait for completion before giving up.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
         /// Command to run (joined with spaces)
@@ -119,6 +130,27 @@ pub enum Command {
         terminal: String,
         #[arg(long)]
         json: bool,
+    },
+
+    /// Print or install the agent skill (a concise CLI reference for agents)
+    Skill {
+        #[command(subcommand)]
+        cmd: SkillCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SkillCmd {
+    /// Print the skill markdown to stdout
+    Show,
+    /// Install the skill as a Claude Code skill (SKILL.md)
+    Install {
+        /// Install for the current user: ~/.claude/skills/okena (default)
+        #[arg(long)]
+        user: bool,
+        /// Install into the current project: ./.claude/skills/okena
+        #[arg(long, conflicts_with = "user")]
+        project: bool,
     },
 }
 
@@ -299,7 +331,7 @@ pub enum TermCmd {
 pub fn subcommand_names() -> &'static [&'static str] {
     &[
         "pair", "health", "state", "action", "services", "service", "whoami", "ls", "project",
-        "worktree", "folder", "term", "send", "run", "key", "read",
+        "worktree", "folder", "term", "send", "run", "key", "read", "skill",
     ]
 }
 
@@ -342,6 +374,17 @@ mod tests {
         assert!(Cli::try_parse_from(["okena", "send", "t1", "echo", "hi"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "run", "t1", "ls", "-la"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "key", "t1", "ctrl-c"]).is_ok());
+        // `run --wait` flags precede the trailing command (trailing_var_arg).
+        assert!(Cli::try_parse_from(["okena", "run", "--wait", "t1", "make"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["okena", "run", "--wait", "--timeout", "60", "t1", "make"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["okena", "skill", "show"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "skill", "install", "--project"]).is_ok());
+        // --user and --project are mutually exclusive.
+        assert!(
+            Cli::try_parse_from(["okena", "skill", "install", "--user", "--project"]).is_err()
+        );
         // Missing required positional → error.
         assert!(Cli::try_parse_from(["okena", "term", "split", "p/sh"]).is_err());
     }

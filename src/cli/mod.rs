@@ -5,7 +5,7 @@ mod resolve;
 
 use crate::workspace::persistence::config_dir;
 use clap::Parser as _;
-use parser::{Cli, Command, FolderCmd, ProjectCmd, ServiceCmd, TermCmd, WorktreeCmd};
+use parser::{Cli, Command, FolderCmd, ProjectCmd, ServiceCmd, SkillCmd, TermCmd, WorktreeCmd};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -160,9 +160,19 @@ fn dispatch(cli: Cli) -> i32 {
         },
 
         Command::Send { terminal, text } => commands::cli_send(&terminal, &text),
-        Command::Run { terminal, command } => commands::cli_run(&terminal, &command),
+        Command::Run {
+            wait,
+            timeout,
+            terminal,
+            command,
+        } => commands::cli_run(&terminal, &command, wait, timeout),
         Command::Key { terminal, key } => commands::cli_key(&terminal, &key),
         Command::Read { terminal, json } => commands::cli_read(&terminal, json),
+
+        Command::Skill { cmd } => match cmd {
+            SkillCmd::Show => commands::cli_skill_show(),
+            SkillCmd::Install { user, project } => commands::cli_skill_install(user, project),
+        },
     }
 }
 

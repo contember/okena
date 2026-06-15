@@ -15,6 +15,7 @@ handling untouched.
 | `parser.rs` | clap `Cli` parser + `Command`/`*Cmd` subcommand enums. `subcommand_names()` feeds the gate (a test asserts it covers the whole tree). |
 | `resolve.rs` | Pure, unit-tested resolvers over a parsed `StateResponse`. No I/O. |
 | `commands.rs` | Command implementations — build an `ActionRequest` JSON body, POST it, render the result. |
+| `skill.md` | The agent skill, `include_str!`-embedded into `commands.rs` and emitted by `skill show` / written by `skill install`. Keep it concise — it's a reference, not a manual. |
 | `register.rs` | First-use token registration (reads the local `remote_secret`). |
 
 ## Addressing (agent-friendly)
@@ -30,4 +31,6 @@ handling untouched.
 - `ls --json` emits a *structured overview* (windows with visible projects resolved to names + focus, and per-project hidden/git/terminals/layout) — not the raw state. Use `okena state` for the full raw dump.
 - `key` accepts the named keys plus a generic `ctrl-<a-z>` chord (serialized as `{"Ctrl":"l"}` → `SpecialKey::Ctrl`). The named `ctrl-c/d/z` stay as dedicated variants for back-compat.
 - `service start/stop/restart` validates the service name against the project up front (fail fast) instead of POSTing and polling for a status that never arrives.
+- `run --wait` appends a completion marker (`OKENADONE_<pid>:<code>:END` via `printf`), polls `read_content` until it appears, prints the visible output (marker lines stripped) and exits with the command's status. The echoed command line carries the literal `%s`, so the digit-requiring match never false-positives on it. POSIX-shell + non-interactive only. Flags precede the terminal (trailing-var-arg).
+- `skill show`/`install` are pure client-side (no server round-trip). `install` defaults to `~/.claude/skills/okena/SKILL.md` (`dirs::home_dir()`); `--project` writes `./.claude/skills/okena/SKILL.md`.
 - Every command maps to an `ActionRequest` snake_case tag (or `GET /v1/state`). Authentication is automatic on first use.

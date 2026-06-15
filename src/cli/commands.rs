@@ -3,6 +3,13 @@ use crate::cli::{api_get, api_post, discover_server, ensure_token};
 use crate::remote::auth::{generate_pairing_code, pair_code_path};
 use okena_core::api::{ApiProject, StateResponse};
 
+/// The agent skill, embedded so `skill show`/`install` always match this build.
+const SKILL_MD: &str = include_str!("skill.md");
+
+/// Prefix of the completion marker `run --wait` appends to detect command end.
+/// Carried in one place so the emit, detect and strip steps can't drift.
+const MARKER_PREFIX: &str = "OKENADONE_";
+
 pub fn cli_pair() -> i32 {
     let code = generate_pairing_code();
     let path = pair_code_path();
@@ -1584,16 +1591,145 @@ pub fn cli_send(terminal: &str, text: &[String]) -> i32 {
 }
 
 /// `okena run <terminal> <command...>`
-pub fn cli_run(terminal: &str, command: &[String]) -> i32 {
+pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64) -> i32 {
     let command = command.join(" ");
-    with_state_post(|state| {
-        let (_project_id, terminal_id) = resolve::resolve_terminal(state, terminal)?;
-        Ok(serde_json::json!({
-            "action": "run_command",
-            "terminal_id": terminal_id,
-            "command": command,
-        }))
-    })
+    if !wait {
+        return with_state_post(|state| {
+            let (_project_id, terminal_id) = resolve::resolve_terminal(state, terminal)?;
+            Ok(serde_json::json!({
+                "action": "run_command",
+                "terminal_id": terminal_id,
+                "command": command,
+            }))
+        });
+    }
+
+    // --wait: append a completion marker carrying the exit code, then poll the
+    // terminal until it appears. The echoed command line shows the literal `%s`
+    // (not digits), so matching `TAG:<digits>:END` only fires on the real printf
+    // output, never on the echo. Assumes a POSIX-ish shell (bash/zsh/sh).
+    let token = match ensure_token() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let state = match fetch_state(&token) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let terminal_id = match resolve::resolve_terminal(&state, terminal) {
+        Ok((_project_id, tid)) => tid,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+
+    let tag = format!("{MARKER_PREFIX}{}", std::process::id());
+    let full = format!("{command} ; printf '\\n{tag}:%s:END\\n' \"$?\"");
+    let body = serde_json::json!({
+        "action": "run_command",
+        "terminal_id": terminal_id,
+        "command": full,
+    });
+    if let Err(e) = api_post("/v1/actions", &token, &body.to_string()) {
+        eprintln!("{e}");
+        return 1;
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if std::time::Instant::now() > deadline {
+            eprintln!("Timeout after {timeout_secs}s waiting for the command to finish.");
+            return 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let content = match fetch_terminal_content(&token, &terminal_id) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Some(code) = parse_done_marker(&content, &tag) {
+            // Echo the visible output, dropping every marker/echo line (ours and
+            // any left on screen by previous `run --wait` calls).
+            for line in content.lines() {
+                if !line.contains(MARKER_PREFIX) {
+                    println!("{line}");
+                }
+            }
+            if code != 0 {
+                eprintln!("Command exited with status {code}.");
+            }
+            return code;
+        }
+    }
+}
+
+/// Post a `read_content` action and return the terminal's visible content.
+fn fetch_terminal_content(token: &str, terminal_id: &str) -> Result<String, String> {
+    let body = serde_json::json!({ "action": "read_content", "terminal_id": terminal_id });
+    let resp = api_post("/v1/actions", token, &body.to_string())?;
+    let v: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("bad read response: {e}"))?;
+    Ok(v
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string())
+}
+
+/// Find a completion marker `TAG:<digits>:END` and return the exit code. Only
+/// matches when digits are present, so the echoed command line (which carries
+/// the literal `%s`) never yields a false positive.
+fn parse_done_marker(content: &str, tag: &str) -> Option<i32> {
+    let needle = format!("{tag}:");
+    let mut rest = content;
+    while let Some(idx) = rest.find(&needle) {
+        let after = &rest[idx + needle.len()..];
+        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() && after[digits.len()..].starts_with(":END") {
+            return digits.parse().ok();
+        }
+        rest = &rest[idx + needle.len()..];
+    }
+    None
+}
+
+/// `okena skill show` — print the embedded skill markdown to stdout.
+pub fn cli_skill_show() -> i32 {
+    print!("{SKILL_MD}");
+    0
+}
+
+/// `okena skill install [--user|--project]` — write the skill as a Claude Code
+/// `SKILL.md`. Defaults to the user scope (`~/.claude/skills/okena`).
+pub fn cli_skill_install(_user: bool, project: bool) -> i32 {
+    let dir = if project {
+        std::path::PathBuf::from(".claude/skills/okena")
+    } else {
+        match dirs::home_dir() {
+            Some(home) => home.join(".claude/skills/okena"),
+            None => {
+                eprintln!("Could not determine the home directory.");
+                return 1;
+            }
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("Failed to create {}: {e}", dir.display());
+        return 1;
+    }
+    let path = dir.join("SKILL.md");
+    if let Err(e) = std::fs::write(&path, SKILL_MD) {
+        eprintln!("Failed to write {}: {e}", path.display());
+        return 1;
+    }
+    println!("{}", path.display());
+    0
 }
 
 /// `okena key <terminal> <key>`
@@ -1657,5 +1793,27 @@ pub fn cli_read(terminal: &str, json_mode: bool) -> i32 {
             eprintln!("{e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_done_marker;
+
+    #[test]
+    fn done_marker_matches_only_real_output() {
+        let tag = "OKENADONE_42";
+        // The echoed command line carries the literal `%s` — must NOT match.
+        let echo = "okena $ make ; printf '\\nOKENADONE_42:%s:END\\n' \"$?\"";
+        assert_eq!(parse_done_marker(echo, tag), None);
+        // The actual printf output carries digits — matches.
+        assert_eq!(parse_done_marker("OKENADONE_42:0:END", tag), Some(0));
+        assert_eq!(parse_done_marker("noise\nOKENADONE_42:130:END\n$", tag), Some(130));
+        // Echo line followed by the real result line: still resolves the result.
+        let both = format!("{echo}\nOKENADONE_42:7:END\nokena $ ");
+        assert_eq!(parse_done_marker(&both, tag), Some(7));
+        // Absent / wrong tag.
+        assert_eq!(parse_done_marker("nothing here", tag), None);
+        assert_eq!(parse_done_marker("OKENADONE_99:0:END", tag), None);
     }
 }
