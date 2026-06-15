@@ -583,6 +583,52 @@ pub enum ActionRequest {
         project_id: String,
         top_level_index: usize,
     },
+
+    // ── Settings (app-scoped; handled at the remote bridge) ───────────
+    /// Return the full current settings as JSON.
+    GetSettings,
+    /// Return a defaults instance of the settings (de-facto schema: every key
+    /// present with its default value).
+    GetSettingsSchema,
+    /// Deep-merge `patch` into the current settings and apply.
+    SetSettings {
+        patch: serde_json::Value,
+    },
+
+    // ── Theme (app-scoped; handled at the remote bridge) ──────────────
+    /// List built-in + custom themes, flagging the active one.
+    GetThemes,
+    /// Return a theme as an editable custom-theme blob (the active theme when
+    /// `id` is None).
+    GetTheme {
+        #[serde(default)]
+        id: Option<String>,
+    },
+    /// Activate a theme by id: a built-in mode (auto / dark / light /
+    /// pastel-dark / high-contrast) or a custom theme id (with or without the
+    /// `custom:` prefix).
+    SetTheme {
+        id: String,
+    },
+    /// Write a custom theme JSON file (a full `CustomThemeConfig`) and,
+    /// when `activate`, switch to it.
+    SaveCustomTheme {
+        id: String,
+        config: serde_json::Value,
+        #[serde(default)]
+        activate: bool,
+    },
+
+    // ── Command palette (app-scoped; handled at the remote bridge) ────
+    /// List invokable GUI commands (name, description, category).
+    ListActions,
+    /// Invoke a named GUI command in a window (the focused window when
+    /// `window` is None).
+    InvokeAction {
+        action_name: String,
+        #[serde(default)]
+        window: Option<String>,
+    },
 }
 
 impl ActionRequest {

@@ -819,5 +819,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             top_level_index,
         },
+        // App-scoped actions carry no project/terminal ids to remap.
+        a @ (ActionRequest::GetSettings
+        | ActionRequest::GetSettingsSchema
+        | ActionRequest::SetSettings { .. }
+        | ActionRequest::GetThemes
+        | ActionRequest::GetTheme { .. }
+        | ActionRequest::SetTheme { .. }
+        | ActionRequest::SaveCustomTheme { .. }
+        | ActionRequest::ListActions
+        | ActionRequest::InvokeAction { .. }) => a,
     }
 }

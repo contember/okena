@@ -4,6 +4,7 @@ mod extras;
 pub mod headless;
 mod notifications;
 mod remote_commands;
+mod remote_config;
 
 pub use detached_overlays::open_detached_overlay;
 

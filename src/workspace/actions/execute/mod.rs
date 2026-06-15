@@ -234,6 +234,21 @@ pub fn execute_action(
         | ActionRequest::ReloadServices { .. } => {
             ActionResult::Err("service actions must be handled via ServiceManager".to_string())
         }
+
+        // App-scoped actions (settings, theme, command palette) are handled by
+        // the remote command loop directly — they touch globals/windows outside
+        // the Workspace, so they never reach this Workspace-scoped executor.
+        ActionRequest::GetSettings
+        | ActionRequest::GetSettingsSchema
+        | ActionRequest::SetSettings { .. }
+        | ActionRequest::GetThemes
+        | ActionRequest::GetTheme { .. }
+        | ActionRequest::SetTheme { .. }
+        | ActionRequest::SaveCustomTheme { .. }
+        | ActionRequest::ListActions
+        | ActionRequest::InvokeAction { .. } => {
+            ActionResult::Err("app-scoped action must be handled by the remote bridge".to_string())
+        }
     }
 }
 

@@ -1732,6 +1732,237 @@ pub fn cli_skill_install(_user: bool, project: bool) -> i32 {
     0
 }
 
+// ── Settings / theme / command palette ───────────────────────────────────────
+
+/// Authenticate and POST an action body, returning the raw response.
+fn post_action_body(body: &serde_json::Value) -> Result<String, String> {
+    let token = ensure_token()?;
+    api_post("/v1/actions", &token, &body.to_string())
+}
+
+/// Pretty-print a JSON response (raw fallback on parse failure).
+fn print_json_pretty(raw: &str) {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => {
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw.to_string()))
+        }
+        Err(_) => println!("{}", raw.trim()),
+    }
+}
+
+/// POST an action and pretty-print the JSON response.
+fn post_and_print(body: serde_json::Value) -> i32 {
+    match post_action_body(&body) {
+        Ok(resp) => {
+            print_json_pretty(&resp);
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// Navigate a dotted key path (`sidebar.width`) into a JSON value.
+fn navigate_json<'a>(v: &'a serde_json::Value, dotted: &str) -> Option<&'a serde_json::Value> {
+    let mut cur = v;
+    for part in dotted.split('.') {
+        cur = cur.get(part)?;
+    }
+    Some(cur)
+}
+
+/// Build a nested object patch from a dotted key (`a.b` + v → `{"a":{"b":v}}`).
+fn nested_patch(dotted: &str, value: serde_json::Value) -> serde_json::Value {
+    let mut node = value;
+    for key in dotted.split('.').rev() {
+        node = serde_json::json!({ key: node });
+    }
+    node
+}
+
+/// `okena settings show [key]`
+pub fn cli_settings_show(key: Option<&str>) -> i32 {
+    let body = serde_json::json!({ "action": "get_settings" });
+    let resp = match post_action_body(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    match key {
+        None => {
+            print_json_pretty(&resp);
+            0
+        }
+        Some(k) => {
+            let v: serde_json::Value = match serde_json::from_str(&resp) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("bad response: {e}");
+                    return 1;
+                }
+            };
+            match navigate_json(&v, k) {
+                Some(found) => {
+                    println!("{}", serde_json::to_string_pretty(found).unwrap_or_default());
+                    0
+                }
+                None => {
+                    eprintln!("No such setting: {k}");
+                    1
+                }
+            }
+        }
+    }
+}
+
+/// `okena settings schema`
+pub fn cli_settings_schema() -> i32 {
+    post_and_print(serde_json::json!({ "action": "get_settings_schema" }))
+}
+
+/// `okena settings set <key> <value>`
+pub fn cli_settings_set(key: &str, value: &str) -> i32 {
+    // Parse the value as JSON; bare text falls back to a JSON string.
+    let parsed: serde_json::Value = serde_json::from_str(value)
+        .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+    let patch = nested_patch(key, parsed);
+    let body = serde_json::json!({ "action": "set_settings", "patch": patch });
+    match post_action_body(&body) {
+        Ok(_) => {
+            println!("ok");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// `okena theme list [--json]`
+pub fn cli_theme_list(json_mode: bool) -> i32 {
+    let body = serde_json::json!({ "action": "get_themes" });
+    let resp = match post_action_body(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    if json_mode {
+        print_json_pretty(&resp);
+        return 0;
+    }
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap_or(serde_json::Value::Null);
+    if let Some(arr) = v.get("themes").and_then(|t| t.as_array()) {
+        for t in arr {
+            let s = |k: &str| match t.get(k) {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            let active = if t.get("active").and_then(|a| a.as_bool()).unwrap_or(false) {
+                "*"
+            } else {
+                ""
+            };
+            // id \t name \t kind \t is_dark \t active
+            println!("{}\t{}\t{}\t{}\t{}", s("id"), s("name"), s("kind"), s("is_dark"), active);
+        }
+    }
+    0
+}
+
+/// `okena theme show [id]`
+pub fn cli_theme_show(id: Option<&str>) -> i32 {
+    let mut body = serde_json::json!({ "action": "get_theme" });
+    if let Some(i) = id {
+        body["id"] = serde_json::Value::String(i.to_string());
+    }
+    post_and_print(body)
+}
+
+/// `okena theme set <id>`
+pub fn cli_theme_set(id: &str) -> i32 {
+    post_and_print(serde_json::json!({ "action": "set_theme", "id": id }))
+}
+
+/// `okena theme save <id> [json]` — JSON from the arg, or stdin when omitted / `-`.
+pub fn cli_theme_save(id: &str, json: Option<&str>, activate: bool) -> i32 {
+    let raw = match json {
+        Some("-") | None => {
+            let mut s = String::new();
+            if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut s) {
+                eprintln!("Failed to read stdin: {e}");
+                return 1;
+            }
+            s
+        }
+        Some(s) => s.to_string(),
+    };
+    let config: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Invalid theme JSON: {e}");
+            return 1;
+        }
+    };
+    let body = serde_json::json!({
+        "action": "save_custom_theme",
+        "id": id,
+        "config": config,
+        "activate": activate,
+    });
+    post_and_print(body)
+}
+
+/// `okena command list [--json]`
+pub fn cli_command_list(json_mode: bool) -> i32 {
+    let body = serde_json::json!({ "action": "list_actions" });
+    let resp = match post_action_body(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    if json_mode {
+        print_json_pretty(&resp);
+        return 0;
+    }
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap_or(serde_json::Value::Null);
+    if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
+        for a in arr {
+            let g = |k: &str| a.get(k).and_then(|x| x.as_str()).unwrap_or("");
+            // category \t name \t description
+            println!("{}\t{}\t{}", g("category"), g("name"), g("description"));
+        }
+    }
+    0
+}
+
+/// `okena command run <name> [--window]`
+pub fn cli_command_run(name: &str, window: Option<&str>) -> i32 {
+    let mut body = serde_json::json!({ "action": "invoke_action", "action_name": name });
+    if let Some(w) = window {
+        body["window"] = serde_json::Value::String(w.to_string());
+    }
+    match post_action_body(&body) {
+        Ok(_) => {
+            println!("ok");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
 /// `okena key <terminal> <key>`
 pub fn cli_key(terminal: &str, key: &str) -> i32 {
     let key_name = match map_special_key(key) {

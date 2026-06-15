@@ -59,6 +59,13 @@ pub(crate) type FocusManagerResolver = Arc<
 /// window. Lets the read side report exactly what the user sees.
 pub(crate) type WindowsResolver = Arc<dyn Fn(&App) -> Vec<ApiWindow> + Send + Sync>;
 
+/// Dispatches a named GUI command (command palette) into a window for
+/// `ActionRequest::InvokeAction`. Args: `(cx, target_window, action_name)`.
+/// `None` target → focused window. Returns `Err` if the window or action name
+/// can't be resolved, or in headless mode where there is no GUI to dispatch to.
+pub(crate) type ActionDispatcher =
+    Arc<dyn Fn(&mut App, Option<WindowId>, &str) -> Result<(), String> + Send + Sync>;
+
 /// Shared remote command loop used by both GUI (`Okena`) and headless (`HeadlessApp`).
 ///
 /// Processes commands from the remote API bridge on the GPUI main thread.
@@ -82,6 +89,7 @@ pub(crate) async fn remote_command_loop(
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
     service_manager: Entity<ServiceManager>,
+    action_dispatcher: ActionDispatcher,
     cx: &mut AsyncApp,
 ) {
     loop {
@@ -159,6 +167,54 @@ pub(crate) async fn remote_command_loop(
                             })
                         })
                     }
+
+                    // ── App-scoped: settings / theme / command palette ────
+                    ActionRequest::GetSettings => {
+                        cx.update(|cx| super::remote_config::get_settings(cx))
+                    }
+                    ActionRequest::GetSettingsSchema => {
+                        cx.update(|_cx| super::remote_config::get_settings_schema())
+                    }
+                    ActionRequest::SetSettings { patch } => {
+                        cx.update(|cx| super::remote_config::set_settings(cx, patch))
+                    }
+                    ActionRequest::GetThemes => {
+                        cx.update(|cx| super::remote_config::get_themes(cx))
+                    }
+                    ActionRequest::GetTheme { id } => {
+                        cx.update(|cx| super::remote_config::get_theme(cx, id))
+                    }
+                    ActionRequest::SetTheme { id } => {
+                        cx.update(|cx| super::remote_config::set_theme(cx, id))
+                    }
+                    ActionRequest::SaveCustomTheme { id, config, activate } => {
+                        cx.update(|cx| {
+                            super::remote_config::save_custom_theme(cx, id, config, activate)
+                        })
+                    }
+                    ActionRequest::ListActions => {
+                        cx.update(|_cx| super::remote_config::list_actions())
+                    }
+                    ActionRequest::InvokeAction { action_name, window } => {
+                        cx.update(|cx| {
+                            let target = match window.as_deref() {
+                                None => None,
+                                Some(s) => match parse_window_id(s) {
+                                    Some(w) => Some(w),
+                                    None => {
+                                        return CommandResult::Err(format!(
+                                            "invalid window id: {s}"
+                                        ));
+                                    }
+                                },
+                            };
+                            match action_dispatcher(cx, target, &action_name) {
+                                Ok(()) => CommandResult::Ok(None),
+                                Err(e) => CommandResult::Err(e),
+                            }
+                        })
+                    }
+
                     action => {
                         cx.update(|cx| {
                             // Resolve the action's explicit target window (if
@@ -423,13 +479,34 @@ impl Okena {
                     },
                 }
             });
-        let windows_okena_weak = okena_weak;
+        let windows_okena_weak = okena_weak.clone();
         let windows_resolver: WindowsResolver = Arc::new(move |cx: &App| {
             windows_okena_weak
                 .upgrade()
                 .map(|okena| okena.read(cx).build_api_windows(cx))
                 .unwrap_or_default()
         });
+        // Command-palette dispatch: resolve the target window and the named
+        // GUI action, then dispatch it into that window.
+        let dispatch_okena_weak = okena_weak;
+        let action_dispatcher: ActionDispatcher =
+            Arc::new(move |cx: &mut App, target: Option<WindowId>, name: &str| {
+                let okena = dispatch_okena_weak
+                    .upgrade()
+                    .ok_or_else(|| "app is shutting down".to_string())?;
+                let handle = okena
+                    .read(cx)
+                    .window_handle_for(cx, target)
+                    .ok_or_else(|| "window not found".to_string())?;
+                let descriptions = crate::keybindings::get_action_descriptions();
+                let desc = descriptions
+                    .get(name)
+                    .ok_or_else(|| format!("unknown command: {name}"))?;
+                let action = (desc.factory)();
+                handle
+                    .update(cx, |_view, window, cx| window.dispatch_action(action, cx))
+                    .map_err(|e| format!("dispatch failed: {e}"))
+            });
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
         let git_status_tx = self.git_status_tx.clone();
@@ -438,7 +515,7 @@ impl Okena {
         cx.spawn(async move |_this: WeakEntity<Okena>, cx: &mut AsyncApp| {
             remote_command_loop(
                 bridge_rx, backend, workspace, focus_manager_resolver, windows_resolver, terminals,
-                state_version, git_status_tx, service_manager, cx,
+                state_version, git_status_tx, service_manager, action_dispatcher, cx,
             ).await;
         })
         .detach();

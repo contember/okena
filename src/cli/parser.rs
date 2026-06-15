@@ -32,12 +32,17 @@ pub enum Command {
     Pair,
     /// Server health check
     Health {
+        /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
     },
     /// Print raw workspace state (JSON)
     State,
     /// Execute a raw action (JSON ActionRequest)
+    ///
+    /// Escape hatch for actions without a dedicated subcommand. The body is a
+    /// snake_case-tagged object like `{"action":"focus_terminal", ...}`. See
+    /// `okena skill show` for the action surface and `okena state` for the ids.
     Action {
         /// The JSON ActionRequest body
         json: String,
@@ -46,6 +51,7 @@ pub enum Command {
     Services {
         /// Optional project filter (id / name)
         project: Option<String>,
+        /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
     },
@@ -56,6 +62,7 @@ pub enum Command {
     },
     /// Identify the current terminal and project (uses $OKENA_TERMINAL_ID)
     Whoami {
+        /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
     },
@@ -63,6 +70,7 @@ pub enum Command {
     // ── Orientation ──────────────────────────────────────────────────────────
     /// Compact overview of windows, projects and layout
     Ls {
+        /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
     },
@@ -121,13 +129,15 @@ pub enum Command {
     Key {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
-        /// Key name (e.g. enter, esc, tab, up, ctrl-c)
+        /// Key name: enter, esc, tab, up/down/left/right, home, end, pageup,
+        /// pagedown, backspace, delete, or a ctrl-<a-z> chord (e.g. ctrl-c, ctrl-l)
         key: String,
     },
     /// Read the visible content of a terminal
     Read {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
+        /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
     },
@@ -136,6 +146,86 @@ pub enum Command {
     Skill {
         #[command(subcommand)]
         cmd: SkillCmd,
+    },
+
+    /// Inspect or change app settings
+    Settings {
+        #[command(subcommand)]
+        cmd: SettingsCmd,
+    },
+    /// Inspect or change the theme (incl. editing a custom theme)
+    Theme {
+        #[command(subcommand)]
+        cmd: ThemeCmd,
+    },
+    /// List or invoke command-palette actions
+    #[command(name = "command")]
+    Cmd {
+        #[command(subcommand)]
+        cmd: PaletteCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SettingsCmd {
+    /// Show current settings (optionally a single dotted key, e.g. sidebar.width)
+    Show {
+        /// Dotted key path; omit for the whole settings object
+        key: Option<String>,
+    },
+    /// Show the settings schema (every key with its default value)
+    Schema,
+    /// Set a setting: a dotted key to a JSON value (bare strings are allowed)
+    Set {
+        /// Dotted key path (e.g. font_size, sidebar.width)
+        key: String,
+        /// JSON value (e.g. 16, true, "JetBrains Mono"); bare text → string
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ThemeCmd {
+    /// List built-in and custom themes
+    List {
+        /// Output JSON instead of the default plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a theme as an editable JSON blob (the active theme if id omitted)
+    Show {
+        /// Theme id: a built-in mode (dark/light/…) or a custom id
+        id: Option<String>,
+    },
+    /// Activate a theme (built-in mode or custom id)
+    Set {
+        /// Theme id: auto/dark/light/pastel-dark/high-contrast or a custom id
+        id: String,
+    },
+    /// Write a custom theme from a full JSON blob and (by default) activate it
+    Save {
+        /// Custom theme id (becomes the file name stem)
+        id: String,
+        /// The full CustomThemeConfig JSON; omit or '-' to read stdin
+        json: Option<String>,
+        /// Write the file but don't switch to it
+        #[arg(long)]
+        no_activate: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PaletteCmd {
+    /// List invokable commands (name, description, category)
+    List {
+        /// Output JSON instead of the default plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Invoke a command by name (e.g. ToggleSidebar, NewWindow, ZoomIn)
+    Run {
+        /// Action name from `okena command list`
+        name: String,
     },
 }
 
@@ -158,22 +248,31 @@ pub enum SkillCmd {
 pub enum ServiceCmd {
     /// Start a service
     Start {
+        /// Service name (see `okena services`)
         name: String,
+        /// Project (id / name); omit to use the only / focused project
         project: Option<String>,
+        /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
     },
     /// Stop a service
     Stop {
+        /// Service name (see `okena services`)
         name: String,
+        /// Project (id / name); omit to use the only / focused project
         project: Option<String>,
+        /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
     },
     /// Restart a service
     Restart {
+        /// Service name (see `okena services`)
         name: String,
+        /// Project (id / name); omit to use the only / focused project
         project: Option<String>,
+        /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
     },
@@ -214,6 +313,7 @@ pub enum ProjectCmd {
     Rename {
         /// Project (id / name / path)
         project: String,
+        /// New display name
         name: String,
     },
     /// Set a project's color
@@ -246,6 +346,7 @@ pub enum WorktreeCmd {
     Rm {
         /// Worktree project (id / name / path)
         worktree: String,
+        /// Remove even with uncommitted changes / unmerged work
         #[arg(long)]
         force: bool,
     },
@@ -254,7 +355,10 @@ pub enum WorktreeCmd {
 #[derive(Subcommand)]
 pub enum FolderCmd {
     /// Create a folder
-    Add { name: String },
+    Add {
+        /// Folder name
+        name: String,
+    },
     /// Delete a folder
     Rm {
         /// Folder (id / name)
@@ -264,6 +368,7 @@ pub enum FolderCmd {
     Rename {
         /// Folder (id / name)
         folder: String,
+        /// New folder name
         name: String,
     },
 }
@@ -274,6 +379,7 @@ pub enum TermCmd {
     Ls {
         /// Optional project filter (id / name / path)
         project: Option<String>,
+        /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
     },
@@ -296,13 +402,15 @@ pub enum TermCmd {
     Rename {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
+        /// New terminal name
         name: String,
     },
-    /// Split a terminal horizontally (h) or vertically (v)
+    /// Split a terminal: h = stacked top/bottom, v = side by side left/right
     Split {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
-        /// Direction: h (horizontal) or v (vertical)
+        /// h = horizontal split (new pane below, panes stacked top/bottom);
+        /// v = vertical split (new pane to the right, panes side by side)
         direction: String,
     },
     /// Add a tab next to a terminal
@@ -331,7 +439,8 @@ pub enum TermCmd {
 pub fn subcommand_names() -> &'static [&'static str] {
     &[
         "pair", "health", "state", "action", "services", "service", "whoami", "ls", "project",
-        "worktree", "folder", "term", "send", "run", "key", "read", "skill",
+        "worktree", "folder", "term", "send", "run", "key", "read", "skill", "settings", "theme",
+        "command",
     ]
 }
 
@@ -381,6 +490,17 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["okena", "skill", "show"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "skill", "install", "--project"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "settings", "show"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "settings", "show", "sidebar.width"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "settings", "set", "font_size", "16"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "theme", "list", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "theme", "set", "dark"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "theme", "save", "mine", "--no-activate"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "command", "list"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["okena", "command", "run", "ToggleSidebar", "--window", "main"])
+                .is_ok()
+        );
         // --user and --project are mutually exclusive.
         assert!(
             Cli::try_parse_from(["okena", "skill", "install", "--user", "--project"]).is_err()

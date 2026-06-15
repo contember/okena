@@ -5,7 +5,10 @@ mod resolve;
 
 use crate::workspace::persistence::config_dir;
 use clap::Parser as _;
-use parser::{Cli, Command, FolderCmd, ProjectCmd, ServiceCmd, SkillCmd, TermCmd, WorktreeCmd};
+use parser::{
+    Cli, Command, FolderCmd, PaletteCmd, ProjectCmd, ServiceCmd, SettingsCmd, SkillCmd, TermCmd,
+    ThemeCmd, WorktreeCmd,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -69,6 +72,7 @@ fn command_uses_window(cmd: &Command) -> bool {
         Command::Term { cmd } => {
             matches!(cmd, TermCmd::Focus { .. } | TermCmd::Fullscreen { .. })
         }
+        Command::Cmd { cmd } => matches!(cmd, PaletteCmd::Run { .. }),
         _ => false,
     }
 }
@@ -172,6 +176,24 @@ fn dispatch(cli: Cli) -> i32 {
         Command::Skill { cmd } => match cmd {
             SkillCmd::Show => commands::cli_skill_show(),
             SkillCmd::Install { user, project } => commands::cli_skill_install(user, project),
+        },
+
+        Command::Settings { cmd } => match cmd {
+            SettingsCmd::Show { key } => commands::cli_settings_show(key.as_deref()),
+            SettingsCmd::Schema => commands::cli_settings_schema(),
+            SettingsCmd::Set { key, value } => commands::cli_settings_set(&key, &value),
+        },
+        Command::Theme { cmd } => match cmd {
+            ThemeCmd::List { json } => commands::cli_theme_list(json),
+            ThemeCmd::Show { id } => commands::cli_theme_show(id.as_deref()),
+            ThemeCmd::Set { id } => commands::cli_theme_set(&id),
+            ThemeCmd::Save { id, json, no_activate } => {
+                commands::cli_theme_save(&id, json.as_deref(), !no_activate)
+            }
+        },
+        Command::Cmd { cmd } => match cmd {
+            PaletteCmd::List { json } => commands::cli_command_list(json),
+            PaletteCmd::Run { name } => commands::cli_command_run(&name, window),
         },
     }
 }

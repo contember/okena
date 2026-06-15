@@ -43,8 +43,15 @@ okena key okena:0 ctrl-c               # interrupt
 
 - Projects: `okena project add <path> | rm | rename | color | focus | show | hide`
 - Layout: `okena term new | close | rename | split <h|v> | tab | focus | minimize | fullscreen`
+  (`split h` = stacked top/bottom, `split v` = side by side left/right)
 - Worktrees: `okena worktree add <project> <branch> [--new-branch] | rm`
 - Services: `okena services [project]`, `okena service start|stop|restart <name> [project]`
+- Settings: `okena settings show [key] | schema | set <key> <value>` (dotted keys, e.g. `sidebar.width`).
+- Theme: `okena theme list | show [id] | set <id> | save <id> <json>`. To recolor
+  ("make it lighter"): `theme show` the active theme, edit the colors, pipe the
+  whole blob back via `theme save <id> -` (reads stdin) — it activates by default.
+- Command palette: `okena command list`, `okena command run <Name>` invokes a GUI
+  action (e.g. `ToggleSidebar`, `NewWindow`, `ZoomIn`) — things with no dedicated CLI verb.
 - Raw: `okena state` (full JSON), `okena action '<json>'` (any ActionRequest).
 
 Commands that create things (`term new/split/tab`, `project add`, `worktree add`,

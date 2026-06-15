@@ -253,6 +253,86 @@ impl CustomThemeColors {
         u32::from_str_radix(s, 16).unwrap_or(0)
     }
 
+    /// Format a u32 color as a `#rrggbb` hex string.
+    fn to_hex(c: u32) -> String {
+        format!("#{:06x}", c & 0x00ff_ffff)
+    }
+
+    /// Build hex-string colors from a [`ThemeColors`] (inverse of
+    /// [`Self::to_theme_colors`]). Lets a built-in or live theme be emitted as
+    /// an editable custom-theme blob (e.g. for `okena theme show`).
+    pub fn from_theme_colors(c: &ThemeColors) -> Self {
+        let h = Self::to_hex;
+        Self {
+            bg_primary: h(c.bg_primary),
+            bg_secondary: h(c.bg_secondary),
+            bg_header: h(c.bg_header),
+            bg_selection: h(c.bg_selection),
+            bg_hover: h(c.bg_hover),
+            border: h(c.border),
+            border_active: h(c.border_active),
+            border_focused: h(c.border_focused),
+            border_bell: h(c.border_bell),
+            border_idle: h(c.border_idle),
+            text_primary: h(c.text_primary),
+            text_secondary: h(c.text_secondary),
+            text_muted: h(c.text_muted),
+            selection_bg: h(c.selection_bg),
+            selection_fg: h(c.selection_fg),
+            search_match_bg: h(c.search_match_bg),
+            search_current_bg: h(c.search_current_bg),
+            term_black: h(c.term_black),
+            term_red: h(c.term_red),
+            term_green: h(c.term_green),
+            term_yellow: h(c.term_yellow),
+            term_blue: h(c.term_blue),
+            term_magenta: h(c.term_magenta),
+            term_cyan: h(c.term_cyan),
+            term_white: h(c.term_white),
+            term_bright_black: h(c.term_bright_black),
+            term_bright_red: h(c.term_bright_red),
+            term_bright_green: h(c.term_bright_green),
+            term_bright_yellow: h(c.term_bright_yellow),
+            term_bright_blue: h(c.term_bright_blue),
+            term_bright_magenta: h(c.term_bright_magenta),
+            term_bright_cyan: h(c.term_bright_cyan),
+            term_bright_white: h(c.term_bright_white),
+            term_foreground: h(c.term_foreground),
+            term_background: h(c.term_background),
+            term_background_unfocused: h(c.term_background_unfocused),
+            cursor: h(c.cursor),
+            scrollbar: h(c.scrollbar),
+            scrollbar_hover: h(c.scrollbar_hover),
+            success: h(c.success),
+            warning: h(c.warning),
+            error: h(c.error),
+            button_primary_bg: h(c.button_primary_bg),
+            button_primary_fg: h(c.button_primary_fg),
+            button_primary_hover: h(c.button_primary_hover),
+            folder_default: h(c.folder_default),
+            folder_red: h(c.folder_red),
+            folder_orange: h(c.folder_orange),
+            folder_yellow: h(c.folder_yellow),
+            folder_lime: h(c.folder_lime),
+            folder_green: h(c.folder_green),
+            folder_teal: h(c.folder_teal),
+            folder_cyan: h(c.folder_cyan),
+            folder_blue: h(c.folder_blue),
+            folder_indigo: h(c.folder_indigo),
+            folder_purple: h(c.folder_purple),
+            folder_pink: h(c.folder_pink),
+            metric_normal: h(c.metric_normal),
+            metric_warning: h(c.metric_warning),
+            metric_critical: h(c.metric_critical),
+            diff_added_bg: h(c.diff_added_bg),
+            diff_removed_bg: h(c.diff_removed_bg),
+            diff_added_fg: h(c.diff_added_fg),
+            diff_removed_fg: h(c.diff_removed_fg),
+            diff_hunk_header_bg: h(c.diff_hunk_header_bg),
+            diff_hunk_header_fg: h(c.diff_hunk_header_fg),
+        }
+    }
+
     /// Convert to ThemeColors
     pub fn to_theme_colors(&self) -> ThemeColors {
         ThemeColors {

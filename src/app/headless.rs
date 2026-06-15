@@ -23,7 +23,9 @@ use tokio::sync::watch as tokio_watch;
 
 use crate::terminal::backend::LocalBackend;
 
-use super::remote_commands::{remote_command_loop, FocusManagerResolver, WindowsResolver};
+use super::remote_commands::{
+    remote_command_loop, ActionDispatcher, FocusManagerResolver, WindowsResolver,
+};
 use okena_core::api::ApiWindow;
 
 /// Headless application entity — runs workspace, PTY management, and remote
@@ -253,6 +255,10 @@ impl HeadlessApp {
                 sidebar_open: None,
             }]
         });
+        // No GUI windows in headless mode → the command palette can't dispatch.
+        let action_dispatcher: ActionDispatcher = Arc::new(|_cx, _target, _name| {
+            Err("command palette unavailable in headless mode".to_string())
+        });
         cx.spawn({
             let workspace = workspace.clone();
             let terminals = terminals.clone();
@@ -262,7 +268,7 @@ impl HeadlessApp {
             async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
                 remote_command_loop(
                     bridge_rx, local_backend, workspace, focus_manager_resolver, windows_resolver,
-                    terminals, state_version, git_status_tx, service_manager, cx,
+                    terminals, state_version, git_status_tx, service_manager, action_dispatcher, cx,
                 ).await;
             }
         })

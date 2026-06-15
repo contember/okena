@@ -225,6 +225,22 @@ impl Okena {
         }
     }
 
+    /// Resolve a target window to its OS handle, for dispatching GUI actions
+    /// (the command palette) from the remote bridge. `None` → the focused
+    /// window (falling back to main); `Some(id)` → that window, or `None` if it
+    /// doesn't exist.
+    pub(super) fn window_handle_for(
+        &self,
+        cx: &App,
+        target: Option<WindowId>,
+    ) -> Option<AnyWindowHandle> {
+        match target {
+            None => cx.active_window().or(Some(self.main_window_handle)),
+            Some(WindowId::Main) => Some(self.main_window_handle),
+            Some(extra @ WindowId::Extra(_)) => self.extra_window_handles.get(&extra).copied(),
+        }
+    }
+
     /// Enumerate the open OS windows for `GET /v1/state`.
     ///
     /// Stable order: main first, then extras in `WorkspaceData.extra_windows`
