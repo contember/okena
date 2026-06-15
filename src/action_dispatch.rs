@@ -175,13 +175,12 @@ impl ActionDispatcher {
                         // and multi-terminal close actions are gated; whatever
                         // isn't soft-closed falls through to the immediate close.
                         match &action {
-                            ActionRequest::CloseTerminal { project_id, terminal_id } => {
+                            ActionRequest::CloseTerminal { project_id, terminal_id }
                                 if crate::soft_close::try_begin(
                                     ws, fm, &*backend, &terminals, project_id, terminal_id, cx,
-                                ) {
+                                ) => {
                                     return;
                                 }
-                            }
                             ActionRequest::CloseTerminals { project_id, terminal_ids } => {
                                 // Soft-close each busy terminal; hard-close the
                                 // rest in a single batched action.

@@ -212,8 +212,8 @@ impl Render for WorktreeDialog {
                                     cx.notify();
                                 }
                     }
-                    "down" => {
-                        if search_focused {
+                    "down"
+                        if search_focused => {
                             let max = this.filtered_branches.len().saturating_sub(1);
                             if let Some(idx) = this.selected_branch_index {
                                 if idx < max {
@@ -225,7 +225,6 @@ impl Render for WorktreeDialog {
                                 cx.notify();
                             }
                         }
-                    }
                     "enter" => {
                         this.create_worktree(cx);
                     }

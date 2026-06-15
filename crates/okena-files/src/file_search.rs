@@ -328,7 +328,7 @@ impl FileSearchDialog {
                 })
                 .collect();
 
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            scored.sort_by_key(|b| std::cmp::Reverse(b.1));
             self.filtered_files = scored.into_iter().map(|(i, _, pos)| (i, pos)).collect();
         }
 
@@ -594,16 +594,14 @@ impl Render for FileSearchDialog {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
-                    "up" => {
-                        if this.select_prev() {
+                    "up"
+                        if this.select_prev() => {
                             cx.notify();
                         }
-                    }
-                    "down" => {
-                        if this.select_next() {
+                    "down"
+                        if this.select_next() => {
                             cx.notify();
                         }
-                    }
                     "enter" => this.open_selected(cx),
                     "escape" => this.close(cx),
                     _ => {}

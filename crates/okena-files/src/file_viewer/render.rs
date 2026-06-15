@@ -1311,11 +1311,10 @@ impl Render for FileViewer {
                 let img_zoom_chord = is_img_view;
 
                 match key {
-                    "f" if modifiers.platform || modifiers.control => {
-                        if !is_preview && !is_img_view && !is_font_tab {
+                    "f" if (modifiers.platform || modifiers.control)
+                        && !is_preview && !is_img_view && !is_font_tab => {
                             this.open_search(window, cx);
                         }
-                    }
                     "tab" if (is_md || is_svg_tab) && !modifiers.control && !modifiers.shift => {
                         this.toggle_display_mode(cx);
                     }
@@ -1325,13 +1324,12 @@ impl Render for FileViewer {
                     "tab" if modifiers.control => {
                         this.next_tab(cx);
                     }
-                    "b" if (modifiers.platform || modifiers.control) && modifiers.alt => {
-                        if this.blame_provider.is_some() {
+                    "b" if (modifiers.platform || modifiers.control) && modifiers.alt
+                        && this.blame_provider.is_some() => {
                             this.toggle_blame(cx);
                             let visible = this.blame_visible();
                             cx.emit(super::FileViewerEvent::BlamePreferenceChanged(visible));
                         }
-                    }
                     "b" if !modifiers.platform && !modifiers.control => {
                         this.toggle_sidebar(cx);
                     }

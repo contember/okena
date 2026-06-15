@@ -611,11 +611,10 @@ impl Render for KeybindingsHelp {
                 }
                 let key = event.keystroke.key.as_str();
                 match key {
-                    "backspace" => {
-                        if this.search_query.pop().is_some() {
+                    "backspace"
+                        if this.search_query.pop().is_some() => {
                             cx.notify();
                         }
-                    }
                     k if k.len() == 1 && !event.keystroke.modifiers.modified() => {
                         let Some(ch) = k.chars().next() else {
                             return;
