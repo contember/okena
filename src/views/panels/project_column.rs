@@ -56,6 +56,10 @@ pub struct ProjectColumn {
     service_panel: Entity<ServicePanel<ActionDispatcher>>,
     /// Self-contained hook panel entity
     hook_panel: Entity<HookPanel>,
+    /// Index into the discoverability tip pool shown on the empty state.
+    /// Advanced by the "Another tip" control; seeded per column so different
+    /// empty columns don't all open on the same tip.
+    tip_index: usize,
 }
 
 impl ProjectColumn {
@@ -140,6 +144,7 @@ impl ProjectColumn {
             git_header,
             service_panel,
             hook_panel,
+            tip_index: crate::views::tips::next_start_index(),
         }
     }
 
@@ -758,14 +763,6 @@ impl ProjectColumn {
             )
             .child(
                 div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .max_w(px(200.0))
-                    .text_center()
-                    .child("This project is saved as a bookmark. Start a terminal to begin working.")
-            )
-            .child(
-                div()
                     .id("start-terminal-btn")
                     .cursor_pointer()
                     .px(px(16.0))
@@ -802,6 +799,93 @@ impl ProjectColumn {
                             }
                         }
                     })
+            )
+            .child(self.render_tip(cx))
+    }
+
+    /// Render a single rotating discoverability tip below the empty-state CTA.
+    fn render_tip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let tip = crate::views::tips::tip_at(self.tip_index);
+        // Live keybinding chip when the tip maps to an action; otherwise the
+        // static trigger hint. `None` => no chip at all.
+        let chip = tip
+            .action
+            .and_then(crate::views::tips::shortcut_for_action)
+            .or_else(|| tip.hint.map(str::to_string));
+
+        v_flex()
+            .items_center()
+            .gap(px(10.0))
+            .mt(px(20.0))
+            .max_w(px(340.0))
+            .px(px(20.0))
+            .py(px(16.0))
+            .rounded(px(10.0))
+            .bg(rgb(t.bg_secondary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        svg()
+                            .path("icons/lightbulb.svg")
+                            .size(px(13.0))
+                            .text_color(rgb(t.button_primary_bg)),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(t.button_primary_bg))
+                            .child("TIP"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .text_center()
+                    .child(tip.text),
+            )
+            .children(chip.map(|c| {
+                div()
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(c)
+            }))
+            .child(
+                h_flex()
+                    .id("next-tip-btn")
+                    .cursor_pointer()
+                    .items_center()
+                    .gap(px(4.0))
+                    .mt(px(2.0))
+                    .text_color(rgb(t.text_muted))
+                    .hover(|s| s.text_color(rgb(t.text_secondary)))
+                    .child(
+                        svg()
+                            .path("icons/refresh.svg")
+                            .size(px(11.0))
+                            .text_color(rgb(t.text_muted)),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .child("Another tip"),
+                    )
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.tip_index = this.tip_index.wrapping_add(1);
+                        cx.notify();
+                    })),
             )
     }
 }
