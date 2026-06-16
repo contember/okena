@@ -359,6 +359,14 @@ impl Workspace {
         }
     }
 
+    /// Flip the "needs attention" section opt-in for a window's manual view.
+    /// Persisted via `notify_data`.
+    pub fn toggle_show_attention_section(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+        if self.data.toggle_show_attention_section(window_id).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
     /// Toggle whether a project is pinned to the top of the activity-sorted
     /// view. No-op for an unknown project id. Persisted via `notify_data`.
     pub fn toggle_project_pinned(&mut self, project_id: &str, cx: &mut Context<Self>) {
