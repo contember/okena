@@ -41,6 +41,39 @@ impl ProjectLayoutMode {
     }
 }
 
+/// How the sidebar orders projects in a window.
+///
+/// `Manual` (default) follows the persisted `project_order` and folder
+/// grouping — the user's hand-arranged layout. `Activity` ignores
+/// `project_order` and folders and instead groups projects into fixed tiers
+/// (pinned, needs-attention, running, rest) sorted by recent activity, so the
+/// projects that need attention float to the top. Stored per-window so each
+/// window can flip its own view independently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSortMode {
+    /// Hand-arranged order from `project_order` + folders. Default.
+    #[default]
+    Manual,
+    /// Tiered, activity-sorted view that ignores `project_order` and folders.
+    Activity,
+}
+
+impl ProjectSortMode {
+    /// Return the other mode.
+    pub fn toggled(self) -> Self {
+        match self {
+            ProjectSortMode::Manual => ProjectSortMode::Activity,
+            ProjectSortMode::Activity => ProjectSortMode::Manual,
+        }
+    }
+
+    /// True when the sidebar should use the activity-sorted view.
+    pub fn is_activity(self) -> bool {
+        matches!(self, ProjectSortMode::Activity)
+    }
+}
+
 /// Restore bounds for an OS window: origin + size in screen pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WindowBounds {
@@ -91,6 +124,17 @@ pub struct WindowState {
     /// Orientation of the project grid in this window (columns vs rows).
     #[serde(default)]
     pub project_layout: ProjectLayoutMode,
+    /// How the sidebar orders projects in this window (manual vs activity).
+    #[serde(default)]
+    pub project_sort_mode: ProjectSortMode,
+    /// Opt-in: in the manual (`ProjectSortMode::Manual`) view, surface a
+    /// "needs attention" section at the top of the sidebar that *duplicates*
+    /// the projects with an unseen bell/notification, so they're reachable
+    /// without losing the hand-arranged folder layout below. Default off.
+    /// Irrelevant in the activity view, which already has a NEEDS ATTENTION
+    /// tier. Per-window so each window opts in independently.
+    #[serde(default)]
+    pub show_attention_section: bool,
     /// Per-folder collapsed state in this window's sidebar.
     #[serde(default)]
     pub folder_collapsed: HashMap<String, bool>,
@@ -113,6 +157,8 @@ impl Default for WindowState {
             folder_filter: None,
             project_widths: HashMap::new(),
             project_layout: ProjectLayoutMode::default(),
+            project_sort_mode: ProjectSortMode::default(),
+            show_attention_section: false,
             folder_collapsed: HashMap::new(),
             os_bounds: None,
             sidebar_open: None,
@@ -152,6 +198,8 @@ mod tests {
             folder_filter: Some("folder-7".to_string()),
             project_widths: widths,
             project_layout: ProjectLayoutMode::Rows,
+            project_sort_mode: ProjectSortMode::Activity,
+            show_attention_section: true,
             folder_collapsed: collapsed,
             os_bounds: Some(WindowBounds {
                 origin_x: 100.0,
@@ -170,6 +218,8 @@ mod tests {
         assert_eq!(reloaded.folder_filter, original.folder_filter);
         assert_eq!(reloaded.project_widths, original.project_widths);
         assert_eq!(reloaded.project_layout, original.project_layout);
+        assert_eq!(reloaded.project_sort_mode, original.project_sort_mode);
+        assert_eq!(reloaded.show_attention_section, original.show_attention_section);
         assert_eq!(reloaded.folder_collapsed, original.folder_collapsed);
         assert_eq!(reloaded.os_bounds, original.os_bounds);
         assert_eq!(reloaded.sidebar_open, original.sidebar_open);
@@ -220,5 +270,7 @@ mod tests {
         assert!(s.os_bounds.is_none());
         assert_eq!(s.sidebar_open, None);
         assert_eq!(s.project_layout, ProjectLayoutMode::Columns);
+        assert_eq!(s.project_sort_mode, ProjectSortMode::Manual);
+        assert!(!s.show_attention_section);
     }
 }

@@ -203,6 +203,14 @@ pub struct Terminal {
     /// GPUI thread only.
     pub(super) prompt_tracker: Mutex<PromptTracker>,
 
+    /// One-shot "a command finished (OSC 133 ;D) since last drain" edge.
+    /// Set in `process_output` when the prompt sidecar records a
+    /// `CommandFinished` mark, consumed (swapped to false) by the PTY event
+    /// loop so a finished command bumps the owning project's activity
+    /// timestamp exactly once. Mirrors `bell_pending`; not Arc-shared since it
+    /// is only ever set on the GPUI thread. GPUI thread only.
+    pub(super) command_finished_pending: AtomicBool,
+
     /// Reverse index into the current list of `PromptStart` marks (0 =
     /// newest). `Some` while the user is walking through prompts with
     /// `jump_to_prompt_above/below`; reset to `None` on any output or
@@ -351,6 +359,7 @@ impl Terminal {
             osc_sidecar,
             prompt_sidecar: Mutex::new(PromptSidecar::new()),
             prompt_tracker: Mutex::new(PromptTracker::new()),
+            command_finished_pending: AtomicBool::new(false),
             prompt_jump_index: Mutex::new(None),
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),

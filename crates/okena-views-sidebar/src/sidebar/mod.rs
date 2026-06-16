@@ -23,11 +23,13 @@ use okena_terminal::TerminalsRegistry;
 use okena_ui::click_detector::ClickDetector;
 use okena_ui::rename_state::RenameState;
 use okena_ui::theme::theme;
-use okena_ui::tokens::{ui_text_ms, ui_text_xl};
+use okena_ui::tokens::{ui_text_ms, ui_text_xl, ui_text_xs};
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{FolderData, ProjectData, WindowId, Workspace};
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use gpui_component::h_flex;
+use gpui_component::tooltip::Tooltip;
 use std::collections::{HashMap, HashSet};
 
 /// Callback for dispatching actions for a given project.
@@ -158,6 +160,27 @@ pub struct Sidebar {
     pub(crate) send_remote_action: Option<SendRemoteActionFn>,
     /// Callback to get remote folder ID for reordering
     pub(crate) get_remote_folder: Option<GetRemoteFolderFn>,
+    /// Last computed activity-view ordering `(tier, project_id)`. Reused while
+    /// the pointer is inside the sidebar (hover-freeze) so rows don't reshuffle
+    /// out from under the cursor; recomputed once the pointer leaves.
+    pub(crate) activity_order_cache: Vec<(crate::activity_order::ActivityTier, String)>,
+    /// True while the pointer is hovering the sidebar scroll area. Freezes the
+    /// activity-view ordering so a finishing command / bell doesn't reshuffle
+    /// rows mid-interaction.
+    pub(crate) activity_pointer_inside: bool,
+    /// Cursor-navigable items for the activity view, in exact rendered order
+    /// (project rows + their expanded group/terminal children; tier headers
+    /// and the attention mirror are not navigable). Rebuilt every render of the
+    /// activity path; `build_cursor_items` returns this verbatim in activity
+    /// mode so keyboard nav lines up 1:1 with what's on screen. Empty in manual
+    /// mode.
+    pub(crate) activity_cursor_items: Vec<SidebarCursorItem>,
+    /// Scroll-child index for each `cursor_index`, populated every render by
+    /// both paths. The scroll container interleaves non-navigable children
+    /// (the leading drop zone and attention section in the manual view; tier
+    /// headers in the activity view) with the navigable rows, so `cursor_index`
+    /// is not the scroll-child index — this maps one to the other.
+    pub(crate) cursor_scroll_indices: Vec<usize>,
 }
 
 impl Sidebar {
@@ -207,6 +230,10 @@ impl Sidebar {
             get_remote_connections: None,
             send_remote_action: None,
             get_remote_folder: None,
+            activity_order_cache: Vec::new(),
+            activity_pointer_inside: false,
+            activity_cursor_items: Vec::new(),
+            cursor_scroll_indices: Vec::new(),
         }
     }
 
@@ -429,6 +456,14 @@ impl Sidebar {
         let focus_manager = self.focus_manager.clone();
         let window_id = self.window_id;
 
+        let (activity_mode, show_attention) = self
+            .workspace
+            .read(cx)
+            .data()
+            .window(window_id)
+            .map(|w| (w.project_sort_mode.is_activity(), w.show_attention_section))
+            .unwrap_or((false, false));
+
         div()
             .h(px(28.0))
             .px(px(12.0))
@@ -454,6 +489,94 @@ impl Sidebar {
                     .text_color(rgb(t.text_secondary))
                     .child("PROJECTS"),
             )
+            .child(
+                h_flex()
+                    .gap(px(4.0))
+                    .items_center()
+                    // "Needs attention" opt-in. Only relevant in the manual
+                    // (Custom) view — the Activity view already has a NEEDS
+                    // ATTENTION tier — so it's hidden in activity mode.
+                    .when(!activity_mode, |row| {
+                        let attn_color = if show_attention { t.border_active } else { t.text_secondary };
+                        row.child(
+                            div()
+                                .id("attention-toggle")
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .px(px(4.0))
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .child(
+                                    svg()
+                                        .path("icons/bell.svg")
+                                        .size(px(13.0))
+                                        .text_color(rgb(attn_color)),
+                                )
+                                .tooltip(|_window, cx| {
+                                    Tooltip::new("Show a \"needs attention\" section at the top")
+                                        .build(_window, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.toggle_show_attention_section(window_id, cx);
+                                    });
+                                })),
+                        )
+                    })
+                    // Sort-order toggle: Custom (hand-arranged folders) vs
+                    // Activity (tiered, activity-sorted). Segmented so both
+                    // states are visible and labeled. Stops click propagation
+                    // so flipping the mode doesn't clear focus via the header.
+                    .child(self.render_sort_mode_toggle(activity_mode, cx)),
+            )
+    }
+
+    /// Segmented `Custom | Activity` control for the projects header.
+    fn render_sort_mode_toggle(&self, activity_mode: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let window_id = self.window_id;
+
+        let segment = |label: &'static str, id: &'static str, active: bool, cx: &mut Context<Self>| {
+            let mut seg = div()
+                .id(id)
+                .px(px(8.0))
+                .py(px(1.0))
+                .rounded(px(4.0))
+                .text_size(ui_text_xs(cx))
+                .cursor_pointer();
+            if active {
+                seg = seg
+                    .bg(rgb(t.bg_primary))
+                    .text_color(rgb(t.text_primary))
+                    .shadow_sm();
+            } else {
+                seg = seg
+                    .text_color(rgb(t.text_muted))
+                    .hover(|s| s.text_color(rgb(t.text_secondary)));
+            }
+            seg.child(label).on_click(cx.listener(move |this, _, _window, cx| {
+                cx.stop_propagation();
+                // Only flip when switching to the other mode; clicking the
+                // already-active segment is a no-op.
+                if active {
+                    return;
+                }
+                this.workspace.update(cx, |ws, cx| {
+                    ws.toggle_project_sort_mode(window_id, cx);
+                });
+            }))
+        };
+
+        h_flex()
+            .gap(px(2.0))
+            .rounded(px(6.0))
+            .bg(rgb(t.bg_secondary))
+            .p(px(2.0))
+            .child(segment("Custom", "sort-seg-custom", !activity_mode, cx))
+            .child(segment("Activity", "sort-seg-activity", activity_mode, cx))
     }
 }
 
@@ -510,6 +633,9 @@ pub struct SidebarProjectInfo {
     pub is_creating: bool,
     /// Whether this project is itself a worktree
     pub is_worktree: bool,
+    /// Whether this project is pinned (shows a pin marker; drives the pinned
+    /// tier in the activity-sorted view).
+    pub pinned: bool,
 }
 
 impl SidebarProjectInfo {
@@ -567,6 +693,7 @@ impl SidebarProjectInfo {
             is_closing: false,
             is_creating: false,
             is_worktree: project.worktree_info.is_some(),
+            pinned: project.pinned,
         }
     }
 }

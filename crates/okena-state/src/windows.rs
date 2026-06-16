@@ -15,7 +15,7 @@
 //! not prescriptive of where they live.
 
 use crate::window_id::WindowId;
-use crate::window_state::{WindowBounds, WindowState};
+use crate::window_state::{ProjectSortMode, WindowBounds, WindowState};
 use crate::workspace_data::WorkspaceData;
 
 impl WorkspaceData {
@@ -214,6 +214,30 @@ impl WorkspaceData {
         if let Some(w) = self.window_mut(id) {
             w.sidebar_open = Some(open);
         }
+    }
+
+    /// Set the project sort mode (manual vs activity) on the targeted window.
+    /// Unknown extra ids are a silent no-op, matching the `window_mut` contract.
+    pub fn set_project_sort_mode(&mut self, id: WindowId, mode: ProjectSortMode) {
+        if let Some(w) = self.window_mut(id) {
+            w.project_sort_mode = mode;
+        }
+    }
+
+    /// Flip the project sort mode on the targeted window and return the new
+    /// value. Unknown extra ids are a silent no-op and return `None`.
+    pub fn toggle_project_sort_mode(&mut self, id: WindowId) -> Option<ProjectSortMode> {
+        let w = self.window_mut(id)?;
+        w.project_sort_mode = w.project_sort_mode.toggled();
+        Some(w.project_sort_mode)
+    }
+
+    /// Flip the "needs attention" section opt-in on the targeted window and
+    /// return the new value. Unknown extra ids are a silent no-op (`None`).
+    pub fn toggle_show_attention_section(&mut self, id: WindowId) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        w.show_attention_section = !w.show_attention_section;
+        Some(w.show_attention_section)
     }
 
     /// Append a fresh extra window onto `extra_windows` and return its id.

@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod activity_order;
 pub mod sidebar;
 pub mod project_list;
 pub mod folder_list;

@@ -134,13 +134,18 @@ impl Perform for PromptSidecarPerform {
 /// itself as terminated; we advance the main processor up to the same byte
 /// offset (so the cursor is at its post-OSC position, which is unchanged
 /// since OSC sequences are zero-width) and then record the mark.
+///
+/// Returns `true` if at least one `CommandFinished` (OSC 133 ;D) mark was
+/// recorded in this chunk, so the caller can raise the per-terminal
+/// command-finished activity edge exactly once per drain.
 pub(super) fn advance_with_prompt_marks<L: EventListener>(
     term: &mut Term<L>,
     processor: &mut Processor,
     sidecar: &mut PromptSidecar,
     tracker: &mut PromptTracker,
     data: &[u8],
-) {
+) -> bool {
+    let mut command_finished = false;
     let mut pos = 0;
     while pos < data.len() {
         let consumed = sidecar
@@ -148,6 +153,9 @@ pub(super) fn advance_with_prompt_marks<L: EventListener>(
             .advance_until_terminated(&mut sidecar.perform, &data[pos..]);
         processor.advance(term, &data[pos..pos + consumed]);
         if let Some(kind) = sidecar.perform.pending.take() {
+            if matches!(kind, PromptMarkKind::CommandFinished { .. }) {
+                command_finished = true;
+            }
             let point = term.grid().cursor.point;
             tracker.record(kind, point);
         }
@@ -160,4 +168,5 @@ pub(super) fn advance_with_prompt_marks<L: EventListener>(
         }
         pos += consumed;
     }
+    command_finished
 }
