@@ -406,25 +406,49 @@ impl Sidebar {
         div()
             .id(ElementId::Name(format!("attention-mirror-{}", info.id).into()))
             .h(px(24.0))
-            .pl(px(12.0))
+            .pl(px(4.0))
             .pr(px(8.0))
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(4.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
-            .child(color_dot(dot_color, info.is_worktree))
+            // Match the leading slots of the project rows below so the color
+            // dot lines up: an empty expand-arrow spacer, then the dot inside
+            // the same 14px indicator box (sans the color-picker affordance).
+            .child(crate::item_widgets::sidebar_expand_spacer())
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(14.0))
+                    .h(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(color_dot(dot_color, info.is_worktree)),
+            )
             .child(crate::item_widgets::sidebar_name_label(
                 ElementId::Name(format!("attention-mirror-name-{}", info.id).into()),
                 info.name.clone(),
                 &t,
                 cx,
             ))
+            // Bell in an 18px box matching the visibility (eye) button so it
+            // lines up with the trailing toggles on the rows below.
             .child(
-                svg()
-                    .path("icons/bell.svg")
-                    .size(px(12.0))
-                    .text_color(rgb(t.border_active)),
+                div()
+                    .flex_shrink_0()
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path("icons/bell.svg")
+                            .size(px(12.0))
+                            .text_color(rgb(t.border_active)),
+                    ),
             )
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.cursor_index = None;
@@ -739,8 +763,9 @@ impl Render for Sidebar {
 
         // Map each cursor index to its scroll-child index. Manual rows are 1:1
         // with cursor items, offset by the leading drop zone (1) plus the
-        // attention section (header + one row per attention project, when shown).
-        let attention_section_len = if attention_infos.is_empty() { 0 } else { 1 + attention_infos.len() };
+        // attention section (header + one row per attention project + a trailing
+        // divider, when shown).
+        let attention_section_len = if attention_infos.is_empty() { 0 } else { 1 + attention_infos.len() + 1 };
         let cursor_scroll_base = 1 + attention_section_len;
         self.cursor_scroll_indices = (0..cursor_items.len()).map(|i| cursor_scroll_base + i).collect();
 
@@ -790,6 +815,16 @@ impl Render for Sidebar {
             for info in &attention_infos {
                 flat_elements.push(self.render_attention_mirror_row(info, cx).into_any_element());
             }
+            // A thin rule sets the mirrored section apart from the structured
+            // folder/project layout that follows.
+            flat_elements.push(
+                div()
+                    .h(px(1.0))
+                    .mx(px(12.0))
+                    .my(px(4.0))
+                    .bg(rgb(t.border))
+                    .into_any_element(),
+            );
         }
 
         for item in items {
