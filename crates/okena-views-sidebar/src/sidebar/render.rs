@@ -363,7 +363,13 @@ impl Sidebar {
     /// unseen bell/notification on any of their terminals — the source for the
     /// opt-in "needs attention" section in the manual view. Owned infos so the
     /// caller can render after releasing the workspace borrow.
-    fn collect_attention_infos(&self, workspace: &Workspace) -> Vec<SidebarProjectInfo> {
+    ///
+    /// `focused_terminal_id` (when set) is the terminal the user is actively
+    /// looking at; it never counts toward attention. A bell raised on the
+    /// focused terminal of the active window is cleared on the very next
+    /// terminal-pane render, so without this it would flicker through the menu
+    /// for a single frame.
+    fn collect_attention_infos(&self, workspace: &Workspace, focused_terminal_id: Option<&str>) -> Vec<SidebarProjectInfo> {
         let terminals = self.terminals.lock();
         // Determine attention cheaply from raw layout + terminal state first;
         // only build the (potentially git-touching) `SidebarProjectInfo` for the
@@ -378,7 +384,8 @@ impl Sidebar {
                 .unwrap_or_default()
                 .iter()
                 .any(|tid| {
-                    !project.hook_terminals.contains_key(tid)
+                    Some(tid.as_str()) != focused_terminal_id
+                        && !project.hook_terminals.contains_key(tid)
                         && terminals
                             .get(tid.as_str())
                             .is_some_and(|t| t.has_bell() || t.has_notification())
@@ -393,6 +400,30 @@ impl Sidebar {
         hits.into_iter()
             .map(|(_, project)| SidebarProjectInfo::from_project(project, workspace, self.window_id))
             .collect()
+    }
+
+    /// The terminal the user is actively looking at — the focused terminal of
+    /// this window, but only while it is the active OS window — resolved to its
+    /// id. `None` when the window is in the background or nothing is focused.
+    /// Used to keep that terminal out of the needs-attention section (see
+    /// `collect_attention_infos`).
+    fn active_focused_terminal_id(&self, workspace: &Workspace, window: &Window, cx: &App) -> Option<String> {
+        if !window.is_window_active() {
+            return None;
+        }
+        let focus = self.focus_manager.read(cx).focused_terminal_state()?;
+        let node = workspace
+            .data()
+            .projects
+            .iter()
+            .find(|p| p.id == focus.project_id)?
+            .layout
+            .as_ref()?
+            .get_at_path(&focus.layout_path)?;
+        match node {
+            okena_workspace::state::LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+            _ => None,
+        }
     }
 
     /// One compact, non-draggable "mirror" row for the manual view's needs-
@@ -629,7 +660,8 @@ impl Render for Sidebar {
             .map(|w| w.show_attention_section)
             .unwrap_or(false);
         let attention_infos = if show_attention {
-            self.collect_attention_infos(workspace)
+            let focused_terminal_id = self.active_focused_terminal_id(workspace, window, cx);
+            self.collect_attention_infos(workspace, focused_terminal_id.as_deref())
         } else {
             Vec::new()
         };
