@@ -31,8 +31,16 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// Build a flat list of cursor items matching the visual render order
+    /// Build a flat list of cursor items matching the visual render order.
+    ///
+    /// In the activity view the rendered order is tiered and activity-sorted,
+    /// not the manual `project_order`+folder walk below, so we return the list
+    /// the render path already built (`activity_cursor_items`) verbatim — it is
+    /// kept 1:1 with the rows on screen.
     pub(super) fn build_cursor_items(&self, cx: &mut Context<Self>) -> Vec<SidebarCursorItem> {
+        if self.is_activity_sort_mode(cx) {
+            return self.activity_cursor_items.clone();
+        }
         let workspace = self.workspace.read(cx);
         let all_projects: HashMap<&str, &ProjectData> = workspace.data().projects.iter()
             .map(|p| (p.id.as_str(), p))
@@ -247,13 +255,10 @@ impl Sidebar {
             || self.folder_rename.is_some()
     }
 
-    /// True when this window's sidebar is in the activity-sorted view, where
-    /// the cursor-key handlers below no-op. The keyboard cursor list is built
-    /// from the manual `project_order`+folder ordering (`build_cursor_items`),
-    /// which does not line up with the activity view's tiered, activity-sorted
-    /// rows — acting on it would scroll to and confirm rows the user sees no
-    /// highlight on. `Escape` is intentionally left active (it just clears the
-    /// cursor and restores focus, which is harmless in either mode).
+    /// True when this window's sidebar is in the activity-sorted view. Used to
+    /// dispatch `build_cursor_items` to the activity cursor list (built by the
+    /// render path to match the tiered rows 1:1) instead of the manual
+    /// `project_order`+folder walk.
     fn is_activity_sort_mode(&self, cx: &App) -> bool {
         self.workspace
             .read(cx)
@@ -264,7 +269,7 @@ impl Sidebar {
     }
 
     pub(super) fn handle_sidebar_up(&mut self, _: &SidebarUp, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_interactive_mode_active() || self.is_activity_sort_mode(cx) { return; }
+        if self.is_interactive_mode_active() { return; }
         let items = self.build_cursor_items(cx);
         if items.is_empty() { return; }
         match self.cursor_index {
@@ -272,12 +277,12 @@ impl Sidebar {
             None => self.cursor_index = Some(items.len() - 1),
             _ => {}
         }
-        self.scroll_to_cursor(items.len());
+        self.scroll_to_cursor();
         cx.notify();
     }
 
     pub(super) fn handle_sidebar_down(&mut self, _: &SidebarDown, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_interactive_mode_active() || self.is_activity_sort_mode(cx) { return; }
+        if self.is_interactive_mode_active() { return; }
         let items = self.build_cursor_items(cx);
         if items.is_empty() { return; }
         match self.cursor_index {
@@ -285,7 +290,7 @@ impl Sidebar {
             None => self.cursor_index = Some(0),
             _ => {}
         }
-        self.scroll_to_cursor(items.len());
+        self.scroll_to_cursor();
         cx.notify();
     }
 
@@ -302,7 +307,7 @@ impl Sidebar {
             self.finish_rename(cx);
             return;
         }
-        if self.is_interactive_mode_active() || self.is_activity_sort_mode(cx) { return; }
+        if self.is_interactive_mode_active() { return; }
         let items = self.build_cursor_items(cx);
         let Some(idx) = self.cursor_index else { return };
         let Some(item) = items.get(idx) else { return };
@@ -430,7 +435,7 @@ impl Sidebar {
     }
 
     pub(super) fn handle_sidebar_toggle_expand(&mut self, _: &SidebarToggleExpand, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_interactive_mode_active() || self.is_activity_sort_mode(cx) { return; }
+        if self.is_interactive_mode_active() { return; }
         let items = self.build_cursor_items(cx);
         let Some(idx) = self.cursor_index else { return };
         let Some(item) = items.get(idx) else { return };
@@ -490,11 +495,18 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// Scroll the sidebar to keep the cursor item visible
-    fn scroll_to_cursor(&self, item_count: usize) {
+    /// Scroll the sidebar to keep the cursor item visible.
+    ///
+    /// `cursor_index` counts cursor-navigable rows, but the scroll container
+    /// also holds non-navigable children (the leading drop zone, the opt-in
+    /// attention section, and — in the activity view — tier headers between
+    /// rows). `cursor_scroll_indices`, populated by the render path, maps the
+    /// cursor index to the actual scroll-child index for the current view.
+    fn scroll_to_cursor(&self) {
         if let Some(idx) = self.cursor_index
-            && item_count > 0 {
-                self.scroll_handle.scroll_to_item(idx);
-            }
+            && let Some(&target) = self.cursor_scroll_indices.get(idx)
+        {
+            self.scroll_handle.scroll_to_item(target);
+        }
     }
 }

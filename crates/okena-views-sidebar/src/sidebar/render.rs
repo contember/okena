@@ -1,10 +1,11 @@
 //! Top-level `Render` impl for the sidebar and the `render_expanded_children`
 //! helper that lays out per-project terminal / service / hook groups.
 
-use super::{GroupKind, Sidebar, SidebarItem, SidebarProjectInfo, SidebarServiceInfo};
+use super::{GroupKind, Sidebar, SidebarCursorItem, SidebarItem, SidebarProjectInfo, SidebarServiceInfo};
 use crate::activity_order::{order_by_activity, ActivityEntry, ActivityTier};
 use crate::drag::{FolderDrag, ProjectDrag};
 use gpui::*;
+use okena_ui::color_dot::color_dot;
 use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_ms;
 use okena_workspace::requests::SidebarRequest;
@@ -255,12 +256,43 @@ impl Sidebar {
                 ord
             };
 
+        // Phase 2b — build the cursor-navigable item list + its scroll-index map
+        // in the exact order the rows render below. `build_cursor_items` returns
+        // this list verbatim in activity mode so keyboard nav lines up 1:1 with
+        // the screen. Every cursor item maps to exactly one flat element and the
+        // only non-navigable flat elements are tier headers, so a cursor item's
+        // scroll-child index is its own index plus the headers emitted before it.
+        let mut cursor_items: Vec<SidebarCursorItem> = Vec::new();
+        let mut scroll_indices: Vec<usize> = Vec::new();
+        {
+            let mut headers_before = 0usize;
+            let mut last_tier: Option<ActivityTier> = None;
+            for (tier, id) in &ordering {
+                if last_tier != Some(*tier) {
+                    headers_before += 1;
+                    last_tier = Some(*tier);
+                }
+                let Some(info) = infos.get(id) else { continue };
+                let first = cursor_items.len();
+                cursor_items.push(SidebarCursorItem::Project { project_id: id.clone() });
+                if self.expanded_projects.contains(id) {
+                    self.push_activity_group_cursor_items(info, &mut cursor_items);
+                }
+                // No tier header falls between a project and its children, so
+                // `headers_before` is constant across this project's run.
+                scroll_indices.extend((first..cursor_items.len()).map(|i| i + headers_before));
+            }
+        }
+        self.validate_cursor(cursor_items.len());
+        let cursor_index = self.cursor_index;
+        self.activity_cursor_items = cursor_items;
+        self.cursor_scroll_indices = scroll_indices;
+
         // Phase 3 — render rows with a section header whenever the tier changes.
         let focused_project_id = self.focus_manager.read(cx).focused_project_id().cloned();
         let mut flat_elements: Vec<AnyElement> = Vec::new();
-        // Cursor-key navigation is not wired for the activity view yet; rows
-        // render without the keyboard cursor highlight. `flat_idx` is still
-        // threaded for render_expanded_children's internal accounting.
+        // `flat_idx` counts cursor-navigable rows (not tier headers), matching
+        // the index space of `cursor_items` built above so `is_cursor` lines up.
         let mut flat_idx: usize = 0;
         let mut last_tier: Option<ActivityTier> = None;
         for (tier, id) in ordering {
@@ -269,18 +301,141 @@ impl Sidebar {
                 last_tier = Some(tier);
             }
             let Some(info) = infos.get(&id) else { continue };
+            let is_cursor = cursor_index == Some(flat_idx);
             let is_focused_project = focused_project_id.as_ref() == Some(&id);
             let idx = manual_index.get(&id).copied().unwrap_or(0);
             flat_elements.push(
-                self.render_project_item(info, idx, false, is_focused_project, window, cx)
+                self.render_project_item(info, idx, is_cursor, is_focused_project, window, cx)
                     .into_any_element(),
             );
             flat_idx += 1;
             if self.expanded_projects.contains(&id) {
-                self.render_expanded_children(info, 20.0, 34.0, "", None, &mut flat_idx, &mut flat_elements, cx);
+                self.render_expanded_children(info, 20.0, 34.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
             }
         }
         flat_elements
+    }
+
+    /// Append the cursor-navigable rows of an expanded project (group headers +
+    /// their children) for the activity view's cursor list.
+    ///
+    /// Reads the same `SidebarProjectInfo` fields `render_expanded_children`
+    /// renders from, so the two stay aligned by construction; it MUST keep
+    /// emitting one entry per element that function pushes, in the same order
+    /// and under the same collapse conditions. (It can't reuse
+    /// `push_group_cursor_items`, which derives terminals from the raw layout
+    /// without filtering hook terminals and so diverges from the rendered rows.)
+    fn push_activity_group_cursor_items(
+        &self,
+        info: &SidebarProjectInfo,
+        cursor_items: &mut Vec<SidebarCursorItem>,
+    ) {
+        // Terminals group
+        if !info.terminal_ids.is_empty() {
+            cursor_items.push(SidebarCursorItem::GroupHeader { project_id: info.id.clone(), group: GroupKind::Terminals });
+            if !self.is_group_collapsed(&info.id, &GroupKind::Terminals) {
+                for tid in &info.terminal_ids {
+                    cursor_items.push(SidebarCursorItem::Terminal { project_id: info.id.clone(), terminal_id: tid.clone() });
+                }
+            }
+        }
+        // Services group
+        if !info.services.is_empty() {
+            cursor_items.push(SidebarCursorItem::GroupHeader { project_id: info.id.clone(), group: GroupKind::Services });
+            if !self.is_group_collapsed(&info.id, &GroupKind::Services) {
+                for service in &info.services {
+                    cursor_items.push(SidebarCursorItem::Service { project_id: info.id.clone(), service_name: service.name.clone() });
+                }
+            }
+        }
+        // Hooks group
+        if !info.hook_terminals.is_empty() {
+            cursor_items.push(SidebarCursorItem::GroupHeader { project_id: info.id.clone(), group: GroupKind::Hooks });
+            if !self.is_group_collapsed(&info.id, &GroupKind::Hooks) {
+                for hook in &info.hook_terminals {
+                    cursor_items.push(SidebarCursorItem::Hook { project_id: info.id.clone(), terminal_id: hook.terminal_id.clone() });
+                }
+            }
+        }
+    }
+
+    /// Collect, in most-recent-activity-first order, the projects with an
+    /// unseen bell/notification on any of their terminals — the source for the
+    /// opt-in "needs attention" section in the manual view. Owned infos so the
+    /// caller can render after releasing the workspace borrow.
+    fn collect_attention_infos(&self, workspace: &Workspace) -> Vec<SidebarProjectInfo> {
+        let terminals = self.terminals.lock();
+        // Determine attention cheaply from raw layout + terminal state first;
+        // only build the (potentially git-touching) `SidebarProjectInfo` for the
+        // few projects that actually qualify. Hook terminals are excluded to
+        // match the activity view's `terminal_ids` (which filters them out).
+        let mut hits: Vec<(Option<u64>, &ProjectData)> = Vec::new();
+        for project in &workspace.data().projects {
+            let has_attention = project
+                .layout
+                .as_ref()
+                .map(|l| l.collect_terminal_ids())
+                .unwrap_or_default()
+                .iter()
+                .any(|tid| {
+                    !project.hook_terminals.contains_key(tid)
+                        && terminals
+                            .get(tid.as_str())
+                            .is_some_and(|t| t.has_bell() || t.has_notification())
+                });
+            if has_attention {
+                hits.push((project.last_activity_at, project));
+            }
+        }
+        drop(terminals);
+        // Most-recent activity first; `None` (never active) sorts last.
+        hits.sort_by_key(|h| std::cmp::Reverse(h.0));
+        hits.into_iter()
+            .map(|(_, project)| SidebarProjectInfo::from_project(project, workspace, self.window_id))
+            .collect()
+    }
+
+    /// One compact, non-draggable "mirror" row for the manual view's needs-
+    /// attention section. Clicking focuses the canonical project (the same
+    /// action as its real row below); it is not a second entity and is not part
+    /// of keyboard cursor navigation.
+    fn render_attention_mirror_row(&self, info: &SidebarProjectInfo, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let project_id = info.id.clone();
+        let dot_color = t.get_folder_color(info.folder_color);
+        div()
+            .id(ElementId::Name(format!("attention-mirror-{}", info.id).into()))
+            .h(px(24.0))
+            .pl(px(12.0))
+            .pr(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .child(color_dot(dot_color, info.is_worktree))
+            .child(crate::item_widgets::sidebar_name_label(
+                ElementId::Name(format!("attention-mirror-name-{}", info.id).into()),
+                info.name.clone(),
+                &t,
+                cx,
+            ))
+            .child(
+                svg()
+                    .path("icons/bell.svg")
+                    .size(px(12.0))
+                    .text_color(rgb(t.border_active)),
+            )
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.cursor_index = None;
+                let workspace = this.workspace.clone();
+                this.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                    });
+                    cx.notify();
+                });
+            }))
     }
 
     /// Render expanded children (terminals group + services group) for a project.
@@ -435,7 +590,25 @@ impl Render for Sidebar {
             return self.render_sidebar_container(flat_elements, cx);
         }
 
+        // Manual path: cursor nav uses `build_cursor_items` (manual order), so
+        // drop the activity-view cursor list from a previous render.
+        self.activity_cursor_items.clear();
+
         let workspace = self.workspace.read(cx);
+
+        // Opt-in "needs attention" section: collect (owned) the attention
+        // projects to mirror at the top, in most-recent-first order. Computed
+        // under the workspace borrow; rendered after it is released.
+        let show_attention = workspace
+            .data()
+            .window(self.window_id)
+            .map(|w| w.show_attention_section)
+            .unwrap_or(false);
+        let attention_infos = if show_attention {
+            self.collect_attention_infos(workspace)
+        } else {
+            Vec::new()
+        };
 
         // Collect all projects for lookup
         let all_projects: HashMap<&str, &ProjectData> = workspace.data().projects.iter()
@@ -564,6 +737,13 @@ impl Render for Sidebar {
         self.validate_cursor(cursor_items.len());
         let cursor_index = self.cursor_index;
 
+        // Map each cursor index to its scroll-child index. Manual rows are 1:1
+        // with cursor items, offset by the leading drop zone (1) plus the
+        // attention section (header + one row per attention project, when shown).
+        let attention_section_len = if attention_infos.is_empty() { 0 } else { 1 + attention_infos.len() };
+        let cursor_scroll_base = 1 + attention_section_len;
+        self.cursor_scroll_indices = (0..cursor_items.len()).map(|i| cursor_scroll_base + i).collect();
+
         // Determine which project is focused — only highlight when explicitly focused via sidebar click
         let (focused_project_id, focus_individual) = {
             let fm = self.focus_manager.read(cx);
@@ -598,6 +778,19 @@ impl Render for Sidebar {
                 }))
                 .into_any_element()
         );
+
+        // Opt-in "needs attention" section: mirror the attention projects at
+        // the top so they're reachable without leaving the folder layout below.
+        // Self-managing — only shown when something actually needs attention.
+        // The mirror rows are not cursor targets (so not counted in `flat_idx`),
+        // but they occupy scroll children — already accounted for in
+        // `cursor_scroll_indices` above via `attention_section_len`.
+        if !attention_infos.is_empty() {
+            flat_elements.push(self.render_activity_tier_header(ActivityTier::Attention, cx).into_any_element());
+            for info in &attention_infos {
+                flat_elements.push(self.render_attention_mirror_row(info, cx).into_any_element());
+            }
+        }
 
         for item in items {
             match item {
