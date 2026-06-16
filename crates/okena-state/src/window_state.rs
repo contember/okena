@@ -127,6 +127,14 @@ pub struct WindowState {
     /// How the sidebar orders projects in this window (manual vs activity).
     #[serde(default)]
     pub project_sort_mode: ProjectSortMode,
+    /// Opt-in: in the manual (`ProjectSortMode::Manual`) view, surface a
+    /// "needs attention" section at the top of the sidebar that *duplicates*
+    /// the projects with an unseen bell/notification, so they're reachable
+    /// without losing the hand-arranged folder layout below. Default off.
+    /// Irrelevant in the activity view, which already has a NEEDS ATTENTION
+    /// tier. Per-window so each window opts in independently.
+    #[serde(default)]
+    pub show_attention_section: bool,
     /// Per-folder collapsed state in this window's sidebar.
     #[serde(default)]
     pub folder_collapsed: HashMap<String, bool>,
@@ -150,6 +158,7 @@ impl Default for WindowState {
             project_widths: HashMap::new(),
             project_layout: ProjectLayoutMode::default(),
             project_sort_mode: ProjectSortMode::default(),
+            show_attention_section: false,
             folder_collapsed: HashMap::new(),
             os_bounds: None,
             sidebar_open: None,
@@ -190,6 +199,7 @@ mod tests {
             project_widths: widths,
             project_layout: ProjectLayoutMode::Rows,
             project_sort_mode: ProjectSortMode::Activity,
+            show_attention_section: true,
             folder_collapsed: collapsed,
             os_bounds: Some(WindowBounds {
                 origin_x: 100.0,
@@ -209,6 +219,7 @@ mod tests {
         assert_eq!(reloaded.project_widths, original.project_widths);
         assert_eq!(reloaded.project_layout, original.project_layout);
         assert_eq!(reloaded.project_sort_mode, original.project_sort_mode);
+        assert_eq!(reloaded.show_attention_section, original.show_attention_section);
         assert_eq!(reloaded.folder_collapsed, original.folder_collapsed);
         assert_eq!(reloaded.os_bounds, original.os_bounds);
         assert_eq!(reloaded.sidebar_open, original.sidebar_open);
@@ -260,5 +271,6 @@ mod tests {
         assert_eq!(s.sidebar_open, None);
         assert_eq!(s.project_layout, ProjectLayoutMode::Columns);
         assert_eq!(s.project_sort_mode, ProjectSortMode::Manual);
+        assert!(!s.show_attention_section);
     }
 }

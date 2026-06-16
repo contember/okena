@@ -232,6 +232,14 @@ impl WorkspaceData {
         Some(w.project_sort_mode)
     }
 
+    /// Flip the "needs attention" section opt-in on the targeted window and
+    /// return the new value. Unknown extra ids are a silent no-op (`None`).
+    pub fn toggle_show_attention_section(&mut self, id: WindowId) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        w.show_attention_section = !w.show_attention_section;
+        Some(w.show_attention_section)
+    }
+
     /// Append a fresh extra window onto `extra_windows` and return its id.
     ///
     /// Snapshots the current set of project IDs into the new window's
