@@ -661,7 +661,7 @@ fn format_window_label(window_seconds: u64) -> &'static str {
 /// Build a shared [`UsageRow`] from a Codex rate-limit window.
 fn window_row(label: &str, window: &RateLimitWindow, marker_id: &'static str) -> UsageRow {
     let unit = segment_unit_for_window(window.window_seconds);
-    let reset_epoch = (window.reset_at > 0).then(|| window.reset_at as f64);
+    let reset_epoch = (window.reset_at > 0).then_some(window.reset_at as f64);
     UsageRow {
         label: label.into(),
         period: format_window_label(window.window_seconds).into(),
@@ -688,7 +688,7 @@ impl Render for CodexUsage {
                     .flatten()
                 {
                     let et = effective_time_pct(
-                        (w.reset_at > 0).then(|| w.reset_at as f64),
+                        (w.reset_at > 0).then_some(w.reset_at as f64),
                         w.window_seconds as f64,
                         segment_unit_for_window(w.window_seconds),
                         working,
