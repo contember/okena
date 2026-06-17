@@ -262,6 +262,18 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         self.deregister_child_resize_viewers_except(&visible_paths, cx);
         self.child_containers.retain(|path, _| valid_paths.contains(path));
 
+        // Deregister pane map entries for inactive tabs so stale entries
+        // don't interfere with spatial navigation
+        let mut path = self.layout_path.clone();
+        let base_len = path.len();
+        for i in 0..num_children {
+            if i != active_tab {
+                path.truncate(base_len);
+                path.push(i);
+                crate::layout::navigation::deregister_pane_bounds(self.window_id, &self.project_id, &path);
+            }
+        }
+
         let container_bounds_ref = self.container_bounds_ref.clone();
 
         v_flex()

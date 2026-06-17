@@ -20,8 +20,8 @@ On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid 
 
 ```
 src/                        # Desktop app — main binary, GPUI views, app coordinator
-crates/                     # Library crates (23 crates, see below)
-mobile/                     # Mobile app (Flutter + Rust FFI)
+crates/                     # Library crates (24 crates, see below)
+mobile/                     # Mobile app — React Native UI (mobile/rn) over the Rust core via uniffi (crates/okena-mobile-ffi)
 web/                        # Web client (React + TypeScript + xterm.js)
 assets/                     # Fonts, icons (assets/icons/*.svg referenced as icons/*.svg)
 scripts/                    # Build & utility scripts
@@ -56,6 +56,7 @@ Most logic lives in `crates/`. The `src/` modules are thin re-exports (`pub use 
 | `okena-ext-github` | GitHub status extension |
 | `okena-ext-updater` | Self-update system |
 | `okena-core` | Shared types, API client, key handling |
+| `okena-mobile-ffi` | uniffi FFI surface for the React Native mobile app (`mobile/rn`); self-contained ConnectionManager / TerminalHolder engine over `okena-core` |
 
 ## Module-Specific Context
 
@@ -68,5 +69,5 @@ Read these when working in the corresponding areas:
 - `crates/okena-workspace/CLAUDE.md` — State management, LayoutNode tree, persistence
 - `crates/okena-terminal/CLAUDE.md` — PTY threading model, shell detection
 - `crates/okena-git/CLAUDE.md` — Diff parsing, worktree operations
-- `mobile/CLAUDE.md` — Flutter + Rust FFI mobile app
+- `mobile/rn/CLAUDE.md` — React Native mobile app (uniffi over `okena-mobile-ffi`)
 - `web/CLAUDE.md` — React web client
