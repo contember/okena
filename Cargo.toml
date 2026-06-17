@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme"]
+members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli"]
 resolver = "2"
 
 [package]
@@ -20,6 +20,7 @@ okena-views-services = { path = "crates/okena-views-services" }
 okena-views-sidebar = { path = "crates/okena-views-sidebar" }
 okena-remote-client = { path = "crates/okena-remote-client" }
 okena-remote-server = { path = "crates/okena-remote-server" }
+okena-cli = { path = "crates/okena-cli" }
 okena-views-remote = { path = "crates/okena-views-remote" }
 okena-workspace = { path = "crates/okena-workspace" }
 okena-ui = { path = "crates/okena-ui" }
@@ -59,7 +60,6 @@ serde_json = "1.0"
 
 # System info
 sysinfo = "0.33"
-libc = "0.2"
 
 # Native desktop notifications (libnotify/dbus on Linux, NSUserNotification on
 # macOS, WinRT toast on Windows). Used for OSC 9 / OSC 777 terminal alerts.
@@ -68,9 +68,6 @@ notify-rust = "4"
 # Utilities
 uuid = { version = "1.10", features = ["v4"] }
 dirs = "5.0"
-
-# CLI argument parsing (agent-friendly command surface)
-clap = { version = "4", features = ["derive"] }
 
 # Global allocator — see [features] for the per-target default. glibc malloc
 # fragments badly under okena's high-churn, multi-threaded small-allocation
@@ -108,7 +105,6 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-fan
 pulldown-cmark = "0.12"
 
 # Self-updater
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 semver = "1"
 
 # The remote-control HTTP/WS server (axum/hyper/rustls/rcgen + HMAC auth) lives
@@ -118,9 +114,8 @@ semver = "1"
 # boundary (src/app/{mod,headless,remote_commands}.rs).
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 
-# Base64 (CLI token transport + remote image paste) and RNG (CLI pairing).
+# Base64 (remote image paste).
 base64 = "0.22"
-rand = "0.8"
 
 [features]
 # Per-target default allocator: jemalloc on Unix (the `tikv-jemallocator` dep is

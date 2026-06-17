@@ -1,6 +1,6 @@
-use crate::cli::resolve;
-use crate::cli::{api_get, api_post, discover_server, ensure_token};
-use crate::remote::auth::{generate_pairing_code, pair_code_path};
+use crate::resolve;
+use crate::{api_get, api_post, discover_server, ensure_token};
+use okena_remote_server::auth::{generate_pairing_code, pair_code_path};
 use okena_core::api::{ApiProject, StateResponse};
 
 /// The agent skill, embedded so `skill show`/`install` always match this build.
@@ -40,7 +40,7 @@ pub fn cli_pair() -> i32 {
     // host can read it out for the connecting client to verify out-of-band.
     // Goes to stderr to keep stdout a clean, pipeable pairing code.
     if let Some(fp) =
-        crate::remote::tls::read_fingerprint(&crate::workspace::persistence::config_dir())
+        okena_remote_server::tls::read_fingerprint(&okena_workspace::persistence::config_dir())
     {
         eprintln!(
             "TLS certificate fingerprint (SHA-256) — verify it matches the connecting client:"

@@ -6016,7 +6016,6 @@ dependencies = [
  "arc-swap",
  "async-channel 2.5.0",
  "base64",
- "clap",
  "core-text",
  "dhat",
  "dirs 5.0.1",
@@ -6026,10 +6025,10 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui_platform",
- "libc",
  "log",
  "mimalloc",
  "notify-rust",
+ "okena-cli",
  "okena-core",
  "okena-ext-claude",
  "okena-ext-codex",
@@ -6054,9 +6053,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "pulldown-cmark",
- "rand 0.8.5",
  "regex",
- "reqwest",
  "rust-embed",
  "semver",
  "serde",
@@ -6072,6 +6069,24 @@ dependencies = [
  "two-face",
  "uuid",
  "winresource",
+]
+
+[[package]]
+name = "okena-cli"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "clap",
+ "dirs 5.0.1",
+ "libc",
+ "okena-core",
+ "okena-remote-server",
+ "okena-workspace",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

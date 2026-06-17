@@ -1,9 +1,9 @@
-mod commands;
-mod parser;
-mod register;
-mod resolve;
+pub mod commands;
+pub mod parser;
+pub mod register;
+pub mod resolve;
 
-use crate::workspace::persistence::config_dir;
+use okena_workspace::persistence::config_dir;
 use clap::Parser as _;
 use parser::{
     Cli, Command, FolderCmd, PaletteCmd, ProjectCmd, ServiceCmd, SettingsCmd, SkillCmd, TermCmd,

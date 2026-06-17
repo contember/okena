@@ -1,0 +1,28 @@
+[package]
+name = "okena-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core", features = ["client"] }
+okena-workspace = { path = "../okena-workspace" }
+okena-remote-server = { path = "../okena-remote-server" }
+
+# CLI argument parsing (agent-friendly command surface)
+clap = { version = "4", features = ["derive"] }
+
+# HTTP client for talking to the running server
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+
+# Serialization / utilities
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+rand = "0.8"
+uuid = { version = "1.10", features = ["v4"] }
+dirs = "5.0"
+
+[target.'cfg(unix)'.dependencies]
+# Liveness check for the running server's PID (libc::kill on unix).
+libc = "0.2"

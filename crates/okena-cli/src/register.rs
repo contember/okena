@@ -1,6 +1,6 @@
-use crate::cli::{CliConfig, discover_server, save_cli_config};
-use crate::remote::auth::{self, PersistedToken};
-use crate::workspace::persistence::config_dir;
+use crate::{CliConfig, discover_server, save_cli_config};
+use okena_remote_server::auth::{self, PersistedToken};
+use okena_workspace::persistence::config_dir;
 
 /// Register a CLI token by writing directly to the token store.
 /// Returns the plaintext bearer token.

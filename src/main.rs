@@ -6,7 +6,6 @@ mod macros;
 mod action_dispatch;
 mod app;
 mod assets;
-mod cli;
 mod elements;
 mod git;
 mod keybindings;
@@ -427,7 +426,7 @@ fn main() {
 
     // Handle CLI subcommands after profile is initialized so that helpers like
     // discover_server() read the right profile's remote.json.
-    if let Some(exit_code) = cli::try_handle_cli() {
+    if let Some(exit_code) = okena_cli::try_handle_cli() {
         std::process::exit(exit_code);
     }
 

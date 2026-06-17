@@ -11,7 +11,7 @@ handling untouched.
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | The gate + `dispatch(Cli)`. HTTP/token infra: `discover_server`, `ensure_token`, `api_get`/`api_post`, `CliConfig` load/save. |
+| `lib.rs` | The gate + `dispatch(Cli)`. HTTP/token infra: `discover_server`, `ensure_token`, `api_get`/`api_post`, `CliConfig` load/save. |
 | `parser.rs` | clap `Cli` parser + `Command`/`*Cmd` subcommand enums. `subcommand_names()` feeds the gate (a test asserts it covers the whole tree). |
 | `resolve.rs` | Pure, unit-tested resolvers over a parsed `StateResponse`. No I/O. |
 | `commands.rs` | Command implementations — build an `ActionRequest` JSON body, POST it, render the result. |
