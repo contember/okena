@@ -1,9 +1,12 @@
-use crate::ui_helpers::open_url;
+use crate::ui_helpers::capitalize_first;
 use okena_extensions::{ExtensionSettingsStore, ThemeColors};
-use okena_ui::tokens::{ui_text_xs, ui_text_ms, ui_text_md};
+use okena_usage::{
+    effective_time_pct, read_working_days, render_simple_bar, render_usage_row,
+    usage_body_container, usage_divider, usage_kv_row, usage_popover_container,
+    usage_popover_header, usage_trigger_items, SegmentUnit, UsageRow,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use parking_lot::Mutex;
 #[cfg(target_os = "macos")]
@@ -29,9 +32,9 @@ const HOVER_REFETCH_THROTTLE: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 struct TierUsage {
     utilization: f64,
-    resets_at: String,
-    /// Raw ISO 8601 reset timestamp, used to anchor the per-day/hour grid.
-    resets_at_raw: Option<String>,
+    /// Reset time as Unix epoch seconds, anchoring the per-day/hour grid and
+    /// the "resets …" label.
+    reset_epoch: Option<f64>,
     /// Length of this rate-limit window in seconds.
     period_secs: f64,
     /// Percentage of the billing period that has elapsed (0.0–100.0)
@@ -50,6 +53,8 @@ struct ExtraUsage {
 /// All fetched usage data
 #[derive(Clone)]
 struct UsageData {
+    /// Subscription plan label (e.g. "Pro", "Max") read from the credentials.
+    plan: Option<String>,
     five_hour: Option<TierUsage>,
     seven_day: Option<TierUsage>,
     seven_day_sonnet: Option<TierUsage>,
@@ -233,11 +238,54 @@ fn read_access_token(claude_dir: &Path) -> Option<String> {
     None
 }
 
+/// Extract the subscription plan label (e.g. "pro", "max") from a Claude
+/// credentials JSON blob.
+fn extract_subscription_type(json_str: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let plan = v["claudeAiOauth"]["subscriptionType"].as_str()?.trim();
+    if plan.is_empty() {
+        None
+    } else {
+        Some(plan.to_string())
+    }
+}
+
+/// Read the subscription plan label from the credentials file or, on macOS,
+/// the Keychain — mirroring [`read_access_token`]'s lookup.
+fn read_subscription_type(claude_dir: &Path) -> Option<String> {
+    if let Some(plan) = std::fs::read_to_string(claude_dir.join(".credentials.json"))
+        .ok()
+        .and_then(|content| extract_subscription_type(&content))
+    {
+        return Some(plan);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let user = std::env::var("USER").ok()?;
+        for service in keychain_service_names(claude_dir) {
+            let output = okena_core::process::safe_output(
+                okena_core::process::command("security")
+                    .args(["find-generic-password", "-s", &service, "-a", &user, "-w"]),
+            )
+            .ok()?;
+            if output.status.success() {
+                let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if let Some(plan) = extract_subscription_type(&content) {
+                    return Some(plan);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn parse_usage(resp: &serde_json::Value) -> UsageData {
-    let five_hour = parse_tier(resp, "five_hour", false, FIVE_HOUR_SECS);
-    let seven_day = parse_tier(resp, "seven_day", true, SEVEN_DAY_SECS);
-    let seven_day_sonnet = parse_tier(resp, "seven_day_sonnet", true, SEVEN_DAY_SECS);
-    let seven_day_opus = parse_tier(resp, "seven_day_opus", true, SEVEN_DAY_SECS);
+    let five_hour = parse_tier(resp, "five_hour", FIVE_HOUR_SECS);
+    let seven_day = parse_tier(resp, "seven_day", SEVEN_DAY_SECS);
+    let seven_day_sonnet = parse_tier(resp, "seven_day_sonnet", SEVEN_DAY_SECS);
+    let seven_day_opus = parse_tier(resp, "seven_day_opus", SEVEN_DAY_SECS);
 
     let extra_usage = resp.get("extra_usage").map(|eu| {
         ExtraUsage {
@@ -249,6 +297,7 @@ fn parse_usage(resp: &serde_json::Value) -> UsageData {
     });
 
     UsageData {
+        plan: None,
         five_hour,
         seven_day,
         seven_day_sonnet,
@@ -261,21 +310,14 @@ fn parse_usage(resp: &serde_json::Value) -> UsageData {
 const FIVE_HOUR_SECS: f64 = 5.0 * 3600.0;
 const SEVEN_DAY_SECS: f64 = 7.0 * 86400.0;
 
-fn parse_tier(
-    resp: &serde_json::Value,
-    key: &str,
-    include_date: bool,
-    period_secs: f64,
-) -> Option<TierUsage> {
+fn parse_tier(resp: &serde_json::Value, key: &str, period_secs: f64) -> Option<TierUsage> {
     let tier = resp.get(key)?;
     let resets_at_raw = tier["resets_at"].as_str();
+    let reset_epoch = resets_at_raw.and_then(parse_iso8601_to_epoch);
     let time_elapsed_pct = resets_at_raw.and_then(|ts| compute_time_elapsed_pct(ts, period_secs));
     Some(TierUsage {
         utilization: tier["utilization"].as_f64().unwrap_or(0.0),
-        resets_at: resets_at_raw
-            .map(|ts| format_reset_time(ts, include_date))
-            .unwrap_or_default(),
-        resets_at_raw: resets_at_raw.map(str::to_owned),
+        reset_epoch,
         period_secs,
         time_elapsed_pct,
     })
@@ -304,124 +346,6 @@ fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
 pub(crate) fn parse_iso8601_to_local(ts: &str) -> Option<jiff::Zoned> {
     let timestamp: jiff::Timestamp = ts.parse().ok()?;
     Some(timestamp.to_zoned(jiff::tz::TimeZone::system()))
-}
-
-#[derive(Clone, Copy)]
-enum SegmentUnit {
-    Hour,
-    Day,
-}
-
-/// Compute reset-anchored grid boundaries for a usage bar, plus the block that
-/// currently contains "now".
-///
-/// Boundaries land on the user's *actual* reset time-of-day — e.g. a Sunday
-/// 12:00 weekly reset yields noon-to-noon day blocks — computed with calendar
-/// arithmetic so they stay correct across DST and for any reset time, rather
-/// than just evenly dividing the bar. Returns the divider fractions (0..1,
-/// excluding the ends) and the (start, end) fractions of the current block.
-fn reset_aligned_segments(
-    resets_at: Option<&str>,
-    period_secs: f64,
-    unit: SegmentUnit,
-) -> (Vec<f32>, Option<(f32, f32)>) {
-    let reset = match resets_at.and_then(parse_iso8601_to_local) {
-        Some(z) => z,
-        None => return (Vec::new(), None),
-    };
-    let reset_epoch = reset.timestamp().as_millisecond() as f64 / 1_000.0;
-    let start_epoch = reset_epoch - period_secs;
-    let now_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(start_epoch);
-
-    // Keep the grid legible on a thin bar: if a window spans more units than
-    // this, step by a whole multiple (e.g. every 2 days), which is still
-    // anchored to the reset time-of-day.
-    let (unit_secs, max_blocks) = match unit {
-        SegmentUnit::Hour => (3_600.0, 12.0),
-        SegmentUnit::Day => (86_400.0, 14.0),
-    };
-    let units = (period_secs / unit_secs).round().max(1.0);
-    let multiplier = (units / max_blocks).ceil().max(1.0) as i64;
-    let step = match unit {
-        SegmentUnit::Hour => jiff::Span::new().hours(multiplier),
-        SegmentUnit::Day => jiff::Span::new().days(multiplier),
-    };
-
-    // Walk back from the reset, one block at a time, until the window start is
-    // covered. `bounds` ends up holding boundary epochs in ascending order.
-    let mut bounds = vec![reset_epoch];
-    let mut cursor = reset;
-    for _ in 0..64 {
-        cursor = match cursor.checked_sub(step) {
-            Ok(z) => z,
-            Err(_) => break,
-        };
-        let epoch = cursor.timestamp().as_millisecond() as f64 / 1_000.0;
-        bounds.push(epoch);
-        if epoch <= start_epoch {
-            break;
-        }
-    }
-    bounds.reverse();
-
-    let frac = |epoch: f64| ((epoch - start_epoch) / period_secs) as f32;
-    let dividers = bounds
-        .iter()
-        .map(|&epoch| frac(epoch))
-        .filter(|&f| f > 0.001 && f < 0.999)
-        .collect();
-    let current = bounds.windows(2).find_map(|w| {
-        (now_epoch >= w[0] && now_epoch < w[1])
-            .then(|| (frac(w[0]).max(0.0), frac(w[1]).min(1.0)))
-    });
-
-    (dividers, current)
-}
-
-/// Format ISO 8601 reset time to a human-readable short form in local timezone.
-/// Falls back to UTC if local timezone is unavailable, or returns `ts` as-is if unparseable.
-fn format_reset_time(ts: &str, include_date: bool) -> String {
-    if let Some(zoned) = parse_iso8601_to_local(ts) {
-        if include_date {
-            let today = jiff::Zoned::now().date();
-            let reset_date = zoned.date();
-
-            let diff_days = today.until(reset_date).ok()
-                .map(|span| span.get_days())
-                .unwrap_or(i32::MAX);
-
-            let date_label = match diff_days {
-                0 => Some("today"),
-                1 => Some("tomorrow"),
-                _ => None,
-            };
-
-            return match date_label {
-                Some(label) => format!("{}, {}", label, zoned.strftime("%H:%M %Z")),
-                None if (2..=6).contains(&diff_days) => {
-                    zoned.strftime("%a, %H:%M %Z").to_string()
-                }
-                None => zoned.strftime("%b %-d, %H:%M %Z").to_string(),
-            };
-        }
-
-        return zoned.strftime("%H:%M %Z").to_string();
-    }
-
-    // Fallback: try UTC if the timestamp parses but local timezone failed
-    if let Ok(timestamp) = ts.parse::<jiff::Timestamp>() {
-        let utc = timestamp.to_zoned(jiff::tz::TimeZone::UTC);
-        return if include_date {
-            utc.strftime("%b %-d, %H:%M UTC").to_string()
-        } else {
-            utc.strftime("%H:%M UTC").to_string()
-        };
-    }
-
-    ts.to_string()
 }
 
 impl ClaudeUsageData {
@@ -555,7 +479,9 @@ impl ClaudeUsageData {
                                     Ok(v) => v,
                                     Err(_) => return (None, None),
                                 };
-                            (Some(parse_usage(&parsed)), None)
+                            let mut usage = parse_usage(&parsed);
+                            usage.plan = read_subscription_type(&dir);
+                            (Some(usage), None)
                         }
                         Err(e) => {
                             log::warn!("[claude-usage] request failed: {}", e);
@@ -707,6 +633,8 @@ impl ClaudeUsage {
             _ => return div().size_0().into_any_element(),
         };
 
+        let working = read_working_days(cx);
+        let plan = data.plan.as_deref().map(capitalize_first);
         let bounds = self.trigger_bounds;
         let position = point(bounds.origin.x, bounds.origin.y - px(4.0));
 
@@ -716,16 +644,9 @@ impl ClaudeUsage {
                 .anchor(Anchor::BottomLeft)
                 .snap_to_window()
                 .child(
-                    div()
+                    usage_popover_container(t)
                         .id("claude-usage-popover")
                         .occlude()
-                        .min_w(px(300.0))
-                        .max_w(px(420.0))
-                        .bg(rgb(t.bg_primary))
-                        .border_1()
-                        .border_color(rgb(t.border))
-                        .rounded(px(8.0))
-                        .shadow_lg()
                         .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                             if *hovered {
                                 this.hover_token.fetch_add(1, Ordering::SeqCst);
@@ -736,44 +657,65 @@ impl ClaudeUsage {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
+                        .child(usage_popover_header(
+                            "CLAUDE USAGE",
+                            plan.as_deref(),
+                            "https://claude.ai/settings/usage",
+                            "Open usage settings on claude.ai",
+                            t,
+                            cx,
+                        ))
                         .child(
-                            v_flex()
-                                .child(render_popover_header(t, cx))
-                                .child(
-                                    v_flex()
-                                        .px(px(12.0))
-                                        .py(px(10.0))
-                                        .gap(px(7.0))
-                                        .when_some(data.five_hour.as_ref(), |el, tier| {
-                                            el.child(render_tier_row(t, cx, "Session", "5h", tier, "marker-session", SegmentUnit::Hour))
-                                        })
-                                        .when_some(data.seven_day.as_ref(), |el, tier| {
-                                            el.child(render_tier_row(t, cx, "Weekly", "7d", tier, "marker-weekly", SegmentUnit::Day))
-                                        })
-                                        .when_some(
-                                            data.seven_day_sonnet
-                                                .as_ref()
-                                                .filter(|tier| tier.utilization >= 0.5),
-                                            |el, tier| {
-                                                el.child(render_tier_row(t, cx, "Sonnet", "7d", tier, "marker-sonnet", SegmentUnit::Day))
-                                            },
-                                        )
-                                        .when_some(
-                                            data.seven_day_opus
-                                                .as_ref()
-                                                .filter(|tier| tier.utilization >= 0.5),
-                                            |el, tier| {
-                                                el.child(render_tier_row(t, cx, "Opus", "7d", tier, "marker-opus", SegmentUnit::Day))
-                                            },
-                                        )
-                                        .when_some(data.extra_usage.as_ref(), |el, extra| {
-                                            if !extra.is_enabled {
-                                                return el;
-                                            }
-                                            el.child(render_divider(t))
-                                                .child(render_extra_usage_row(t, cx, extra))
-                                        }),
-                                ),
+                            usage_body_container()
+                                .when_some(data.five_hour.as_ref(), |el, tier| {
+                                    el.child(render_usage_row(
+                                        t,
+                                        cx,
+                                        &tier_row("Session", "5h", tier, "claude-marker-session", SegmentUnit::Hour),
+                                        working,
+                                    ))
+                                })
+                                .when_some(data.seven_day.as_ref(), |el, tier| {
+                                    el.child(render_usage_row(
+                                        t,
+                                        cx,
+                                        &tier_row("Weekly", "7d", tier, "claude-marker-weekly", SegmentUnit::Day),
+                                        working,
+                                    ))
+                                })
+                                .when_some(
+                                    data.seven_day_sonnet
+                                        .as_ref()
+                                        .filter(|tier| tier.utilization >= 0.5),
+                                    |el, tier| {
+                                        el.child(render_usage_row(
+                                            t,
+                                            cx,
+                                            &tier_row("Sonnet", "7d", tier, "claude-marker-sonnet", SegmentUnit::Day),
+                                            working,
+                                        ))
+                                    },
+                                )
+                                .when_some(
+                                    data.seven_day_opus
+                                        .as_ref()
+                                        .filter(|tier| tier.utilization >= 0.5),
+                                    |el, tier| {
+                                        el.child(render_usage_row(
+                                            t,
+                                            cx,
+                                            &tier_row("Opus", "7d", tier, "claude-marker-opus", SegmentUnit::Day),
+                                            working,
+                                        ))
+                                    },
+                                )
+                                .when_some(data.extra_usage.as_ref(), |el, extra| {
+                                    if !extra.is_enabled {
+                                        return el;
+                                    }
+                                    el.child(usage_divider(t))
+                                        .child(render_extra_usage_row(t, cx, extra))
+                                }),
                         ),
                 ),
         )
@@ -782,359 +724,72 @@ impl ClaudeUsage {
     }
 }
 
-fn render_popover_header(t: &ThemeColors, cx: &App) -> impl IntoElement {
-    let muted = t.text_muted;
-    let primary = t.text_primary;
-
-    h_flex()
-        .px(px(12.0))
-        .py(px(7.0))
-        .items_center()
-        .justify_between()
-        .border_b_1()
-        .border_color(rgb(t.border))
-        .child(
-            div()
-                .text_size(ui_text_xs(cx))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(t.text_secondary))
-                .child("CLAUDE USAGE"),
-        )
-        .child(
-            h_flex()
-                .id("claude-usage-settings")
-                .gap(px(4.0))
-                .items_center()
-                .px(px(4.0))
-                .py(px(1.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_color(rgb(muted))
-                .hover(|s| s.text_color(rgb(primary)).bg(rgb(t.bg_hover)))
-                .child(
-                    div()
-                        .text_size(ui_text_xs(cx))
-                        .line_height(px(10.0))
-                        .child("Settings"),
-                )
-                .child(
-                    svg()
-                        .path("icons/external-link.svg")
-                        .size(px(10.0)),
-                )
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .on_click(|_, _, _cx| {
-                    open_url("https://claude.ai/settings/usage");
-                })
-                .tooltip(|window, cx| {
-                    Tooltip::new("Open usage settings on claude.ai").build(window, cx)
-                }),
-        )
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Severity {
-    Normal,
-    Warning,
-    Critical,
-}
-
-fn severity_color(t: &ThemeColors, s: Severity) -> u32 {
-    match s {
-        Severity::Normal => t.metric_normal,
-        Severity::Warning => t.metric_warning,
-        Severity::Critical => t.metric_critical,
-    }
-}
-
-/// Severity from absolute utilization — how close to the hard cap.
-fn abs_severity(pct: f64) -> Severity {
-    if pct > 80.0 {
-        Severity::Critical
-    } else if pct > 60.0 {
-        Severity::Warning
-    } else {
-        Severity::Normal
-    }
-}
-
-/// Severity from pace — how far ahead usage is of where it "should" be at this
-/// point in the period. `Critical` means the user is burning budget fast enough
-/// to run out before the period resets unless they slow down.
-fn pace_severity(usage_pct: f64, time_pct: Option<f64>) -> Severity {
-    match time_pct {
-        Some(tp) if usage_pct > tp + 15.0 => Severity::Critical,
-        Some(tp) if usage_pct > tp + 5.0 => Severity::Warning,
-        _ => Severity::Normal,
-    }
-}
-
-fn utilization_color(t: &ThemeColors, pct: f64) -> u32 {
-    severity_color(t, abs_severity(pct))
-}
-
-fn render_tier_row(
-    t: &ThemeColors,
-    cx: &App,
+/// Build a shared [`UsageRow`] from a Claude rate-limit tier.
+fn tier_row(
     label: &str,
     period: &str,
     tier: &TierUsage,
     marker_id: &'static str,
     unit: SegmentUnit,
-) -> impl IntoElement {
-    let pct = tier.utilization;
-    let (dividers, current_seg) =
-        reset_aligned_segments(tier.resets_at_raw.as_deref(), tier.period_secs, unit);
-    let pace = pace_severity(pct, tier.time_elapsed_pct);
-    // % text reflects whichever is worse: nearness to the cap, or burn pace.
-    let pct_color = severity_color(t, abs_severity(pct).max(pace));
-    let pace_msg: Option<(&str, u32)> = match pace {
-        Severity::Critical => Some(("Slow down to last the period", t.metric_critical)),
-        Severity::Warning => Some(("Ahead of pace", t.metric_warning)),
-        Severity::Normal => None,
-    };
+) -> UsageRow {
+    UsageRow {
+        label: label.into(),
+        period: period.into(),
+        pct: tier.utilization,
+        time_pct: tier.time_elapsed_pct,
+        reset_epoch: tier.reset_epoch,
+        period_secs: tier.period_secs,
+        unit: Some(unit),
+        marker_id: marker_id.into(),
+    }
+}
 
+fn render_extra_usage_row(t: &ThemeColors, cx: &App, extra: &ExtraUsage) -> impl IntoElement {
     v_flex()
         .gap(px(5.0))
-        .child(
-            h_flex()
-                .items_baseline()
-                .justify_between()
-                .child(
-                    h_flex()
-                        .gap(px(6.0))
-                        .items_baseline()
-                        .child(
-                            div()
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(t.text_primary))
-                                .child(label.to_string()),
-                        )
-                        .child(
-                            div()
-                                .text_size(ui_text_xs(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child(period.to_string()),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(ui_text_md(cx))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(pct_color))
-                        .child(format!("{:.0}%", pct)),
-                ),
-        )
-        .child(render_usage_with_time_bar(
+        .child(usage_kv_row(
             t,
-            pct,
-            tier.time_elapsed_pct,
-            marker_id,
-            dividers,
-            current_seg,
+            cx,
+            "Extra Usage",
+            format!(
+                "${:.2} / ${:.2}",
+                extra.used_credits / 100.0,
+                extra.monthly_limit / 100.0
+            ),
+            t.text_primary,
         ))
-        .when(pace_msg.is_some() || !tier.resets_at.is_empty(), |el| {
-            el.child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(
-                        div()
-                            .text_size(ui_text_xs(cx))
-                            .font_weight(FontWeight::MEDIUM)
-                            .when_some(pace_msg, |d, (msg, col)| {
-                                d.text_color(rgb(col)).child(msg)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_text_xs(cx))
-                            .text_color(rgb(t.text_muted))
-                            .when(!tier.resets_at.is_empty(), |d| {
-                                d.child(format!("resets {}", tier.resets_at))
-                            }),
-                    ),
-            )
-        })
-}
-
-fn render_extra_usage_row(
-    t: &ThemeColors,
-    cx: &App,
-    extra: &ExtraUsage,
-) -> impl IntoElement {
-    v_flex()
-        .gap(px(5.0))
-        .child(
-            h_flex()
-                .items_baseline()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_primary))
-                        .child("Extra Usage"),
-                )
-                .child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(t.text_primary))
-                        .child(format!(
-                            "${:.2} / ${:.2}",
-                            extra.used_credits / 100.0,
-                            extra.monthly_limit / 100.0
-                        )),
-                ),
-        )
-        .child(render_progress_bar(t, extra.utilization))
-}
-
-fn render_divider(t: &ThemeColors) -> impl IntoElement {
-    div().h(px(1.0)).w_full().bg(rgb(t.border))
-}
-
-fn render_usage_with_time_bar(
-    t: &ThemeColors,
-    usage_pct: f64,
-    time_pct: Option<f64>,
-    marker_id: &'static str,
-    dividers: Vec<f32>,
-    current_seg: Option<(f32, f32)>,
-) -> impl IntoElement {
-    let clamped_usage = usage_pct.clamp(0.0, 100.0) as f32;
-
-    // Base fill reflects nearness to the hard cap. Any usage *beyond* the pace
-    // marker is overage — drawn on top in warning/critical — so being over the
-    // budget for this point in the period is visible directly on the bar.
-    let base_color = severity_color(t, abs_severity(usage_pct));
-    let overage = time_pct.and_then(|tp| {
-        let start = tp.clamp(0.0, 100.0) as f32;
-        let width = clamped_usage - start;
-        if width <= 0.0 {
-            return None;
-        }
-        let color = if width > 15.0 {
-            t.metric_critical
-        } else {
-            t.metric_warning
-        };
-        Some((start, width, color))
-    });
-
-    // Divider lines at the reset-anchored day/hour boundaries, so the pace
-    // marker can be read against a real time grid.
-    let divider_els = dividers.into_iter().map(move |f| {
-        div()
-            .absolute()
-            .top_0()
-            .h_full()
-            .w(px(1.0))
-            .bg(rgb(t.border))
-            .left(relative(f))
-    });
-
-    // Translucent band over the block the user is currently in (today / this
-    // hour). Derived from text_primary so it lightens on dark themes and darkens
-    // on light ones.
-    let mut highlight = rgb(t.text_primary);
-    highlight.a = 0.14;
-
-    div()
-        .h(px(6.0))
-        .w_full()
-        .rounded_full()
-        .bg(rgb(t.bg_secondary))
-        .relative()
-        .child(
-            div()
-                .h_full()
-                .rounded_full()
-                .bg(rgb(base_color))
-                .w(relative(clamped_usage / 100.0)),
-        )
-        .when_some(overage, |el, (start, width, color)| {
-            el.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .h_full()
-                    .left(relative(start / 100.0))
-                    .w(relative(width / 100.0))
-                    .rounded_r(px(3.0))
-                    .bg(rgb(color)),
-            )
-        })
-        .children(divider_els)
-        .when_some(current_seg, |el, (start, end)| {
-            el.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .h_full()
-                    .left(relative(start))
-                    .w(relative((end - start).max(0.0)))
-                    .bg(highlight),
-            )
-        })
-        .when_some(time_pct, |el, tp| {
-            let clamped_time = tp.clamp(0.0, 100.0) as f32;
-            let marker_color = t.text_primary;
-            el.child(
-                div()
-                    .id(marker_id)
-                    .absolute()
-                    .top(px(-4.0))
-                    .left(relative(clamped_time / 100.0))
-                    .w(px(8.0))
-                    .h(px(14.0))
-                    .flex()
-                    .items_center()
-                    .justify_start()
-                    .child(
-                        div()
-                            .w(px(2.0))
-                            .h(px(10.0))
-                            .rounded(px(1.0))
-                            .bg(rgb(marker_color)),
-                    )
-                    .tooltip(|window, cx| {
-                        Tooltip::new("Time elapsed in this period").build(window, cx)
-                    }),
-            )
-        })
-}
-
-fn render_progress_bar(t: &ThemeColors, pct: f64) -> impl IntoElement {
-    let clamped = pct.clamp(0.0, 100.0) as f32;
-    let color = utilization_color(t, pct);
-
-    div()
-        .h(px(6.0))
-        .w_full()
-        .rounded_full()
-        .bg(rgb(t.bg_secondary))
-        .child(
-            div()
-                .h_full()
-                .rounded_full()
-                .bg(rgb(color))
-                .w(relative(clamped / 100.0)),
-        )
+        .child(render_simple_bar(t, extra.utilization))
 }
 
 impl Render for ClaudeUsage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
+        let working = read_working_days(cx);
         let data = self.data.read(cx).data.lock();
-        let (five_h, seven_d) = match data.as_ref() {
+        let mut items: Vec<(SharedString, f64, Option<f64>)> = Vec::new();
+        match data.as_ref() {
             Some(d) => {
-                let fh = d.five_hour.as_ref().map(|t| t.utilization);
-                let sd = d.seven_day.as_ref().map(|t| t.utilization);
-                (fh, sd)
+                if let Some(tier) = d.five_hour.as_ref() {
+                    let et = effective_time_pct(
+                        tier.reset_epoch,
+                        tier.period_secs,
+                        Some(SegmentUnit::Hour),
+                        working,
+                        tier.time_elapsed_pct,
+                    );
+                    items.push(("5h".into(), tier.utilization, et));
+                }
+                if let Some(tier) = d.seven_day.as_ref() {
+                    let et = effective_time_pct(
+                        tier.reset_epoch,
+                        tier.period_secs,
+                        Some(SegmentUnit::Day),
+                        working,
+                        tier.time_elapsed_pct,
+                    );
+                    items.push(("7d".into(), tier.utilization, et));
+                }
             }
             None => {
                 drop(data);
@@ -1143,7 +798,7 @@ impl Render for ClaudeUsage {
                 self.data.read(cx).wake_if_no_data();
                 return div().size_0().into_any_element();
             }
-        };
+        }
         drop(data);
 
         let entity_handle = cx.entity().clone();
@@ -1158,48 +813,7 @@ impl Render for ClaudeUsage {
                     .py(px(1.0))
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .when_some(five_h, |el, pct| {
-                        el.child(
-                            h_flex()
-                                .gap(px(3.0))
-                                .child(
-                                    div()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child("5h"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(utilization_color(&t, pct)))
-                                        .child(format!("{:.0}%", pct)),
-                                ),
-                        )
-                    })
-                    .when_some(seven_d, |el, pct| {
-                        el.child(
-                            div()
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child("|"),
-                        )
-                        .child(
-                            h_flex()
-                                .gap(px(3.0))
-                                .child(
-                                    div()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child("7d"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(utilization_color(&t, pct)))
-                                        .child(format!("{:.0}%", pct)),
-                                ),
-                        )
-                    })
+                    .children(usage_trigger_items(&t, cx, &items))
                     .child(
                         canvas(
                             move |bounds, _window, app| {
@@ -1339,36 +953,6 @@ mod tests {
     #[test]
     fn test_parse_iso8601_to_local_invalid() {
         assert!(parse_iso8601_to_local("garbage").is_none());
-    }
-
-    #[test]
-    fn test_format_reset_time_uses_local_tz() {
-        let result = format_reset_time("2025-06-15T14:00:00.000Z", false);
-        // Should contain a colon (HH:MM) and a timezone abbreviation
-        assert!(result.contains(':'), "Expected HH:MM format, got: {}", result);
-        assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_format_reset_time_with_date() {
-        let result = format_reset_time("2099-01-15T11:00:00.000Z", true);
-        assert!(result.contains(':'), "Expected time in result, got: {}", result);
-        assert!(result.contains(','), "Expected date label with comma, got: {}", result);
-    }
-
-    #[test]
-    fn test_format_reset_time_invalid_input() {
-        // Invalid input should be returned as-is
-        let result = format_reset_time("garbage", false);
-        assert_eq!(result, "garbage");
-    }
-
-    #[test]
-    fn test_format_reset_time_past_date() {
-        // A reset time in the past should still format with date (no panic, no special label)
-        let result = format_reset_time("2020-01-01T00:00:00.000Z", true);
-        assert!(result.contains(':'), "Expected time in result, got: {}", result);
-        assert!(result.contains(','), "Expected date with comma, got: {}", result);
     }
 
     #[test]

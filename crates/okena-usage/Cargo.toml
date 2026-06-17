@@ -1,23 +1,14 @@
 [package]
-name = "okena-ext-claude"
+name = "okena-usage"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
 [dependencies]
-okena-core = { path = "../okena-core", features = ["blocking-http"] }
-okena-extensions = { path = "../okena-extensions" }
+okena-core = { path = "../okena-core" }
 okena-ui = { path = "../okena-ui" }
-okena-usage = { path = "../okena-usage" }
+okena-extensions = { path = "../okena-extensions" }
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
 serde_json = "1.0"
-smol = "2.0"
-parking_lot = "0.12"
-dirs = "5.0"
-log = "0.4"
 jiff = "0.2"
-sha2 = "0.10"
-
-[dev-dependencies]
-tempfile = "3"

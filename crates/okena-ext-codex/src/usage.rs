@@ -1,16 +1,20 @@
 use okena_extensions::ThemeColors;
-use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_ms, ui_text_md};
+use okena_usage::{
+    effective_time_pct, read_working_days, render_usage_row, usage_body_container, usage_divider,
+    usage_kv_row, usage_popover_container, usage_popover_header, usage_trigger_items, SegmentUnit,
+    UsageRow,
+};
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{h_flex, v_flex};
+use gpui_component::h_flex;
 use parking_lot::Mutex;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Refresh interval for usage data
 const USAGE_INTERVAL: Duration = Duration::from_secs(300);
@@ -20,6 +24,9 @@ const MIN_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Hover delay before showing the popover (ms)
 const HOVER_DELAY_MS: u64 = 300;
+
+/// Minimum interval between hover-triggered re-fetches.
+const HOVER_REFETCH_THROTTLE: Duration = Duration::from_secs(60);
 
 /// Codex OAuth client ID (public, embedded in the Codex CLI binary)
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -70,6 +77,12 @@ struct UsageData {
 /// state (popover, hover) lives on [`CodexUsage`] instead.
 struct CodexUsageData {
     data: Arc<Mutex<Option<UsageData>>>,
+    /// Send on this channel to wake up the fetch loop and retry immediately.
+    wake_tx: smol::channel::Sender<()>,
+    /// Whether a wake signal has already been sent (avoids spamming from render).
+    wake_sent: Arc<AtomicBool>,
+    /// Timestamp of the most recent successful fetch — used to throttle hover-triggered refreshes.
+    last_fetch_at: Arc<Mutex<Option<Instant>>>,
     /// Background polling task. Cancelled automatically when this entity is dropped.
     _poll_task: Task<()>,
 }
@@ -377,9 +390,30 @@ impl CodexUsageData {
         entity
     }
 
+    /// Wake the fetch loop, but only if the most recent successful fetch is older
+    /// than [`HOVER_REFETCH_THROTTLE`]. Used to refresh on popover open without
+    /// hammering the API on rapid hover-on/off.
+    fn request_fresh_fetch(&self) {
+        let stale = match *self.last_fetch_at.lock() {
+            None => true,
+            Some(last) => last.elapsed() >= HOVER_REFETCH_THROTTLE,
+        };
+        if !stale {
+            return;
+        }
+        if !self.wake_sent.swap(true, Ordering::SeqCst) {
+            let _ = self.wake_tx.try_send(());
+        }
+    }
+
     fn new(cx: &mut Context<Self>) -> Self {
         let data: Arc<Mutex<Option<UsageData>>> = Arc::new(Mutex::new(None));
         let data_for_task = data.clone();
+        let (wake_tx, wake_rx) = smol::channel::bounded::<()>(1);
+        let wake_sent = Arc::new(AtomicBool::new(false));
+        let wake_sent_for_task = wake_sent.clone();
+        let last_fetch_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        let last_fetch_at_for_task = last_fetch_at.clone();
 
         let poll_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut consecutive_failures: u32 = 0;
@@ -388,7 +422,9 @@ impl CodexUsageData {
 
                 if let Some(fetched) = result {
                     *data_for_task.lock() = Some(fetched);
+                    *last_fetch_at_for_task.lock() = Some(Instant::now());
                     consecutive_failures = 0;
+                    wake_sent_for_task.store(false, Ordering::SeqCst);
                     if this.update(cx, |_this, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -406,12 +442,28 @@ impl CodexUsageData {
                 } else {
                     USAGE_INTERVAL
                 };
-                smol::Timer::after(delay).await;
+                // Race: sleep vs wake signal (e.g. when the popover opens and the
+                // data is stale). Don't reset consecutive_failures on wake — keep
+                // the backoff to avoid retry storms during failures.
+                smol::future::or(
+                    async {
+                        smol::Timer::after(delay).await;
+                    },
+                    async {
+                        let _ = wake_rx.recv().await;
+                    },
+                )
+                .await;
+                // Drain any extra wake signals.
+                while wake_rx.try_recv().is_ok() {}
             }
         });
 
         Self {
             data,
+            wake_tx,
+            wake_sent,
+            last_fetch_at,
             _poll_task: poll_task,
         }
     }
@@ -459,6 +511,7 @@ impl CodexUsage {
             let _ = this.update(cx, |this, cx| {
                 if hover_token.load(Ordering::SeqCst) == token {
                     this.popover_visible = true;
+                    this.data.read(cx).request_fresh_fetch();
                     cx.notify();
                 }
             });
@@ -504,6 +557,8 @@ impl CodexUsage {
             _ => return div().size_0().into_any_element(),
         };
 
+        let working = read_working_days(cx);
+        let plan = data.plan_type.clone();
         let bounds = self.trigger_bounds;
         let position = point(bounds.origin.x, bounds.origin.y - px(4.0));
 
@@ -513,17 +568,9 @@ impl CodexUsage {
                 .anchor(Anchor::BottomLeft)
                 .snap_to_window()
                 .child(
-                    div()
+                    usage_popover_container(t)
                         .id("codex-usage-popover")
                         .occlude()
-                        .min_w(px(280.0))
-                        .max_w(px(400.0))
-                        .bg(rgb(t.bg_primary))
-                        .border_1()
-                        .border_color(rgb(t.border))
-                        .rounded(px(6.0))
-                        .shadow_lg()
-                        .p(px(10.0))
                         .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                             if *hovered {
                                 this.hover_token.fetch_add(1, Ordering::SeqCst);
@@ -534,84 +581,53 @@ impl CodexUsage {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
+                        .child(usage_popover_header(
+                            "CODEX USAGE",
+                            Some(plan.as_str()),
+                            "https://chatgpt.com",
+                            "Open usage settings on chatgpt.com",
+                            t,
+                            cx,
+                        ))
                         .child(
-                            v_flex()
-                                .gap(px(8.0))
-                                .child(
-                                    h_flex()
-                                        .justify_between()
-                                        .child(
-                                            div()
-                                                .text_size(ui_text_md(cx))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(t.text_primary))
-                                                .child("Codex Usage"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(ui_text_sm(cx))
-                                                .text_color(rgb(t.text_muted))
-                                                .child(data.plan_type.clone()),
-                                        ),
-                                )
+                            usage_body_container()
                                 .when_some(data.primary_window.as_ref(), |el, w| {
-                                    el.child(render_window_row(t, cx, "Rate Limit", w))
+                                    el.child(render_usage_row(
+                                        t,
+                                        cx,
+                                        &window_row("Rate Limit", w, "codex-marker-primary"),
+                                        working,
+                                    ))
                                 })
                                 .when_some(data.secondary_window.as_ref(), |el, w| {
-                                    el.child(render_window_row(t, cx, "Secondary", w))
+                                    el.child(render_usage_row(
+                                        t,
+                                        cx,
+                                        &window_row("Secondary", w, "codex-marker-secondary"),
+                                        working,
+                                    ))
                                 })
                                 .when_some(data.review_primary.as_ref(), |el, w| {
-                                    el.child(render_window_row(t, cx, "Code Review", w))
+                                    el.child(render_usage_row(
+                                        t,
+                                        cx,
+                                        &window_row("Code Review", w, "codex-marker-review"),
+                                        working,
+                                    ))
                                 })
-                                .when(
-                                    data.primary_window.as_ref().and_then(|w| w.time_elapsed_pct).is_some()
-                                        || data.secondary_window.as_ref().and_then(|w| w.time_elapsed_pct).is_some(),
-                                    |el| {
-                                        el.child(
-                                            div()
-                                                .text_size(ui_text_xs(cx))
-                                                .text_color(rgb(t.text_muted))
-                                                .child("Bar color = pace · Marker = time elapsed"),
-                                        )
-                                    },
-                                )
                                 .when_some(data.credits.as_ref(), |el, c| {
-                                    if c.unlimited {
-                                        el.child(
-                                            h_flex()
-                                                .justify_between()
-                                                .child(
-                                                    div()
-                                                        .text_size(ui_text_ms(cx))
-                                                        .text_color(rgb(t.text_secondary))
-                                                        .child("Credits"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(ui_text_ms(cx))
-                                                        .text_color(rgb(t.metric_normal))
-                                                        .child("Unlimited"),
-                                                ),
-                                        )
+                                    let value = if c.unlimited {
+                                        Some(("Unlimited".to_string(), t.metric_normal))
                                     } else if c.has_credits {
-                                        el.child(
-                                            h_flex()
-                                                .justify_between()
-                                                .child(
-                                                    div()
-                                                        .text_size(ui_text_ms(cx))
-                                                        .text_color(rgb(t.text_secondary))
-                                                        .child("Credits"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(ui_text_ms(cx))
-                                                        .text_color(rgb(t.text_primary))
-                                                        .child(format!("${:.2}", c.balance)),
-                                                ),
-                                        )
+                                        Some((format!("${:.2}", c.balance), t.text_primary))
                                     } else {
-                                        el
+                                        None
+                                    };
+                                    match value {
+                                        Some((text, color)) => el
+                                            .child(usage_divider(t))
+                                            .child(usage_kv_row(t, cx, "Credits", text, color)),
+                                        None => el,
                                     }
                                 }),
                         ),
@@ -620,53 +636,6 @@ impl CodexUsage {
         .with_priority(1)
         .into_any_element()
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Severity {
-    Normal,
-    Warning,
-    Critical,
-}
-
-fn severity_color(t: &ThemeColors, s: Severity) -> u32 {
-    match s {
-        Severity::Normal => t.metric_normal,
-        Severity::Warning => t.metric_warning,
-        Severity::Critical => t.metric_critical,
-    }
-}
-
-/// Severity from absolute utilization — how close to the hard cap.
-fn abs_severity(pct: u64) -> Severity {
-    if pct > 80 {
-        Severity::Critical
-    } else if pct > 60 {
-        Severity::Warning
-    } else {
-        Severity::Normal
-    }
-}
-
-/// Severity from pace — how far ahead usage is of where it "should" be at this
-/// point in the period. `Critical` means the user is burning budget fast enough
-/// to run out before the period resets unless they slow down.
-fn pace_severity(usage_pct: u64, time_pct: Option<f64>) -> Severity {
-    match time_pct {
-        Some(tp) if (usage_pct as f64) > tp + 15.0 => Severity::Critical,
-        Some(tp) if (usage_pct as f64) > tp + 5.0 => Severity::Warning,
-        _ => Severity::Normal,
-    }
-}
-
-fn utilization_color(t: &ThemeColors, pct: u64) -> u32 {
-    severity_color(t, abs_severity(pct))
-}
-
-#[derive(Clone, Copy)]
-enum SegmentUnit {
-    Hour,
-    Day,
 }
 
 /// Pick the grid granularity for a window: per-hour up to a day, per-day for
@@ -679,78 +648,6 @@ fn segment_unit_for_window(window_seconds: u64) -> Option<SegmentUnit> {
     }
 }
 
-/// Compute reset-anchored grid boundaries for a usage bar, plus the block that
-/// currently contains "now".
-///
-/// Boundaries land on the user's *actual* reset time-of-day — e.g. a Sunday
-/// 12:00 weekly reset yields noon-to-noon day blocks — computed with calendar
-/// arithmetic so they stay correct across DST and for any reset time, rather
-/// than just evenly dividing the bar. Returns the divider fractions (0..1,
-/// excluding the ends) and the (start, end) fractions of the current block.
-fn reset_aligned_segments(
-    reset_at: u64,
-    period_secs: f64,
-    unit: SegmentUnit,
-) -> (Vec<f32>, Option<(f32, f32)>) {
-    if reset_at == 0 || period_secs <= 0.0 {
-        return (Vec::new(), None);
-    }
-    let reset = match jiff::Timestamp::from_second(reset_at as i64) {
-        Ok(ts) => ts.to_zoned(jiff::tz::TimeZone::system()),
-        Err(_) => return (Vec::new(), None),
-    };
-    let reset_epoch = reset_at as f64;
-    let start_epoch = reset_epoch - period_secs;
-    let now_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(start_epoch);
-
-    // Keep the grid legible on a thin bar: if a window spans more units than
-    // this, step by a whole multiple (e.g. every 2 days), which is still
-    // anchored to the reset time-of-day.
-    let (unit_secs, max_blocks) = match unit {
-        SegmentUnit::Hour => (3_600.0, 12.0),
-        SegmentUnit::Day => (86_400.0, 14.0),
-    };
-    let units = (period_secs / unit_secs).round().max(1.0);
-    let multiplier = (units / max_blocks).ceil().max(1.0) as i64;
-    let step = match unit {
-        SegmentUnit::Hour => jiff::Span::new().hours(multiplier),
-        SegmentUnit::Day => jiff::Span::new().days(multiplier),
-    };
-
-    // Walk back from the reset, one block at a time, until the window start is
-    // covered. `bounds` ends up holding boundary epochs in ascending order.
-    let mut bounds = vec![reset_epoch];
-    let mut cursor = reset;
-    for _ in 0..64 {
-        cursor = match cursor.checked_sub(step) {
-            Ok(z) => z,
-            Err(_) => break,
-        };
-        let epoch = cursor.timestamp().as_millisecond() as f64 / 1_000.0;
-        bounds.push(epoch);
-        if epoch <= start_epoch {
-            break;
-        }
-    }
-    bounds.reverse();
-
-    let frac = |epoch: f64| ((epoch - start_epoch) / period_secs) as f32;
-    let dividers = bounds
-        .iter()
-        .map(|&epoch| frac(epoch))
-        .filter(|&f| f > 0.001 && f < 0.999)
-        .collect();
-    let current = bounds.windows(2).find_map(|w| {
-        (now_epoch >= w[0] && now_epoch < w[1])
-            .then(|| (frac(w[0]).max(0.0), frac(w[1]).min(1.0)))
-    });
-
-    (dividers, current)
-}
-
 fn format_window_label(window_seconds: u64) -> &'static str {
     match window_seconds {
         0..=3600 => "1h",
@@ -761,213 +658,51 @@ fn format_window_label(window_seconds: u64) -> &'static str {
     }
 }
 
-fn format_reset_time(reset_at: u64) -> String {
-    if reset_at == 0 {
-        return String::new();
+/// Build a shared [`UsageRow`] from a Codex rate-limit window.
+fn window_row(label: &str, window: &RateLimitWindow, marker_id: &'static str) -> UsageRow {
+    let unit = segment_unit_for_window(window.window_seconds);
+    let reset_epoch = (window.reset_at > 0).then(|| window.reset_at as f64);
+    UsageRow {
+        label: label.into(),
+        period: format_window_label(window.window_seconds).into(),
+        pct: window.used_percent as f64,
+        time_pct: window.time_elapsed_pct,
+        reset_epoch,
+        period_secs: window.window_seconds as f64,
+        unit,
+        marker_id: marker_id.into(),
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    if reset_at <= now {
-        return "now".to_string();
-    }
-    let remaining = reset_at - now;
-    let hours = remaining / 3600;
-    let minutes = (remaining % 3600) / 60;
-    if hours > 24 {
-        let days = hours / 24;
-        format!("{}d {}h", days, hours % 24)
-    } else if hours > 0 {
-        format!("{}h {}m", hours, minutes)
-    } else {
-        format!("{}m", minutes)
-    }
-}
-
-fn render_window_row(
-    t: &ThemeColors,
-    cx: &App,
-    label: &str,
-    window: &RateLimitWindow,
-) -> impl IntoElement {
-    let pct = window.used_percent;
-    let window_label = format_window_label(window.window_seconds);
-    let reset = format_reset_time(window.reset_at);
-    let pace = pace_severity(pct, window.time_elapsed_pct);
-    // % text reflects whichever is worse: nearness to the cap, or burn pace.
-    let pct_color = severity_color(t, abs_severity(pct).max(pace));
-    let pace_msg: Option<(&str, u32)> = match pace {
-        Severity::Critical => Some(("Slow down to last the period", t.metric_critical)),
-        Severity::Warning => Some(("Ahead of pace", t.metric_warning)),
-        Severity::Normal => None,
-    };
-
-    v_flex()
-        .gap(px(2.0))
-        .child(
-            h_flex()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_secondary))
-                        .child(format!("{} ({})", label, window_label)),
-                )
-                .child(
-                    h_flex()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(pct_color))
-                                .child(format!("{}%", pct)),
-                        )
-                        .when(!reset.is_empty(), |el| {
-                            el.child(
-                                div()
-                                    .text_size(ui_text_sm(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(format!("resets in {}", reset)),
-                            )
-                        }),
-                ),
-        )
-        .child({
-            let (dividers, current_seg) = segment_unit_for_window(window.window_seconds)
-                .map(|unit| {
-                    reset_aligned_segments(
-                        window.reset_at,
-                        window.window_seconds as f64,
-                        unit,
-                    )
-                })
-                .unwrap_or_default();
-            render_usage_with_time_bar(t, pct, window.time_elapsed_pct, dividers, current_seg)
-        })
-        .when_some(pace_msg, |el, (msg, col)| {
-            el.child(
-                div()
-                    .text_size(ui_text_sm(cx))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(col))
-                    .child(msg),
-            )
-        })
-}
-
-fn render_usage_with_time_bar(
-    t: &ThemeColors,
-    usage_pct: u64,
-    time_pct: Option<f64>,
-    dividers: Vec<f32>,
-    current_seg: Option<(f32, f32)>,
-) -> impl IntoElement {
-    let clamped_usage = (usage_pct as f32).clamp(0.0, 100.0);
-
-    // Base fill reflects nearness to the hard cap. Any usage *beyond* the pace
-    // marker is overage — drawn on top in warning/critical — so being over the
-    // budget for this point in the period is visible directly on the bar.
-    let base_color = severity_color(t, abs_severity(usage_pct));
-    let overage = time_pct.and_then(|tp| {
-        let start = tp.clamp(0.0, 100.0) as f32;
-        let width = clamped_usage - start;
-        if width <= 0.0 {
-            return None;
-        }
-        let color = if width > 15.0 {
-            t.metric_critical
-        } else {
-            t.metric_warning
-        };
-        Some((start, width, color))
-    });
-
-    // Divider lines at the reset-anchored day/hour boundaries, so the pace
-    // marker can be read against a real time grid.
-    let divider_els = dividers.into_iter().map(move |f| {
-        div()
-            .absolute()
-            .top_0()
-            .h_full()
-            .w(px(1.0))
-            .bg(rgb(t.border))
-            .left(relative(f))
-    });
-
-    // Translucent band over the block the user is currently in (today / this
-    // hour). Derived from text_primary so it adapts to light and dark themes.
-    let mut highlight = rgb(t.text_primary);
-    highlight.a = 0.14;
-
-    div()
-        .h(px(4.0))
-        .w_full()
-        .rounded(px(2.0))
-        .bg(rgb(t.bg_secondary))
-        .relative()
-        .child(
-            div()
-                .h_full()
-                .rounded(px(2.0))
-                .bg(rgb(base_color))
-                .w(relative(clamped_usage / 100.0)),
-        )
-        .when_some(overage, |el, (start, width, color)| {
-            el.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .h_full()
-                    .left(relative(start / 100.0))
-                    .w(relative(width / 100.0))
-                    .rounded_r(px(2.0))
-                    .bg(rgb(color)),
-            )
-        })
-        .children(divider_els)
-        .when_some(current_seg, |el, (start, end)| {
-            el.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .h_full()
-                    .left(relative(start))
-                    .w(relative((end - start).max(0.0)))
-                    .bg(highlight),
-            )
-        })
-        .when_some(time_pct, |el, tp| {
-            let clamped_time = tp.clamp(0.0, 100.0) as f32;
-            el.child(
-                div()
-                    .absolute()
-                    .top(px(-1.0))
-                    .left(relative(clamped_time / 100.0))
-                    .w(px(1.5))
-                    .h(px(6.0))
-                    .rounded(px(1.0))
-                    .bg(rgb(t.text_primary)),
-            )
-        })
 }
 
 impl Render for CodexUsage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
+        let working = read_working_days(cx);
         let data = self.data.read(cx).data.lock();
-        let (primary, secondary) = match data.as_ref() {
-            Some(d) => (
-                d.primary_window
-                    .as_ref()
-                    .map(|w| (w.used_percent, w.window_seconds)),
-                d.secondary_window
-                    .as_ref()
-                    .map(|w| (w.used_percent, w.window_seconds)),
-            ),
+        let mut items: Vec<(SharedString, f64, Option<f64>)> = Vec::new();
+        match data.as_ref() {
+            Some(d) => {
+                for w in [d.primary_window.as_ref(), d.secondary_window.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    let et = effective_time_pct(
+                        (w.reset_at > 0).then(|| w.reset_at as f64),
+                        w.window_seconds as f64,
+                        segment_unit_for_window(w.window_seconds),
+                        working,
+                        w.time_elapsed_pct,
+                    );
+                    items.push((
+                        format_window_label(w.window_seconds).into(),
+                        w.used_percent as f64,
+                        et,
+                    ));
+                }
+            }
             None => return div().size_0().into_any_element(),
-        };
+        }
         drop(data);
 
         let entity_handle = cx.entity().clone();
@@ -977,53 +712,12 @@ impl Render for CodexUsage {
                 h_flex()
                     .id("codex-usage-trigger")
                     .cursor_pointer()
-                    .gap(px(3.0))
+                    .gap(px(4.0))
                     .px(px(4.0))
                     .py(px(1.0))
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .when_some(primary, |el, (pct, window_secs)| {
-                        el.child(
-                            h_flex()
-                                .gap(px(3.0))
-                                .child(
-                                    div()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(format_window_label(window_secs)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(utilization_color(&t, pct)))
-                                        .child(format!("{}%", pct)),
-                                ),
-                        )
-                    })
-                    .when_some(secondary, |el, (pct, window_secs)| {
-                        el.child(
-                            div()
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child("|"),
-                        )
-                        .child(
-                            h_flex()
-                                .gap(px(3.0))
-                                .child(
-                                    div()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(format_window_label(window_secs)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(utilization_color(&t, pct)))
-                                        .child(format!("{}%", pct)),
-                                ),
-                        )
-                    })
+                    .children(usage_trigger_items(&t, cx, &items))
                     .child(
                         canvas(
                             move |bounds, _window, app| {
@@ -1076,33 +770,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_reset_aligned_segments_guards() {
-        // No reset / no window → no grid.
-        assert_eq!(
-            reset_aligned_segments(0, 7.0 * 86400.0, SegmentUnit::Day),
-            (Vec::new(), None)
-        );
-        assert_eq!(
-            reset_aligned_segments(1_700_000_000, 0.0, SegmentUnit::Day),
-            (Vec::new(), None)
-        );
-    }
-
-    #[test]
-    fn test_reset_aligned_segments_weekly() {
-        // A 7-day window yields ~6 internal day boundaries, all strictly inside
-        // the bar and in ascending order. (Exact count can vary by ±1 around a
-        // DST transition; the range stays small.)
-        let period = 7.0 * 86400.0;
-        let (dividers, _current) =
-            reset_aligned_segments(1_700_000_000, period, SegmentUnit::Day);
-        assert!(
-            (5..=7).contains(&dividers.len()),
-            "expected ~6 dividers, got {}",
-            dividers.len()
-        );
-        assert!(dividers.iter().all(|&f| f > 0.0 && f < 1.0));
-        assert!(dividers.windows(2).all(|w| w[0] < w[1]));
-    }
 }

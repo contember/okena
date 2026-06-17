@@ -6120,6 +6120,7 @@ dependencies = [
  "okena-core",
  "okena-extensions",
  "okena-ui",
+ "okena-usage",
  "parking_lot",
  "serde_json",
  "sha2",
@@ -6140,6 +6141,7 @@ dependencies = [
  "okena-core",
  "okena-extensions",
  "okena-ui",
+ "okena-usage",
  "parking_lot",
  "serde_json",
  "smol",
@@ -6369,6 +6371,19 @@ dependencies = [
  "okena-core",
  "okena-theme",
  "smol",
+]
+
+[[package]]
+name = "okena-usage"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "jiff",
+ "okena-core",
+ "okena-extensions",
+ "okena-ui",
+ "serde_json",
 ]
 
 [[package]]
