@@ -1,0 +1,74 @@
+[package]
+name = "okena-app"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+# Shared core types + lower-level crates the UI/app layer builds on.
+okena-core = { path = "../okena-core", features = ["client"] }
+okena-app-core = { path = "../okena-app-core" }
+okena-remote-server = { path = "../okena-remote-server" }
+okena-remote-client = { path = "../okena-remote-client" }
+okena-workspace = { path = "../okena-workspace" }
+okena-terminal = { path = "../okena-terminal" }
+okena-git = { path = "../okena-git" }
+okena-files = { path = "../okena-files" }
+okena-ui = { path = "../okena-ui" }
+okena-theme = { path = "../okena-theme" }
+okena-markdown = { path = "../okena-markdown" }
+okena-services = { path = "../okena-services" }
+
+# View crates
+okena-views-git = { path = "../okena-views-git" }
+okena-views-terminal = { path = "../okena-views-terminal" }
+okena-views-services = { path = "../okena-views-services" }
+okena-views-sidebar = { path = "../okena-views-sidebar" }
+okena-views-remote = { path = "../okena-views-remote" }
+
+# Extension system
+okena-extensions = { path = "../okena-extensions" }
+okena-ext-claude = { path = "../okena-ext-claude" }
+okena-ext-updater = { path = "../okena-ext-updater" }
+
+# UI Framework (from Zed repo)
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+
+# UI Components
+gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+
+# Async / concurrency
+smol = "2.0"
+async-channel = "2.3"
+parking_lot = "0.12"
+tokio = { version = "1", features = ["sync"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# System info (status bar memory/cpu readout)
+sysinfo = "0.33"
+
+# Native desktop notifications (OSC 9 / OSC 777 terminal alerts).
+notify-rust = "4"
+
+# Utilities
+uuid = { version = "1.10", features = ["v4"] }
+dirs = "5.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+# Standalone RUST_LOG-syntax filter (the same crate env_logger 0.11 uses) for
+# the runtime-reloadable capture filter behind the in-app log console.
+env_filter = "0.1"
+# Lock-free swap of the capture filter at runtime (no logging-path lock).
+arc-swap = "1"
+anyhow = "1.0"
+
+# Time handling (cross-platform, thread-safe)
+time = { version = "0.3", features = ["local-offset"] }
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }

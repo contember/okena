@@ -5,7 +5,7 @@
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// pub struct MyView {
 ///     focus_handle: FocusHandle,
 /// }

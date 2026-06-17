@@ -1,42 +1,28 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
-#[macro_use]
-mod macros;
-mod action_dispatch;
-mod app;
+// The entire UI/app layer (views, app coordinator, keybindings, action
+// dispatch, logging, and the thin shim modules over the lower-level crates)
+// lives in its own crate (`okena-app`) to keep it off the binary's hot compile
+// path. The binary is now a thin entry point: it owns only `assets` and the
+// `smoke_tests`, plus the allocator/bootstrap glue below.
+//
+// `okena-app` re-exports `okena-remote-server` as `okena_app::remote` and
+// `okena-app-core`'s `settings`/`workspace` modules, so references that used to
+// be `crate::remote` / `crate::settings` / `crate::workspace` are now
+// `okena_app::remote` / `okena_app::settings` / `okena_app::workspace`.
 mod assets;
-mod elements;
-mod git;
-mod keybindings;
-mod logging;
-// The remote-control server lives in its own crate (`okena-remote-server`) to
-// keep it off the binary's hot compile path. Re-exported as `crate::remote` so
-// existing `crate::remote::...` references keep working unchanged.
-pub use okena_remote_server as remote;
-mod remote_client;
-mod services;
-// The headless app-logic layer (global settings + workspace action glue) lives
-// in its own crate (`okena-app-core`) to keep it off the binary's hot compile
-// path. Re-exported as `crate::settings` / `crate::workspace` so existing
-// `crate::settings::...` / `crate::workspace::...` references keep working.
-pub use okena_app_core::{settings, workspace};
-mod soft_close;
-#[cfg(target_os = "linux")]
-mod simple_root;
-mod terminal;
-mod theme;
-mod ui;
-mod views;
 #[cfg(test)]
 mod smoke_tests;
+
+use okena_app::{settings, workspace};
 
 use gpui::*;
 use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
 #[cfg(not(target_os = "linux"))]
 use gpui_component::Root;
 #[cfg(target_os = "linux")]
-use crate::simple_root::SimpleRoot as Root;
+use okena_app::simple_root::SimpleRoot as Root;
 use std::sync::Arc;
 
 use std::net::IpAddr;
@@ -104,16 +90,18 @@ impl std::io::Write for TeeWriter {
     }
 }
 
-use crate::app::Okena;
-use crate::app::headless::HeadlessApp;
+use okena_app::app::Okena;
+use okena_app::app::headless::HeadlessApp;
 use crate::assets::{Assets, embedded_fonts};
-use crate::keybindings::{About, NewWindow, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings, ShowProfileManager};
-use crate::settings::GlobalSettings;
-use crate::terminal::pty_manager::PtyManager;
-use crate::theme::{AppTheme, GlobalTheme, ThemeMode};
-use crate::views::panels::toast::{Toast, ToastManager};
-use crate::workspace::persistence;
-use crate::workspace::state::GlobalWorkspace;
+use okena_app::keybindings;
+use okena_app::keybindings::{About, NewWindow, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings, ShowProfileManager};
+use okena_app::logging;
+use okena_app::settings::GlobalSettings;
+use okena_app::terminal::pty_manager::PtyManager;
+use okena_app::theme::{AppTheme, GlobalTheme, ThemeMode};
+use okena_app::views::panels::toast::{Toast, ToastManager};
+use okena_app::workspace::persistence;
+use okena_app::workspace::state::GlobalWorkspace;
 use okena_core::profiles;
 
 /// Quit action handler - flushes pending saves before exiting
@@ -268,13 +256,13 @@ fn set_app_menus(cx: &mut App) {
             name: "Edit".into(),
             disabled: false,
             items: vec![
-                MenuItem::os_action("Undo", crate::keybindings::Copy, OsAction::Undo), // Using Copy as placeholder since we need an action
-                MenuItem::os_action("Redo", crate::keybindings::Copy, OsAction::Redo),
+                MenuItem::os_action("Undo", okena_app::keybindings::Copy, OsAction::Undo), // Using Copy as placeholder since we need an action
+                MenuItem::os_action("Redo", okena_app::keybindings::Copy, OsAction::Redo),
                 MenuItem::separator(),
-                MenuItem::os_action("Cut", crate::keybindings::Copy, OsAction::Cut),
-                MenuItem::os_action("Copy", crate::keybindings::Copy, OsAction::Copy),
-                MenuItem::os_action("Paste", crate::keybindings::Paste, OsAction::Paste),
-                MenuItem::os_action("Select All", crate::keybindings::Copy, OsAction::SelectAll),
+                MenuItem::os_action("Cut", okena_app::keybindings::Copy, OsAction::Cut),
+                MenuItem::os_action("Copy", okena_app::keybindings::Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", okena_app::keybindings::Paste, OsAction::Paste),
+                MenuItem::os_action("Select All", okena_app::keybindings::Copy, OsAction::SelectAll),
             ],
         },
         Menu {
@@ -568,7 +556,7 @@ fn main() {
 
         // Register theme provider for extensions
         cx.set_global(okena_extensions::GlobalThemeProvider(|cx| {
-            crate::theme::theme(cx)
+            okena_app::theme::theme(cx)
         }));
 
         // Register extension settings store (bridge for extensions and view crates to read/write settings).
@@ -596,7 +584,7 @@ fn main() {
                         }).ok()
                     }
                     "git" => {
-                        let is_dark = crate::theme::theme(cx).is_dark();
+                        let is_dark = okena_app::theme::theme(cx).is_dark();
                         serde_json::to_value(&okena_views_git::settings::GitViewSettings {
                             diff_view_mode: s.settings.diff_view_mode,
                             diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
@@ -680,7 +668,7 @@ fn main() {
             let mut theme = AppTheme::new(app_settings.theme_mode, true);
             if app_settings.theme_mode == ThemeMode::Custom
                 && let Some(ref custom_id) = app_settings.custom_theme_id {
-                    for (info, colors) in crate::theme::load_custom_themes() {
+                    for (info, colors) in okena_app::theme::load_custom_themes() {
                         if info.id == format!("custom:{}", custom_id) {
                             theme.set_custom_colors(colors);
                             break;
@@ -694,12 +682,12 @@ fn main() {
         // Shared, cross-window hover state for the Switch Project overlay.
         // Hovering a project row publishes its id here; every window observes it
         // to ring-highlight the matching project panel (incl. other windows).
-        let project_hover = cx.new(|_| crate::views::project_hover::ProjectHoverState::new());
-        cx.set_global(crate::views::project_hover::GlobalProjectHover(project_hover));
+        let project_hover = cx.new(|_| okena_app::views::project_hover::ProjectHoverState::new());
+        cx.set_global(okena_app::views::project_hover::GlobalProjectHover(project_hover));
 
         // Register theme provider for okena-files crate
         cx.set_global(okena_files::theme::GlobalThemeProvider(|cx| {
-            crate::theme::theme(cx)
+            okena_app::theme::theme(cx)
         }));
 
         // Register UI font size provider for all crates
@@ -807,7 +795,7 @@ fn main() {
 
                 // Wire up content pane registration so PTY events can notify terminal views
                 okena_views_terminal::set_register_content_pane_fn(Box::new(|terminal_id, weak_content| {
-                    let mut registry = crate::views::window::content_pane_registry().lock();
+                    let mut registry = okena_app::views::window::content_pane_registry().lock();
                     let panes = registry.entry(terminal_id).or_default();
                     // Re-layouts (e.g. workspace switch) re-register the same
                     // terminal, minting fresh panes. Drop dead weaks and skip an

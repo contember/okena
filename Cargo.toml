@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli", "crates/okena-app-core"]
+members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli", "crates/okena-app-core", "crates/okena-app"]
 resolver = "2"
 
 [package]
@@ -9,66 +9,39 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-# Shared core types
-okena-core = { path = "crates/okena-core", features = ["client"] }
-okena-git = { path = "crates/okena-git" }
-okena-views-git = { path = "crates/okena-views-git" }
-okena-views-terminal = { path = "crates/okena-views-terminal" }
-okena-terminal = { path = "crates/okena-terminal" }
-okena-services = { path = "crates/okena-services" }
-okena-views-services = { path = "crates/okena-views-services" }
-okena-views-sidebar = { path = "crates/okena-views-sidebar" }
-okena-remote-client = { path = "crates/okena-remote-client" }
-okena-remote-server = { path = "crates/okena-remote-server" }
-okena-cli = { path = "crates/okena-cli" }
-okena-app-core = { path = "crates/okena-app-core" }
-okena-views-remote = { path = "crates/okena-views-remote" }
-okena-workspace = { path = "crates/okena-workspace" }
-okena-ui = { path = "crates/okena-ui" }
-okena-theme = { path = "crates/okena-theme" }
-okena-files = { path = "crates/okena-files" }
-okena-markdown = { path = "crates/okena-markdown" }
+# The entire UI/app layer (views, app coordinator, keybindings, action dispatch,
+# logging, theme/terminal/etc. shim modules) lives in `okena-app`. The binary is
+# a thin entry point that owns only `main.rs`, `assets.rs`, and `smoke_tests.rs`,
+# so most of the former UI dependency set moved to `crates/okena-app/Cargo.toml`.
+okena-app = { path = "crates/okena-app" }
 
-# Extension system
+# Shared core types + the lower-level crates `main.rs`/`smoke_tests.rs` still
+# touch directly (workspace/terminal bootstrap, settings bridge, smoke tests).
+okena-core = { path = "crates/okena-core", features = ["client"] }
+okena-cli = { path = "crates/okena-cli" }
+okena-terminal = { path = "crates/okena-terminal" }
+okena-workspace = { path = "crates/okena-workspace" }
+okena-files = { path = "crates/okena-files" }
+okena-views-terminal = { path = "crates/okena-views-terminal" }
+okena-views-git = { path = "crates/okena-views-git" }
+okena-ui = { path = "crates/okena-ui" }
+
+# Extension system — registered at startup in main.rs.
 okena-extensions = { path = "crates/okena-extensions" }
 okena-ext-claude = { path = "crates/okena-ext-claude" }
 okena-ext-codex = { path = "crates/okena-ext-codex" }
 okena-ext-github = { path = "crates/okena-ext-github" }
 okena-ext-updater = { path = "crates/okena-ext-updater" }
 
-# UI Framework (from Zed repo)
+# UI Framework (from Zed repo) — main.rs creates the GPUI Application + window.
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", features = ["wayland", "x11", "font-kit"] }
 
-# UI Components
+# UI Components — gpui_component::init + theme sync at window creation.
 gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
 
-# Terminal Emulation
-alacritty_terminal = "0.25"
-
-# PTY Management
-portable-pty = "0.9"
-
-# Async Runtime
-smol = "2.0"
-async-channel = "2.3"
-parking_lot = "0.12"
-futures = "0.3"
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
+# Serialization — settings bridge in main.rs + smoke_tests.
 serde_json = "1.0"
-
-# System info
-sysinfo = "0.33"
-
-# Native desktop notifications (libnotify/dbus on Linux, NSUserNotification on
-# macOS, WinRT toast on Windows). Used for OSC 9 / OSC 777 terminal alerts.
-notify-rust = "4"
-
-# Utilities
-uuid = { version = "1.10", features = ["v4"] }
-dirs = "5.0"
 
 # Global allocator — see [features] for the per-target default. glibc malloc
 # fragments badly under okena's high-churn, multi-threaded small-allocation
@@ -81,42 +54,16 @@ mimalloc = { version = "0.1", optional = true }
 # Heap profiler (opt-in via `--features dhat-heap`). Off by default so it never
 # touches normal builds — see [features] and src/main.rs.
 dhat = { version = "0.3", optional = true }
+
+# Logging — main.rs builds the env_logger sink and hands it to okena-app::logging.
 log = "0.4"
 env_logger = "0.11"
-# Standalone RUST_LOG-syntax filter (the same crate env_logger 0.11 uses) for
-# the runtime-reloadable capture filter behind the in-app log console.
-env_filter = "0.1"
-# Lock-free swap of the capture filter at runtime (no logging-path lock).
-arc-swap = "1"
+
+# Error type for the AssetSource impl in assets.rs.
 anyhow = "1.0"
-thiserror = "2.0"
-regex = "1.10"
 
-# Asset embedding
+# Asset embedding (fonts/icons) in assets.rs.
 rust-embed = "8.5"
-
-# Time handling (cross-platform, thread-safe)
-time = { version = "0.3", features = ["local-offset"] }
-
-# Syntax highlighting
-syntect = { version = "5", features = ["default-fancy"] }
-two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
-
-# Markdown parsing
-pulldown-cmark = "0.12"
-
-# Self-updater
-semver = "1"
-
-# The remote-control HTTP/WS server (axum/hyper/rustls/rcgen + HMAC auth) lives
-# in the `okena-remote-server` crate; those deps are declared there, not here.
-
-# Async runtime — the binary forwards remote commands across the GPUI/tokio
-# boundary (src/app/{mod,headless,remote_commands}.rs).
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
-
-# Base64 (remote image paste).
-base64 = "0.22"
 
 [features]
 # Per-target default allocator: jemalloc on Unix (the `tikv-jemallocator` dep is
@@ -153,7 +100,6 @@ strip = false
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
-tempfile = "3"
 
 # jemalloc is the default allocator on Unix (Linux + macOS). Kept Unix-only
 # because tikv-jemalloc-sys doesn't build under MSVC; Windows uses mimalloc.

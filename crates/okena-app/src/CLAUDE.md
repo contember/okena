@@ -1,30 +1,41 @@
-# src/ — Desktop Application
+# okena-app — UI/App Layer
 
-The main binary. Most logic has been extracted into `crates/okena-*`; the `src/` subdirectories are thin re-export modules (`pub use okena_*::*`). Real code still lives in `src/app/`, `src/views/`, `src/remote/`, and `src/keybindings/`.
+The desktop UI/app layer, extracted out of the `okena` binary so it compiles as
+its own crate (the binary is now a thin entry point: `src/main.rs` +
+`src/assets.rs` + `src/smoke_tests.rs`). Real code lives in `app/`, `views/`,
+and `keybindings/`; the remaining subdirectories are thin re-export modules
+(`pub use okena_*::*`).
+
+`lib.rs` re-exports the lower-level crates so the moved code's `crate::...`
+paths keep resolving:
+- `pub use okena_remote_server as remote;` → `crate::remote`
+- `pub use okena_app_core::{settings, workspace};` → `crate::settings` / `crate::workspace`
+- `#[macro_use] mod macros;` keeps `impl_focusable!` exported at the crate root
 
 ## Module Structure
 
 ```
-src/
-├── main.rs               # Entry point, GPUI setup, window creation
-├── settings.rs           # Global settings entity (SettingsState, auto-save)
-├── assets.rs             # Embedded fonts and icons
-├── process.rs            # Cross-platform subprocess spawning
+crates/okena-app/src/
+├── lib.rs                # Crate root: shim re-exports + module declarations
 ├── macros.rs             # Shared macros (impl_focusable!)
-├── simple_root.rs        # Linux Wayland maximize workaround
+├── action_dispatch.rs    # Action → workspace dispatch glue
+├── logging.rs            # In-app log console (ring buffer + reloadable filter)
+├── simple_root.rs        # Linux Wayland maximize workaround (cfg(target_os = "linux"))
+├── soft_close.rs         # Confirm-before-close helpers
 ├── app/                  # Main app entity — real code (see app/CLAUDE.md)
 ├── views/                # UI views — real code (overlays, chrome, panels, components)
 ├── keybindings/          # Keyboard actions — real code (see keybindings/CLAUDE.md)
-├── remote/               # Remote server — real code (see remote/CLAUDE.md)
-├── terminal/             # Re-exports okena-terminal
-├── workspace/            # Re-exports okena-workspace (+ local actions/)
-├── git/                  # Re-exports okena-git + okena-views-git
-├── theme/                # Re-exports okena-theme
-├── ui/                   # Re-exports okena-ui
 ├── elements/             # Re-exports okena-views-terminal elements
+├── terminal/             # Re-exports okena-terminal
+├── git/                  # Re-exports okena-git + okena-views-git
+├── theme/                # Re-exports okena-theme (+ desktop theme() helper)
+├── ui/                   # Re-exports okena-ui
 ├── services/             # Re-exports okena-services
 └── remote_client/        # Re-exports okena-remote-client
 ```
+
+(`settings` / `workspace` / `remote` are re-export shims in `lib.rs`, not
+directories — see above.)
 
 ## Architecture
 

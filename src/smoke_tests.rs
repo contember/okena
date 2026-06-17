@@ -12,31 +12,31 @@ mod tests {
         cx.update(|cx| {
             // Settings entity
             let settings_entity = cx.new(|_cx| {
-                crate::settings::SettingsState::new(Default::default())
+                okena_app::settings::SettingsState::new(Default::default())
             });
-            cx.set_global(crate::settings::GlobalSettings(settings_entity));
+            cx.set_global(okena_app::settings::GlobalSettings(settings_entity));
 
             // Theme — AppTheme is a GPUI Entity, not a Global
-            let theme_entity = cx.new(|_cx| crate::theme::AppTheme::new(
+            let theme_entity = cx.new(|_cx| okena_app::theme::AppTheme::new(
                 okena_core::theme::ThemeMode::Dark,
                 false,
             ));
-            cx.set_global(crate::theme::GlobalTheme(theme_entity));
+            cx.set_global(okena_app::theme::GlobalTheme(theme_entity));
 
             // Theme provider for view crates
             cx.set_global(okena_ui::theme::GlobalThemeProvider(|cx| {
-                crate::theme::theme(cx)
+                okena_app::theme::theme(cx)
             }));
 
             // UI font size provider for view crates
             cx.set_global(okena_ui::tokens::GlobalUiFontSize(|cx| {
-                crate::settings::settings_entity(cx).read(cx).settings.ui_font_size
+                okena_app::settings::settings_entity(cx).read(cx).settings.ui_font_size
             }));
 
             // Extension settings store (used by terminal and git view crates)
             cx.set_global(okena_extensions::ExtensionSettingsStore::new(
                 |namespace, cx| {
-                    let s = crate::settings::settings_entity(cx).read(cx);
+                    let s = okena_app::settings::settings_entity(cx).read(cx);
                     match namespace {
                         "terminal" => serde_json::to_value(&okena_views_terminal::TerminalViewSettings {
                             font_size: s.settings.font_size,
@@ -120,7 +120,7 @@ mod tests {
         init_globals(cx);
         cx.update(|cx| {
             // Register keybindings (this exercises the action type mapping)
-            crate::keybindings::register_keybindings(cx);
+            okena_app::keybindings::register_keybindings(cx);
         });
     }
 }
