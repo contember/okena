@@ -3,10 +3,10 @@
 //! Provides app-wide access to settings through the GlobalSettings global.
 //! Settings are automatically persisted to disk with debouncing.
 
-use crate::terminal::session_backend::SessionBackend;
-use crate::terminal::shell_config::ShellType;
-use crate::theme::ThemeMode;
-use crate::views::panels::toast::ToastManager;
+use okena_terminal::session_backend::SessionBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_theme::ThemeMode;
+use okena_workspace::toast::ToastManager;
 use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
 use gpui::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -407,19 +407,19 @@ pub fn open_settings_file() {
 
     #[cfg(target_os = "macos")]
     {
-        let _ = crate::process::spawn_and_reap(
-            crate::process::command("open").arg("-t").arg(&path),
+        let _ = okena_core::process::spawn_and_reap(
+            okena_core::process::command("open").arg("-t").arg(&path),
         );
     }
 
     #[cfg(target_os = "linux")]
     {
-        let _ = crate::process::spawn_and_reap(crate::process::command("xdg-open").arg(&path));
+        let _ = okena_core::process::spawn_and_reap(okena_core::process::command("xdg-open").arg(&path));
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = crate::process::spawn_and_reap(crate::process::command("notepad").arg(&path));
+        let _ = okena_core::process::spawn_and_reap(okena_core::process::command("notepad").arg(&path));
     }
 }
 

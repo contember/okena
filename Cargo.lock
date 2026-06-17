@@ -6028,6 +6028,7 @@ dependencies = [
  "log",
  "mimalloc",
  "notify-rust",
+ "okena-app-core",
  "okena-cli",
  "okena-core",
  "okena-ext-claude",
@@ -6069,6 +6070,25 @@ dependencies = [
  "two-face",
  "uuid",
  "winresource",
+]
+
+[[package]]
+name = "okena-app-core"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "base64",
+ "gpui",
+ "log",
+ "okena-core",
+ "okena-files",
+ "okena-git",
+ "okena-terminal",
+ "okena-theme",
+ "okena-workspace",
+ "serde_json",
+ "smol",
+ "uuid",
 ]
 
 [[package]]

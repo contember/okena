@@ -17,9 +17,9 @@ mod terminal;
 
 use okena_core::api::{ActionRequest, CommandResult};
 use crate::settings::settings;
-use crate::terminal::backend::TerminalBackend;
-use crate::terminal::shell_config::ShellType;
-use crate::terminal::terminal::{Terminal, TerminalSize};
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_terminal::TerminalsRegistry;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::hooks;

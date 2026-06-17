@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli"]
+members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli", "crates/okena-app-core"]
 resolver = "2"
 
 [package]
@@ -21,6 +21,7 @@ okena-views-sidebar = { path = "crates/okena-views-sidebar" }
 okena-remote-client = { path = "crates/okena-remote-client" }
 okena-remote-server = { path = "crates/okena-remote-server" }
 okena-cli = { path = "crates/okena-cli" }
+okena-app-core = { path = "crates/okena-app-core" }
 okena-views-remote = { path = "crates/okena-views-remote" }
 okena-workspace = { path = "crates/okena-workspace" }
 okena-ui = { path = "crates/okena-ui" }

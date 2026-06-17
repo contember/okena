@@ -1,6 +1,6 @@
 //! Git action handlers.
 //!
-//! Each handler resolves the project path and delegates to the `crate::git`
+//! Each handler resolves the project path and delegates to the `okena_git`
 //! query layer. All return DTOs serialize infallibly for well-formed types
 //! (see the module-level `expect_used` allow in the parent module).
 
@@ -11,7 +11,7 @@ pub(super) fn status(ws: &Workspace, project_id: String) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            let status = crate::git::get_git_status(std::path::Path::new(&path));
+            let status = okena_git::get_git_status(std::path::Path::new(&path));
             ActionResult::Ok(Some(serde_json::to_value(status).expect("BUG: GitStatus must serialize")))
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),
@@ -22,7 +22,7 @@ pub(super) fn diff_summary(ws: &Workspace, project_id: String) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            let summary = crate::git::get_diff_file_summary(std::path::Path::new(&path));
+            let summary = okena_git::get_diff_file_summary(std::path::Path::new(&path));
             ActionResult::Ok(Some(serde_json::to_value(summary).expect("BUG: FileDiffSummary must serialize")))
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),
@@ -33,7 +33,7 @@ pub(super) fn diff(ws: &Workspace, project_id: String, mode: DiffMode, ignore_wh
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            match crate::git::get_diff_with_options(std::path::Path::new(&path), mode, ignore_whitespace) {
+            match okena_git::get_diff_with_options(std::path::Path::new(&path), mode, ignore_whitespace) {
                 Ok(diff) => ActionResult::Ok(Some(serde_json::to_value(diff).expect("BUG: DiffResult must serialize"))),
                 Err(e) => ActionResult::Err(e.to_string()),
             }
@@ -46,7 +46,7 @@ pub(super) fn branches(ws: &Workspace, project_id: String) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            let branches = crate::git::get_available_branches_for_worktree(std::path::Path::new(&path));
+            let branches = okena_git::get_available_branches_for_worktree(std::path::Path::new(&path));
             ActionResult::Ok(Some(serde_json::to_value(branches).expect("BUG: branches must serialize")))
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),
@@ -57,7 +57,7 @@ pub(super) fn file_contents(ws: &Workspace, project_id: String, file_path: Strin
     match ws.project(&project_id) {
         Some(p) => {
             let repo_path = p.path.clone();
-            let (old, new) = crate::git::get_file_contents_for_diff(
+            let (old, new) = okena_git::get_file_contents_for_diff(
                 std::path::Path::new(&repo_path),
                 &file_path,
                 mode,
@@ -75,7 +75,7 @@ pub(super) fn commit_graph(ws: &Workspace, project_id: String, count: usize, bra
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            let entries = crate::git::fetch_commit_log(
+            let entries = okena_git::fetch_commit_log(
                 std::path::Path::new(&path),
                 count,
                 branch.as_deref(),
@@ -90,7 +90,7 @@ pub(super) fn list_branches(ws: &Workspace, project_id: String) -> ActionResult 
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            let branches = crate::git::list_branches(std::path::Path::new(&path));
+            let branches = okena_git::list_branches(std::path::Path::new(&path));
             ActionResult::Ok(Some(serde_json::to_value(branches).expect("BUG: branches must serialize")))
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),
@@ -101,7 +101,7 @@ pub(super) fn stage_file(ws: &Workspace, project_id: String, file_path: String) 
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            match crate::git::stage_file(std::path::Path::new(&path), &file_path) {
+            match okena_git::stage_file(std::path::Path::new(&path), &file_path) {
                 Ok(()) => ActionResult::Ok(None),
                 Err(e) => ActionResult::Err(e.to_string()),
             }
@@ -114,7 +114,7 @@ pub(super) fn unstage_file(ws: &Workspace, project_id: String, file_path: String
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            match crate::git::unstage_file(std::path::Path::new(&path), &file_path) {
+            match okena_git::unstage_file(std::path::Path::new(&path), &file_path) {
                 Ok(()) => ActionResult::Ok(None),
                 Err(e) => ActionResult::Err(e.to_string()),
             }
@@ -127,7 +127,7 @@ pub(super) fn discard_file(ws: &Workspace, project_id: String, file_path: String
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            match crate::git::discard_file_changes(std::path::Path::new(&path), &file_path) {
+            match okena_git::discard_file_changes(std::path::Path::new(&path), &file_path) {
                 Ok(()) => ActionResult::Ok(None),
                 Err(e) => ActionResult::Err(e.to_string()),
             }

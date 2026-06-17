@@ -6,7 +6,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::{ActionResult, spawn_uninitialized_terminals};
-use crate::terminal::backend::TerminalBackend;
+use okena_terminal::backend::TerminalBackend;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{DropZone, Workspace};
 use gpui::*;

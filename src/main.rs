@@ -10,14 +10,17 @@ mod elements;
 mod git;
 mod keybindings;
 mod logging;
-mod process;
 // The remote-control server lives in its own crate (`okena-remote-server`) to
 // keep it off the binary's hot compile path. Re-exported as `crate::remote` so
 // existing `crate::remote::...` references keep working unchanged.
 pub use okena_remote_server as remote;
 mod remote_client;
 mod services;
-mod settings;
+// The headless app-logic layer (global settings + workspace action glue) lives
+// in its own crate (`okena-app-core`) to keep it off the binary's hot compile
+// path. Re-exported as `crate::settings` / `crate::workspace` so existing
+// `crate::settings::...` / `crate::workspace::...` references keep working.
+pub use okena_app_core::{settings, workspace};
 mod soft_close;
 #[cfg(target_os = "linux")]
 mod simple_root;
@@ -25,7 +28,6 @@ mod terminal;
 mod theme;
 mod ui;
 mod views;
-mod workspace;
 #[cfg(test)]
 mod smoke_tests;
 

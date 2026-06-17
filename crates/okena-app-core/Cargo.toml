@@ -1,0 +1,27 @@
+[package]
+name = "okena-app-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core", features = ["client"] }
+okena-terminal = { path = "../okena-terminal" }
+okena-workspace = { path = "../okena-workspace" }
+okena-git = { path = "../okena-git" }
+okena-files = { path = "../okena-files" }
+okena-theme = { path = "../okena-theme" }
+
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+
+# Terminal emulation (grid/index types used by action execution)
+alacritty_terminal = "0.25"
+
+# Async timers / blocking IO offload (settings debounce, action handlers)
+smol = "2.0"
+
+# Serialization / utilities
+serde_json = "1.0"
+log = "0.4"
+uuid = { version = "1.10", features = ["v4"] }
+base64 = "0.22"

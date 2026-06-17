@@ -8,8 +8,8 @@
 use super::{
     ActionResult, ensure_terminal, find_terminal_path, spawn_uninitialized_terminals,
 };
-use crate::terminal::backend::TerminalBackend;
-use crate::terminal::terminal::TerminalSize;
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::terminal::TerminalSize;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::Workspace;
 use alacritty_terminal::grid::Dimensions;

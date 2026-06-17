@@ -7,7 +7,7 @@
 
 use super::{ActionResult, find_first_terminal_id, spawn_uninitialized_terminals};
 use crate::settings::settings;
-use crate::terminal::backend::TerminalBackend;
+use okena_terminal::backend::TerminalBackend;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
