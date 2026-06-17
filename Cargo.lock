@@ -6165,6 +6165,7 @@ dependencies = [
  "dirs 5.0.1",
  "gpui",
  "gpui-component",
+ "jiff",
  "log",
  "okena-core",
  "okena-extensions",

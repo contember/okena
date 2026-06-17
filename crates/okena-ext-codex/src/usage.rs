@@ -663,14 +663,92 @@ fn utilization_color(t: &ThemeColors, pct: u64) -> u32 {
     severity_color(t, abs_severity(pct))
 }
 
-/// Number of grid segments to split a usage bar into: per-hour for windows up
-/// to a day, per-day for longer windows. 1 means no internal dividers.
-fn segments_for_window(window_seconds: u64) -> u32 {
+#[derive(Clone, Copy)]
+enum SegmentUnit {
+    Hour,
+    Day,
+}
+
+/// Pick the grid granularity for a window: per-hour up to a day, per-day for
+/// longer windows. Sub-hour windows get no grid.
+fn segment_unit_for_window(window_seconds: u64) -> Option<SegmentUnit> {
     match window_seconds {
-        0..=3600 => 1,
-        3601..=86400 => (window_seconds / 3600).clamp(2, 12) as u32,
-        _ => (window_seconds / 86400).clamp(2, 14) as u32,
+        0..=3600 => None,
+        3601..=86400 => Some(SegmentUnit::Hour),
+        _ => Some(SegmentUnit::Day),
     }
+}
+
+/// Compute reset-anchored grid boundaries for a usage bar, plus the block that
+/// currently contains "now".
+///
+/// Boundaries land on the user's *actual* reset time-of-day — e.g. a Sunday
+/// 12:00 weekly reset yields noon-to-noon day blocks — computed with calendar
+/// arithmetic so they stay correct across DST and for any reset time, rather
+/// than just evenly dividing the bar. Returns the divider fractions (0..1,
+/// excluding the ends) and the (start, end) fractions of the current block.
+fn reset_aligned_segments(
+    reset_at: u64,
+    period_secs: f64,
+    unit: SegmentUnit,
+) -> (Vec<f32>, Option<(f32, f32)>) {
+    if reset_at == 0 || period_secs <= 0.0 {
+        return (Vec::new(), None);
+    }
+    let reset = match jiff::Timestamp::from_second(reset_at as i64) {
+        Ok(ts) => ts.to_zoned(jiff::tz::TimeZone::system()),
+        Err(_) => return (Vec::new(), None),
+    };
+    let reset_epoch = reset_at as f64;
+    let start_epoch = reset_epoch - period_secs;
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(start_epoch);
+
+    // Keep the grid legible on a thin bar: if a window spans more units than
+    // this, step by a whole multiple (e.g. every 2 days), which is still
+    // anchored to the reset time-of-day.
+    let (unit_secs, max_blocks) = match unit {
+        SegmentUnit::Hour => (3_600.0, 12.0),
+        SegmentUnit::Day => (86_400.0, 14.0),
+    };
+    let units = (period_secs / unit_secs).round().max(1.0);
+    let multiplier = (units / max_blocks).ceil().max(1.0) as i64;
+    let step = match unit {
+        SegmentUnit::Hour => jiff::Span::new().hours(multiplier),
+        SegmentUnit::Day => jiff::Span::new().days(multiplier),
+    };
+
+    // Walk back from the reset, one block at a time, until the window start is
+    // covered. `bounds` ends up holding boundary epochs in ascending order.
+    let mut bounds = vec![reset_epoch];
+    let mut cursor = reset;
+    for _ in 0..64 {
+        cursor = match cursor.checked_sub(step) {
+            Ok(z) => z,
+            Err(_) => break,
+        };
+        let epoch = cursor.timestamp().as_millisecond() as f64 / 1_000.0;
+        bounds.push(epoch);
+        if epoch <= start_epoch {
+            break;
+        }
+    }
+    bounds.reverse();
+
+    let frac = |epoch: f64| ((epoch - start_epoch) / period_secs) as f32;
+    let dividers = bounds
+        .iter()
+        .map(|&epoch| frac(epoch))
+        .filter(|&f| f > 0.001 && f < 0.999)
+        .collect();
+    let current = bounds.windows(2).find_map(|w| {
+        (now_epoch >= w[0] && now_epoch < w[1])
+            .then(|| (frac(w[0]).max(0.0), frac(w[1]).min(1.0)))
+    });
+
+    (dividers, current)
 }
 
 fn format_window_label(window_seconds: u64) -> &'static str {
@@ -755,12 +833,18 @@ fn render_window_row(
                         }),
                 ),
         )
-        .child(render_usage_with_time_bar(
-            t,
-            pct,
-            window.time_elapsed_pct,
-            segments_for_window(window.window_seconds),
-        ))
+        .child({
+            let (dividers, current_seg) = segment_unit_for_window(window.window_seconds)
+                .map(|unit| {
+                    reset_aligned_segments(
+                        window.reset_at,
+                        window.window_seconds as f64,
+                        unit,
+                    )
+                })
+                .unwrap_or_default();
+            render_usage_with_time_bar(t, pct, window.time_elapsed_pct, dividers, current_seg)
+        })
         .when_some(pace_msg, |el, (msg, col)| {
             el.child(
                 div()
@@ -776,7 +860,8 @@ fn render_usage_with_time_bar(
     t: &ThemeColors,
     usage_pct: u64,
     time_pct: Option<f64>,
-    segments: u32,
+    dividers: Vec<f32>,
+    current_seg: Option<(f32, f32)>,
 ) -> impl IntoElement {
     let clamped_usage = (usage_pct as f32).clamp(0.0, 100.0);
 
@@ -798,27 +883,20 @@ fn render_usage_with_time_bar(
         Some((start, width, color))
     });
 
-    // Divider lines splitting the bar into per-hour or per-day segments so the
-    // pace marker can be read against a time grid.
-    let dividers = (1..segments).map(move |i| {
+    // Divider lines at the reset-anchored day/hour boundaries, so the pace
+    // marker can be read against a real time grid.
+    let divider_els = dividers.into_iter().map(move |f| {
         div()
             .absolute()
             .top_0()
             .h_full()
             .w(px(1.0))
             .bg(rgb(t.border))
-            .left(relative(i as f32 / segments as f32))
+            .left(relative(f))
     });
 
-    // Translucent band over the segment the user is currently in (today / this
+    // Translucent band over the block the user is currently in (today / this
     // hour). Derived from text_primary so it adapts to light and dark themes.
-    let current_seg = time_pct.and_then(|tp| {
-        if segments <= 1 {
-            return None;
-        }
-        let idx = (tp / 100.0 * segments as f64).floor() as i64;
-        Some(idx.clamp(0, segments as i64 - 1) as u32)
-    });
     let mut highlight = rgb(t.text_primary);
     highlight.a = 0.14;
 
@@ -847,15 +925,15 @@ fn render_usage_with_time_bar(
                     .bg(rgb(color)),
             )
         })
-        .children(dividers)
-        .when_some(current_seg, |el, seg| {
+        .children(divider_els)
+        .when_some(current_seg, |el, (start, end)| {
             el.child(
                 div()
                     .absolute()
                     .top_0()
                     .h_full()
-                    .left(relative(seg as f32 / segments as f32))
-                    .w(relative(1.0 / segments as f32))
+                    .left(relative(start))
+                    .w(relative((end - start).max(0.0)))
                     .bg(highlight),
             )
         })
@@ -979,17 +1057,52 @@ mod tests {
     use core::prelude::rust_2024::test;
 
     #[test]
-    fn test_segments_for_window() {
-        // Sub-hour windows get no internal grid.
-        assert_eq!(segments_for_window(0), 1);
-        assert_eq!(segments_for_window(3600), 1);
-        // Multi-hour windows split per hour.
-        assert_eq!(segments_for_window(5 * 3600), 5);
-        // Per-hour count is capped so the bar doesn't get crowded.
-        assert_eq!(segments_for_window(86400), 12);
-        // Multi-day windows split per day.
-        assert_eq!(segments_for_window(7 * 86400), 7);
-        // Per-day count is capped as well.
-        assert_eq!(segments_for_window(30 * 86400), 14);
+    fn test_segment_unit_for_window() {
+        // Sub-hour windows get no grid.
+        assert!(segment_unit_for_window(0).is_none());
+        assert!(segment_unit_for_window(3600).is_none());
+        // Up to a day → per-hour; longer → per-day.
+        assert!(matches!(
+            segment_unit_for_window(5 * 3600),
+            Some(SegmentUnit::Hour)
+        ));
+        assert!(matches!(
+            segment_unit_for_window(86400),
+            Some(SegmentUnit::Hour)
+        ));
+        assert!(matches!(
+            segment_unit_for_window(7 * 86400),
+            Some(SegmentUnit::Day)
+        ));
+    }
+
+    #[test]
+    fn test_reset_aligned_segments_guards() {
+        // No reset / no window → no grid.
+        assert_eq!(
+            reset_aligned_segments(0, 7.0 * 86400.0, SegmentUnit::Day),
+            (Vec::new(), None)
+        );
+        assert_eq!(
+            reset_aligned_segments(1_700_000_000, 0.0, SegmentUnit::Day),
+            (Vec::new(), None)
+        );
+    }
+
+    #[test]
+    fn test_reset_aligned_segments_weekly() {
+        // A 7-day window yields ~6 internal day boundaries, all strictly inside
+        // the bar and in ascending order. (Exact count can vary by ±1 around a
+        // DST transition; the range stays small.)
+        let period = 7.0 * 86400.0;
+        let (dividers, _current) =
+            reset_aligned_segments(1_700_000_000, period, SegmentUnit::Day);
+        assert!(
+            (5..=7).contains(&dividers.len()),
+            "expected ~6 dividers, got {}",
+            dividers.len()
+        );
+        assert!(dividers.iter().all(|&f| f > 0.0 && f < 1.0));
+        assert!(dividers.windows(2).all(|w| w[0] < w[1]));
     }
 }

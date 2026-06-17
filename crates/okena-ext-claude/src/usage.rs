@@ -30,6 +30,10 @@ const HOVER_REFETCH_THROTTLE: Duration = Duration::from_secs(60);
 struct TierUsage {
     utilization: f64,
     resets_at: String,
+    /// Raw ISO 8601 reset timestamp, used to anchor the per-day/hour grid.
+    resets_at_raw: Option<String>,
+    /// Length of this rate-limit window in seconds.
+    period_secs: f64,
     /// Percentage of the billing period that has elapsed (0.0–100.0)
     time_elapsed_pct: Option<f64>,
 }
@@ -271,6 +275,8 @@ fn parse_tier(
         resets_at: resets_at_raw
             .map(|ts| format_reset_time(ts, include_date))
             .unwrap_or_default(),
+        resets_at_raw: resets_at_raw.map(str::to_owned),
+        period_secs,
         time_elapsed_pct,
     })
 }
@@ -298,6 +304,81 @@ fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
 pub(crate) fn parse_iso8601_to_local(ts: &str) -> Option<jiff::Zoned> {
     let timestamp: jiff::Timestamp = ts.parse().ok()?;
     Some(timestamp.to_zoned(jiff::tz::TimeZone::system()))
+}
+
+#[derive(Clone, Copy)]
+enum SegmentUnit {
+    Hour,
+    Day,
+}
+
+/// Compute reset-anchored grid boundaries for a usage bar, plus the block that
+/// currently contains "now".
+///
+/// Boundaries land on the user's *actual* reset time-of-day — e.g. a Sunday
+/// 12:00 weekly reset yields noon-to-noon day blocks — computed with calendar
+/// arithmetic so they stay correct across DST and for any reset time, rather
+/// than just evenly dividing the bar. Returns the divider fractions (0..1,
+/// excluding the ends) and the (start, end) fractions of the current block.
+fn reset_aligned_segments(
+    resets_at: Option<&str>,
+    period_secs: f64,
+    unit: SegmentUnit,
+) -> (Vec<f32>, Option<(f32, f32)>) {
+    let reset = match resets_at.and_then(parse_iso8601_to_local) {
+        Some(z) => z,
+        None => return (Vec::new(), None),
+    };
+    let reset_epoch = reset.timestamp().as_millisecond() as f64 / 1_000.0;
+    let start_epoch = reset_epoch - period_secs;
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(start_epoch);
+
+    // Keep the grid legible on a thin bar: if a window spans more units than
+    // this, step by a whole multiple (e.g. every 2 days), which is still
+    // anchored to the reset time-of-day.
+    let (unit_secs, max_blocks) = match unit {
+        SegmentUnit::Hour => (3_600.0, 12.0),
+        SegmentUnit::Day => (86_400.0, 14.0),
+    };
+    let units = (period_secs / unit_secs).round().max(1.0);
+    let multiplier = (units / max_blocks).ceil().max(1.0) as i64;
+    let step = match unit {
+        SegmentUnit::Hour => jiff::Span::new().hours(multiplier),
+        SegmentUnit::Day => jiff::Span::new().days(multiplier),
+    };
+
+    // Walk back from the reset, one block at a time, until the window start is
+    // covered. `bounds` ends up holding boundary epochs in ascending order.
+    let mut bounds = vec![reset_epoch];
+    let mut cursor = reset;
+    for _ in 0..64 {
+        cursor = match cursor.checked_sub(step) {
+            Ok(z) => z,
+            Err(_) => break,
+        };
+        let epoch = cursor.timestamp().as_millisecond() as f64 / 1_000.0;
+        bounds.push(epoch);
+        if epoch <= start_epoch {
+            break;
+        }
+    }
+    bounds.reverse();
+
+    let frac = |epoch: f64| ((epoch - start_epoch) / period_secs) as f32;
+    let dividers = bounds
+        .iter()
+        .map(|&epoch| frac(epoch))
+        .filter(|&f| f > 0.001 && f < 0.999)
+        .collect();
+    let current = bounds.windows(2).find_map(|w| {
+        (now_epoch >= w[0] && now_epoch < w[1])
+            .then(|| (frac(w[0]).max(0.0), frac(w[1]).min(1.0)))
+    });
+
+    (dividers, current)
 }
 
 /// Format ISO 8601 reset time to a human-readable short form in local timezone.
@@ -664,17 +745,17 @@ impl ClaudeUsage {
                                         .py(px(10.0))
                                         .gap(px(7.0))
                                         .when_some(data.five_hour.as_ref(), |el, tier| {
-                                            el.child(render_tier_row(t, cx, "Session", "5h", tier, "marker-session", 5))
+                                            el.child(render_tier_row(t, cx, "Session", "5h", tier, "marker-session", SegmentUnit::Hour))
                                         })
                                         .when_some(data.seven_day.as_ref(), |el, tier| {
-                                            el.child(render_tier_row(t, cx, "Weekly", "7d", tier, "marker-weekly", 7))
+                                            el.child(render_tier_row(t, cx, "Weekly", "7d", tier, "marker-weekly", SegmentUnit::Day))
                                         })
                                         .when_some(
                                             data.seven_day_sonnet
                                                 .as_ref()
                                                 .filter(|tier| tier.utilization >= 0.5),
                                             |el, tier| {
-                                                el.child(render_tier_row(t, cx, "Sonnet", "7d", tier, "marker-sonnet", 7))
+                                                el.child(render_tier_row(t, cx, "Sonnet", "7d", tier, "marker-sonnet", SegmentUnit::Day))
                                             },
                                         )
                                         .when_some(
@@ -682,7 +763,7 @@ impl ClaudeUsage {
                                                 .as_ref()
                                                 .filter(|tier| tier.utilization >= 0.5),
                                             |el, tier| {
-                                                el.child(render_tier_row(t, cx, "Opus", "7d", tier, "marker-opus", 7))
+                                                el.child(render_tier_row(t, cx, "Opus", "7d", tier, "marker-opus", SegmentUnit::Day))
                                             },
                                         )
                                         .when_some(data.extra_usage.as_ref(), |el, extra| {
@@ -801,9 +882,11 @@ fn render_tier_row(
     period: &str,
     tier: &TierUsage,
     marker_id: &'static str,
-    segments: u32,
+    unit: SegmentUnit,
 ) -> impl IntoElement {
     let pct = tier.utilization;
+    let (dividers, current_seg) =
+        reset_aligned_segments(tier.resets_at_raw.as_deref(), tier.period_secs, unit);
     let pace = pace_severity(pct, tier.time_elapsed_pct);
     // % text reflects whichever is worse: nearness to the cap, or burn pace.
     let pct_color = severity_color(t, abs_severity(pct).max(pace));
@@ -844,7 +927,14 @@ fn render_tier_row(
                         .child(format!("{:.0}%", pct)),
                 ),
         )
-        .child(render_usage_with_time_bar(t, pct, tier.time_elapsed_pct, marker_id, segments))
+        .child(render_usage_with_time_bar(
+            t,
+            pct,
+            tier.time_elapsed_pct,
+            marker_id,
+            dividers,
+            current_seg,
+        ))
         .when(pace_msg.is_some() || !tier.resets_at.is_empty(), |el| {
             el.child(
                 h_flex()
@@ -911,7 +1001,8 @@ fn render_usage_with_time_bar(
     usage_pct: f64,
     time_pct: Option<f64>,
     marker_id: &'static str,
-    segments: u32,
+    dividers: Vec<f32>,
+    current_seg: Option<(f32, f32)>,
 ) -> impl IntoElement {
     let clamped_usage = usage_pct.clamp(0.0, 100.0) as f32;
 
@@ -933,28 +1024,21 @@ fn render_usage_with_time_bar(
         Some((start, width, color))
     });
 
-    // Divider lines splitting the bar into per-day (7d) or per-hour (5h)
-    // segments, so the pace marker can be read against a time grid.
-    let dividers = (1..segments).map(move |i| {
+    // Divider lines at the reset-anchored day/hour boundaries, so the pace
+    // marker can be read against a real time grid.
+    let divider_els = dividers.into_iter().map(move |f| {
         div()
             .absolute()
             .top_0()
             .h_full()
             .w(px(1.0))
             .bg(rgb(t.border))
-            .left(relative(i as f32 / segments as f32))
+            .left(relative(f))
     });
 
-    // Translucent band over the segment the user is currently in (today / this
+    // Translucent band over the block the user is currently in (today / this
     // hour). Derived from text_primary so it lightens on dark themes and darkens
     // on light ones.
-    let current_seg = time_pct.and_then(|tp| {
-        if segments <= 1 {
-            return None;
-        }
-        let idx = (tp / 100.0 * segments as f64).floor() as i64;
-        Some(idx.clamp(0, segments as i64 - 1) as u32)
-    });
     let mut highlight = rgb(t.text_primary);
     highlight.a = 0.14;
 
@@ -983,15 +1067,15 @@ fn render_usage_with_time_bar(
                     .bg(rgb(color)),
             )
         })
-        .children(dividers)
-        .when_some(current_seg, |el, seg| {
+        .children(divider_els)
+        .when_some(current_seg, |el, (start, end)| {
             el.child(
                 div()
                     .absolute()
                     .top_0()
                     .h_full()
-                    .left(relative(seg as f32 / segments as f32))
-                    .w(relative(1.0 / segments as f32))
+                    .left(relative(start))
+                    .w(relative((end - start).max(0.0)))
                     .bg(highlight),
             )
         })
