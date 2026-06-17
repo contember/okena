@@ -8,9 +8,9 @@ pub mod state;
 pub mod stream;
 pub mod tokens;
 
-use crate::remote::auth::AuthStore;
-use crate::remote::bridge::BridgeSender;
-use crate::remote::pty_broadcaster::PtyBroadcaster;
+use crate::auth::AuthStore;
+use crate::bridge::BridgeSender;
+use crate::pty_broadcaster::PtyBroadcaster;
 use axum::extract::DefaultBodyLimit;
 use axum::Router;
 use axum::extract::Request;
@@ -24,8 +24,10 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+// The web client is built into `<repo>/web/dist`. This crate's manifest dir is
+// `<repo>/crates/okena-remote-server`, so reach the repo root via `../../`.
 #[derive(RustEmbed)]
-#[folder = "web/dist"]
+#[folder = "$CARGO_MANIFEST_DIR/../../web/dist"]
 struct WebAssets;
 
 /// Shared state available to all route handlers.

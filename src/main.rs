@@ -12,7 +12,10 @@ mod git;
 mod keybindings;
 mod logging;
 mod process;
-mod remote;
+// The remote-control server lives in its own crate (`okena-remote-server`) to
+// keep it off the binary's hot compile path. Re-exported as `crate::remote` so
+// existing `crate::remote::...` references keep working unchanged.
+pub use okena_remote_server as remote;
 mod remote_client;
 mod services;
 mod settings;

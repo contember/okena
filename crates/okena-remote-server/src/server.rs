@@ -1,7 +1,7 @@
-use crate::remote::auth::AuthStore;
-use crate::remote::bridge::BridgeSender;
-use crate::remote::pty_broadcaster::PtyBroadcaster;
-use crate::remote::routes;
+use crate::auth::AuthStore;
+use crate::bridge::BridgeSender;
+use crate::pty_broadcaster::PtyBroadcaster;
+use crate::routes;
 use okena_core::api::ApiGitStatus;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -70,8 +70,8 @@ impl RemoteServer {
         // http — that would defeat the point — so the error propagates and the
         // server stays off until the user fixes it.
         let tls_material = if tls_enabled {
-            let dir = crate::workspace::persistence::config_dir();
-            Some(crate::remote::tls::load_or_generate(&dir)?)
+            let dir = okena_workspace::persistence::config_dir();
+            Some(crate::tls::load_or_generate(&dir)?)
         } else {
             None
         };
@@ -132,9 +132,9 @@ impl RemoteServer {
                 // TLS enabled → dual-stack: accept BOTH http and TLS on this one
                 // port so already-paired plain-http clients keep working while
                 // new/auto clients negotiate TLS.
-                match crate::remote::tls::server_config(&material) {
+                match crate::tls::server_config(&material) {
                     Ok(tls_config) => {
-                        crate::remote::serve::serve_dual_stack(
+                        crate::serve::serve_dual_stack(
                             listener,
                             app,
                             tls_config,
@@ -216,7 +216,7 @@ async fn shutdown_signal(mut rx: watch::Receiver<bool>) {
 
 /// Path to remote.json in the config dir.
 fn remote_json_path() -> std::path::PathBuf {
-    crate::workspace::persistence::config_dir().join("remote.json")
+    okena_workspace::persistence::config_dir().join("remote.json")
 }
 
 /// Write remote.json atomically (temp file + rename).

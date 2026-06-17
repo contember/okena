@@ -1,6 +1,6 @@
-use crate::remote::bridge::{BridgeMessage, CommandResult, RemoteCommand};
-use crate::remote::routes::AppState;
-use crate::remote::types::ActionRequest;
+use crate::bridge::{BridgeMessage, CommandResult, RemoteCommand};
+use crate::routes::AppState;
+use crate::types::ActionRequest;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;

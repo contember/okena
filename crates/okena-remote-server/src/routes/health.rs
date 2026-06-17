@@ -1,5 +1,5 @@
-use crate::remote::routes::AppState;
-use crate::remote::types::HealthResponse;
+use crate::routes::AppState;
+use crate::types::HealthResponse;
 use axum::Json;
 use axum::extract::State;
 

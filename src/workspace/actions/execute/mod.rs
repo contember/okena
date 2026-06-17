@@ -15,8 +15,7 @@ mod project;
 mod tab;
 mod terminal;
 
-use crate::remote::bridge::CommandResult;
-use crate::remote::types::ActionRequest;
+use okena_core::api::{ActionRequest, CommandResult};
 use crate::settings::settings;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::shell_config::ShellType;

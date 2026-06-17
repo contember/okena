@@ -1,6 +1,6 @@
-use crate::remote::auth::{PairError, TOKEN_TTL_SECS};
-use crate::remote::routes::AppState;
-use crate::remote::types::{PairRequest, PairResponse};
+use crate::auth::{PairError, TOKEN_TTL_SECS};
+use crate::routes::AppState;
+use crate::types::{PairRequest, PairResponse};
 use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;

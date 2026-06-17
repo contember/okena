@@ -1,0 +1,56 @@
+[package]
+name = "okena-remote-server"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core", features = ["client"] }
+okena-terminal = { path = "../okena-terminal" }
+okena-workspace = { path = "../okena-workspace" }
+
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+
+# Async runtime + channels
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "fs"] }
+async-channel = "2.3"
+futures = "0.3"
+parking_lot = "0.12"
+
+# HTTP/WS server stack
+axum = { version = "0.8", features = ["ws"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+tower-service = "0.3"
+
+# TLS (self-signed cert + dual-stack http/https on one port)
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pki-types = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+# Auth (HMAC-SHA256 tokens, pairing codes)
+base64 = "0.22"
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.5"
+
+# Serialization / utilities
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+log = "0.4"
+uuid = { version = "1.10", features = ["v4"] }
+
+# Embed the built web client into the binary. `interpolate-folder-path` lets
+# the `#[folder]` attribute expand `$CARGO_MANIFEST_DIR` so we can point at the
+# repo-root `web/dist` from inside this crate.
+rust-embed = { version = "8.5", features = ["interpolate-folder-path"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tempfile = "3"

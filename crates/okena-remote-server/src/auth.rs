@@ -481,7 +481,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Path to the file-based pairing code (written by `okena pair` CLI).
 pub fn pair_code_path() -> std::path::PathBuf {
-    crate::workspace::persistence::config_dir().join("pair_code")
+    okena_workspace::persistence::config_dir().join("pair_code")
 }
 
 /// Generate a pairing code: "XXXX-XXXX" from base32 alphabet (A-Z, 2-7).
@@ -503,7 +503,7 @@ pub fn generate_pairing_code() -> String {
 
 /// Path to the app secret file.
 pub fn secret_path() -> std::path::PathBuf {
-    crate::workspace::persistence::config_dir().join("remote_secret")
+    okena_workspace::persistence::config_dir().join("remote_secret")
 }
 
 /// Load existing app secret or generate a new one.
@@ -554,7 +554,7 @@ pub struct PersistedToken {
 
 /// Path to the persisted tokens file.
 pub fn tokens_path() -> PathBuf {
-    crate::workspace::persistence::config_dir().join("remote_tokens.json")
+    okena_workspace::persistence::config_dir().join("remote_tokens.json")
 }
 
 /// Save token records to disk, filtering out expired tokens.

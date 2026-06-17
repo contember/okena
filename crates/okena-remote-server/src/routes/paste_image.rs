@@ -9,8 +9,8 @@
 //! the file is materialised server-side. This mirrors the desktop's local
 //! image-paste (write temp file → `send_paste(path)`), just across the wire.
 
-use crate::remote::bridge::{BridgeMessage, CommandResult, RemoteCommand};
-use crate::remote::routes::AppState;
+use crate::bridge::{BridgeMessage, CommandResult, RemoteCommand};
+use crate::routes::AppState;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};

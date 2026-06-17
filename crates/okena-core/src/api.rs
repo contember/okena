@@ -635,6 +635,22 @@ pub enum ActionRequest {
     },
 }
 
+/// Result of processing a remote command on the GPUI thread.
+///
+/// Lives in `okena-core` (rather than the server crate) so the binary's
+/// action-execution layer can produce it without depending on
+/// `okena-remote-server`. The server re-exports it as
+/// `okena_remote_server::bridge::CommandResult`.
+#[derive(Debug)]
+pub enum CommandResult {
+    /// Success with optional JSON-serializable payload.
+    Ok(Option<serde_json::Value>),
+    /// Success with raw bytes (e.g., terminal snapshots).
+    OkBytes(Vec<u8>),
+    /// Error with a human-readable message.
+    Err(String),
+}
+
 impl ActionRequest {
     /// The window an action explicitly targets ("main" or an extra UUID), if
     /// any. Only the per-window actions carry this; everything else returns

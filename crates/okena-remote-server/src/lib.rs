@@ -7,7 +7,7 @@ pub mod server;
 pub mod tls;
 pub mod types;
 
-use crate::remote::auth::AuthStore;
+use crate::auth::AuthStore;
 use parking_lot::Mutex;
 use std::sync::Arc;
 

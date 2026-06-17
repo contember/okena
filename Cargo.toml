@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-views-remote", "crates/okena-theme"]
+members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme"]
 resolver = "2"
 
 [package]
@@ -19,6 +19,7 @@ okena-services = { path = "crates/okena-services" }
 okena-views-services = { path = "crates/okena-views-services" }
 okena-views-sidebar = { path = "crates/okena-views-sidebar" }
 okena-remote-client = { path = "crates/okena-remote-client" }
+okena-remote-server = { path = "crates/okena-remote-server" }
 okena-views-remote = { path = "crates/okena-views-remote" }
 okena-workspace = { path = "crates/okena-workspace" }
 okena-ui = { path = "crates/okena-ui" }
@@ -110,25 +111,16 @@ pulldown-cmark = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 semver = "1"
 
-# Remote server TLS (self-signed cert + dual-stack http/https on one port)
-rcgen = "0.13"
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "tls12"] }
-rustls-pki-types = "1"
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-hyper = { version = "1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
-tower-service = "0.3"
+# The remote-control HTTP/WS server (axum/hyper/rustls/rcgen + HMAC auth) lives
+# in the `okena-remote-server` crate; those deps are declared there, not here.
 
-# Remote control server
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "fs"] }
-axum = { version = "0.8", features = ["ws"] }
+# Async runtime — the binary forwards remote commands across the GPUI/tokio
+# boundary (src/app/{mod,headless,remote_commands}.rs).
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 
+# Base64 (CLI token transport + remote image paste) and RNG (CLI pairing).
 base64 = "0.22"
 rand = "0.8"
-hmac = "0.12"
-sha2 = "0.10"
-subtle = "2.5"
-data-encoding = "2.6"
 
 [features]
 # Per-target default allocator: jemalloc on Unix (the `tikv-jemallocator` dep is

@@ -183,7 +183,7 @@ mod handshake_tests {
         let tls = super::server_config(material).unwrap();
         let app = Router::new().route("/health", get(|| async { "ok" }));
         tokio::spawn(async move {
-            let _ = crate::remote::serve::serve_dual_stack(
+            let _ = crate::serve::serve_dual_stack(
                 listener,
                 app,
                 tls,

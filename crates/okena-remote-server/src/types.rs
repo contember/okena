@@ -15,7 +15,7 @@ pub use okena_core::ws::{
 
 #[cfg(test)]
 mod tests {
-    use crate::workspace::state::LayoutNode;
+    use okena_workspace::state::LayoutNode;
     use okena_core::api::ApiLayoutNode;
     use okena_core::types::SplitDirection;
 

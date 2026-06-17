@@ -1,5 +1,5 @@
-use crate::remote::auth::TOKEN_TTL_SECS;
-use crate::remote::routes::AppState;
+use crate::auth::TOKEN_TTL_SECS;
+use crate::routes::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;

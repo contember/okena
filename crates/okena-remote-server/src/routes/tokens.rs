@@ -1,4 +1,4 @@
-use crate::remote::routes::AppState;
+use crate::routes::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;

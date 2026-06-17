@@ -1,5 +1,9 @@
-use crate::remote::types::ActionRequest;
+use crate::types::ActionRequest;
 use tokio::sync::oneshot;
+
+/// Result of processing a `RemoteCommand`. Defined in `okena-core` and
+/// re-exported here so existing `bridge::CommandResult` paths keep working.
+pub use okena_core::api::CommandResult;
 
 /// Commands sent from the axum server to the GPUI main thread.
 /// Fire-and-forget commands (SendText, Resize, etc.) set `reply` to `None`
@@ -23,17 +27,6 @@ pub enum RemoteCommand {
     /// Bracketed-paste the path of a remote-pasted image (already written to a
     /// temp file on this host) into the target terminal.
     PasteImage { terminal_id: String, path: String },
-}
-
-/// Result of processing a RemoteCommand.
-#[derive(Debug)]
-pub enum CommandResult {
-    /// Success with optional JSON-serializable payload.
-    Ok(Option<serde_json::Value>),
-    /// Success with raw bytes (e.g., terminal snapshots).
-    OkBytes(Vec<u8>),
-    /// Error with a human-readable message.
-    Err(String),
 }
 
 /// Channel types for the bridge.

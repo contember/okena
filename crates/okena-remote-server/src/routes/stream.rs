@@ -2,9 +2,9 @@
 // internal WsOutbound DTOs whose Serialize impls cannot fail in practice.
 #![allow(clippy::expect_used)]
 
-use crate::remote::bridge::{BridgeMessage, CommandResult, RemoteCommand};
-use crate::remote::routes::AppState;
-use crate::remote::types::{
+use crate::bridge::{BridgeMessage, CommandResult, RemoteCommand};
+use crate::routes::AppState;
+use crate::types::{
     ActionRequest, WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
     FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT,
 };
@@ -220,12 +220,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                         let mut resize_msgs: Vec<WsOutbound> = Vec::new();
 
                         match &event {
-                            crate::remote::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data } => {
+                            crate::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data } => {
                                 if let Some(&stream_id) = subscribed_ids.get(terminal_id) {
                                     batch.entry(stream_id).or_default().extend_from_slice(data);
                                 }
                             }
-                            crate::remote::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows, server_owns } => {
+                            crate::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows, server_owns } => {
                                 if subscribed_ids.contains_key(terminal_id) {
                                     resize_msgs.push(WsOutbound::TerminalResized {
                                         terminal_id: terminal_id.clone(),
@@ -242,12 +242,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                         loop {
                             match pty_rx.try_recv() {
                                 Ok(ev) => match &ev {
-                                    crate::remote::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data } => {
+                                    crate::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data } => {
                                         if let Some(&sid) = subscribed_ids.get(terminal_id) {
                                             batch.entry(sid).or_default().extend_from_slice(data);
                                         }
                                     }
-                                    crate::remote::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows, server_owns } => {
+                                    crate::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows, server_owns } => {
                                         if subscribed_ids.contains_key(terminal_id) {
                                             // Keep only the latest resize per terminal
                                             resize_msgs.retain(|m| !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if id == terminal_id));
