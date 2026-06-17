@@ -174,11 +174,7 @@ pub fn get_visible_cells_packed(conn_id: String, terminal_id: String) -> Vec<u8>
         .with_terminal(&conn_id, &terminal_id, |holder| {
             let (_total, visible, _offset) = holder.scroll_info();
             let rows = visible as u16;
-            let cols = if visible > 0 {
-                (cells.len() / visible) as u16
-            } else {
-                0
-            };
+            let cols = cells.len().checked_div(visible).unwrap_or(0) as u16;
             (cols, rows)
         })
         .unwrap_or((0, 0));
