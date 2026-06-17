@@ -289,6 +289,8 @@ mod tests {
 
     #[test]
     fn test_col_beyond_length() {
-        assert_eq!(find_word_boundaries("hello", 100), (0, 5));
+        // Byte offsets past the end clamp to text.len(), which sits on no char,
+        // so the result is an empty selection at the end rather than the last word.
+        assert_eq!(find_word_boundaries("hello", 100), (5, 5));
     }
 }

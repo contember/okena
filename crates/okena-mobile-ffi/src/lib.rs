@@ -407,7 +407,8 @@ pub fn send_special_key(
         .map_err(|_| MobileFfiError::Action {
             message: format!("Unknown special key: {key}"),
         })?;
-    let text = String::from_utf8_lossy(special_key.to_bytes()).to_string();
+    let bytes = special_key.to_bytes();
+    let text = String::from_utf8_lossy(&bytes).to_string();
     ConnectionManager::get().send_ws_message(&conn_id, WsClientMessage::SendText { terminal_id, text });
     Ok(())
 }
@@ -523,6 +524,7 @@ pub async fn focus_terminal(
             ActionRequest::FocusTerminal {
                 project_id,
                 terminal_id,
+                window: None,
             },
         )
         .await?;
@@ -561,6 +563,7 @@ pub async fn set_fullscreen(
             ActionRequest::SetFullscreen {
                 project_id,
                 terminal_id,
+                window: None,
             },
         )
         .await?;

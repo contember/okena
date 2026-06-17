@@ -916,6 +916,7 @@ fn render_layout(node: &okena_core::api::ApiLayoutNode, project: &ApiProject, de
             terminal_id,
             minimized,
             detached,
+            ..
         } => {
             let id = terminal_id.as_deref().unwrap_or("(empty)");
             let short = if id.len() > 8 { &id[..8] } else { id };
@@ -996,6 +997,7 @@ fn render_terminal_line(
         terminal_id,
         minimized,
         detached,
+        ..
     } = node
     {
         let id = terminal_id.as_deref().unwrap_or("(empty)");

@@ -284,6 +284,8 @@ mod tests {
             terminal_id: Some(id.into()),
             minimized: false,
             detached: false,
+            cols: None,
+            rows: None,
         }
     }
 
