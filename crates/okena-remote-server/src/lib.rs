@@ -25,6 +25,12 @@ struct RemoteInfoInner {
     cert_fingerprint: Option<String>,
 }
 
+impl Default for RemoteInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RemoteInfo {
     pub fn new() -> Self {
         Self {

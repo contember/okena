@@ -20,6 +20,12 @@ pub struct PtyBroadcaster {
     tx: broadcast::Sender<PtyBroadcastEvent>,
 }
 
+impl Default for PtyBroadcaster {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PtyBroadcaster {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(4096);

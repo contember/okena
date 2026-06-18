@@ -110,6 +110,12 @@ struct AuthStoreInner {
     rate_limiter: RateLimiter,
 }
 
+impl Default for AuthStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuthStore {
     /// Create a new AuthStore, loading or generating the app secret.
     /// Previously issued tokens are loaded from disk so clients survive restarts.
