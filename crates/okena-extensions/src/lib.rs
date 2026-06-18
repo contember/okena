@@ -142,6 +142,12 @@ impl ExtensionSettingsStore {
         // before invoking the closure with `&mut App`.
         let setter = cx.global::<Self>().setter.clone();
         setter(extension_id, value, cx);
+        // The host setter mutates its own settings entity, not this store, so
+        // `observe_global::<ExtensionSettingsStore>` watchers (settings panels,
+        // usage widgets) wouldn't otherwise wake. Touch the global to fire them
+        // — without this a settings change only reaches the live widgets on the
+        // next poll tick.
+        let _ = cx.global_mut::<Self>();
     }
 }
 
