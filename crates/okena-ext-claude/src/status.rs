@@ -82,8 +82,8 @@ impl ClaudeStatusData {
         let poll_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
             loop {
                 let result = smol::unblock(|| {
-                    let resp: serde_json::Value = okena_core::http::send(
-                        okena_core::http::HttpRequest::get(
+                    let resp: serde_json::Value = okena_transport::http::send(
+                        okena_transport::http::HttpRequest::get(
                             "https://status.claude.com/api/v2/summary.json",
                         )
                         .timeout(Duration::from_secs(10))

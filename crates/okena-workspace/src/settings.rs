@@ -1,4 +1,4 @@
-use okena_core::client::RemoteConnectionConfig;
+use okena_transport::client::RemoteConnectionConfig;
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_core::theme::ThemeMode;

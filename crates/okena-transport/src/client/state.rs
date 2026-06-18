@@ -1,4 +1,4 @@
-use crate::api::{ApiLayoutNode, StateResponse};
+use okena_core::api::{ApiLayoutNode, StateResponse};
 use std::collections::HashSet;
 
 /// Represents the differences between two remote state snapshots.
@@ -152,9 +152,9 @@ fn collect_layout_terminal_sizes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{ApiLayoutNode, ApiProject, StateResponse};
-    use crate::theme::FolderColor;
-    use crate::types::SplitDirection;
+    use okena_core::api::{ApiLayoutNode, ApiProject, StateResponse};
+    use okena_core::theme::FolderColor;
+    use okena_core::types::SplitDirection;
 
     fn make_state(projects: Vec<ApiProject>) -> StateResponse {
         StateResponse {

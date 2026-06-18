@@ -6,7 +6,7 @@ use crate::views::components::{modal_backdrop, modal_content, modal_header};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_sm};
 use gpui::*;
 use gpui::prelude::*;
-use okena_core::client::tls::format_fingerprint;
+use okena_transport::client::tls::format_fingerprint;
 use std::sync::Arc;
 
 pub struct PairingDialog {

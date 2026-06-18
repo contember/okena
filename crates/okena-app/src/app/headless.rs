@@ -311,7 +311,7 @@ impl HeadlessApp {
                 if let Some(fp) = &fingerprint {
                     println!(
                         "TLS cert fingerprint (SHA-256): {}",
-                        okena_core::client::tls::format_fingerprint(fp)
+                        okena_transport::client::tls::format_fingerprint(fp)
                     );
                 }
                 println!("Run `okena pair` anytime for a fresh code.");

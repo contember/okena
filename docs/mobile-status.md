@@ -51,7 +51,8 @@ over REST + WebSocket.
 ```
 Cargo.toml                     ← workspace: members include "crates/okena-mobile-ffi"
 src/                           ← desktop app
-crates/okena-core/             ← shared crate (API types, client state machine, theme colors)
+crates/okena-core/             ← shared data crate (API/wire types, theme colors); network-free
+crates/okena-transport/        ← client state machine + transport (WS/TLS/HTTP) over okena-core
 crates/okena-mobile-ffi/       ← uniffi FFI crate (self-contained — no flutter tooling)
   Cargo.toml                   ← crate-type = ["cdylib","staticlib","lib"]; uniffi 0.29
   src/
@@ -199,5 +200,5 @@ cd mobile/rn && npm ci && npm run typecheck && npm run lint
 
 The native app build (ubrn cross-compile → Android `.so` / iOS xcframework, `pod install`,
 `react-native run-*`) requires the mobile toolchain and is documented step-by-step in
-`mobile/rn/README.md`. Use `rustls-tls` (already selected by `okena-core`'s `client` feature) to
+`mobile/rn/README.md`. Use `rustls-tls` (already selected by `okena-transport`'s `client` feature) to
 avoid cross-compiling OpenSSL for the NDK.

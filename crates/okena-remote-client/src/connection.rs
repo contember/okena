@@ -4,7 +4,7 @@ use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_terminal::TerminalsRegistry;
 
 use okena_core::api::StateResponse;
-use okena_core::client::{
+use okena_transport::client::{
     is_remote_terminal, ConnectionEvent, ConnectionHandler, ConnectionStatus,
     RemoteClient, RemoteConnectionConfig, WsClientMessage,
 };
@@ -112,7 +112,7 @@ impl ConnectionHandler for DesktopConnectionHandler {
         connection_id: &str,
         keep_ids: &std::collections::HashSet<String>,
     ) {
-        use okena_core::client::strip_prefix;
+        use okena_transport::client::strip_prefix;
         let mut terminals = self.terminals.lock();
         let to_remove: Vec<String> = terminals
             .keys()

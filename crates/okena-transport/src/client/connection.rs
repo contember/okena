@@ -1,4 +1,4 @@
-use crate::api::StateResponse;
+use okena_core::api::StateResponse;
 use crate::client::config::RemoteConnectionConfig;
 use crate::client::id::make_prefixed_id;
 use crate::client::state::{collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states};
@@ -740,8 +740,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         .ok()
                         .and_then(|m| m.get(terminal_id).copied());
                     if let Some(sid) = stream_id {
-                        let frame = crate::ws::build_binary_frame(
-                            crate::ws::FRAME_TYPE_INPUT,
+                        let frame = okena_core::ws::build_binary_frame(
+                            okena_core::ws::FRAME_TYPE_INPUT,
                             sid,
                             text.as_bytes(),
                         );
@@ -816,10 +816,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 Some(Ok(tungstenite::Message::Binary(data))) => {
                     // Generic binary frame: [proto:1][type:1][stream_id:4 BE][payload...]
                     if let Some((frame_type, stream_id, payload)) =
-                        crate::ws::parse_binary_frame(&data)
+                        okena_core::ws::parse_binary_frame(&data)
                     {
                         match frame_type {
-                            crate::ws::FRAME_TYPE_PTY | crate::ws::FRAME_TYPE_SNAPSHOT => {
+                            okena_core::ws::FRAME_TYPE_PTY | okena_core::ws::FRAME_TYPE_SNAPSHOT => {
                                 // Route PTY output or snapshot to the correct terminal
                                 if let Some(remote_tid) = reverse_stream_map.get(&stream_id) {
                                     let prefixed = make_prefixed_id(&config_id, remote_tid);
@@ -1041,7 +1041,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 "git_status_changed" => {
                                     if let Some(projects) = value.get("projects")
                                         && let Ok(statuses) = serde_json::from_value::<
-                                            HashMap<String, crate::api::ApiGitStatus>,
+                                            HashMap<String, okena_core::api::ApiGitStatus>,
                                         >(projects.clone()) {
                                             let _ = event_tx_clone
                                                 .send(ConnectionEvent::GitStatusChanged {

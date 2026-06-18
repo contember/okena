@@ -155,7 +155,7 @@ runs the app is wired — no code edit needed.
 > mismatch, bump both together.
 
 > **NDK / TLS:** ensure `$HOME/.cargo/bin` is on the PATH the Gradle daemon sees. The crate
-> already selects `rustls-tls` (via `okena-core`'s `client` feature), so no OpenSSL is
+> already selects `rustls-tls` (via `okena-transport`'s `client` feature), so no OpenSSL is
 > cross-compiled for the NDK.
 
 ### 4. Run

@@ -5,7 +5,8 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-okena-core = { path = "../okena-core", features = ["blocking-http"] }
+okena-core = { path = "../okena-core" }
+okena-transport = { path = "../okena-transport", features = ["blocking-http"] }
 okena-extensions = { path = "../okena-extensions" }
 okena-git = { path = "../okena-git" }
 okena-files = { path = "../okena-files" }

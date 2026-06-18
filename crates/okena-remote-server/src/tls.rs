@@ -234,8 +234,8 @@ mod handshake_tests {
 
         // 1) TOFU (no pin): handshake succeeds and the client captures exactly
         //    the server's cert fingerprint.
-        let observed = okena_core::client::tls::new_observed();
-        let client = okena_core::client::tls::build_reqwest_client(true, None, observed.clone());
+        let observed = okena_transport::client::tls::new_observed();
+        let client = okena_transport::client::tls::build_reqwest_client(true, None, observed.clone());
         let resp = get_with_retry(&client, &url).await.expect("TOFU connect should succeed");
         assert!(resp.status().is_success());
         assert_eq!(
@@ -245,10 +245,10 @@ mod handshake_tests {
         );
 
         // 2) Correct pin: handshake succeeds.
-        let client_ok = okena_core::client::tls::build_reqwest_client(
+        let client_ok = okena_transport::client::tls::build_reqwest_client(
             true,
             Some(material.fingerprint.clone()),
-            okena_core::client::tls::new_observed(),
+            okena_transport::client::tls::new_observed(),
         );
         assert!(
             get_with_retry(&client_ok, &url).await.is_ok(),
@@ -256,10 +256,10 @@ mod handshake_tests {
         );
 
         // 3) Wrong pin: handshake is rejected (MITM / cert swap defense).
-        let client_bad = okena_core::client::tls::build_reqwest_client(
+        let client_bad = okena_transport::client::tls::build_reqwest_client(
             true,
             Some("00".repeat(32)),
-            okena_core::client::tls::new_observed(),
+            okena_transport::client::tls::new_observed(),
         );
         assert!(
             client_bad.get(&url).send().await.is_err(),

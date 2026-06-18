@@ -151,7 +151,7 @@ impl RemoteProjectFs {
     }
 
     fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
-        okena_core::remote_action::post_action(&self.host, self.port, &self.token, action)
+        okena_transport::remote_action::post_action(&self.host, self.port, &self.token, action)
     }
 }
 

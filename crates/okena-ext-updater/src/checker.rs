@@ -18,8 +18,8 @@ pub async fn check_for_update(app_version: String) -> Result<Option<ReleaseAsset
 }
 
 fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
-    let http_resp = okena_core::http::send(
-        okena_core::http::HttpRequest::get(
+    let http_resp = okena_transport::http::send(
+        okena_transport::http::HttpRequest::get(
             "https://api.github.com/repos/contember/okena/releases/latest",
         )
         .user_agent(format!("okena/{}", app_version))

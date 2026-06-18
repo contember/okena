@@ -15,7 +15,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_flex;
 use okena_core::api::ActionRequest;
-use okena_core::client::ConnectionStatus;
+use okena_transport::client::ConnectionStatus;
 
 enum AddProjectTarget {
     Local,

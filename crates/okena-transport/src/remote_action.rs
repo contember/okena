@@ -1,6 +1,6 @@
 //! Shared blocking HTTP helper for posting ActionRequests to a remote server.
 
-use crate::api::ActionRequest;
+use okena_core::api::ActionRequest;
 
 /// Total request timeout for "fast" actions (terminal control, listings,
 /// metadata). 10 s is generous for these; longer would mask real failures.

@@ -493,7 +493,7 @@ impl WindowView {
 
                 // Get remote folder callback
                 sidebar.set_get_remote_folder(Box::new(move |conn_id, prefixed_project_id, cx| {
-                    let server_project_id = okena_core::client::strip_prefix(prefixed_project_id, conn_id);
+                    let server_project_id = okena_transport::client::strip_prefix(prefixed_project_id, conn_id);
                     rm_for_folder.read(cx).connections().iter()
                         .find(|(config, _, _)| config.id == conn_id)
                         .and_then(|(_, _, state)| state.as_ref())

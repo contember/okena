@@ -118,7 +118,7 @@ impl Sidebar {
             .filter(|p| p.is_remote)
             .and_then(|p| p.connection_id.clone())
             && let Some(ref send_action) = self.send_remote_action {
-                let server_id = okena_core::client::strip_prefix(project_id, &conn_id);
+                let server_id = okena_transport::client::strip_prefix(project_id, &conn_id);
                 (send_action)(&conn_id, ActionRequest::SetProjectColor {
                     project_id: server_id,
                     color,

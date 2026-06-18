@@ -16,7 +16,7 @@ mod worktree;
 mod from_project_test;
 
 use okena_core::api::ActionRequest;
-use okena_core::client::{ConnectionStatus, RemoteConnectionConfig};
+use okena_transport::client::{ConnectionStatus, RemoteConnectionConfig};
 use okena_core::theme::FolderColor;
 use okena_services::manager::ServiceManager;
 use okena_terminal::TerminalsRegistry;

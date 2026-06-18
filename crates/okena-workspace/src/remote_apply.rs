@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use okena_core::api::StateResponse;
-use okena_core::client::RemoteConnectionConfig;
+use okena_transport::client::RemoteConnectionConfig;
 use okena_layout::LayoutNode;
 use okena_state::{FolderData, HooksConfig, ProjectData, WindowId, WorkspaceData, WorktreeMetadata};
 

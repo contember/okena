@@ -37,8 +37,8 @@ fn download_blocking(
 
     let dest = updates_dir.join(asset_name);
 
-    let resp = okena_core::http::stream(
-        okena_core::http::HttpRequest::get(url)
+    let resp = okena_transport::http::stream(
+        okena_transport::http::HttpRequest::get(url)
             .timeout(Duration::from_secs(3600))
             .label("updater.download"),
     )
@@ -114,8 +114,8 @@ fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Re
 
     log::info!("Verifying checksum for {}", asset_name);
 
-    let body = okena_core::http::send(
-        okena_core::http::HttpRequest::get(checksum_url)
+    let body = okena_transport::http::send(
+        okena_transport::http::HttpRequest::get(checksum_url)
             .timeout(Duration::from_secs(30))
             .label("updater.checksum"),
     )

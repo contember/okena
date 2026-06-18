@@ -20,7 +20,7 @@ On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid 
 
 ```
 src/                        # Desktop app — main binary, GPUI views, app coordinator
-crates/                     # Library crates (24 crates, see below)
+crates/                     # Library crates (29 crates, see below)
 mobile/                     # Mobile app — React Native UI (mobile/rn) over the Rust core via uniffi (crates/okena-mobile-ffi)
 web/                        # Web client (React + TypeScript + xterm.js)
 assets/                     # Fonts, icons (assets/icons/*.svg referenced as icons/*.svg)
@@ -55,7 +55,8 @@ Most logic lives in `crates/`. The `src/` modules are thin re-exports (`pub use 
 | `okena-ext-codex` | Codex extension |
 | `okena-ext-github` | GitHub status extension |
 | `okena-ext-updater` | Self-update system |
-| `okena-core` | Shared types, API client, key handling |
+| `okena-core` | Shared data types only (no networking): wire schema (`api`), WS message types (`ws`), profiles, theme colors, process bus, key handling. Depended on by every crate. |
+| `okena-transport` | Networking/transport over the `okena-core` schema: async client engine (WS connection + TLS pinning, `client` feature) and blocking HTTP + `remote_action` (`blocking-http` feature). Holds the heavy optional deps (tokio/reqwest/tungstenite/rustls) split out of `okena-core`. |
 | `okena-mobile-ffi` | uniffi FFI surface for the React Native mobile app (`mobile/rn`); self-contained ConnectionManager / TerminalHolder engine over `okena-core` |
 
 ## Module-Specific Context

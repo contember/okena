@@ -1,4 +1,4 @@
-use okena_core::client::{ConnectionStatus, RemoteConnectionConfig};
+use okena_transport::client::{ConnectionStatus, RemoteConnectionConfig};
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_sm, ui_text_xl};
 use okena_workspace::requests::OverlayRequest;

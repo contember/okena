@@ -1,6 +1,6 @@
 use crate::client::terminal_holder::TerminalHolder;
 
-use okena_core::client::{is_remote_terminal, ConnectionHandler, WsClientMessage};
+use okena_transport::client::{is_remote_terminal, ConnectionHandler, WsClientMessage};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,7 +80,7 @@ impl ConnectionHandler for MobileConnectionHandler {
         connection_id: &str,
         keep_ids: &std::collections::HashSet<String>,
     ) {
-        use okena_core::client::strip_prefix;
+        use okena_transport::client::strip_prefix;
         let mut terminals = self.terminals.write();
         let to_remove: Vec<String> = terminals
             .keys()

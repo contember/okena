@@ -34,7 +34,7 @@ use crate::views::overlays::rename_directory_dialog::{RenameDirectoryDialog, Ren
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use okena_views_sidebar::{WorktreeListPopover, WorktreeListPopoverEvent};
 use okena_views_sidebar::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
-use okena_core::client::RemoteConnectionConfig;
+use okena_transport::client::RemoteConnectionConfig;
 use crate::remote::GlobalRemoteInfo;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;

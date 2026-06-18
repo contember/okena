@@ -30,7 +30,7 @@ mod client;
 mod types;
 
 use okena_core::api::ActionRequest;
-use okena_core::client::{collect_state_terminal_ids, WsClientMessage};
+use okena_transport::client::{collect_state_terminal_ids, WsClientMessage};
 use okena_core::keys::SpecialKey;
 use okena_core::theme::DARK_THEME;
 use okena_core::types::{DiffMode, SplitDirection};

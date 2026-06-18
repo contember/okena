@@ -1,4 +1,4 @@
-use crate::api::StateResponse;
+use okena_core::api::StateResponse;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -85,7 +85,7 @@ pub enum ConnectionEvent {
     /// Git status changed for remote projects
     GitStatusChanged {
         connection_id: String,
-        statuses: HashMap<String, crate::api::ApiGitStatus>,
+        statuses: HashMap<String, okena_core::api::ApiGitStatus>,
     },
     /// Token was refreshed — save new token and update timestamp
     TokenRefreshed {

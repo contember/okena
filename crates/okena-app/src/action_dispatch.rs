@@ -12,7 +12,7 @@ use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
 
 use okena_core::api::ActionRequest;
-use okena_core::client::strip_prefix;
+use okena_transport::client::strip_prefix;
 
 use gpui::{AppContext, Entity};
 use std::sync::Arc;

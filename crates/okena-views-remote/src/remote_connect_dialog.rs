@@ -1,8 +1,8 @@
 //! Remote connection dialog overlay.
 
 use crate::Cancel;
-use okena_core::client::tls::format_fingerprint;
-use okena_core::client::RemoteConnectionConfig;
+use okena_transport::client::tls::format_fingerprint;
+use okena_transport::client::RemoteConnectionConfig;
 use okena_remote_client::RemoteConnectionManager;
 use okena_ui::button::{button, button_primary};
 use okena_ui::input::{input_container, labeled_input};
@@ -61,7 +61,7 @@ async fn detect_scheme(
     runtime: &Arc<tokio::runtime::Runtime>,
     host: String,
     port: u16,
-    observed: okena_core::client::tls::ObservedFingerprint,
+    observed: okena_transport::client::tls::ObservedFingerprint,
 ) -> Result<Detected, String> {
     for tls in [true, false] {
         let host = host.clone();
@@ -69,7 +69,7 @@ async fn detect_scheme(
         let probe = runtime
             .spawn(async move {
                 let client =
-                    okena_core::client::tls::build_reqwest_client(tls, None, observed);
+                    okena_transport::client::tls::build_reqwest_client(tls, None, observed);
                 let scheme = if tls { "https" } else { "http" };
                 let base_url = format!("{}://{}:{}", scheme, host, port);
                 let resp = client
@@ -173,7 +173,7 @@ impl RemoteConnectDialog {
         let runtime = self.runtime(cx);
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let observed = okena_core::client::tls::new_observed();
+            let observed = okena_transport::client::tls::new_observed();
             let status = match detect_scheme(&runtime, host, port_num, observed).await {
                 Ok(d) => {
                     let version = d.version.unwrap_or_else(|| "unknown".to_string());
@@ -234,7 +234,7 @@ impl RemoteConnectDialog {
         // TOFU: no pin yet on a brand-new connection. The verifier records the
         // observed cert fingerprint into this slot during the TLS handshake so we
         // can pin it onto the config before emitting Connected.
-        let observed = okena_core::client::tls::new_observed();
+        let observed = okena_transport::client::tls::new_observed();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut config = config;
@@ -261,7 +261,7 @@ impl RemoteConnectDialog {
                     let code = code.clone();
                     let observed = observed.clone();
                     async move {
-                        let client = okena_core::client::tls::build_reqwest_client(
+                        let client = okena_transport::client::tls::build_reqwest_client(
                             use_tls, None, observed,
                         );
                         let pair_body = serde_json::json!({ "code": code });

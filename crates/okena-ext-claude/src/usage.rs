@@ -433,8 +433,8 @@ impl ClaudeUsageData {
                         }
                     };
 
-                    let response = okena_core::http::send(
-                        okena_core::http::HttpRequest::get(
+                    let response = okena_transport::http::send(
+                        okena_transport::http::HttpRequest::get(
                             "https://api.anthropic.com/api/oauth/usage",
                         )
                         .bearer(&token)

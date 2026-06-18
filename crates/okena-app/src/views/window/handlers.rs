@@ -51,7 +51,7 @@ impl WindowView {
         let connections = rm.connections();
         let (config, _, _) = connections.iter().find(|(c, _, _)| c.id == connection_id)?;
         let token = config.saved_token.as_ref()?.clone();
-        let actual_id = okena_core::client::strip_prefix(project_id, connection_id);
+        let actual_id = okena_transport::client::strip_prefix(project_id, connection_id);
         Some((config.host.clone(), config.port, token, actual_id))
     }
 

@@ -6,8 +6,6 @@ license = "MIT"
 
 [features]
 default = []
-client = ["dep:tokio", "dep:reqwest", "dep:tokio-tungstenite", "dep:async-channel", "dep:futures", "dep:rustls", "dep:rustls-pki-types", "dep:sha2"]
-blocking-http = ["dep:reqwest", "reqwest/blocking"]
 # Exposes `process::testing` (command bus mock) to downstream crates' tests.
 test-support = []
 
@@ -18,21 +16,6 @@ alacritty_terminal = "0.25"
 log = "0.4"
 dirs = "5.0"
 anyhow = "1.0"
-
-# Client feature deps (async networking)
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"], optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"], optional = true }
-async-channel = { version = "2.3", optional = true }
-futures = { version = "0.3", optional = true }
-# Client TLS with certificate pinning (TOFU). Uses the `ring` crypto backend:
-# it's the portable provider that works on every target (notably Android/NDK,
-# where `aws_lc_rs`'s jitter-entropy init segfaults), and reqwest 0.12's
-# `rustls-tls` feature already pulls `ring` for hyper/tokio-rustls, so a single
-# CryptoProvider is shared across reqwest + tungstenite.
-rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"], optional = true }
-rustls-pki-types = { version = "1", optional = true }
-sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

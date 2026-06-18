@@ -10,10 +10,12 @@ edition = "2024"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
-# Shared protocol / TLS / WS / terminal-emulation core. The `client` feature
-# pulls reqwest + tokio-tungstenite with the rustls backends (NDK-friendly — no
-# OpenSSL cross-compile), so we inherit that backend selection via unification.
-okena-core = { path = "../okena-core", features = ["client"] }
+# Shared data core: protocol/wire schema, WS message types, terminal-emulation glue.
+okena-core = { path = "../okena-core" }
+# Transport layer. The `client` feature pulls reqwest + tokio-tungstenite with the
+# rustls backends (NDK-friendly — no OpenSSL cross-compile), so we inherit that
+# backend selection via unification.
+okena-transport = { path = "../okena-transport", features = ["client"] }
 
 # uniffi in proc-macro mode (no UDL). `tokio` enables async export via
 # `#[uniffi::export(async_runtime = "tokio")]`. Pinned to 0.31 to match the

@@ -2,7 +2,7 @@ use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::TerminalTransport;
 use anyhow::Result;
-use okena_core::client::{make_prefixed_id, strip_prefix, WsClientMessage};
+use okena_transport::client::{make_prefixed_id, strip_prefix, WsClientMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
 

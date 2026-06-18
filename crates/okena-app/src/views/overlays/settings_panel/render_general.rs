@@ -7,7 +7,7 @@ use crate::workspace::settings::HeaderDensity;
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::{h_flex, v_flex};
-use okena_core::client::tls::format_fingerprint;
+use okena_transport::client::tls::format_fingerprint;
 
 use super::components::*;
 use super::SettingsPanel;

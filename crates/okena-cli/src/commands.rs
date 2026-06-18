@@ -45,7 +45,7 @@ pub fn cli_pair() -> i32 {
         eprintln!(
             "TLS certificate fingerprint (SHA-256) — verify it matches the connecting client:"
         );
-        eprintln!("  {}", okena_core::client::tls::format_fingerprint(&fp));
+        eprintln!("  {}", okena_transport::client::tls::format_fingerprint(&fp));
     }
     eprintln!("Expires in 60s — run `okena pair` again for a fresh code.");
     0

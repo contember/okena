@@ -2,7 +2,7 @@ use crate::client::handler::MobileConnectionHandler;
 use crate::client::terminal_holder::TerminalHolder;
 
 use okena_core::api::{ActionRequest, StateResponse};
-use okena_core::client::{
+use okena_transport::client::{
     make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig,
     WsClientMessage,
 };

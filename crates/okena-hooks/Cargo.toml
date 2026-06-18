@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-okena-core = { path = "../okena-core", features = ["client"] }
+okena-core = { path = "../okena-core" }
 okena-terminal = { path = "../okena-terminal" }
 okena-git = { path = "../okena-git" }
 okena-state = { path = "../okena-state" }

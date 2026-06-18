@@ -90,7 +90,7 @@ impl BlameProvider for RemoteBlameProvider {
             project_id: self.project_id.clone(),
             relative_path: relative_path.to_string(),
         };
-        let value = okena_core::remote_action::post_action(
+        let value = okena_transport::remote_action::post_action(
             &self.host,
             self.port,
             &self.token,

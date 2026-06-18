@@ -111,8 +111,8 @@ struct CodexAuth {
 
 /// Refresh the OAuth access token using the refresh token.
 fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
-    let resp: serde_json::Value = okena_core::http::send(
-        okena_core::http::HttpRequest::post("https://auth.openai.com/oauth/token")
+    let resp: serde_json::Value = okena_transport::http::send(
+        okena_transport::http::HttpRequest::post("https://auth.openai.com/oauth/token")
             .body(
                 "application/x-www-form-urlencoded",
                 format!(
@@ -298,12 +298,12 @@ fn fetch_usage_from_local_sessions(auth: &CodexAuth) -> Option<UsageData> {
 fn try_fetch_with_token(
     access_token: &str,
     account_id: &str,
-) -> Result<okena_core::http::HttpResponse, Option<u16>> {
+) -> Result<okena_transport::http::HttpResponse, Option<u16>> {
     // No min_interval floor here: a single tick can legitimately issue two
     // requests with this label (cached token → 401 → refresh → retry), and a
     // floor would clip the retry. The outer poll cadence is 300s.
-    let resp = okena_core::http::send(
-        okena_core::http::HttpRequest::get("https://chatgpt.com/backend-api/codex/usage")
+    let resp = okena_transport::http::send(
+        okena_transport::http::HttpRequest::get("https://chatgpt.com/backend-api/codex/usage")
             .bearer(access_token)
             .header("chatgpt-account-id", account_id)
             .timeout(Duration::from_secs(10))

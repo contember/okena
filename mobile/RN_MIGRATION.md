@@ -18,7 +18,7 @@ All real logic already lives below an FFI-agnostic seam. The mobile app is a *th
 client over the desktop remote server (`/v1/pair`, `/v1/state`, `/v1/actions`, WS `/v1/stream`).
 
 ```
-crates/okena-core (feature = "client")     ← REUSE AS-IS. GPUI-free, framework-agnostic.
+crates/okena-transport (feature = "client") ← REUSE AS-IS. GPUI-free, framework-agnostic.
   RemoteClient<H: ConnectionHandler>          protocol, TLS + cert pinning (TOFU), WS,
   ConnectionHandler trait                      reconnect, state diffing. ~1900 LOC.
         ▲
@@ -30,7 +30,7 @@ mobile/native  (okena_mobile_native)       ← REWRITE the binding layer only.
 Flutter UI  (mobile/lib, ~2700+ LOC Dart)  ← REPLACE with React Native.
 ```
 
-The seam is `RemoteClient<H: ConnectionHandler>` (`crates/okena-core/src/client/connection.rs`).
+The seam is `RemoteClient<H: ConnectionHandler>` (`crates/okena-transport/src/client/connection.rs`).
 `MobileConnectionHandler` is just one `impl ConnectionHandler`; the desktop has its own. RN
 gets a third consumer of the *same* core — identical terminal emulation as desktop, because
 both run `alacritty_terminal`.
@@ -58,7 +58,7 @@ touched. We swap the binding generator (`flutter_rust_bridge` → `uniffi`) and 
 │ crates/okena-mobile-ffi   (uniffi-annotated, was mobile/native)│
 │   reuses ConnectionManager + TerminalHolder logic verbatim    │
 │        ▲                                                      │
-│   crates/okena-core (client)  ← unchanged                     │
+│   crates/okena-transport (client)  ← unchanged                │
 └───────────────────────────────────────────────────────────────┘
 ```
 

@@ -6,10 +6,10 @@ use okena_terminal::TerminalsRegistry;
 use okena_workspace::settings::{load_settings, update_remote_connections};
 
 use okena_core::api::{ActionRequest, StateResponse};
-use okena_core::client::{
+use okena_transport::client::{
     ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
 };
-use okena_core::client::connection::try_refresh_token;
+use okena_transport::client::connection::try_refresh_token;
 
 use gpui::*;
 use std::collections::HashMap;
@@ -733,7 +733,7 @@ mod tests {
     }
     use okena_terminal::TerminalsRegistry;
     use gpui::AppContext as _;
-    use okena_core::client::RemoteConnectionConfig;
+    use okena_transport::client::RemoteConnectionConfig;
     use parking_lot::Mutex as PMutex;
     use std::collections::HashMap;
     use std::sync::Arc;

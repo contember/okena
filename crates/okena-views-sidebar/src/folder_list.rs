@@ -18,7 +18,7 @@ impl Sidebar {
     /// Send a reorder action to the remote server when a project is reordered
     /// within a remote folder on the client.
     fn send_remote_reorder(this: &mut Self, conn_id: &str, prefixed_project_id: &str, new_index: usize, cx: &mut App) {
-        let server_project_id = okena_core::client::strip_prefix(prefixed_project_id, conn_id);
+        let server_project_id = okena_transport::client::strip_prefix(prefixed_project_id, conn_id);
 
         // Look up the server's folder structure from the cached state
         let server_folder_id = if let Some(ref get_folder) = this.get_remote_folder {

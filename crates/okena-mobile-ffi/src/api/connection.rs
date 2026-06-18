@@ -20,17 +20,17 @@ pub enum ConnectionStatus {
     Error { message: String },
 }
 
-impl From<okena_core::client::ConnectionStatus> for ConnectionStatus {
-    fn from(status: okena_core::client::ConnectionStatus) -> Self {
+impl From<okena_transport::client::ConnectionStatus> for ConnectionStatus {
+    fn from(status: okena_transport::client::ConnectionStatus) -> Self {
         match status {
-            okena_core::client::ConnectionStatus::Disconnected => ConnectionStatus::Disconnected,
-            okena_core::client::ConnectionStatus::Connecting => ConnectionStatus::Connecting,
-            okena_core::client::ConnectionStatus::Connected => ConnectionStatus::Connected,
-            okena_core::client::ConnectionStatus::Pairing => ConnectionStatus::Pairing,
-            okena_core::client::ConnectionStatus::Reconnecting { .. } => {
+            okena_transport::client::ConnectionStatus::Disconnected => ConnectionStatus::Disconnected,
+            okena_transport::client::ConnectionStatus::Connecting => ConnectionStatus::Connecting,
+            okena_transport::client::ConnectionStatus::Connected => ConnectionStatus::Connected,
+            okena_transport::client::ConnectionStatus::Pairing => ConnectionStatus::Pairing,
+            okena_transport::client::ConnectionStatus::Reconnecting { .. } => {
                 ConnectionStatus::Connecting
             }
-            okena_core::client::ConnectionStatus::Error(msg) => {
+            okena_transport::client::ConnectionStatus::Error(msg) => {
                 ConnectionStatus::Error { message: msg }
             }
         }
