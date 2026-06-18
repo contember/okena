@@ -1183,6 +1183,7 @@ fn wait_for_exit_code(pid: u32) -> Option<u32> {
 ///
 /// On Linux, reads `/proc/net/unix` to map socket paths to inode numbers,
 /// then scans `/proc/*/fd/` to find PIDs holding those inodes.
+/// On macOS, uses `libproc` to scan each process's socket fds — no subprocess.
 /// On other Unix systems, falls back to a single `lsof` invocation.
 #[cfg(unix)]
 pub(crate) fn find_pids_for_unix_sockets(
@@ -1197,7 +1198,12 @@ pub(crate) fn find_pids_for_unix_sockets(
         find_pids_for_unix_sockets_linux(socket_paths)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos_proc::pids_holding_unix_sockets(socket_paths)
+    }
+
+    #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
     {
         find_pids_for_unix_sockets_lsof(socket_paths)
     }
@@ -1298,8 +1304,9 @@ fn find_pids_for_unix_sockets_linux(
     result
 }
 
-/// Fallback for non-Linux Unix: single `lsof` call for all sockets.
-#[cfg(all(unix, not(target_os = "linux")))]
+/// Fallback for non-Linux, non-macOS Unix (e.g. BSD): single `lsof` call for
+/// all sockets. macOS uses `crate::macos_proc` instead.
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
 fn find_pids_for_unix_sockets_lsof(
     socket_paths: &[std::path::PathBuf],
 ) -> HashMap<std::path::PathBuf, Vec<u32>> {
@@ -1360,7 +1367,12 @@ fn first_proc_child(pid: u32) -> Option<u32> {
     contents.split_whitespace().next().and_then(|s| s.parse().ok())
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn first_proc_child(pid: u32) -> Option<u32> {
+    crate::macos_proc::first_child_pid(pid)
+}
+
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
 fn first_proc_child(pid: u32) -> Option<u32> {
     let output = crate::process::safe_output(
         crate::process::command("pgrep").args(["-P", &pid.to_string()]),

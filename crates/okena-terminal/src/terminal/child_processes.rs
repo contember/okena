@@ -2,6 +2,7 @@
 ///
 /// On Linux, this reads `/proc/<pid>/task/*/children` directly — sub-millisecond,
 /// safe to call synchronously from UI handlers (e.g. click / key-down).
+/// On macOS, it uses `libproc` (`proc_listpids`) — no fork+exec.
 /// On other Unix, falls back to `pgrep -P` (~5–20 ms fork+exec).
 /// On non-Unix, always returns false.
 #[cfg(target_os = "linux")]
@@ -23,7 +24,12 @@ pub fn has_child_processes(pid: u32) -> bool {
     false
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub fn has_child_processes(pid: u32) -> bool {
+    crate::macos_proc::has_children(pid)
+}
+
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
 pub fn has_child_processes(pid: u32) -> bool {
     crate::process::safe_output(
         crate::process::command("pgrep").args(["-P", &pid.to_string()]),
@@ -38,9 +44,10 @@ pub fn has_child_processes(_pid: u32) -> bool {
 }
 
 /// Best-effort name of the foreground command running under `pid` (the shell):
-/// the first child process's `comm` (e.g. "make", "vim", "cargo"). Linux only —
-/// reads `/proc/<child>/comm`; returns `None` elsewhere or when the shell has no
-/// child. Used to give the soft-close toast a "what am I killing" hint.
+/// the first child process's name (e.g. "make", "vim", "cargo"). On Linux reads
+/// `/proc/<child>/comm`; on macOS uses `libproc`; returns `None` elsewhere or
+/// when the shell has no child. Gives the soft-close toast a "what am I killing"
+/// hint.
 #[cfg(target_os = "linux")]
 pub fn foreground_command(pid: u32) -> Option<String> {
     let task_dir = format!("/proc/{pid}/task");
@@ -63,7 +70,12 @@ pub fn foreground_command(pid: u32) -> Option<String> {
     None
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub fn foreground_command(pid: u32) -> Option<String> {
+    crate::macos_proc::first_child_pid(pid).and_then(crate::macos_proc::process_name)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn foreground_command(_pid: u32) -> Option<String> {
     None
 }

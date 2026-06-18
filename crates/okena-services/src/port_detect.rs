@@ -1,3 +1,6 @@
+// macOS resolves process tree + listening ports through `okena_terminal::macos_proc`
+// (libproc), so it needs neither `command` nor `safe_output`.
+#[cfg(any(target_os = "linux", windows))]
 use okena_core::process::{command, safe_output};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -14,7 +17,7 @@ const EPHEMERAL_PORT_MIN: u16 = 32768;
 // ---------------------------------------------------------------------------
 
 /// Build the system-wide parent→children process tree.
-/// On Linux reads `/proc`, on macOS runs `ps -eo pid,ppid`,
+/// On Linux reads `/proc`, on macOS uses `libproc`,
 /// on Windows runs a single `wmic` call.
 pub fn build_process_tree() -> HashMap<u32, Vec<u32>> {
     #[cfg(target_os = "linux")]
@@ -105,25 +108,8 @@ fn build_process_tree_linux() -> HashMap<u32, Vec<u32>> {
 
 #[cfg(target_os = "macos")]
 fn build_process_tree_macos() -> HashMap<u32, Vec<u32>> {
-    // Single `ps` call instead of recursive `pgrep -P` per PID.
-    let mut cmd = command("ps");
-    cmd.args(["-eo", "pid,ppid"]);
-    let output = match safe_output(&mut cmd) {
-        Ok(o) if o.status.success() => o,
-        _ => return HashMap::new(),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut tree: HashMap<u32, Vec<u32>> = HashMap::new();
-    for line in stdout.lines().skip(1) {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() >= 2
-            && let (Ok(pid), Ok(ppid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>())
-        {
-            tree.entry(ppid).or_default().push(pid);
-        }
-    }
-    tree
+    // libproc (`proc_pidinfo`) instead of spawning `ps`.
+    okena_terminal::macos_proc::process_tree()
 }
 
 #[cfg(windows)]
@@ -218,14 +204,8 @@ fn get_listening_port_pairs_linux() -> Vec<(u32, u16)> {
 
 #[cfg(target_os = "macos")]
 fn get_listening_port_pairs_macos() -> Vec<(u32, u16)> {
-    let mut cmd = command("lsof");
-    cmd.args(["-iTCP", "-sTCP:LISTEN", "-P", "-n"]);
-    let output = match safe_output(&mut cmd) {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_lsof_output(&stdout)
+    // libproc socket-fd scan instead of spawning `lsof -iTCP -sTCP:LISTEN`.
+    okena_terminal::macos_proc::listening_port_pairs()
 }
 
 #[cfg(windows)]

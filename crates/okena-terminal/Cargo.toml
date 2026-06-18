@@ -31,3 +31,8 @@ anyhow = "1.0"
 regex = "1.10"
 # Decoding base64 payloads in the OSC 99 (kitty) notification protocol.
 base64 = "0.22"
+
+# macOS process introspection via libproc syscalls, replacing fork+exec of
+# `pgrep` / `lsof` (slow on macOS). Linux uses /proc directly instead.
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "0.14"

@@ -2,6 +2,9 @@
 
 pub mod backend;
 pub mod input;
+/// macOS process introspection via libproc (replaces `pgrep`/`lsof`/`ps`).
+#[cfg(target_os = "macos")]
+pub mod macos_proc;
 pub mod process;
 pub mod pty_manager;
 pub mod session_backend;
