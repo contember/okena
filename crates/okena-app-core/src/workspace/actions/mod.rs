@@ -1,7 +1,8 @@
 // Re-export action submodules from the workspace crate.
-// These contain `impl Workspace` blocks (no standalone types to re-export),
-// but re-exporting the modules makes them accessible as `crate::workspace::actions::*`.
+// These mostly contain `impl Workspace` blocks; `soft_close` also exports the
+// `PendingDecision` type. Re-exporting the modules makes them accessible as
+// `crate::workspace::actions::*`.
 #[allow(unused_imports)]
-pub use okena_workspace::actions::{focus, folder, layout, project, terminal};
+pub use okena_workspace::actions::{focus, folder, layout, project, soft_close, terminal};
 
 pub mod execute;

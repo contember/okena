@@ -9,6 +9,22 @@ use crate::focus::FocusManager;
 use crate::state::{LayoutNode, PendingClose, RestoredClose, Workspace};
 use gpui::*;
 
+/// Outcome of resolving an optimistic close once the (off-thread) busy check
+/// has come back. The terminal was already removed from the layout when the
+/// close began; this decides what happens to its still-alive PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingDecision {
+    /// No pending close remained — the PTY exited on its own (or was undone)
+    /// during the check window and the exit path already cleaned up. No-op.
+    Raced,
+    /// The terminal was idle: the PTY was queued for an immediate kill. The
+    /// caller should not show an undo toast.
+    Finalized,
+    /// The terminal was busy: the pending close stays, and the caller should
+    /// post the undo toast + schedule the grace-period teardown.
+    KeepForUndo,
+}
+
 impl Workspace {
     /// Begin a soft close: snapshot the project's layout, remove the terminal
     /// from the tree (focusing a sibling, exactly like a normal close), and
@@ -74,6 +90,31 @@ impl Workspace {
         // observer drains the kill queue on this notification.
         cx.notify();
         true
+    }
+
+    /// Resolve an optimistic close after the off-thread busy check returns.
+    ///
+    /// The pane was already ejected from the layout when the close began (so the
+    /// UI updated instantly); here we decide the PTY's fate now that we know
+    /// whether the terminal was busy. Idle terminals are killed immediately;
+    /// busy ones keep their pending record so the caller can offer an undo. If
+    /// the pending record is gone (the shell exited during the check window),
+    /// this is a no-op — see [`PendingDecision::Raced`].
+    pub fn decide_pending_close(
+        &mut self,
+        terminal_id: &str,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> PendingDecision {
+        if !self.has_pending_close(terminal_id) {
+            return PendingDecision::Raced;
+        }
+        if busy {
+            return PendingDecision::KeepForUndo;
+        }
+        // Idle terminal — no point keeping it alive for an undo. Queue the kill.
+        self.finalize_soft_close(terminal_id, cx);
+        PendingDecision::Finalized
     }
 
     /// Undo a soft close, bringing the terminal back into the layout.
@@ -219,6 +260,7 @@ impl Workspace {
 mod tests {
     use gpui::AppContext as _;
 
+    use super::PendingDecision;
     use crate::focus::FocusManager;
     use crate::settings::HooksConfig;
     use crate::state::{LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
@@ -340,6 +382,56 @@ mod tests {
 
             // Idempotent — second finalize is a no-op.
             assert!(!ws.finalize_soft_close("a", cx));
+        });
+    }
+
+    #[gpui::test]
+    fn decide_keeps_busy_terminal_for_undo(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+
+            // Busy → keep the pending record (no kill queued) so the caller can
+            // offer an undo.
+            assert_eq!(ws.decide_pending_close("a", true, cx), PendingDecision::KeepForUndo);
+            assert!(ws.has_pending_close("a"));
+            assert!(ws.drain_pending_terminal_kills().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn decide_finalizes_idle_terminal(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+
+            // Idle → kill immediately, pending record dropped.
+            assert_eq!(ws.decide_pending_close("a", false, cx), PendingDecision::Finalized);
+            assert!(!ws.has_pending_close("a"));
+            assert_eq!(ws.drain_pending_terminal_kills(), vec!["a".to_string()]);
+        });
+    }
+
+    #[gpui::test]
+    fn decide_is_noop_when_pending_already_gone(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+            // Shell exited during the check window — exit path cancelled the pending close.
+            ws.cancel_pending_close("a");
+
+            // Whatever the busy result, there's nothing left to decide.
+            assert_eq!(ws.decide_pending_close("a", true, cx), PendingDecision::Raced);
+            assert!(ws.drain_pending_terminal_kills().is_empty());
         });
     }
 

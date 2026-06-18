@@ -170,24 +170,29 @@ impl ActionDispatcher {
                 let window_id = *window_id;
                 focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
-                        // Interactive close of a busy terminal goes through the
-                        // grace-period soft close (undo toast). Both the single
-                        // and multi-terminal close actions are gated; whatever
-                        // isn't soft-closed falls through to the immediate close.
+                        // Interactive closes go through the optimistic soft
+                        // close: the pane is ejected immediately and the PTY's
+                        // fate (kill now vs. keep for undo) is decided off the
+                        // GPUI thread. Both the single and multi-terminal close
+                        // actions are gated; whatever isn't handled there
+                        // (feature off / terminal not in layout) falls through
+                        // to the immediate close.
                         match &action {
                             ActionRequest::CloseTerminal { project_id, terminal_id }
-                                if crate::soft_close::try_begin(
-                                    ws, fm, &*backend, &terminals, project_id, terminal_id, cx,
+                                if crate::soft_close::begin(
+                                    ws, fm, &backend, &terminals, project_id, terminal_id, cx,
                                 ) => {
                                     return;
                                 }
                             ActionRequest::CloseTerminals { project_id, terminal_ids } => {
-                                // Soft-close each busy terminal; hard-close the
-                                // rest in a single batched action.
+                                // Optimistically close each terminal (eject now,
+                                // decide kill-vs-undo off-thread); whatever isn't
+                                // handled here (feature off / not in layout)
+                                // hard-closes in a single batched action.
                                 let mut remaining = Vec::new();
                                 for terminal_id in terminal_ids {
-                                    if !crate::soft_close::try_begin(
-                                        ws, fm, &*backend, &terminals, project_id, terminal_id, cx,
+                                    if !crate::soft_close::begin(
+                                        ws, fm, &backend, &terminals, project_id, terminal_id, cx,
                                     ) {
                                         remaining.push(terminal_id.clone());
                                     }

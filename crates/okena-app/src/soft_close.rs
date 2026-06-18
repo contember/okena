@@ -1,22 +1,28 @@
 //! Desktop orchestration for the grace-period "soft close".
 //!
-//! When the user closes a *busy* terminal (one with a running foreground
-//! process), instead of killing it immediately we:
-//!   1. remove the pane from the layout but keep the PTY alive,
-//!   2. show a toast with "Undo" / "Close now" and a countdown,
-//!   3. schedule the real teardown after the grace period.
+//! Every interactive close is handled *optimistically*: the pane is ejected
+//! from the layout immediately (the PTY stays alive), so the UI updates with no
+//! lag, and only then — off the GPUI thread — do we probe whether the terminal
+//! was busy. That probe can fork `tmux` / `lsof` / `pgrep` (slow on macOS),
+//! which is why it must not sit on the close keypath. Once it returns:
+//!   * idle terminal  → kill the PTY now (no toast),
+//!   * busy terminal  → show an "Undo" / "Close now" toast with a countdown and
+//!     schedule the real teardown after the grace period.
 //!
 //! The layout bookkeeping + restore live on `Workspace` (`begin_soft_close`,
-//! `undo_soft_close`, `finalize_soft_close`); this module wires the busy check,
-//! the toast, and the timer. Only the interactive desktop close path goes
-//! through here — the remote API keeps immediate-close semantics.
+//! `decide_pending_close`, `undo_soft_close`, `finalize_soft_close`); this
+//! module wires the off-thread probe, the toast, and the timer. Only the
+//! interactive desktop close path goes through here — the remote API keeps
+//! immediate-close semantics.
 
 use crate::terminal::backend::TerminalBackend;
 use crate::views::window::TerminalsRegistry;
+use crate::workspace::actions::soft_close::PendingDecision;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::Workspace;
 use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastManager};
 use gpui::*;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Prefix for the "undo" toast action id; payload is `:<project_id>:<terminal_id>`.
@@ -70,14 +76,20 @@ fn shorten_cwd(path: &str) -> String {
     format!("\u{2026}{tail}")
 }
 
-/// Attempt to soft-close a terminal. Returns `true` if the close was handled as
-/// a soft close (caller must NOT also run the immediate close); `false` if the
-/// feature is off / the terminal is idle / not found, in which case the caller
-/// should fall through to the normal immediate close.
-pub fn try_begin(
+/// Begin an optimistic close of a terminal. Returns `true` if the close was
+/// taken over here (the pane was ejected from the layout and the PTY's fate is
+/// being decided in the background); `false` if the feature is off or the
+/// terminal isn't in the layout, in which case the caller should fall through
+/// to the normal immediate close.
+///
+/// The "is this terminal busy?" probe — which can fork `tmux` / `lsof` /
+/// `pgrep` and is slow on macOS — runs *after* the pane is ejected, off the
+/// GPUI thread, so the close is perceived as instant. Idle terminals are then
+/// killed immediately; busy ones get the undo toast + grace timer.
+pub fn begin(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
-    backend: &dyn TerminalBackend,
+    backend: &Arc<dyn TerminalBackend>,
     terminals: &TerminalsRegistry,
     project_id: &str,
     terminal_id: &str,
@@ -85,18 +97,7 @@ pub fn try_begin(
 ) -> bool {
     let grace_secs = crate::settings::settings(cx).terminal_close_grace_secs;
     if grace_secs == 0 {
-        return false; // feature disabled
-    }
-
-    // Only soft-close *busy* terminals. The foreground shell pid resolves
-    // through session backends (dtach / tmux), so "has a child" means the user
-    // actually has a command running — not just the persistence wrapper.
-    let fg_pid = backend.get_foreground_shell_pid(terminal_id);
-    let busy = fg_pid
-        .map(okena_terminal::terminal::has_child_processes)
-        .unwrap_or(false);
-    if !busy {
-        return false;
+        return false; // feature disabled — caller does an immediate close
     }
 
     let path = match ws
@@ -108,11 +109,85 @@ pub fn try_begin(
         None => return false,
     };
 
-    // Build an informative two-line toast:
-    //
-    //   title:  Closed “make”             — what's closing
-    //   detail: okena · ~/projects/okena  — project · working directory (muted)
-    //
+    // Stable toast id reserved up front. The pending record references it now,
+    // but the toast is only actually posted later *if* the terminal turns out
+    // to be busy. Only one pending close per terminal exists at a time, so a
+    // deterministic id is safe.
+    let toast_id = format!("soft-close:{terminal_id}");
+
+    // Eject the pane from the layout immediately (PTY stays alive). This is the
+    // instant, blocking-free part the user perceives as "the terminal closed".
+    ws.begin_soft_close(focus_manager, project_id, &path, terminal_id, &toast_id, cx);
+
+    // Probe busy-ness off the GPUI thread, then resolve on the next tick.
+    let backend = backend.clone();
+    let terminals = terminals.clone();
+    let project_id = project_id.to_string();
+    let terminal_id = terminal_id.to_string();
+    let grace = Duration::from_secs(grace_secs as u64);
+
+    cx.spawn(async move |ws_weak, cx| {
+        let probe_backend = backend.clone();
+        let probe_tid = terminal_id.clone();
+        // The foreground shell pid resolves through session backends (dtach /
+        // tmux); "has a child" means the user actually has a command running,
+        // not just the persistence wrapper. Both calls can spawn subprocesses.
+        let (fg_pid, busy) = smol::unblock(move || {
+            let fg_pid = probe_backend.get_foreground_shell_pid(&probe_tid);
+            let busy = fg_pid
+                .map(okena_terminal::terminal::has_child_processes)
+                .unwrap_or(false);
+            (fg_pid, busy)
+        })
+        .await;
+
+        let _ = ws_weak.update(cx, |ws, cx| {
+            if ws.decide_pending_close(&terminal_id, busy, cx) != PendingDecision::KeepForUndo {
+                // Raced (the PTY already exited) or Finalized (idle → killed).
+                // Either way there's nothing to surface.
+                return;
+            }
+
+            // Busy: surface the undo toast and schedule the real teardown.
+            let toast = build_soft_close_toast(
+                ws, &terminals, &project_id, &terminal_id, fg_pid, &toast_id, grace,
+            );
+            ToastManager::post(toast, cx);
+
+            // Schedule the real teardown once the grace period elapses. If the
+            // user already undid or force-closed, `finalize_soft_close` returns
+            // false and the toast was already dismissed by the action handler.
+            let tid = terminal_id.clone();
+            let toast_id_timer = toast_id.clone();
+            cx.spawn(async move |ws_weak, cx| {
+                smol::Timer::after(grace).await;
+                let _ = ws_weak.update(cx, |ws, cx| {
+                    if ws.finalize_soft_close(&tid, cx) {
+                        ToastManager::dismiss(&toast_id_timer, cx);
+                    }
+                });
+            })
+            .detach();
+        });
+    })
+    .detach();
+
+    true
+}
+
+/// Build the two-line undo toast for a busy soft-close:
+///
+///   title:  Closed “make”             — what's closing
+///   detail: okena · ~/projects/okena  — project · working directory (muted)
+fn build_soft_close_toast(
+    ws: &Workspace,
+    terminals: &TerminalsRegistry,
+    project_id: &str,
+    terminal_id: &str,
+    fg_pid: Option<u32>,
+    toast_id: &str,
+    grace: Duration,
+) -> Toast {
     // Read the live OSC title + cwd under a single registry lock.
     let (osc_title, cwd) = {
         let reg = terminals.lock();
@@ -143,7 +218,6 @@ pub fn try_begin(
         })
         .unwrap_or_else(|| ("Terminal closed".to_string(), String::new()));
 
-    let grace = Duration::from_secs(grace_secs as u64);
     let actions = vec![
         ToastAction::new(
             format!("{UNDO_PREFIX}:{project_id}:{terminal_id}"),
@@ -156,32 +230,11 @@ pub fn try_begin(
             ToastActionStyle::Danger,
         ),
     ];
-    let toast = {
-        let base = Toast::info(title).with_ttl(grace).with_actions(actions);
-        if detail.is_empty() { base } else { base.with_detail(detail) }
-    };
-    let toast_id = toast.id.clone();
-
-    // Remove from the layout (PTY stays alive) and record the pending close.
-    ws.begin_soft_close(focus_manager, project_id, &path, terminal_id, &toast_id, cx);
-    ToastManager::post(toast, cx);
-
-    // Schedule the real teardown once the grace period elapses. If the user
-    // already undid or force-closed, `finalize_soft_close` returns false and
-    // the toast was already dismissed by the action handler.
-    let tid = terminal_id.to_string();
-    let toast_id_timer = toast_id;
-    cx.spawn(async move |ws_weak, cx| {
-        smol::Timer::after(grace).await;
-        let _ = ws_weak.update(cx, |ws, cx| {
-            if ws.finalize_soft_close(&tid, cx) {
-                ToastManager::dismiss(&toast_id_timer, cx);
-            }
-        });
-    })
-    .detach();
-
-    true
+    let base = Toast::info(title)
+        .with_id(toast_id)
+        .with_ttl(grace)
+        .with_actions(actions);
+    if detail.is_empty() { base } else { base.with_detail(detail) }
 }
 
 #[cfg(test)]

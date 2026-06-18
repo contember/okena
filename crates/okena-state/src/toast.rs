@@ -99,6 +99,15 @@ impl Toast {
         self
     }
 
+    /// Override the auto-generated id with a caller-chosen one. Used by the
+    /// optimistic soft-close path, which reserves a stable toast id up front
+    /// (before it knows whether a toast will actually be shown) so the same id
+    /// can later dismiss the toast on undo / kill-now / grace expiry.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
     /// Attach clickable actions (rendered as buttons, with a countdown).
     pub fn with_actions(mut self, actions: Vec<ToastAction>) -> Self {
         self.actions = actions;
