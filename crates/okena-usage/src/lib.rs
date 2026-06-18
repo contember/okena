@@ -221,20 +221,23 @@ pub fn reset_aligned_segments(
         && working.count() >= 1
         && !working.is_all()
         && (2..=8).contains(&day_units);
+    // If no working day lands in the window, `working_day_reshape` returns
+    // `None` and we fall through to the plain grid below.
+    if remap
+        && let Some(seg) = working_day_reshape(start_epoch, reset_epoch, working, now_epoch)
+    {
+        return seg;
+    }
 
     // Keep the grid legible on a thin bar: if a window spans more units than
     // this, step by a whole multiple (e.g. every 2 days), still anchored to the
-    // reset time-of-day. Reshaped grids always step one day at a time.
+    // reset time-of-day.
     let (unit_secs, max_blocks) = match unit {
         SegmentUnit::Hour => (3_600.0, 12.0),
         SegmentUnit::Day => (86_400.0, 14.0),
     };
     let units = (period_secs / unit_secs).round().max(1.0);
-    let multiplier = if remap {
-        1
-    } else {
-        (units / max_blocks).ceil().max(1.0) as i64
-    };
+    let multiplier = (units / max_blocks).ceil().max(1.0) as i64;
     let step = match unit {
         SegmentUnit::Hour => jiff::Span::new().hours(multiplier),
         SegmentUnit::Day => jiff::Span::new().days(multiplier),
@@ -258,83 +261,106 @@ pub fn reset_aligned_segments(
     bounds.reverse();
 
     let frac = |epoch: f64| ((epoch - start_epoch) / period_secs) as f32;
-
-    if !remap {
-        let dividers = bounds
-            .iter()
-            .map(|z| frac(epoch_of(z)))
-            .filter(|&f| f > 0.001 && f < 0.999)
-            .collect();
-        let epochs: Vec<f64> = bounds.iter().map(epoch_of).collect();
-        let current = epochs.windows(2).find_map(|w| {
-            (now_epoch >= w[0] && now_epoch < w[1])
-                .then(|| (frac(w[0]).max(0.0), frac(w[1]).min(1.0)))
-        });
-        return Segments {
-            dividers,
-            current,
-            time_pct: None,
-        };
-    }
-
-    // Reshape: each calendar block becomes (start, end, is_working) labelled by
-    // its start weekday, then working blocks are laid out as equal segments.
-    let blocks: Vec<(f64, f64, bool)> = bounds
-        .windows(2)
-        .map(|w| {
-            let start = epoch_of(&w[0]);
-            let end = epoch_of(&w[1]);
-            let weekday = w[0].weekday().to_monday_zero_offset() as usize % 7;
-            (start, end, working.days[weekday])
-        })
+    let dividers = bounds
+        .iter()
+        .map(|z| frac(epoch_of(z)))
+        .filter(|&f| f > 0.001 && f < 0.999)
         .collect();
-
-    let n = blocks.iter().filter(|(_, _, w)| *w).count();
-    if n == 0 {
-        // No working day fell inside this window (only possible for an odd
-        // partial window). Fall back to the plain calendar grid.
-        let dividers = bounds
-            .iter()
-            .map(|z| frac(epoch_of(z)))
-            .filter(|&f| f > 0.001 && f < 0.999)
-            .collect();
-        return Segments {
-            dividers,
-            current: None,
-            time_pct: None,
-        };
-    }
-
-    let seg_w = 1.0_f32 / n as f32;
-    let mut dividers = Vec::new();
-    let mut current = None;
-    let mut elapsed_working = 0.0_f64; // working time elapsed, in units of blocks (0..=n)
-    let mut wi = 0_usize; // index among working blocks
-    for &(start, end, is_work) in &blocks {
-        if !is_work {
-            continue;
-        }
-        let seg_start = wi as f32 * seg_w;
-        let seg_end = (wi + 1) as f32 * seg_w;
-        if wi > 0 {
-            dividers.push(seg_start);
-        }
-        if now_epoch >= start && now_epoch < end {
-            current = Some((seg_start, seg_end));
-            let frac_in = ((now_epoch - start) / (end - start)).clamp(0.0, 1.0);
-            elapsed_working = wi as f64 + frac_in;
-        } else if now_epoch >= end {
-            elapsed_working = (wi + 1) as f64;
-        }
-        wi += 1;
-    }
-    let time_pct = (elapsed_working / n as f64 * 100.0).clamp(0.0, 100.0);
-
+    let epochs: Vec<f64> = bounds.iter().map(epoch_of).collect();
+    let current = epochs.windows(2).find_map(|w| {
+        (now_epoch >= w[0] && now_epoch < w[1])
+            .then(|| (frac(w[0]).max(0.0), frac(w[1]).min(1.0)))
+    });
     Segments {
         dividers,
         current,
-        time_pct: Some(time_pct),
+        time_pct: None,
     }
+}
+
+/// Reshape a ~weekly window to one equal block per **working calendar day**.
+///
+/// Blocks are keyed by calendar date (local midnight to midnight), not by the
+/// reset time-of-day, so "today" always maps to today's block. With a reset at,
+/// say, 13:00, a reset-anchored grid would put Thursday morning in the block
+/// that *started* Wednesday — one block too early. Keying by date fixes that.
+///
+/// The window's two partial edge days together cover one weekday; we keep
+/// whichever of them has more coverage, leaving exactly one date per weekday.
+/// Working days are then laid out as equal segments in chronological order, and
+/// the pace marker advances across working days only (frozen on off-days).
+/// Returns `None` if no working day falls in the window (caller uses the plain
+/// grid instead).
+fn working_day_reshape(
+    start_epoch: f64,
+    reset_epoch: f64,
+    working: WorkingDays,
+    now_epoch: f64,
+) -> Option<Segments> {
+    let tz = jiff::tz::TimeZone::system();
+    let start_date = epoch_to_local(start_epoch)?.date();
+    let end_date = epoch_to_local(reset_epoch)?.date();
+
+    // For each weekday keep the in-window calendar date with the most coverage,
+    // so the two partial edge days collapse to a single weekday.
+    let mut best: [Option<(jiff::civil::Date, f64)>; 7] = [None; 7];
+    let mut d = start_date;
+    for _ in 0..10 {
+        let day_start = epoch_of(&d.to_zoned(tz.clone()).ok()?);
+        let next = d.tomorrow().ok()?;
+        let day_end = epoch_of(&next.to_zoned(tz.clone()).ok()?);
+        let overlap = day_end.min(reset_epoch) - day_start.max(start_epoch);
+        if overlap > 0.0 {
+            let wd = (d.weekday().to_monday_zero_offset() as usize) % 7;
+            if best[wd].is_none_or(|(_, ov)| overlap > ov) {
+                best[wd] = Some((d, overlap));
+            }
+        }
+        if d == end_date {
+            break;
+        }
+        d = next;
+    }
+
+    // The working calendar dates, chronological.
+    let mut dates: Vec<jiff::civil::Date> = (0..7)
+        .filter(|&wd| working.days[wd])
+        .filter_map(|wd| best[wd].map(|(date, _)| date))
+        .collect();
+    dates.sort();
+    let n = dates.len();
+    if n == 0 {
+        return None;
+    }
+
+    let seg_w = 1.0_f32 / n as f32;
+    let dividers: Vec<f32> = (1..n).map(|k| k as f32 * seg_w).collect();
+
+    // Place the marker by where today sits among the working dates.
+    let today = epoch_to_local(now_epoch)?.date();
+    let (current, time_pct) = if let Some(k) = dates.iter().position(|&dt| dt == today) {
+        let midnight = today
+            .to_zoned(tz.clone())
+            .ok()
+            .map(|z| epoch_of(&z))
+            .unwrap_or(now_epoch);
+        let frac = (((now_epoch - midnight) / 86_400.0).clamp(0.0, 1.0)) as f32;
+        let seg_start = k as f32 * seg_w;
+        let tp = ((k as f32 + frac) / n as f32 * 100.0).clamp(0.0, 100.0) as f64;
+        (Some((seg_start, seg_start + seg_w)), tp)
+    } else {
+        // Off-day (or outside the window): sit on the boundary after the last
+        // elapsed working day; no current-block highlight.
+        let elapsed = dates.iter().filter(|&&dt| dt < today).count();
+        let tp = (elapsed as f64 / n as f64 * 100.0).clamp(0.0, 100.0);
+        (None, tp)
+    };
+
+    Some(Segments {
+        dividers,
+        current,
+        time_pct: Some(time_pct),
+    })
 }
 
 /// The time-elapsed fraction a row will actually use: the working-day-reshaped
@@ -622,6 +648,28 @@ pub fn render_usage_row(
         })
 }
 
+/// A divider color that contrasts with whatever background sits *behind* it:
+/// a translucent dark line over a light/bright fill, a translucent light line
+/// over a dark fill or the dark empty track. Picked per-divider from the
+/// background's luminance so the grid stays visible on any theme — a single
+/// fixed color can't, since a dark cut vanishes on a dark track while a light
+/// line vanishes on a pale fill (e.g. the `neumie-contrast` gray/tan fills).
+fn divider_overlay(bg_hex: u32) -> Rgba {
+    let (r, g, b) = ThemeColors::hex_to_rgb(bg_hex);
+    let luminance = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+    if luminance < 128.0 {
+        // Dark background → a translucent white line.
+        let mut c = rgb(0xffffff);
+        c.a = 0.6;
+        c
+    } else {
+        // Light/bright background → a translucent black line.
+        let mut c = rgb(0x000000);
+        c.a = 0.5;
+        c
+    }
+}
+
 /// The 6px usage bar: base fill (nearness to cap), overage band (usage beyond
 /// the pace marker), the reset-anchored day/hour grid, the current-block
 /// highlight, and the time-elapsed marker.
@@ -650,18 +698,34 @@ pub fn render_usage_bar(
         Some((start, width, color))
     });
 
-    // Dividers cut the bar down to the popover background, so they read as
-    // notches that stay visible over any fill color (yellow/green/red) as well
-    // as the empty track — unlike a subtle border line, which disappears on a
-    // light fill.
-    let divider_color = t.bg_primary;
+    // Each divider takes a dark or light overlay depending on what's behind it
+    // at that point — the fill (base or, within the overage band, the overage
+    // color) where the bar is filled, otherwise the empty track. This keeps the
+    // grid visible across both the colored fill and the (often dominant) empty
+    // track on every theme. See [`divider_overlay`].
+    let usage_frac = clamped_usage / 100.0;
+    let track_hex = t.bg_secondary;
+    let fill_hex = base_color;
+    let overage_for_dividers = overage;
     let divider_els = seg.dividers.clone().into_iter().map(move |f| {
+        let behind = if f > usage_frac {
+            track_hex
+        } else if let Some((ostart, owidth, ocolor)) = overage_for_dividers {
+            let pct = f * 100.0;
+            if pct >= ostart && pct <= ostart + owidth {
+                ocolor
+            } else {
+                fill_hex
+            }
+        } else {
+            fill_hex
+        };
         div()
             .absolute()
             .top_0()
             .h_full()
             .w(px(1.5))
-            .bg(rgb(divider_color))
+            .bg(divider_overlay(behind))
             .left(relative(f))
     });
 
@@ -986,6 +1050,46 @@ mod tests {
     }
 
     #[test]
+    fn reshape_marker_tracks_calendar_day_not_reset_time() {
+        // Weekly window resetting Sat 2026-06-20 11:00Z, Mon–Fri working.
+        // "Now" is Thursday 2026-06-18 09:00Z. Thursday is the 4th of 5 working
+        // days, so the marker must land in the 4th block (second-to-last),
+        // *not* the 3rd — the reset is at 11:00/13:00 local, but blocks key off
+        // the calendar date, not the reset time-of-day.
+        let reset = 1_781_953_200.0_f64; // 2026-06-20T11:00:00Z (Sat)
+        let now = 1_781_773_200.0_f64; // 2026-06-18T09:00:00Z (Thu)
+        let start = reset - 7.0 * 86_400.0;
+        let mon_fri = WorkingDays {
+            days: [true, true, true, true, true, false, false],
+        };
+        let seg = working_day_reshape(start, reset, mon_fri, now).expect("reshape");
+        assert_eq!(seg.dividers, vec![0.2, 0.4, 0.6, 0.8], "5 equal blocks");
+        let (cs, ce) = seg.current.expect("Thursday is a working day → highlighted");
+        assert!(
+            (cs - 0.6).abs() < 1e-4 && (ce - 0.8).abs() < 1e-4,
+            "Thursday must be the 4th block, got ({cs}, {ce})"
+        );
+        let tp = seg.time_pct.expect("working pace");
+        assert!((60.0..80.0).contains(&tp), "marker mid-Thursday, got {tp}");
+    }
+
+    #[test]
+    fn reshape_off_day_pegs_to_boundary() {
+        // Same window, but "now" is Saturday 2026-06-20 09:00Z (an off-day,
+        // after the whole Mon–Fri week): the marker pegs to 100% with no
+        // current-block highlight.
+        let reset = 1_781_953_200.0_f64;
+        let now = 1_781_946_000.0_f64; // 2026-06-20T09:00:00Z (Sat)
+        let start = reset - 7.0 * 86_400.0;
+        let mon_fri = WorkingDays {
+            days: [true, true, true, true, true, false, false],
+        };
+        let seg = working_day_reshape(start, reset, mon_fri, now).expect("reshape");
+        assert!(seg.current.is_none(), "off-day → no highlight");
+        assert_eq!(seg.time_pct, Some(100.0), "all 5 working days elapsed");
+    }
+
+    #[test]
     fn hour_window_never_reshapes() {
         let mon_fri = WorkingDays {
             days: [true, true, true, true, true, false, false],
@@ -1011,6 +1115,19 @@ mod tests {
         let on_pace = abs_severity(65.0).max(pace_severity(65.0, Some(64.0)));
         assert_eq!(ahead, Severity::Critical, "over-pace 65% must be critical");
         assert_eq!(on_pace, Severity::Warning, "on-pace 65% stays warning");
+    }
+
+    #[test]
+    fn divider_overlay_contrasts_background() {
+        // Dark track (neumie-contrast bg_secondary) → light line.
+        let on_dark = divider_overlay(0x252526);
+        assert!(on_dark.r > 0.5 && on_dark.a > 0.0, "dark bg → light divider");
+        // Pale fill (neumie-contrast metric_normal/warning) → dark line.
+        let on_pale = divider_overlay(0xa0a0a0);
+        assert!(on_pale.r < 0.5 && on_pale.a > 0.0, "light bg → dark divider");
+        // Bright yellow fill → still a dark line (the earlier complaint).
+        let on_yellow = divider_overlay(0xe5e510);
+        assert!(on_yellow.r < 0.5, "bright bg → dark divider");
     }
 
     #[test]

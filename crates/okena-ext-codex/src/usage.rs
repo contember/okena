@@ -161,7 +161,14 @@ fn parse_window(v: &serde_json::Value) -> Option<RateLimitWindow> {
         .as_u64()
         .or_else(|| v["window_minutes"].as_u64().map(|v| v.saturating_mul(60)))
         .unwrap_or(0);
-    let reset_at = v["reset_at"].as_u64().unwrap_or(0);
+    // The live `/codex/usage` API uses `reset_at`; the local `token_count`
+    // session events use `resets_at` (plural). Accept either — missing it leaves
+    // the bar with no reset anchor, which silently disables the day/hour grid
+    // and the working-days reshape (the bar collapses to a single block).
+    let reset_at = v["reset_at"]
+        .as_u64()
+        .or_else(|| v["resets_at"].as_u64())
+        .unwrap_or(0);
 
     let time_elapsed_pct = if window_seconds > 0 && reset_at > 0 {
         let now = std::time::SystemTime::now()
@@ -770,4 +777,32 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn parse_window_reads_session_field_names() {
+        // Local `token_count` session events use `window_minutes` + `resets_at`
+        // (plural). Both must be picked up; missing the reset anchor used to
+        // collapse the weekly bar to a single block.
+        let v = serde_json::json!({
+            "used_percent": 3.0,
+            "window_minutes": 10080,
+            "resets_at": 1782371508u64,
+        });
+        let w = parse_window(&v).expect("window should parse");
+        assert_eq!(w.used_percent, 3);
+        assert_eq!(w.window_seconds, 10080 * 60, "weekly window = 7 days");
+        assert_eq!(w.reset_at, 1782371508, "must read `resets_at` (plural)");
+    }
+
+    #[test]
+    fn parse_window_reads_live_api_field_names() {
+        // The live `/codex/usage` API uses `limit_window_seconds` + `reset_at`.
+        let v = serde_json::json!({
+            "used_percent": 50,
+            "limit_window_seconds": 604800,
+            "reset_at": 1782371508u64,
+        });
+        let w = parse_window(&v).expect("window should parse");
+        assert_eq!(w.window_seconds, 604800);
+        assert_eq!(w.reset_at, 1782371508);
+    }
 }
