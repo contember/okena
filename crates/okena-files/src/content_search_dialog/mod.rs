@@ -117,6 +117,12 @@ pub struct ContentSearchDialog {
     /// Prevents re-anchoring the scroll on every render — without this,
     /// the user can't scroll past the highlighted row.
     pub(super) last_scrolled_match: Option<(PathBuf, usize)>,
+    /// In-page search ("search in page") over the preview pane (Cmd/Ctrl+F).
+    pub(super) preview_search: Option<crate::in_page_search::InPageSearch>,
+    /// Signature `(file, line_count, query, case_sensitive)` the preview search
+    /// matches were last computed for. Lets render recompute only when the
+    /// previewed file (incl. async load), query, or case mode actually changes.
+    pub(super) preview_search_sig: Option<(PathBuf, usize, String, bool)>,
 }
 
 impl ContentSearchDialog {
@@ -218,6 +224,8 @@ impl ContentSearchDialog {
             preview_selection: CodeSelection::default(),
             preview_file: None,
             last_scrolled_match: None,
+            preview_search: None,
+            preview_search_sig: None,
         };
 
         // Run initial search if we have a restored query

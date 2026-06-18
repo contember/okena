@@ -122,7 +122,7 @@ impl DiffViewer {
     }
 
     /// Effective view mode (forced unified for new/deleted files).
-    fn effective_view_mode(&self) -> super::types::DiffViewMode {
+    pub(super) fn effective_view_mode(&self) -> super::types::DiffViewMode {
         let is_new_or_deleted = self
             .file_stats
             .get(self.selected_file_index)

@@ -10,6 +10,7 @@ mod nav;
 pub mod provider;
 mod render;
 mod scrollbar;
+mod search;
 mod selection_ops;
 mod side_by_side;
 mod syntax;
@@ -34,6 +35,22 @@ gpui::actions!(okena_git, [Cancel]);
 
 /// Type alias for diff selection (line index, column).
 type Selection = SelectionState<(usize, usize)>;
+
+/// Signature the in-page search matches were last computed for. Lets render
+/// recompute only when content-affecting state, the query, or case mode change:
+/// `(file_index, commit_index, diff_mode, ignore_whitespace, view_mode,
+/// items_len, sbs_len, query, case_sensitive)`.
+type DiffSearchSig = (
+    usize,
+    usize,
+    DiffMode,
+    bool,
+    DiffViewMode,
+    usize,
+    usize,
+    String,
+    bool,
+);
 
 /// Width of file tree sidebar.
 const SIDEBAR_WIDTH: f32 = 240.0;
@@ -107,6 +124,10 @@ pub struct DiffViewer {
     pub(super) commit_hash_menu: Option<context_menu::CommitHashContextMenu>,
     /// Right-click context menu over a non-empty text selection.
     pub(super) selection_context_menu: Option<Point<Pixels>>,
+    /// In-page search ("search in page", Cmd/Ctrl+F) over the diff content.
+    pub(super) search: Option<okena_files::in_page_search::InPageSearch>,
+    /// See [`DiffSearchSig`].
+    pub(super) search_sig: Option<DiffSearchSig>,
 }
 
 impl DiffViewer {
@@ -167,6 +188,8 @@ impl DiffViewer {
             is_detached: false,
             commit_hash_menu: None,
             selection_context_menu: None,
+            search: None,
+            search_sig: None,
         };
 
         if !provider.is_git_repo() {

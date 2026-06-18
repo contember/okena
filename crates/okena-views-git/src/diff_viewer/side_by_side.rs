@@ -303,6 +303,9 @@ impl DiffViewer {
                 let has_selection = self.selection_side == Some(side)
                     && self.selection.line_has_selection(sbs_line_index);
 
+                // In-page search highlights for this cell (row*2 + side).
+                let search_bg = self.search_ranges_sbs(sbs_line_index, side, t);
+
                 let (content_div, text_layout) = if has_selection {
                     self.render_spans_with_combined_highlight(
                         &c.spans,
@@ -310,6 +313,7 @@ impl DiffViewer {
                         word_bg,
                         &c.plain_text,
                         sbs_line_index,
+                        &search_bg,
                         line_height,
                     )
                 } else {
@@ -317,6 +321,7 @@ impl DiffViewer {
                         &c.spans,
                         &c.changed_ranges,
                         word_bg,
+                        &search_bg,
                         line_height,
                     )
                 };
@@ -452,14 +457,17 @@ impl DiffViewer {
         spans: &[super::types::HighlightedSpan],
         changed_ranges: &[ChangedRange],
         word_bg: Option<Rgba>,
+        extra_bg: &[(std::ops::Range<usize>, Hsla)],
         line_height: f32,
     ) -> (Div, TextLayout) {
-        let bg_ranges = self.compute_word_bg_ranges(spans, changed_ranges, word_bg);
+        let mut bg_ranges = self.compute_word_bg_ranges(spans, changed_ranges, word_bg);
+        bg_ranges.extend_from_slice(extra_bg);
         self.render_scrollable_content(spans, &bg_ranges, line_height)
     }
 
     /// Render spans with both word-level diff and selection highlighting merged.
     /// Returns `(Div, TextLayout)` for position-to-index mapping.
+    #[allow(clippy::too_many_arguments)]
     fn render_spans_with_combined_highlight(
         &self,
         spans: &[super::types::HighlightedSpan],
@@ -467,10 +475,12 @@ impl DiffViewer {
         word_bg: Option<Rgba>,
         plain_text: &str,
         line_index: usize,
+        extra_bg: &[(std::ops::Range<usize>, Hsla)],
         line_height: f32,
     ) -> (Div, TextLayout) {
         let mut bg_ranges = selection_bg_ranges(&self.selection, line_index, plain_text.len());
         bg_ranges.extend(self.compute_word_bg_ranges(spans, changed_ranges, word_bg));
+        bg_ranges.extend_from_slice(extra_bg);
 
         self.render_scrollable_content(spans, &bg_ranges, line_height)
     }
