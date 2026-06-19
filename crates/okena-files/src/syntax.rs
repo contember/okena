@@ -228,6 +228,14 @@ pub fn highlight_content(
     max_lines: usize,
     is_dark: bool,
 ) -> Vec<HighlightedLine> {
+    // Markdown/MDX use the tree-sitter path (≈20× faster than syntect's
+    // Markdown grammar); shared with the diff viewer.
+    if crate::markdown_highlight::is_markdown_path(path) {
+        return crate::markdown_highlight::highlight_markdown_content(
+            content, syntax_set, max_lines, is_dark,
+        );
+    }
+
     let syntax = get_syntax_for_path(path, syntax_set);
     let theme = load_syntax_theme(is_dark);
     let mut highlighter = HighlightLines::new(syntax, theme);

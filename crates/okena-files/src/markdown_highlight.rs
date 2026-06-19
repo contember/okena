@@ -18,7 +18,7 @@
 //! per-line `HashMap<line, Vec<HighlightedSpan>>` so the diff viewer is unchanged.
 
 use crate::syntax::{
-    HighlightedSpan, default_text_color, highlight_line, load_syntax_theme,
+    HighlightedLine, HighlightedSpan, default_text_color, highlight_line, load_syntax_theme,
     map_extension_to_syntax,
 };
 use gpui::Rgba;
@@ -50,19 +50,56 @@ pub fn is_markdown_path(path: &Path) -> bool {
     )
 }
 
-/// Pre-highlight a full Markdown/MDX file, returning 1-based line number ->
-/// spans (same shape and line numbering as [`crate::syntax`]'s syntect path).
+/// Pre-highlight a full Markdown/MDX file for the **diff viewer**, returning
+/// 1-based line number -> spans (same shape and line numbering as
+/// [`crate::syntax`]'s syntect path). All lines are highlighted, since diff
+/// line lookups are by arbitrary line number.
 pub fn highlight_markdown_file(
     content: &str,
     syntax_set: &SyntaxSet,
     is_dark: bool,
 ) -> HashMap<usize, Vec<HighlightedSpan>> {
+    markdown_line_spans(content, syntax_set, is_dark, 0)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, spans)| (idx + 1, spans))
+        .collect()
+}
+
+/// Pre-highlight Markdown/MDX for the **file viewer / content-search preview**,
+/// returning ordered [`HighlightedLine`]s (spans + plain text), capped at
+/// `max_lines` (0 = unlimited). Same output shape as
+/// [`crate::syntax::highlight_content`].
+pub fn highlight_markdown_content(
+    content: &str,
+    syntax_set: &SyntaxSet,
+    max_lines: usize,
+    is_dark: bool,
+) -> Vec<HighlightedLine> {
+    markdown_line_spans(content, syntax_set, is_dark, max_lines)
+        .into_iter()
+        .map(|spans| {
+            let plain_text = spans.iter().map(|s| s.text.as_str()).collect();
+            HighlightedLine { spans, plain_text }
+        })
+        .collect()
+}
+
+/// Shared core: produce per-line spans in document order. `max_lines == 0`
+/// means all lines. The whole document is always parsed (tree-sitter is cheap
+/// and parse state is global); only the emitted line count is capped.
+fn markdown_line_spans(
+    content: &str,
+    syntax_set: &SyntaxSet,
+    is_dark: bool,
+    max_lines: usize,
+) -> Vec<Vec<HighlightedSpan>> {
     let default = default_text_color(is_dark);
 
     // Parsing can in principle fail (it cannot in practice for these grammars);
     // degrade to uncoloured text rather than panicking.
     let Some(tree) = MarkdownParser::default().parse(content.as_bytes(), None) else {
-        return plain_lines(content, default);
+        return plain_line_spans(content, default, max_lines);
     };
     let src = content.as_bytes();
 
@@ -109,14 +146,16 @@ pub fn highlight_markdown_file(
 
     // 4. Assemble per-line spans. Code-content lines use their syntect spans;
     //    everything else is built from the colour buffer.
-    let mut result = HashMap::with_capacity(line_starts.len());
+    let mut result = Vec::with_capacity(line_starts.len());
     let mut offset = 0usize;
     for (idx, line) in LinesWithEndings::from(content).enumerate() {
-        let line_num = idx + 1;
-        if let Some(spans) = code_lines.remove(&line_num) {
-            result.insert(line_num, spans);
+        if max_lines > 0 && idx >= max_lines {
+            break;
+        }
+        if let Some(spans) = code_lines.remove(&(idx + 1)) {
+            result.push(spans);
         } else {
-            result.insert(line_num, line_spans(line, offset, &colors, default));
+            result.push(line_spans(line, offset, &colors, default));
         }
         offset += line.len();
     }
@@ -239,16 +278,19 @@ fn color_eq(a: Rgba, b: Rgba) -> bool {
 }
 
 /// Fallback when parsing fails: one default-coloured span per non-empty line.
-fn plain_lines(content: &str, default: Rgba) -> HashMap<usize, Vec<HighlightedSpan>> {
-    let mut result = HashMap::new();
+fn plain_line_spans(content: &str, default: Rgba, max_lines: usize) -> Vec<Vec<HighlightedSpan>> {
+    let mut result = Vec::new();
     for (idx, line) in LinesWithEndings::from(content).enumerate() {
+        if max_lines > 0 && idx >= max_lines {
+            break;
+        }
         let text = line.trim_end_matches(['\n', '\r']).replace('\t', "    ");
         let spans = if text.is_empty() {
             Vec::new()
         } else {
             vec![HighlightedSpan { color: default, text }]
         };
-        result.insert(idx + 1, spans);
+        result.push(spans);
     }
     result
 }
@@ -378,6 +420,25 @@ mod tests {
         let map = highlight_markdown_file(content, &set, false);
         // Three content lines (trailing newline does not create a 4th).
         assert!(map.contains_key(&1) && map.contains_key(&2) && map.contains_key(&3));
+    }
+
+    #[test]
+    fn content_shape_has_plain_text_and_respects_max_lines() {
+        let set = load_syntax_set();
+        let content = "# A\n\nb\nc\nd\n";
+
+        let lines = highlight_markdown_content(content, &set, 0, true);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0].plain_text, "# A");
+        // plain_text is exactly the concatenation of span texts on each line.
+        for line in &lines {
+            let joined: String = line.spans.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(joined, line.plain_text);
+        }
+
+        // max_lines caps the emitted line count.
+        let capped = highlight_markdown_content(content, &set, 2, true);
+        assert_eq!(capped.len(), 2);
     }
 
     #[test]
