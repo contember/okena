@@ -24,10 +24,12 @@ use crate::syntax::{
 use gpui::Rgba;
 use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::OnceLock;
 use streaming_iterator::StreamingIterator;
 use syntect::easy::HighlightLines;
-use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{Color, Highlighter, Theme};
+use syntect::parsing::{ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use tree_sitter::{Language, Query, QueryCursor};
 use tree_sitter_md::{
@@ -103,15 +105,20 @@ fn markdown_line_spans(
     };
     let src = content.as_bytes();
 
+    // Markdown colours are derived from the active syntect theme so they match
+    // how that theme renders Markdown elsewhere; captures the theme has no rule
+    // for fall back to a hand-picked palette.
+    let palette = MarkdownPalette::from_theme(load_syntax_theme(is_dark), is_dark);
+
     // 1. Collect Markdown structural captures from the block tree and every
     //    inline sub-tree. Inline trees use document-absolute byte offsets.
     let mut caps: Vec<(usize, usize, Rgba)> = Vec::new();
     if let Some(q) = block_query() {
-        collect_captures(q, tree.block_tree().root_node(), src, is_dark, &mut caps);
+        collect_captures(q, tree.block_tree().root_node(), src, &palette, &mut caps);
     }
     if let Some(q) = inline_query() {
         for inline in tree.inline_trees() {
-            collect_captures(q, inline.root_node(), src, is_dark, &mut caps);
+            collect_captures(q, inline.root_node(), src, &palette, &mut caps);
         }
     }
 
@@ -167,7 +174,7 @@ fn collect_captures(
     query: &Query,
     root: tree_sitter::Node,
     src: &[u8],
-    is_dark: bool,
+    palette: &MarkdownPalette,
     out: &mut Vec<(usize, usize, Rgba)>,
 ) {
     let names = query.capture_names();
@@ -177,7 +184,7 @@ fn collect_captures(
         for cap in m.captures {
             if let Some(color) = names
                 .get(cap.index as usize)
-                .and_then(|name| capture_color(name, is_dark))
+                .and_then(|name| palette.color(name))
             {
                 let range = cap.node.byte_range();
                 out.push((range.start, range.end, color));
@@ -311,37 +318,96 @@ fn line_of(line_starts: &[usize], byte: usize) -> usize {
     line_starts.partition_point(|&s| s <= byte).max(1)
 }
 
-/// Map a tree-sitter Markdown capture name to a colour, or `None` for captures
-/// that should use the default text colour (e.g. `@none`).
-fn capture_color(name: &str, is_dark: bool) -> Option<Rgba> {
-    let hex = if is_dark {
-        // Dracula palette, matching the dark syntect theme.
-        match name {
-            "text.title" => 0xbd93f9,        // headings — purple
-            "text.literal" => 0x50fa7b,      // inline/fenced code — green
-            "text.emphasis" => 0xf1fa8c,     // italic — yellow
-            "text.strong" => 0xffb86c,       // bold — orange
-            "text.uri" => 0x8be9fd,          // link targets — cyan
-            "text.reference" => 0xff79c6,    // link labels/text — pink
-            "string.escape" => 0xffb86c,     // escapes — orange
-            "punctuation.special" | "punctuation.delimiter" => 0x6272a4, // markers — comment grey
-            _ => return None,
+/// Markdown element colours, resolved from the active syntect theme with
+/// hand-picked fallbacks for elements the theme defines no rule for.
+struct MarkdownPalette {
+    title: Rgba,
+    strong: Rgba,
+    emphasis: Rgba,
+    literal: Rgba,
+    uri: Rgba,
+    reference: Rgba,
+    punctuation: Rgba,
+    escape: Rgba,
+}
+
+impl MarkdownPalette {
+    fn from_theme(theme: &Theme, is_dark: bool) -> Self {
+        let highlighter = Highlighter::new(theme);
+        let default_fg = theme.settings.foreground;
+        // Each Markdown element maps to the TextMate scope a Sublime/TextMate
+        // grammar would assign it; the theme's rule for that scope (if any)
+        // wins, otherwise the fallback hex keeps elements visually distinct.
+        let pick = |scope: &str, fallback: u32| {
+            resolve_scope(&highlighter, default_fg, scope).unwrap_or_else(|| rgb(fallback))
+        };
+        if is_dark {
+            // Fallbacks: Dracula palette.
+            Self {
+                title: pick("markup.heading.markdown", 0xbd93f9),
+                strong: pick("markup.bold.markdown", 0xffb86c),
+                emphasis: pick("markup.italic.markdown", 0xf1fa8c),
+                literal: pick("markup.raw.inline.markdown", 0x50fa7b),
+                uri: pick("markup.underline.link.markdown", 0x8be9fd),
+                reference: pick("string.other.link.title.markdown", 0xff79c6),
+                punctuation: pick("punctuation.definition.markdown", 0x6272a4),
+                escape: pick("constant.character.escape.markdown", 0xffb86c),
+            }
+        } else {
+            // Fallbacks: GitHub palette.
+            Self {
+                title: pick("markup.heading.markdown", 0x6f42c1),
+                strong: pick("markup.bold.markdown", 0xb31d28),
+                emphasis: pick("markup.italic.markdown", 0xe36209),
+                literal: pick("markup.raw.inline.markdown", 0x22863a),
+                uri: pick("markup.underline.link.markdown", 0x032f62),
+                reference: pick("string.other.link.title.markdown", 0x005cc5),
+                punctuation: pick("punctuation.definition.markdown", 0x6a737d),
+                escape: pick("constant.character.escape.markdown", 0xe36209),
+            }
         }
-    } else {
-        // GitHub-ish palette, matching the light syntect theme.
-        match name {
-            "text.title" => 0x6f42c1,
-            "text.literal" => 0x22863a,
-            "text.emphasis" => 0xe36209,
-            "text.strong" => 0xb31d28,
-            "text.uri" => 0x032f62,
-            "text.reference" => 0x005cc5,
-            "string.escape" => 0xe36209,
-            "punctuation.special" | "punctuation.delimiter" => 0x6a737d,
+    }
+
+    /// Colour for a tree-sitter Markdown capture, or `None` for captures that
+    /// should use the default text colour (e.g. `@none`).
+    fn color(&self, capture: &str) -> Option<Rgba> {
+        Some(match capture {
+            "text.title" => self.title,
+            "text.strong" => self.strong,
+            "text.emphasis" => self.emphasis,
+            "text.literal" => self.literal,
+            "text.uri" => self.uri,
+            "text.reference" => self.reference,
+            "punctuation.special" | "punctuation.delimiter" => self.punctuation,
+            "string.escape" => self.escape,
             _ => return None,
-        }
-    };
-    Some(rgb(hex))
+        })
+    }
+}
+
+/// Resolve a TextMate scope through a theme. Returns `None` when the theme has
+/// no specific rule (the highlighter then yields the default text colour), so
+/// the caller can fall back.
+fn resolve_scope(highlighter: &Highlighter, default_fg: Option<Color>, scope: &str) -> Option<Rgba> {
+    let stack = ScopeStack::from_str(scope).ok()?;
+    let fg = highlighter.style_for_stack(stack.as_slice()).foreground;
+    if let Some(d) = default_fg
+        && fg.r == d.r
+        && fg.g == d.g
+        && fg.b == d.b
+    {
+        return None;
+    }
+    Some(color_to_rgba(fg))
+}
+
+fn color_to_rgba(c: Color) -> Rgba {
+    Rgba {
+        r: c.r as f32 / 255.0,
+        g: c.g as f32 / 255.0,
+        b: c.b as f32 / 255.0,
+        a: c.a as f32 / 255.0,
+    }
 }
 
 fn rgb(hex: u32) -> Rgba {
@@ -420,6 +486,25 @@ mod tests {
         let map = highlight_markdown_file(content, &set, false);
         // Three content lines (trailing newline does not create a 4th).
         assert!(map.contains_key(&1) && map.contains_key(&2) && map.contains_key(&3));
+    }
+
+    #[test]
+    fn palette_derives_from_theme_with_fallback() {
+        // Dark = Dracula, which defines `markup.heading` -> cyan (#8be9fd):
+        // the heading colour must come from the theme, not the fallback purple.
+        let dark = MarkdownPalette::from_theme(load_syntax_theme(true), true);
+        assert!(
+            color_eq(dark.title, rgb(0x8be9fd)),
+            "dark heading should use Dracula's markup.heading colour"
+        );
+
+        // Light = GitHub, which has no `markup.heading` rule: the heading
+        // colour must fall back to the hand-picked palette.
+        let light = MarkdownPalette::from_theme(load_syntax_theme(false), false);
+        assert!(
+            color_eq(light.title, rgb(0x6f42c1)),
+            "light heading should fall back to the palette"
+        );
     }
 
     #[test]
