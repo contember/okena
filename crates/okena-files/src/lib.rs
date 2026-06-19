@@ -11,6 +11,7 @@ pub mod file_viewer;
 pub mod in_page_search;
 pub mod list_directory;
 pub mod list_overlay;
+pub mod markdown_highlight;
 pub mod selection;
 pub mod syntax;
 pub mod theme;

@@ -6,6 +6,7 @@ use okena_git::diff::DiffHunk;
 use okena_files::syntax::{
     default_text_color, get_syntax_for_path, highlight_line, load_syntax_theme,
 };
+use okena_files::markdown_highlight::{highlight_markdown_file, is_markdown_path};
 use gpui::Rgba;
 use std::collections::HashMap;
 use syntect::easy::HighlightLines;
@@ -57,23 +58,29 @@ pub fn process_file(
 ) -> DiffDisplayFile {
     let t_total = std::time::Instant::now();
     let path = file.display_name();
+    let path_ref = std::path::Path::new(path);
 
-    // Get syntax highlighter for this file
-    let syntax = get_syntax_for_path(std::path::Path::new(path), syntax_set);
+    // Markdown/MDX go through tree-sitter (≈20× faster than syntect's Markdown
+    // grammar); everything else uses syntect. Both paths return the same
+    // `line -> spans` map, so the rest of the pipeline is unchanged.
+    let is_markdown = is_markdown_path(path_ref);
+    let syntax = get_syntax_for_path(path_ref, syntax_set);
     let theme = load_syntax_theme(is_dark);
 
-    let t1 = std::time::Instant::now();
-    let old_highlighted = match old_content.as_ref() {
-        Some(content) => highlight_full_file(content, syntax, theme, syntax_set, is_dark),
-        None => HashMap::new(),
+    let highlight = |content: &str| -> HashMap<usize, Vec<HighlightedSpan>> {
+        if is_markdown {
+            highlight_markdown_file(content, syntax_set, is_dark)
+        } else {
+            highlight_full_file(content, syntax, theme, syntax_set, is_dark)
+        }
     };
+
+    let t1 = std::time::Instant::now();
+    let old_highlighted = old_content.as_deref().map(&highlight).unwrap_or_default();
     log::debug!("[process_file] highlight old: {:?}, lines: {}", t1.elapsed(), old_highlighted.len());
 
     let t2 = std::time::Instant::now();
-    let new_highlighted = match new_content.as_ref() {
-        Some(content) => highlight_full_file(content, syntax, theme, syntax_set, is_dark),
-        None => HashMap::new(),
-    };
+    let new_highlighted = new_content.as_deref().map(&highlight).unwrap_or_default();
     log::debug!("[process_file] highlight new: {:?}, lines: {}", t2.elapsed(), new_highlighted.len());
 
     let old_line_count = old_content.as_ref().map(|c| c.lines().count()).unwrap_or(0);

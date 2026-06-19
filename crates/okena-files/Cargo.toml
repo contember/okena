@@ -16,6 +16,13 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", package
 syntect = { version = "5", features = ["default-fancy"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 
+# Markdown highlighting: tree-sitter is ~20x faster than syntect's Markdown
+# grammar on large files. tree-sitter (0.26) and streaming-iterator are already
+# in the workspace via gpui-component, so this only adds the grammar crate.
+tree-sitter = "0.26"
+tree-sitter-md = { version = "0.5", features = ["parser"] }
+streaming-iterator = "0.1"
+
 grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"
