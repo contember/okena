@@ -66,7 +66,7 @@ impl FileViewer {
         let gutter_width = (tab.line_num_width as f32) * char_width + 16.0;
 
         let mut bg_ranges = selection_bg_ranges(&tab.selection, line_number, line.plain_text.len());
-        bg_ranges.extend(self.search_bg_ranges_for_line(line_number));
+        bg_ranges.extend(self.search_bg_ranges_for_line(line_number, t));
 
         let plain_text = line.plain_text.clone();
         let line_len = line.plain_text.len();

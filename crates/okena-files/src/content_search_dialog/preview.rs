@@ -2,13 +2,83 @@
 
 use super::{ContentSearchDialog, ResultRow, search_match_bg};
 use crate::code_view::{build_styled_text_with_backgrounds, selection_bg_ranges};
+use crate::in_page_search::{self, InPageSearch, SearchBarCallbacks};
 use crate::theme::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use okena_ui::simple_input::InputChangedEvent;
 use okena_ui::text_utils::find_word_boundaries;
 use okena_ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
+use std::rc::Rc;
 
 impl ContentSearchDialog {
+    /// Open (or refocus) the in-page search bar over the preview pane. Only
+    /// meaningful in expanded mode, where the preview is visible.
+    pub(super) fn open_preview_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ref search) = self.preview_search {
+            search.input.update(cx, |input, cx| {
+                input.select_all(cx);
+                input.focus(window, cx);
+            });
+            return;
+        }
+        let search = InPageSearch::new(None, window, cx);
+        cx.subscribe(
+            &search.input,
+            |_this: &mut Self, _, _: &InputChangedEvent, cx| {
+                // Recompute happens in render via the signature check; just
+                // request a re-render here.
+                cx.notify();
+            },
+        )
+        .detach();
+        self.preview_search = Some(search);
+        self.preview_search_sig = None;
+        cx.notify();
+    }
+
+    /// Close the preview search bar and return focus to the main query input.
+    pub(super) fn close_preview_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview_search = None;
+        self.preview_search_sig = None;
+        self.search_input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(super) fn next_preview_search(&mut self, cx: &mut Context<Self>) {
+        if let Some(search) = self.preview_search.as_mut() {
+            search.next_match();
+        }
+        self.scroll_to_preview_search_match();
+        cx.notify();
+    }
+
+    pub(super) fn prev_preview_search(&mut self, cx: &mut Context<Self>) {
+        if let Some(search) = self.preview_search.as_mut() {
+            search.prev_match();
+        }
+        self.scroll_to_preview_search_match();
+        cx.notify();
+    }
+
+    pub(super) fn toggle_preview_search_case(&mut self, cx: &mut Context<Self>) {
+        if let Some(search) = self.preview_search.as_mut() {
+            search.toggle_case();
+        }
+        // Case is part of the signature, so render will recompute.
+        self.preview_search_sig = None;
+        cx.notify();
+    }
+
+    fn scroll_to_preview_search_match(&self) {
+        if let Some(search) = self.preview_search.as_ref()
+            && let Some(cell) = search.current_cell()
+        {
+            self.preview_scroll_handle
+                .scroll_to_item(cell, ScrollStrategy::Center);
+        }
+    }
+
     /// Render the file preview panel showing the selected match's file.
     pub(super) fn render_preview_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
@@ -75,6 +145,44 @@ impl ContentSearchDialog {
             a: 0.4,
         });
 
+        // In-page search ("search in page", Cmd/Ctrl+F): recompute matches when
+        // the previewed file (incl. async load), query, or case mode changed.
+        let search_inputs = self.preview_search.as_ref().map(|search| {
+            let query = search.input.read(cx).value().to_string();
+            let case = search.case_sensitive();
+            ((file_path.clone(), line_count, query.clone(), case), query, case)
+        });
+        if let Some((sig, query, case)) = search_inputs
+            && self.preview_search_sig.as_ref() != Some(&sig)
+        {
+            let matches = in_page_search::compute_matches(
+                &query,
+                case,
+                lines.iter().map(|l| l.plain_text.as_str()),
+            );
+            if let Some(search) = self.preview_search.as_mut() {
+                search.set_matches(matches);
+            }
+            self.preview_search_sig = Some(sig);
+        }
+        let preview_search_bar: Option<AnyElement> = self.preview_search.as_ref().map(|search| {
+            in_page_search::render_search_bar(
+                search,
+                &t,
+                cx,
+                SearchBarCallbacks {
+                    on_next: Rc::new(|this: &mut Self, cx| this.next_preview_search(cx)),
+                    on_prev: Rc::new(|this: &mut Self, cx| this.prev_preview_search(cx)),
+                    on_toggle_case: Rc::new(|this: &mut Self, cx| {
+                        this.toggle_preview_search_case(cx)
+                    }),
+                    on_close: Rc::new(|this: &mut Self, window, cx| {
+                        this.close_preview_search(window, cx)
+                    }),
+                },
+            )
+        });
+
         // Find all matches in this file to highlight them all (current brighter)
         let all_matches_in_file: Vec<(usize, Vec<std::ops::Range<usize>>)> = self
             .rows
@@ -126,6 +234,8 @@ impl ContentSearchDialog {
                     .text_ellipsis()
                     .child(relative_path),
             )
+            // In-page search bar (Cmd/Ctrl+F)
+            .children(preview_search_bar)
             // File content
             .child(
                 uniform_list(
@@ -168,6 +278,9 @@ impl ContentSearchDialog {
                                             );
                                         }
                                         bg_ranges.extend(sel_bg_ranges);
+                                        if let Some(search) = this.preview_search.as_ref() {
+                                            bg_ranges.extend(search.ranges_for_cell(line_idx, &t));
+                                        }
                                         build_styled_text_with_backgrounds(
                                             &hl.spans, &bg_ranges,
                                         )

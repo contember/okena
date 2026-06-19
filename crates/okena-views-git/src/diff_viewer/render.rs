@@ -505,15 +505,10 @@ impl DiffViewer {
         let side_by_side_count = self.side_by_side_lines.len();
 
         // For new/deleted files, always use unified view (no point in split)
-        let current_stats = self.file_stats.get(self.selected_file_index);
-        let is_new_or_deleted = current_stats
-            .map(|f| f.is_new || f.is_deleted)
-            .unwrap_or(false);
-        let view_mode = if is_new_or_deleted {
-            DiffViewMode::Unified
-        } else {
-            self.view_mode
-        };
+        let view_mode = self.effective_view_mode();
+
+        // In-page search bar (recomputes matches when content/query/case change).
+        let search_bar = self.build_search_bar(view_mode, t, cx);
 
         // Horizontal scrollbar
         let scroll_x = self.scroll_x;
@@ -545,6 +540,8 @@ impl DiffViewer {
                     .text_color(rgb(t.text_secondary))
                     .child(file_path),
             )
+            // In-page search bar (Cmd/Ctrl+F)
+            .children(search_bar)
             .when(is_binary, |d| {
                 d.child(
                     div()
@@ -990,7 +987,11 @@ impl Render for DiffViewer {
         outer
             .track_focus(&focus_handle)
             .key_context("DiffViewer")
-            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| {
+                if this.search.is_some() {
+                    this.close_search(window, cx);
+                    return;
+                }
                 if this.dismiss_transient_ui(cx) {
                     return;
                 }
@@ -1002,11 +1003,14 @@ impl Render for DiffViewer {
                     this.close(cx);
                 }
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let modifiers = &event.keystroke.modifiers;
 
                 match key {
+                    "f" if modifiers.platform || modifiers.control => {
+                        this.open_search(window, cx);
+                    }
                     "tab" => this.toggle_mode(cx),
                     "s" => this.toggle_view_mode(cx),
                     "w" => this.toggle_ignore_whitespace(cx),

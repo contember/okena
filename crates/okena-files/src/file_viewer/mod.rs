@@ -547,7 +547,7 @@ pub struct FileViewer {
     /// Delete confirmation dialog state
     pub(super) delete_confirm: Option<DeleteConfirmState>,
     /// In-file search state (Ctrl+F)
-    pub(super) search_state: Option<search::FileSearchState>,
+    pub(super) search_state: Option<crate::in_page_search::InPageSearch>,
     /// True when this viewer is hosted inside a detached window.
     /// Hides the "detach" button and is set by the detached host.
     pub(super) is_detached: bool,

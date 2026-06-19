@@ -276,7 +276,9 @@ impl DiffViewer {
 
         let (line_bg, _, accent_color) = self.line_colors(line.line_type, t);
 
-        let bg_ranges = selection_bg_ranges(&self.selection, line_index, line.plain_text.len());
+        let mut bg_ranges = selection_bg_ranges(&self.selection, line_index, line.plain_text.len());
+        // In-page search highlights (cell id = item index in unified view).
+        bg_ranges.extend(self.search_ranges_unified(line_index, t));
 
         let plain_text = line.plain_text.clone();
         let line_len = line.plain_text.len();

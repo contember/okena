@@ -8,6 +8,7 @@ pub mod content_search_dialog;
 pub mod file_search;
 pub mod file_tree;
 pub mod file_viewer;
+pub mod in_page_search;
 pub mod list_directory;
 pub mod list_overlay;
 pub mod selection;

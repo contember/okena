@@ -19,14 +19,18 @@ impl Render for ContentSearchDialog {
         let focus_handle = self.focus_handle.clone();
         let project_name = self.project_fs.project_name();
 
-        // Focus search input on first render
+        // Focus search input on first render. Don't steal focus while the
+        // preview's in-page search is open (its input should keep focus).
         let search_input_focus = self.search_input.read(cx).focus_handle(cx);
-        if !search_input_focus.is_focused(window) && !self.glob_editing {
+        if !search_input_focus.is_focused(window)
+            && !self.glob_editing
+            && self.preview_search.is_none()
+        {
             self.search_input.update(cx, |input, cx| input.focus(window, cx));
         }
 
         // Shared key handler for both modes
-        let key_handler = cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+        let key_handler = cx.listener(|this, event: &KeyDownEvent, window, cx| {
             match event.keystroke.key.as_str() {
                 "up"
                     if this.select_prev() => {
@@ -37,6 +41,13 @@ impl Render for ContentSearchDialog {
                         cx.notify();
                     }
                 "enter" => this.open_selected(cx),
+                // In-page search over the preview (only visible when expanded)
+                "f" if (event.keystroke.modifiers.platform
+                    || event.keystroke.modifiers.control)
+                    && this.expanded =>
+                {
+                    this.open_preview_search(window, cx);
+                }
                 "tab" if !event.keystroke.modifiers.shift => {
                     this.expanded = !this.expanded;
                     if !this.search_input.read(cx).value().is_empty() {
@@ -44,7 +55,13 @@ impl Render for ContentSearchDialog {
                     }
                     cx.notify();
                 }
-                "escape" => this.close(cx),
+                "escape" => {
+                    if this.preview_search.is_some() {
+                        this.close_preview_search(window, cx);
+                    } else {
+                        this.close(cx);
+                    }
+                }
                 "c" if event.keystroke.modifiers.platform => {
                     if let Some(file_path) = &this.preview_file
                         && let Some(lines) = this.highlight_cache.get(file_path) {
@@ -193,7 +210,13 @@ impl Render for ContentSearchDialog {
             fullscreen_overlay("content-search-fullscreen", &t)
                 .track_focus(&focus_handle)
                 .key_context(self.config.key_context.as_str())
-                .on_action(cx.listener(|this, _: &Cancel, _window, cx| this.close(cx)))
+                .on_action(cx.listener(|this, _: &Cancel, window, cx| {
+                    if this.preview_search.is_some() {
+                        this.close_preview_search(window, cx);
+                    } else {
+                        this.close(cx);
+                    }
+                }))
                 .on_key_down(key_handler)
                 .child(header)
                 .child(
@@ -260,7 +283,13 @@ impl Render for ContentSearchDialog {
                 .key_context(self.config.key_context.as_str())
                 .items_start()
                 .pt(px(80.0))
-                .on_action(cx.listener(|this, _: &Cancel, _window, cx| this.close(cx)))
+                .on_action(cx.listener(|this, _: &Cancel, window, cx| {
+                    if this.preview_search.is_some() {
+                        this.close_preview_search(window, cx);
+                    } else {
+                        this.close(cx);
+                    }
+                }))
                 .on_key_down(key_handler)
                 .on_mouse_down(
                     MouseButton::Left,
