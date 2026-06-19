@@ -419,6 +419,9 @@ impl ProjectColumn {
                         ahead: g.ahead,
                         behind: g.behind,
                         unpushed: g.unpushed,
+                        // Not carried over the wire yet; remote projects don't
+                        // surface the "Review changes" chip.
+                        review_base: None,
                     })
             });
 

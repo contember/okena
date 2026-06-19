@@ -29,11 +29,19 @@ pub fn get_status(path: &Path) -> StatusFetch {
     let Some((lines_added, lines_removed)) = get_diff_stats(path) else {
         return StatusFetch::Transient;
     };
-    let (ahead, behind) = match count_ahead_behind(path) {
-        Some((a, b)) => (Some(a), Some(b)),
+    let unpushed = count_unpushed_commits(path);
+    let review_base = super::branch::resolve_review_base(path);
+    // Ahead/behind are measured against the review base (`origin/<default>`),
+    // not the branch's configured upstream — so the count is consistent
+    // regardless of how `@{u}` is set and matches the "review changes" diff.
+    // `None` when there's no base (HEAD is on the default branch).
+    let (ahead, behind) = match review_base.as_deref() {
+        Some(base) => match count_ahead_behind_vs(path, base) {
+            Some((a, b)) => (Some(a), Some(b)),
+            None => (None, None),
+        },
         None => (None, None),
     };
-    let unpushed = count_unpushed_commits(path);
 
     StatusFetch::Status(GitStatus {
         branch,
@@ -44,6 +52,7 @@ pub fn get_status(path: &Path) -> StatusFetch {
         ahead,
         behind,
         unpushed,
+        review_base,
     })
 }
 
@@ -280,6 +289,33 @@ pub fn count_ahead_behind(path: &Path) -> Option<(usize, usize)> {
     Some((ahead, behind))
 }
 
+/// Count commits HEAD is ahead of / behind an arbitrary base ref (e.g.
+/// `origin/main`). Returns `(ahead, behind)` where `ahead` is commits on HEAD
+/// not on `base` and `behind` is the reverse — the two sides of the three-dot
+/// `base...HEAD` symmetric difference. `None` if either tip can't be resolved.
+///
+/// Unlike [`count_ahead_behind`] (which uses the branch's configured upstream
+/// `@{u}`), this measures against a fixed base, so the numbers are stable
+/// regardless of how tracking is set up and match the "review changes" diff.
+pub fn count_ahead_behind_vs(path: &Path, base_ref: &str) -> Option<(usize, usize)> {
+    let repo = crate::gix_helpers::open(path)?;
+
+    // Count one side of a range spec (e.g. `base..HEAD`) by walking `to` with
+    // `from` hidden — mirrors [`count_unpushed_commits`].
+    let count_range = |range: &str| -> Option<usize> {
+        let spec = repo.rev_parse(range).ok()?;
+        let gix::revision::plumbing::Spec::Range { from, to } = spec.detach() else {
+            return None;
+        };
+        let walk = repo.rev_walk([to]).with_hidden([from]).all().ok()?;
+        Some(walk.filter_map(Result::ok).count())
+    };
+
+    let ahead = count_range(&format!("{base_ref}..HEAD"))?;
+    let behind = count_range(&format!("HEAD..{base_ref}"))?;
+    Some((ahead, behind))
+}
+
 /// Count commits that haven't been pushed to the branch's own remote.
 /// Compares against `origin/<branch>` rather than `@{u}` because worktree
 /// branches created from `origin/main` auto-track main, which would
@@ -453,6 +489,23 @@ mod tests {
         let (_tmp, repo) = init_temp_repo();
         // No remote, no upstream configured — must return None instead of (0,0).
         assert!(count_ahead_behind(&repo).is_none());
+    }
+
+    #[test]
+    fn count_ahead_behind_vs_counts_against_given_base() {
+        let (_tmp, repo) = init_temp_repo();
+        // Branch off main and add two commits.
+        git_in(&repo, &["checkout", "-b", "feature"]);
+        for i in 0..2 {
+            std::fs::write(repo.join(format!("f{}.txt", i)), "x").unwrap();
+            git_in(&repo, &["add", "."]);
+            git_in(
+                &repo,
+                &["-c", "commit.gpgsign=false", "commit", "-m", &format!("f{}", i)],
+            );
+        }
+        // Two commits ahead of main, none behind — independent of any upstream.
+        assert_eq!(count_ahead_behind_vs(&repo, "main"), Some((2, 0)));
     }
 
     #[test]

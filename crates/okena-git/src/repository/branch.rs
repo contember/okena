@@ -54,6 +54,36 @@ pub fn get_default_branch(repo_path: &Path) -> Option<String> {
     None
 }
 
+/// Resolve the ref to diff against for "review changes" — a three-dot
+/// `base...HEAD` diff that shows everything the current branch/worktree added
+/// since it diverged from the default branch (the standard "PR diff").
+///
+/// Prefers `origin/<default>` so the review matches what an eventual PR would
+/// show; falls back to the local `<default>` branch. Returns `None` when there
+/// is no sensible base — no default branch is resolvable, or HEAD is already on
+/// the default branch (reviewing it against itself would be empty).
+pub fn resolve_review_base(repo_path: &Path) -> Option<String> {
+    let default = get_default_branch(repo_path)?;
+
+    // Don't offer reviewing the default branch against itself.
+    if let Some(current) = super::status::get_current_branch(repo_path)
+        && current == default {
+        return None;
+    }
+
+    let repo = crate::gix_helpers::open(repo_path)?;
+
+    // Prefer the pushed ref so the review matches what a PR would diff against.
+    if repo.find_reference(&format!("refs/remotes/origin/{}", default)).is_ok() {
+        return Some(format!("origin/{}", default));
+    }
+    // Fall back to the local default branch.
+    if repo.find_reference(&format!("refs/heads/{}", default)).is_ok() {
+        return Some(default);
+    }
+    None
+}
+
 /// Rebase the current branch onto a target branch.
 /// Automatically aborts on failure.
 pub fn rebase_onto(worktree_path: &Path, target_branch: &str) -> GitResult<()> {
@@ -404,5 +434,26 @@ mod tests {
         let (_tmp, repo) = init_temp_repo();
         // No origin/HEAD exists — should fall back to local "main".
         assert_eq!(get_default_branch(&repo).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn resolve_review_base_is_none_on_default_branch() {
+        let (_tmp, repo) = init_temp_repo();
+        // HEAD is on "main" (the default branch) — nothing to review against.
+        assert_eq!(resolve_review_base(&repo), None);
+    }
+
+    #[test]
+    fn resolve_review_base_falls_back_to_local_default_on_feature_branch() {
+        let (_tmp, repo) = init_temp_repo();
+        create_and_checkout_branch(&repo, "feat/x", None).expect("create branch");
+        // No origin ref exists, so it falls back to the local default branch.
+        assert_eq!(resolve_review_base(&repo).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn resolve_review_base_returns_none_for_invalid_path() {
+        let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        assert!(resolve_review_base(&path).is_none());
     }
 }

@@ -24,6 +24,7 @@ pub use repository::{
     has_uncommitted_changes,
     get_current_branch,
     get_default_branch,
+    resolve_review_base,
     rebase_onto,
     merge_branch,
     stash_changes,
@@ -82,12 +83,13 @@ pub struct GitStatus {
     /// branch-level check-runs and statuses on the commit itself.
     #[serde(default)]
     pub ci_checks: Option<CiCheckSummary>,
-    /// Number of commits the local branch is ahead of its upstream.
-    /// `None` when there is no upstream or HEAD is detached.
+    /// Number of commits the branch is ahead of its review base
+    /// (`origin/<default>`, three-dot) — i.e. what it adds vs the base branch.
+    /// `None` when there's no base (HEAD is on the default branch / detached).
     #[serde(default)]
     pub ahead: Option<usize>,
-    /// Number of commits the local branch is behind its upstream.
-    /// `None` when there is no upstream or HEAD is detached.
+    /// Number of commits the branch is behind its review base — i.e. how stale
+    /// it is vs the base branch. `None` when there's no base.
     #[serde(default)]
     pub behind: Option<usize>,
     /// Number of commits not yet pushed to `origin/<branch>`.
@@ -98,6 +100,11 @@ pub struct GitStatus {
     /// was never pushed or remote not configured).
     #[serde(default)]
     pub unpushed: Option<usize>,
+    /// Ref to diff against for a "review changes" (three-dot `base...HEAD`)
+    /// diff — e.g. `origin/main`. `None` when there is no sensible base (HEAD
+    /// is on the default branch, or no default branch is resolvable).
+    #[serde(default)]
+    pub review_base: Option<String>,
 }
 
 /// Per-file diff summary for popover display
@@ -225,6 +232,7 @@ pub fn warm_branch_cache(path: &Path) {
             ahead: None,
             behind: None,
             unpushed: None,
+            review_base: None,
         }));
     });
 }
