@@ -20,8 +20,8 @@ pub struct TitleBar {
     title: SharedString,
     menu_open: bool,
     sidebar_open: bool,
-    /// Flag for Linux compositor-driven window move (set on mouse-down, consumed on mouse-move)
-    #[cfg(target_os = "linux")]
+    /// Flag for platform-driven window move (set on mouse-down, consumed on mouse-move).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     should_move: bool,
 }
 
@@ -33,7 +33,7 @@ impl TitleBar {
             title: title.into(),
             menu_open: false,
             sidebar_open: true,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             should_move: false,
         }
     }
@@ -263,38 +263,40 @@ impl Render for TitleBar {
             .border_b_1()
             .border_color(rgb(t.border))
             // Mark titlebar as drag region - GPUI maps this to HTCAPTION on Windows
-            // (enabling native snap gestures, unmaximize-on-drag) and platform-native
-            // drag on other platforms.
+            // (enabling native snap gestures and unmaximize-on-drag).
             .window_control_area(WindowControlArea::Drag)
-            // On Linux, WindowControlArea::Drag is a no-op (GPUI doesn't wire
-            // the hit-test callback), so use a mouse-down → mouse-move pattern
-            // to start a compositor-native window move. The move is deferred to
-            // mouse-move so that double-click to maximize still works.
-            .when(cfg!(target_os = "linux"), |d| {
+            // On macOS and Linux, WindowControlArea::Drag is not wired through
+            // the platform hit-test callback, so start a platform-native window
+            // move from mouse movement after the initial press. Deferring the
+            // move keeps double-click behavior available.
+            .when(cfg!(any(target_os = "linux", target_os = "macos")), |d| {
                 d
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _cx| {
-                        #[cfg(target_os = "linux")]
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
                         { this.should_move = true; }
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                         { let _ = this; }
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _cx| {
-                        #[cfg(target_os = "linux")]
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
                         { this.should_move = false; }
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                         { let _ = this; }
                     }))
                     .on_mouse_move(cx.listener(|this, _, window, _cx| {
-                        #[cfg(target_os = "linux")]
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
                         if this.should_move {
                             this.should_move = false;
                             window.start_window_move();
                         }
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                         { let _ = (this, window); }
                     }))
                     .on_click(|event: &ClickEvent, window, _| {
                         if event.click_count() == 2 {
+                            #[cfg(target_os = "macos")]
+                            window.titlebar_double_click();
+                            #[cfg(target_os = "linux")]
                             window.zoom_window();
                         }
                     })

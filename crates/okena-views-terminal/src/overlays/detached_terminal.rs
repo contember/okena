@@ -186,9 +186,9 @@ impl Render for DetachedTerminalView {
             .child(
                 // Header bar - draggable for window move. Mirrors the main app
                 // titlebar: WindowControlArea::Drag handles Windows (HTCAPTION,
-                // enabling native snap and unmaximize-on-drag) and macOS;
-                // start_window_move is a Linux-only fallback since the
-                // hit-test callback isn't wired there.
+                // enabling native snap and unmaximize-on-drag); start_window_move
+                // is the macOS/Linux fallback since their hit-test callback
+                // doesn't consume WindowControlArea::Drag.
                 div()
                     .h(px(35.0))
                     .pl(traffic_light_padding)
@@ -200,7 +200,7 @@ impl Render for DetachedTerminalView {
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .window_control_area(WindowControlArea::Drag)
-                    .when(cfg!(target_os = "linux"), |d| {
+                    .when(cfg!(any(target_os = "linux", target_os = "macos")), |d| {
                         d.on_mouse_down(MouseButton::Left, |_, window, _cx| {
                             window.start_window_move();
                         })

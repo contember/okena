@@ -42,9 +42,8 @@ pub fn fullscreen_panel(id: impl Into<SharedString>, t: &ThemeColors) -> Statefu
 
 /// A spacer that always fills remaining flex space. When `enabled` is true
 /// the spacer also acts as a drag handle for window move, mirroring the
-/// main app titlebar: `WindowControlArea::Drag` (HTCAPTION on Windows,
-/// platform-native drag on macOS) plus a Linux mouse-move fallback since
-/// `WindowControlArea::Drag` is a no-op there.
+/// main app titlebar: `WindowControlArea::Drag` (HTCAPTION on Windows)
+/// plus an explicit platform move fallback on macOS and Linux.
 pub fn window_drag_spacer(enabled: bool) -> Stateful<Div> {
     div()
         .id("window-drag-spacer")
@@ -52,7 +51,7 @@ pub fn window_drag_spacer(enabled: bool) -> Stateful<Div> {
         .h_full()
         .when(enabled, |d| {
             d.window_control_area(WindowControlArea::Drag)
-                .when(cfg!(target_os = "linux"), |d| {
+                .when(cfg!(any(target_os = "linux", target_os = "macos")), |d| {
                     d.on_mouse_down(MouseButton::Left, |_, window, _cx| {
                         window.start_window_move();
                     })
