@@ -738,6 +738,48 @@ fn test_osc52_write_does_not_enqueue_read() {
 }
 
 #[test]
+fn test_xtwinops_14t_reports_text_area_size_in_pixels() {
+    // Explicit size so the pixel math is unambiguous: 80 cols x 24 rows at
+    // 8x16 px cells → text area is 640 px wide and 384 px tall.
+    let size = TerminalSize {
+        cols: 80,
+        rows: 24,
+        cell_width: 8.0,
+        cell_height: 16.0,
+    };
+    let transport = Arc::new(CapturingTransport::new());
+    let terminal = Terminal::new("t".into(), size, transport.clone(), "/tmp".into());
+
+    // CSI 14 t — report text-area size in pixels.
+    terminal.process_output(b"\x1b[14t");
+
+    let writes = transport.writes();
+    assert_eq!(writes.len(), 1, "expected exactly one PTY reply");
+    // Reply is `CSI 4 ; <height> ; <width> t` = rows*cell_height ; cols*cell_width.
+    assert_eq!(writes[0], b"\x1b[4;384;640t");
+}
+
+#[test]
+fn test_xtwinops_18t_still_reports_size_in_cells() {
+    // No regression: CSI 18 t (size in cells) keeps replying via PtyWrite.
+    let size = TerminalSize {
+        cols: 80,
+        rows: 24,
+        cell_width: 8.0,
+        cell_height: 16.0,
+    };
+    let transport = Arc::new(CapturingTransport::new());
+    let terminal = Terminal::new("t".into(), size, transport.clone(), "/tmp".into());
+
+    terminal.process_output(b"\x1b[18t");
+
+    let writes = transport.writes();
+    assert_eq!(writes.len(), 1, "expected exactly one PTY reply");
+    // Reply is `CSI 8 ; <rows> ; <cols> t`.
+    assert_eq!(writes[0], b"\x1b[8;24;80t");
+}
+
+#[test]
 fn test_xtversion_responds_with_okena_name() {
     set_app_version("0.20.0-test");
 

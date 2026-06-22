@@ -45,7 +45,7 @@ pub use types::{
 
 pub use osc_sidecar::TerminalNotification;
 
-use event_listener::{ClipboardQueues, ZedEventListener};
+use event_listener::{ClipboardQueues, CurrentState, ZedEventListener};
 use osc_sidecar::OscSidecar;
 use prompt_marks::{PromptSidecar, PromptTracker};
 use types::FocusReportState;
@@ -347,6 +347,7 @@ impl Terminal {
         let pending_clipboard = Arc::new(Mutex::new(Vec::new()));
         let pending_clipboard_reads = Arc::new(Mutex::new(Vec::new()));
         let palette = Arc::new(Mutex::new(None));
+        let resize_state = Arc::new(Mutex::new(ResizeState::new(size)));
         let event_listener = ZedEventListener::new(
             title.clone(),
             has_bell.clone(),
@@ -355,7 +356,10 @@ impl Terminal {
                 writes: pending_clipboard.clone(),
                 reads: pending_clipboard_reads.clone(),
             },
-            palette.clone(),
+            CurrentState {
+                palette: palette.clone(),
+                resize_state: resize_state.clone(),
+            },
             transport.clone(),
             terminal_id.clone(),
         );
@@ -376,7 +380,7 @@ impl Terminal {
             term: Arc::new(Mutex::new(term)),
             processor: Mutex::new(Processor::new()),
             terminal_id,
-            resize_state: Arc::new(Mutex::new(ResizeState::new(size))),
+            resize_state,
             transport,
             selection_state: Mutex::new(SelectionState::default()),
             scroll_offset: Mutex::new(0),
