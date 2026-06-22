@@ -11,8 +11,9 @@ use crate::GitStatus;
 /// with `(0, 0)` whenever the gix status walk briefly fails (lock contention
 /// with a concurrent `git add`, partial `.git/index` rewrite, etc).
 pub enum StatusFetch {
-    /// Got a fresh reading.
-    Status(GitStatus),
+    /// Got a fresh reading. Boxed because `GitStatus` dwarfs the other
+    /// (data-less) variants — see `clippy::large_enum_variant`.
+    Status(Box<GitStatus>),
     /// Path is definitively not inside a git repository.
     NotRepo,
     /// Transient failure — caller should keep the last known cached value.
@@ -43,7 +44,7 @@ pub fn get_status(path: &Path) -> StatusFetch {
         None => (None, None),
     };
 
-    StatusFetch::Status(GitStatus {
+    StatusFetch::Status(Box::new(GitStatus {
         branch,
         lines_added,
         lines_removed,
@@ -53,7 +54,7 @@ pub fn get_status(path: &Path) -> StatusFetch {
         behind,
         unpushed,
         review_base,
-    })
+    }))
 }
 
 /// Check if a worktree/repo has uncommitted changes (staged, unstaged, or untracked).

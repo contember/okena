@@ -196,6 +196,7 @@ pub fn refresh_git_status(path: &Path) -> Option<GitStatus> {
     let path_buf = path.to_path_buf();
     match repository::get_status(path) {
         repository::StatusFetch::Status(s) => {
+            let s = *s;
             with_cache(|cache| { cache.insert(path_buf, Some(s.clone())); });
             Some(s)
         }
