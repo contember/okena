@@ -210,6 +210,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     }
 
             let app_cursor_mode = terminal.is_app_cursor_mode();
+            let kitty = terminal.kitty_keyboard_flags();
             let key_event = KeyEvent {
                 key: event.keystroke.key.clone(),
                 key_char: event.keystroke.key_char.clone(),
@@ -220,7 +221,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     platform: event.keystroke.modifiers.platform,
                 },
             };
-            if let Some(input) = key_to_bytes(&key_event, app_cursor_mode) {
+            if let Some(input) = key_to_bytes(&key_event, app_cursor_mode, kitty) {
                 terminal.send_bytes(&input);
             }
         }

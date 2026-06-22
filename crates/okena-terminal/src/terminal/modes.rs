@@ -25,6 +25,19 @@ impl Terminal {
         term.mode().contains(TermMode::APP_CURSOR)
     }
 
+    /// Active kitty keyboard protocol enhancement flags requested by the app.
+    /// Only the level-1 "disambiguate escape codes" flag is honored today; the
+    /// higher progressive-enhancement levels are a follow-up.
+    pub fn kitty_keyboard_flags(&self) -> crate::input::KittyKeyboardFlags {
+        crate::input::KittyKeyboardFlags {
+            disambiguate_escape_codes: self
+                .term
+                .lock()
+                .mode()
+                .contains(TermMode::DISAMBIGUATE_ESC_CODES),
+        }
+    }
+
     /// Check if terminal is using the alternate screen buffer.
     /// TUI apps (vim, less, htop, Claude Code CLI) use alternate screen.
     pub fn is_alt_screen(&self) -> bool {

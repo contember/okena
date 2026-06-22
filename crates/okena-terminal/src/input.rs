@@ -19,12 +19,34 @@ pub struct KeyEvent {
     pub modifiers: KeyModifiers,
 }
 
+/// Active kitty keyboard protocol enhancement flags (read from the terminal mode).
+/// Only `disambiguate_escape_codes` is honored today; the other progressive-
+/// enhancement levels are a follow-up, so this struct intentionally carries
+/// just that one flag for now.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KittyKeyboardFlags {
+    pub disambiguate_escape_codes: bool,
+}
+
 /// Convert a key event to terminal input bytes.
 ///
 /// `app_cursor_mode`: When true, arrow keys send SS3 sequences (\x1bOA) instead of CSI (\x1b[A).
 /// This should be true when the terminal is in application cursor keys mode (DECCKM),
 /// which is used by applications like less, vim, htop, etc.
-pub fn key_to_bytes(event: &KeyEvent, app_cursor_mode: bool) -> Option<Vec<u8>> {
+///
+/// `kitty`: Active kitty keyboard protocol flags. When `disambiguate_escape_codes`
+/// is set, the ambiguous keys (Esc, ctrl/alt+key, modified Enter/Tab/Backspace) are
+/// reported as `CSI u` sequences before the legacy logic runs.
+pub fn key_to_bytes(
+    event: &KeyEvent,
+    app_cursor_mode: bool,
+    kitty: KittyKeyboardFlags,
+) -> Option<Vec<u8>> {
+    if kitty.disambiguate_escape_codes
+        && let Some(bytes) = kitty_disambiguate_bytes(event) {
+        return Some(bytes);
+    }
+
     let mods = &event.modifiers;
 
     // Handle Ctrl+key combinations for letters (produces control characters)
@@ -168,4 +190,176 @@ pub fn key_to_bytes(event: &KeyEvent, app_cursor_mode: bool) -> Option<Vec<u8>> 
 
     log::warn!("No input generated for key: {:?}", event.key);
     None
+}
+
+/// Encode a key as a `CSI u` sequence: `CSI code u` when unmodified, or
+/// `CSI code ; kmod u` when modifiers are held.
+fn csi_u(code: u32, kmod: u32) -> Vec<u8> {
+    if kmod == 1 {
+        format!("\x1b[{code}u").into_bytes()
+    } else {
+        format!("\x1b[{code};{kmod}u").into_bytes()
+    }
+}
+
+/// Kitty keyboard protocol level 1 ("Disambiguate escape codes").
+///
+/// Returns the `CSI u` encoding for the keys the disambiguate level rewrites:
+/// Esc (always), modified Enter/Tab/Backspace, and ctrl/alt printable keys.
+/// Returns `None` for everything else so the caller falls through to the
+/// legacy logic, which already matches kitty for arrows/Home/End and produces
+/// text for plain keys.
+fn kitty_disambiguate_bytes(event: &KeyEvent) -> Option<Vec<u8>> {
+    let mods = &event.modifiers;
+    // Kitty modifier value: 1 + bitmask (shift=1, alt=2, ctrl=4, super=8).
+    let kmod = 1
+        + (if mods.shift { 1 } else { 0 })
+        + (if mods.alt { 2 } else { 0 })
+        + (if mods.control { 4 } else { 0 })
+        + (if mods.platform { 8 } else { 0 });
+    let has_mods = kmod > 1;
+
+    match event.key.as_str() {
+        // Plain Esc is reported as `CSI 27 u` so apps can tell it from the
+        // start of an escape sequence.
+        "escape" => Some(csi_u(27, kmod)),
+        // Plain Enter stays legacy `\r`; modified Enter is disambiguated.
+        "enter" | "return" | "kp_enter" => has_mods.then(|| csi_u(13, kmod)),
+        // Plain Tab stays legacy `\t`; Shift+Tab → `\x1b[9;2u`.
+        "tab" => has_mods.then(|| csi_u(9, kmod)),
+        // Plain Backspace stays legacy; modified Backspace is disambiguated.
+        "backspace" => has_mods.then(|| csi_u(127, kmod)),
+        key => {
+            // ctrl/alt + a single printable char (ctrl+letter, alt+key,
+            // ctrl+alt+key, shift+alt+key). Plain super+key is a higher level.
+            if (mods.control || mods.alt)
+                && key.chars().count() == 1
+                && let Some(c) = key.chars().next()
+                && !c.is_control()
+            {
+                let cp = if c.is_ascii_alphabetic() {
+                    c.to_ascii_lowercase() as u32
+                } else {
+                    c as u32
+                };
+                Some(csi_u(cp, kmod))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(key: &str, key_char: Option<&str>, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            key: key.to_string(),
+            key_char: key_char.map(|s| s.to_string()),
+            modifiers: mods,
+        }
+    }
+
+    fn ctrl() -> KeyModifiers {
+        KeyModifiers { control: true, ..Default::default() }
+    }
+
+    fn shift() -> KeyModifiers {
+        KeyModifiers { shift: true, ..Default::default() }
+    }
+
+    fn on() -> KittyKeyboardFlags {
+        KittyKeyboardFlags { disambiguate_escape_codes: true }
+    }
+
+    #[test]
+    fn flag_off_keeps_legacy_bytes() {
+        let off = KittyKeyboardFlags::default();
+        assert_eq!(
+            key_to_bytes(&ev("a", None, ctrl()), false, off),
+            Some(vec![0x01])
+        );
+        assert_eq!(
+            key_to_bytes(&ev("tab", None, KeyModifiers::default()), false, off),
+            Some(b"\t".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&ev("escape", None, KeyModifiers::default()), false, off),
+            Some(b"\x1b".to_vec())
+        );
+    }
+
+    #[test]
+    fn escape_is_disambiguated() {
+        assert_eq!(
+            key_to_bytes(&ev("escape", None, KeyModifiers::default()), false, on()),
+            Some(b"\x1b[27u".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&ev("escape", None, ctrl()), false, on()),
+            Some(b"\x1b[27;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn ctrl_letters_are_disambiguated() {
+        assert_eq!(
+            key_to_bytes(&ev("i", None, ctrl()), false, on()),
+            Some(b"\x1b[105;5u".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&ev("a", None, ctrl()), false, on()),
+            Some(b"\x1b[97;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn tab_disambiguation() {
+        assert_eq!(
+            key_to_bytes(&ev("tab", None, shift()), false, on()),
+            Some(b"\x1b[9;2u".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&ev("tab", None, KeyModifiers::default()), false, on()),
+            Some(b"\t".to_vec())
+        );
+    }
+
+    #[test]
+    fn enter_disambiguation() {
+        assert_eq!(
+            key_to_bytes(&ev("enter", None, ctrl()), false, on()),
+            Some(b"\x1b[13;5u".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&ev("enter", None, KeyModifiers::default()), false, on()),
+            Some(b"\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn ctrl_backspace_is_disambiguated() {
+        assert_eq!(
+            key_to_bytes(&ev("backspace", None, ctrl()), false, on()),
+            Some(b"\x1b[127;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn plain_char_falls_through_to_text() {
+        assert_eq!(
+            key_to_bytes(&ev("a", Some("a"), KeyModifiers::default()), false, on()),
+            None
+        );
+    }
+
+    #[test]
+    fn plain_arrow_is_not_stolen() {
+        assert_eq!(
+            key_to_bytes(&ev("up", None, KeyModifiers::default()), false, on()),
+            Some(b"\x1b[A".to_vec())
+        );
+    }
 }

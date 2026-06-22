@@ -6,7 +6,7 @@
 //! - Key input handling
 //! - Focus management
 
-use okena_terminal::input::{KeyEvent, KeyModifiers, key_to_bytes};
+use okena_terminal::input::{KeyEvent, KeyModifiers, KittyKeyboardFlags, key_to_bytes};
 use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
 use okena_terminal::TerminalsRegistry;
 use crate::layout::terminal_pane::TerminalContent;
@@ -15,7 +15,11 @@ use gpui::*;
 use std::sync::Arc;
 
 /// Convert a GPUI key event to terminal input bytes.
-fn gpui_key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u8>> {
+fn gpui_key_to_bytes(
+    event: &KeyDownEvent,
+    app_cursor_mode: bool,
+    kitty: KittyKeyboardFlags,
+) -> Option<Vec<u8>> {
     let key_event = KeyEvent {
         key: event.keystroke.key.clone(),
         key_char: event.keystroke.key_char.clone(),
@@ -26,7 +30,7 @@ fn gpui_key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<
             platform: event.keystroke.modifiers.platform,
         },
     };
-    key_to_bytes(&key_event, app_cursor_mode)
+    key_to_bytes(&key_event, app_cursor_mode, kitty)
 }
 
 /// Default terminal size for overlay terminals.
@@ -95,7 +99,8 @@ pub fn create_terminal_content<V: 'static>(
 /// Returns true if input was sent.
 pub fn handle_terminal_key_input(terminal: &Terminal, event: &KeyDownEvent) -> bool {
     let app_cursor_mode = terminal.is_app_cursor_mode();
-    if let Some(input) = gpui_key_to_bytes(event, app_cursor_mode) {
+    let kitty = terminal.kitty_keyboard_flags();
+    if let Some(input) = gpui_key_to_bytes(event, app_cursor_mode, kitty) {
         terminal.send_bytes(&input);
         true
     } else {
