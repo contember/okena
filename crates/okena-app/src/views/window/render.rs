@@ -32,7 +32,9 @@ impl WindowView {
     }
 
     /// Scroll the projects grid horizontally to ensure the focused project column is visible.
-    pub(super) fn scroll_to_focused_project(&self, focused_id: Option<&str>, center: bool, cx: &Context<Self>) {
+    /// Scroll the project grid just enough to bring the focused project into
+    /// view (no-op if it is already visible). Never re-centers.
+    pub(super) fn scroll_to_focused_project(&self, focused_id: Option<&str>, cx: &Context<Self>) {
         let focused_id = match focused_id {
             Some(id) => id,
             None => return,
@@ -83,11 +85,7 @@ impl WindowView {
             f32::from(if is_rows { o.y } else { o.x })
         };
 
-        let new_offset = if center {
-            // Center the focused project in the viewport
-            let col_center = col_lead + pixel_widths[focused_idx] / 2.0;
-            -(col_center - container_size / 2.0)
-        } else {
+        let new_offset = {
             let col_trail = col_lead + pixel_widths[focused_idx];
             let viewport_lead = -current_offset_axis;
             let viewport_trail = viewport_lead + container_size;
@@ -112,9 +110,11 @@ impl WindowView {
     }
 
     pub(super) fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Execute pending center-scroll (deferred from unfocus to let layout update first).
-        // We wait until the scroll handle reports overflow (max_offset > 0), which means
-        // the layout has been recalculated with all projects visible.
+        // Restore the grid scroll position saved when project focus was entered,
+        // deferred from unfocus so the overview can re-expand first. We wait until
+        // the scroll handle reports overflow (max_offset > 0), which means the
+        // layout has been recalculated with all projects visible. This keeps the
+        // unfocused project in the same place instead of jumping it to center.
         if let Some(project_id) = self.pending_center_scroll.take() {
             let workspace = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
@@ -125,9 +125,21 @@ impl WindowView {
             let max_offset = self.projects_scroll_handle.max_offset();
             let axis_overflow = if is_rows { max_offset.y } else { max_offset.x };
             if is_zoomed || num_visible <= 1 {
-                // Still zoomed or only one project — no centering needed
+                // Still zoomed or only one project — nothing to restore.
+                self.saved_grid_offset = None;
             } else if axis_overflow > px(0.0) {
-                self.scroll_to_focused_project(Some(&project_id), true, cx);
+                if let Some(saved) = self.saved_grid_offset.take() {
+                    // Re-clamp against the freshly recomputed max offset.
+                    let off = point(
+                        saved.x.clamp(-max_offset.x, px(0.0)),
+                        saved.y.clamp(-max_offset.y, px(0.0)),
+                    );
+                    self.projects_scroll_handle.set_offset(off);
+                } else {
+                    // No saved position (e.g. focus entered before this window
+                    // observed it) — fall back to just ensuring it's visible.
+                    self.scroll_to_focused_project(Some(&project_id), cx);
+                }
             } else {
                 // Layout hasn't updated yet — re-queue for next frame
                 self.pending_center_scroll = Some(project_id);

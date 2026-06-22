@@ -147,8 +147,14 @@ pub struct WindowView {
     last_scroll_project: Option<String>,
     /// Whether a project was zoomed/focused in the last observation (for detecting unfocus)
     was_project_focused: bool,
-    /// Project ID to center-scroll to after the next layout pass
+    /// Project ID whose grid scroll position should be restored after the next
+    /// layout pass (set when exiting project focus). The overview is re-expanded
+    /// asynchronously, so the restore is deferred until the grid reports overflow.
     pending_center_scroll: Option<String>,
+    /// Grid scroll offset captured when entering project focus, restored on exit
+    /// so the project stays in the same place rather than jumping to center.
+    /// (The offset is otherwise clamped to 0 while a single project is zoomed.)
+    saved_grid_offset: Option<Point<Pixels>>,
     /// Last-known on-disk paths per local project, used to detect renames
     /// so we can refresh cached git providers / service paths.
     last_project_paths: HashMap<String, String>,
@@ -330,6 +336,7 @@ impl WindowView {
             last_scroll_project: None,
             was_project_focused: false,
             pending_center_scroll: None,
+            saved_grid_offset: None,
             last_project_paths: HashMap::new(),
             last_data_replacement_epoch,
         };
@@ -370,7 +377,15 @@ impl WindowView {
                 .focused_terminal_state()
                 .map(|f| f.project_id.clone());
 
-            // When project zoom is cleared, defer centering until after next layout pass
+            // Entering project zoom: capture the grid scroll position now (before
+            // the zoomed single-project layout clamps it to 0) so it can be
+            // restored on exit.
+            if !this.was_project_focused && is_project_focused {
+                this.saved_grid_offset = Some(this.projects_scroll_handle.offset());
+            }
+
+            // When project zoom is cleared, defer the scroll restore until after
+            // the next layout pass (the overview re-expands asynchronously).
             if this.was_project_focused && !is_project_focused {
                 this.last_scroll_project = focused_terminal_project.clone();
                 this.pending_center_scroll = focused_terminal_project;
@@ -378,7 +393,7 @@ impl WindowView {
             // When the active terminal changes project, ensure it's visible
             else if focused_terminal_project != this.last_scroll_project && focused_terminal_project.is_some() {
                 this.last_scroll_project = focused_terminal_project.clone();
-                this.scroll_to_focused_project(focused_terminal_project.as_deref(), false, cx);
+                this.scroll_to_focused_project(focused_terminal_project.as_deref(), cx);
             }
 
             this.was_project_focused = is_project_focused;
