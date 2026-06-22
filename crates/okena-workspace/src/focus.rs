@@ -323,6 +323,31 @@ impl FocusManager {
         }
     }
 
+    /// Redirect the focus that will be restored when the current modal
+    /// closes, without leaving the modal context.
+    ///
+    /// Used when the terminal a modal would return to disappears while the
+    /// modal is still open — e.g. hiding the focused project from the project
+    /// switcher. Rewrites both the visual-indicator `current_focus` and the
+    /// saved stack entry that `exit_modal` will pop, but keeps `context` as
+    /// `Modal` so the modal keeps keyboard focus.
+    ///
+    /// Calling `focus_terminal`/`clear_focus` instead would flip `context` to
+    /// `Terminal`, which (a) lets terminal panes steal keyboard focus from the
+    /// open modal on the next render and (b) makes the later `exit_modal`
+    /// short-circuit without unwinding the stack.
+    ///
+    /// No-op when not in a modal context.
+    pub fn redirect_modal_focus(&mut self, target: Option<FocusTarget>) {
+        if self.context != FocusContext::Modal {
+            return;
+        }
+        if let Some(entry) = self.focus_stack.last_mut() {
+            entry.target = target.clone();
+        }
+        self.current_focus = target;
+    }
+
     /// Clear current focus without affecting the stack.
     ///
     /// Used when focus should be removed but not restored later
@@ -457,6 +482,63 @@ mod tests {
         assert_eq!(*fm.context(), FocusContext::Terminal);
         let target = restored.unwrap();
         assert_eq!(target.project_id, "proj1");
+    }
+
+    #[test]
+    fn redirect_modal_focus_keeps_modal_and_rewrites_restore() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        // Open a modal over proj1's terminal (e.g. the project switcher).
+        fm.enter_modal();
+        assert!(fm.is_modal());
+
+        // The terminal the modal would restore disappears (its project is
+        // hidden); redirect the restore target to proj2.
+        fm.redirect_modal_focus(Some(FocusTarget::new("proj2".to_string(), vec![1])));
+
+        // Still modal — the modal keeps keyboard focus, no context flip.
+        assert!(fm.is_modal());
+        assert_eq!(*fm.context(), FocusContext::Modal);
+        // Visual-indicator focus now points at the replacement.
+        assert_eq!(fm.focused_terminal_state().unwrap().project_id, "proj2");
+
+        // Closing the modal restores the redirected target, not the old one,
+        // and properly unwinds the stack.
+        let restored = fm.exit_modal();
+        assert!(!fm.is_modal());
+        let target = restored.unwrap();
+        assert_eq!(target.project_id, "proj2");
+        assert_eq!(target.layout_path, vec![1]);
+        assert!(fm.focus_stack.is_empty());
+    }
+
+    #[test]
+    fn redirect_modal_focus_clear_restores_none_on_close() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+        fm.enter_modal();
+
+        // No replacement available — clear the focus the modal will restore.
+        fm.redirect_modal_focus(None);
+        assert!(fm.is_modal());
+        assert!(fm.focused_terminal_state().is_none());
+
+        let restored = fm.exit_modal();
+        assert!(!fm.is_modal());
+        assert!(restored.is_none());
+        assert!(fm.focused_terminal_state().is_none());
+    }
+
+    #[test]
+    fn redirect_modal_focus_is_noop_outside_modal() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        // Not in a modal — must not touch focus or context.
+        fm.redirect_modal_focus(Some(FocusTarget::new("proj2".to_string(), vec![1])));
+        assert_eq!(fm.focused_terminal_state().unwrap().project_id, "proj1");
+        assert_eq!(*fm.context(), FocusContext::Terminal);
     }
 
     #[test]

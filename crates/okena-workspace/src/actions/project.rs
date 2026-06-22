@@ -126,9 +126,29 @@ impl Workspace {
                 .map(|p| p.id.clone())
                 .collect();
             let replacement = pick_focus_replacement(&visible_before, &visible_after, project_id);
-            match replacement {
-                Some(next_id) => self.focus_first_terminal_in(focus_manager, &next_id),
-                None => focus_manager.clear_focus(),
+            if focus_manager.is_modal() {
+                // The toggle is driven from an open modal (the project
+                // switcher): the modal — not a terminal — holds keyboard
+                // focus. Refocusing a terminal now via focus_first_terminal_in
+                // /clear_focus would drop the Modal context, letting terminal
+                // panes steal keyboard focus from the switcher mid-navigation
+                // (the user then has to click to keep moving). Instead, rewrite
+                // the focus the modal restores when it closes.
+                match replacement {
+                    Some(next_id) => {
+                        if let Some(target) = self.first_terminal_target_in(&next_id) {
+                            focus_manager.redirect_modal_focus(Some(target));
+                        }
+                        // Replacement project has no terminal: leave the saved
+                        // focus as-is (matches focus_first_terminal_in's no-op).
+                    }
+                    None => focus_manager.redirect_modal_focus(None),
+                }
+            } else {
+                match replacement {
+                    Some(next_id) => self.focus_first_terminal_in(focus_manager, &next_id),
+                    None => focus_manager.clear_focus(),
+                }
             }
             cx.notify();
         }
@@ -1471,6 +1491,43 @@ mod gpui_tests {
 
         let state = fm.focused_terminal_state().expect("focus should be set");
         assert_eq!(state.project_id, "p1");
+    }
+
+    #[gpui::test]
+    fn test_hide_focused_project_from_modal_keeps_modal_and_redirects_restore(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Hiding the focused project from the project switcher (a modal) must
+        // NOT drop the Modal context — otherwise the switcher loses keyboard
+        // focus and the user has to click to keep navigating. The focus the
+        // modal restores on close is redirected to the neighbor instead.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2"), make_project("p3")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string(), "p3".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let mut fm = FocusManager::new();
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_focused_terminal(&mut fm, "p2".to_string(), vec![], cx);
+            // Open the switcher: clear_focused_terminal -> enter_modal.
+            ws.clear_focused_terminal(&mut fm, cx);
+            assert!(fm.is_modal());
+            ws.toggle_project_overview_visibility(&mut fm, WindowId::Main, "p2", cx);
+        });
+
+        // Modal context survives the hide — the switcher keeps keyboard focus.
+        assert!(fm.is_modal(), "switcher must keep keyboard focus after hiding");
+
+        // Closing the switcher restores focus to the neighbor (p3), not the
+        // now-hidden p2, and leaves the modal context.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.restore_focused_terminal(&mut fm, cx);
+        });
+        assert!(!fm.is_modal());
+        let state = fm
+            .focused_terminal_state()
+            .expect("focus should be set after close");
+        assert_eq!(state.project_id, "p3");
     }
 
     #[gpui::test]

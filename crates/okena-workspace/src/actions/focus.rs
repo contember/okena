@@ -8,7 +8,7 @@
 //! every caller threads in the focus state belonging to the window driving
 //! the action -- mutations stay scoped to that window.
 
-use crate::focus::FocusManager;
+use crate::focus::{FocusManager, FocusTarget};
 use crate::state::{Workspace, WindowId};
 use gpui::*;
 
@@ -89,6 +89,30 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Resolve the first visible terminal in a project (or its worktree
+    /// children) as a [`FocusTarget`], mirroring `focus_first_terminal_in`'s
+    /// candidate order. Returns `None` when neither the project nor any of its
+    /// worktree children has a layout.
+    ///
+    /// Unlike `focus_first_terminal_in`, this does NOT touch the
+    /// `FocusManager`, so callers that must preserve the current focus context
+    /// (e.g. redirecting a modal's restore target) can use it without flipping
+    /// out of `Modal`/`Fullscreen`.
+    pub(crate) fn first_terminal_target_in(&self, project_id: &str) -> Option<FocusTarget> {
+        // Try the project itself first, then its worktree children
+        let candidates = std::iter::once(project_id.to_string())
+            .chain(self.worktree_child_ids(project_id));
+        for id in candidates {
+            if let Some(project) = self.project(&id)
+                && let Some(layout) = project.layout.as_ref() {
+                    // Follow active tabs to the currently visible terminal
+                    let path = layout.find_visible_terminal_path();
+                    return Some(FocusTarget::new(id, path));
+                }
+        }
+        None
+    }
+
     /// Resolve a focusable project and focus its first terminal.
     ///
     /// If the project has no layout (e.g. only worktree children), drills into
@@ -98,17 +122,8 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         project_id: &str,
     ) {
-        // Try the project itself first, then its worktree children
-        let candidates = std::iter::once(project_id.to_string())
-            .chain(self.worktree_child_ids(project_id));
-        for id in candidates {
-            if let Some(project) = self.project(&id)
-                && let Some(layout) = project.layout.as_ref() {
-                    // Focus the currently visible terminal (follows active tabs)
-                    let path = layout.find_visible_terminal_path();
-                    focus_manager.focus_terminal(id, path);
-                    return;
-                }
+        if let Some(target) = self.first_terminal_target_in(project_id) {
+            focus_manager.focus_terminal(target.project_id, target.layout_path);
         }
     }
 
