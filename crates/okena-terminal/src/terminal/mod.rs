@@ -40,7 +40,7 @@ pub use resize_authority::{
 pub use transport::TerminalTransport;
 pub use types::{
     AppCursorShape, DetectedLink, PromptMark, PromptMarkKind, ResizeState, SelectionState,
-    TerminalSize,
+    TerminalProgress, TerminalProgressState, TerminalSize,
 };
 
 pub use osc_sidecar::TerminalNotification;
@@ -181,6 +181,12 @@ pub struct Terminal {
     /// thread in the PTY event loop via `take_pending_notifications`. GPUI
     /// thread only.
     pub(super) pending_notifications: Arc<Mutex<Vec<TerminalNotification>>>,
+
+    /// Active `OSC 9 ; 4` (ConEmu / Windows Terminal) progress report, or
+    /// `None` when no progress is being shown. `Arc` shared with `OscSidecar`:
+    /// the sidecar overwrites it on each `OSC 9 ; 4` (and clears it to `None`
+    /// on `st=0`), GPUI reads via `progress`. GPUI thread only.
+    pub(super) progress: Arc<Mutex<Option<TerminalProgress>>>,
 
     /// Per-renderer focus state for DEC focus reports. A terminal can appear
     /// in multiple windows, so focus reports are derived from the aggregate
@@ -328,9 +334,11 @@ impl Terminal {
 
         let reported_cwd = Arc::new(Mutex::new(None));
         let pending_notifications = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(None));
         let osc_sidecar = Mutex::new(OscSidecar::new(
             reported_cwd.clone(),
             pending_notifications.clone(),
+            progress.clone(),
             transport.clone(),
             terminal_id.clone(),
         ));
@@ -355,6 +363,7 @@ impl Terminal {
             initial_cwd,
             reported_cwd,
             pending_notifications,
+            progress,
             focus_report_state: Mutex::new(FocusReportState::default()),
             osc_sidecar,
             prompt_sidecar: Mutex::new(PromptSidecar::new()),

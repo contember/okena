@@ -2,7 +2,9 @@ use super::super::Terminal;
 use super::super::TerminalNotification;
 use super::super::app_version::set_app_version;
 use super::super::osc_sidecar::parse_osc7_file_uri;
-use super::super::types::{PromptMarkKind, TerminalSize};
+use super::super::types::{
+    PromptMarkKind, TerminalProgress, TerminalProgressState, TerminalSize,
+};
 use super::{CapturingTransport, NullTransport};
 use std::sync::Arc;
 
@@ -367,6 +369,128 @@ fn test_osc9_st_terminator() {
     assert_eq!(
         terminal.take_pending_notifications(),
         vec![body("hello")],
+    );
+}
+
+#[test]
+fn test_osc9_4_st1_sets_normal_progress() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    assert_eq!(terminal.progress(), None);
+
+    // OSC 9 ; 4 ; 1 ; 42 → normal progress at 42%.
+    terminal.process_output(b"\x1b]9;4;1;42\x07");
+
+    assert_eq!(
+        terminal.progress(),
+        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 42 }),
+    );
+    // Progress is sticky (not drained on read).
+    assert_eq!(
+        terminal.progress(),
+        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 42 }),
+    );
+}
+
+#[test]
+fn test_osc9_4_st0_clears_progress() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    terminal.process_output(b"\x1b]9;4;1;50\x07");
+    assert!(terminal.progress().is_some());
+
+    // st=0 removes the bar; pr is ignored.
+    terminal.process_output(b"\x1b]9;4;0;\x07");
+    assert_eq!(terminal.progress(), None);
+}
+
+#[test]
+fn test_osc9_4_st3_indeterminate_ignores_value() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    // st=3 is a spinner — pr is meaningless and normalised to 0.
+    terminal.process_output(b"\x1b]9;4;3;77\x07");
+
+    assert_eq!(
+        terminal.progress(),
+        Some(TerminalProgress { state: TerminalProgressState::Indeterminate, value: 0 }),
+    );
+}
+
+#[test]
+fn test_osc9_4_clamps_value_over_100() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    // pr above 100 is clamped to 100.
+    terminal.process_output(b"\x1b]9;4;1;255\x07");
+
+    assert_eq!(
+        terminal.progress(),
+        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 100 }),
+    );
+}
+
+#[test]
+fn test_osc9_4_st2_error_keeps_previous_value() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    // Set a baseline, then signal an error without an explicit percent.
+    terminal.process_output(b"\x1b]9;4;1;30\x07");
+    terminal.process_output(b"\x1b]9;4;2;\x07");
+
+    assert_eq!(
+        terminal.progress(),
+        Some(TerminalProgress { state: TerminalProgressState::Error, value: 30 }),
+    );
+
+    // An explicit pr on the error state overrides the kept value.
+    terminal.process_output(b"\x1b]9;4;2;80\x07");
+    assert_eq!(
+        terminal.progress(),
+        Some(TerminalProgress { state: TerminalProgressState::Error, value: 80 }),
+    );
+}
+
+#[test]
+fn test_osc9_4_garbage_st_ignored() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    terminal.process_output(b"\x1b]9;4;1;25\x07");
+    // A non-numeric / out-of-range st must leave the current bar untouched and
+    // must never produce a notification.
+    terminal.process_output(b"\x1b]9;4;abc;5\x07");
+    terminal.process_output(b"\x1b]9;4;9;5\x07");
+
+    assert_eq!(
+        terminal.progress(),
+        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 25 }),
+    );
+    assert!(terminal.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn test_osc9_4_does_not_produce_notification() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    // The progress subtype must NOT be treated as notification text...
+    terminal.process_output(b"\x1b]9;4;1;42\x07");
+    assert!(terminal.take_pending_notifications().is_empty());
+    assert!(terminal.progress().is_some());
+
+    // ...while a plain OSC 9 message still produces a notification and leaves
+    // progress untouched (no regression).
+    terminal.process_output(b"\x1b]9;Build complete\x07");
+    assert_eq!(terminal.take_pending_notifications(), vec![body("Build complete")]);
+    assert_eq!(
+        terminal.progress(),
+        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 42 }),
     );
 }
 

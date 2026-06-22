@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use super::app_version::app_version;
 use super::transport::TerminalTransport;
+use super::types::{TerminalProgress, TerminalProgressState};
 
 /// A desktop notification requested by the shell via an OSC escape.
 ///
@@ -54,6 +55,7 @@ impl OscSidecar {
     pub(super) fn new(
         reported_cwd: Arc<Mutex<Option<String>>>,
         pending_notifications: Arc<Mutex<Vec<TerminalNotification>>>,
+        progress: Arc<Mutex<Option<TerminalProgress>>>,
         transport: Arc<dyn TerminalTransport>,
         terminal_id: String,
     ) -> Self {
@@ -62,6 +64,7 @@ impl OscSidecar {
             perform: SidecarPerform {
                 reported_cwd,
                 pending_notifications,
+                progress,
                 transport,
                 terminal_id,
                 osc99_pending: HashMap::new(),
@@ -79,6 +82,10 @@ struct SidecarPerform {
     /// `OSC 9` / `OSC 777` / `OSC 99` notifications, drained by the GPUI thread
     /// in the PTY event loop (same model as `pending_clipboard`).
     pending_notifications: Arc<Mutex<Vec<TerminalNotification>>>,
+    /// Active `OSC 9 ; 4` (ConEmu / Windows Terminal) progress report, or
+    /// `None` when cleared (`st=0`). Overwritten on each progress sequence and
+    /// read by the GPUI thread via `Terminal::progress`.
+    progress: Arc<Mutex<Option<TerminalProgress>>>,
     transport: Arc<dyn TerminalTransport>,
     terminal_id: String,
     /// In-progress `OSC 99` notifications keyed by `i=` id, awaiting their
@@ -195,6 +202,62 @@ impl SidecarPerform {
         };
         self.pending_notifications.lock().push(notification);
     }
+
+    /// Handle the ConEmu / Windows Terminal progress protocol
+    /// `OSC 9 ; 4 ; st ; pr` (also spoken by WezTerm, Ghostty, Kitty, …).
+    ///
+    /// `st` selects the state and `pr` an optional 0..=100 percentage:
+    /// - `st=0` → clear progress (`pr` ignored).
+    /// - `st=1` → [`TerminalProgressState::Normal`] at `pr` percent
+    ///   (clamped to `0..=100`).
+    /// - `st=2` → [`TerminalProgressState::Error`]; `pr` optional, keeping the
+    ///   previous percent when absent.
+    /// - `st=3` → [`TerminalProgressState::Indeterminate`] (`pr` ignored).
+    /// - `st=4` → [`TerminalProgressState::Paused`]; `pr` optional like `st=2`.
+    ///
+    /// A missing or unparseable `st` (or any value outside `0..=4`) leaves the
+    /// current progress untouched, so a malformed sequence can never panic or
+    /// spuriously clear an active bar. `params[2]` is `st`, `params[3]` is `pr`.
+    fn handle_osc9_progress(&mut self, params: &[&[u8]]) {
+        let Some(st) = params
+            .get(2)
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|s| s.trim().parse::<u8>().ok())
+        else {
+            return;
+        };
+        // `pr` is optional and only meaningful for some states.
+        let pr = params
+            .get(3)
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|s| s.trim().parse::<u8>().ok());
+
+        let mut slot = self.progress.lock();
+        let previous = slot.map(|p| p.value).unwrap_or(0);
+        *slot = match st {
+            // `st=0` removes the progress entirely.
+            0 => None,
+            1 => Some(TerminalProgress {
+                state: TerminalProgressState::Normal,
+                value: pr.unwrap_or(0).min(100),
+            }),
+            // Error / paused keep the previous percent when `pr` is omitted.
+            2 => Some(TerminalProgress {
+                state: TerminalProgressState::Error,
+                value: pr.unwrap_or(previous).min(100),
+            }),
+            3 => Some(TerminalProgress {
+                state: TerminalProgressState::Indeterminate,
+                value: 0,
+            }),
+            4 => Some(TerminalProgress {
+                state: TerminalProgressState::Paused,
+                value: pr.unwrap_or(previous).min(100),
+            }),
+            // Unknown state — ignore gracefully, leaving the bar as-is.
+            _ => return,
+        };
+    }
 }
 
 impl Perform for SidecarPerform {
@@ -243,10 +306,14 @@ impl Perform for SidecarPerform {
                 }
             }
             b"9" => {
-                // iTerm2-style notification: `OSC 9 ; <message>`. ConEmu's
-                // `OSC 9 ; 4 ; state ; progress` progress-bar subtype is
-                // treated as a plain-text message for now — we can split
-                // off subtypes when there's a UI for them.
+                // `OSC 9` is overloaded. The `OSC 9 ; 4 ; st ; pr` subtype is
+                // ConEmu's / Windows Terminal's progress-bar protocol; route it
+                // to the progress handler. Everything else is an iTerm2-style
+                // notification: `OSC 9 ; <message>`.
+                if params.get(1).copied() == Some(b"4".as_slice()) {
+                    self.handle_osc9_progress(params);
+                    return;
+                }
                 let message: String = params[1..]
                     .iter()
                     .filter_map(|p| std::str::from_utf8(p).ok())

@@ -63,6 +63,39 @@ pub struct PromptMark {
     pub column: usize,
 }
 
+/// Progress state reported via the ConEmu / Windows Terminal protocol
+/// `OSC 9 ; 4 ; st ; pr` (also spoken by WezTerm, Ghostty, Kitty, …).
+///
+/// Programs like npm, cargo, and downloaders emit this to drive a taskbar /
+/// tab progress indicator. The `st` field selects the variant; `pr` carries
+/// the 0..=100 percentage where applicable (see [`TerminalProgress`]). The
+/// `st=0` "remove" state has no variant here — it clears the progress to
+/// `None` rather than being represented as a state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalProgressState {
+    /// `st=1` — a normal, determinate progress bar at `value` percent.
+    Normal,
+    /// `st=2` — an error occurred; `value` keeps the last/explicit percent.
+    Error,
+    /// `st=3` — indeterminate work (a spinner); `value` is meaningless.
+    Indeterminate,
+    /// `st=4` — paused or warning; `value` keeps the last/explicit percent.
+    Paused,
+}
+
+/// Active progress reported by the running program via `OSC 9 ; 4`.
+///
+/// The owning [`Terminal`](super::Terminal) holds `Option<TerminalProgress>`:
+/// `None` means no progress is being reported (the program never started one
+/// or sent `st=0` to clear it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalProgress {
+    pub state: TerminalProgressState,
+    /// Percentage in `0..=100`. Ignored for
+    /// [`TerminalProgressState::Indeterminate`].
+    pub value: u8,
+}
+
 /// Cursor shape requested by the terminal application via DECSCUSR.
 ///
 /// Maps onto the three shapes Okena's renderer knows how to paint.

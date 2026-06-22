@@ -27,6 +27,14 @@ impl Terminal {
         std::mem::take(&mut *self.pending_notifications.lock())
     }
 
+    /// Active `OSC 9 ; 4` (ConEmu / Windows Terminal) progress report, or
+    /// `None` when the running program isn't reporting progress (it never
+    /// started one, or sent `st=0` to clear it). Read each render to drive a
+    /// per-tab / per-pane progress indicator.
+    pub fn progress(&self) -> Option<super::TerminalProgress> {
+        *self.progress.lock()
+    }
+
     /// Push the active theme palette so the event listener can answer
     /// OSC 10/11/12/4 color queries with real theme colors. Called from the
     /// render loop on every frame; writes are cheap and uncontested.
