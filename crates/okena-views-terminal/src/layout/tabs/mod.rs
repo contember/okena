@@ -495,6 +495,24 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             .children(idle_label.as_ref().map(|d| {
                                 div().text_size(ui_text_sm(cx)).text_color(rgb(t.border_idle)).child(d.clone())
                             }))
+                            // Determinate OSC 9;4 progress also shows a percentage in
+                            // the label, so it reads even when the bar is a thin sliver.
+                            // Indeterminate progress has no meaningful value, so it's
+                            // bar-only.
+                            .children(
+                                progress
+                                    .and_then(|p| match p.state {
+                                        TerminalProgressState::Indeterminate => None,
+                                        _ => Some(p.value.min(100)),
+                                    })
+                                    .map(|pct| {
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(ui_text_sm(cx))
+                                            .text_color(rgb(t.text_muted))
+                                            .child(format!("{pct}%"))
+                                    }),
+                            )
                             .into_any_element()
                     }
                 })
@@ -519,7 +537,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         .bottom_0()
                         .left_0()
                         .right_0()
-                        .h(px(2.0))
+                        .h(px(3.0))
                         .bg(with_alpha(t.border_active, 0.15))
                         .child(
                             div()
