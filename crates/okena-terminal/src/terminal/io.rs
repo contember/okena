@@ -51,6 +51,7 @@ impl Terminal {
         // New output disengages the prompt-jump walker so the next
         // Above jump starts from the newest prompt again.
         *self.prompt_jump_index.lock() = None;
+        *self.failed_jump_index.lock() = None;
 
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);

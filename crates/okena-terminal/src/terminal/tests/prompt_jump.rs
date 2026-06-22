@@ -163,3 +163,85 @@ fn test_jump_to_prompt_ignores_non_prompt_kinds() {
 
     assert!(!terminal.jump_to_prompt_above());
 }
+
+#[test]
+fn test_jump_to_failed_returns_false_without_failures() {
+    let size = TerminalSize {
+        cols: 20,
+        rows: 5,
+        cell_width: 8.0,
+        cell_height: 16.0,
+    };
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+    // Two prompts that both succeed (exit code 0) — no failures to visit.
+    terminal.process_output(b"\x1b]133;A\x1b\\$ a\r\nout\r\n\x1b]133;D;0\x1b\\");
+    terminal.process_output(b"\x1b]133;A\x1b\\$ b\r\nout\r\n\x1b]133;D;0\x1b\\");
+
+    assert!(!terminal.jump_to_prev_failed_command());
+    assert!(!terminal.jump_to_next_failed_command());
+}
+
+#[test]
+fn test_jump_to_failed_jumps_to_failure() {
+    let size = TerminalSize {
+        cols: 20,
+        rows: 5,
+        cell_width: 8.0,
+        cell_height: 16.0,
+    };
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+    // A single prompt whose command fails (exit code 1), then a fresh
+    // prompt with enough output to scroll the failure into history.
+    terminal.process_output(
+        b"\x1b]133;A\x1b\\$ boom\r\nerr\r\nmore\r\n\x1b]133;D;1\x1b\\",
+    );
+    terminal.process_output(b"\x1b]133;A\x1b\\$ ok\r\n");
+
+    // First Above press engages the walker and lands on the failure.
+    assert!(terminal.jump_to_prev_failed_command());
+    // Nothing older to visit.
+    assert!(!terminal.jump_to_prev_failed_command());
+}
+
+#[test]
+fn test_jump_to_failed_visits_only_failures() {
+    let size = TerminalSize {
+        cols: 20,
+        rows: 5,
+        cell_width: 8.0,
+        cell_height: 16.0,
+    };
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+    // Three commands: fail, succeed, fail. Only the two failures are
+    // walkable — a third Above press must fail.
+    terminal.process_output(b"\x1b]133;A\x1b\\$ a\r\nout\r\n\x1b]133;D;2\x1b\\");
+    terminal.process_output(b"\x1b]133;A\x1b\\$ b\r\nout\r\n\x1b]133;D;0\x1b\\");
+    terminal.process_output(b"\x1b]133;A\x1b\\$ c\r\nout\r\n\x1b]133;D;1\x1b\\");
+
+    assert!(terminal.jump_to_prev_failed_command()); // newest failure (c)
+    assert!(terminal.jump_to_prev_failed_command()); // older failure (a)
+    assert!(!terminal.jump_to_prev_failed_command()); // success (b) skipped, no more
+}
+
+#[test]
+fn test_jump_to_failed_ignores_zero_exit() {
+    let size = TerminalSize {
+        cols: 20,
+        rows: 5,
+        cell_width: 8.0,
+        cell_height: 16.0,
+    };
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+    // Exit code 0 is success, not a failure — jumping must be a no-op.
+    terminal.process_output(b"\x1b]133;A\x1b\\$ a\r\nout\r\n\x1b]133;D;0\x1b\\");
+
+    assert!(!terminal.jump_to_prev_failed_command());
+}

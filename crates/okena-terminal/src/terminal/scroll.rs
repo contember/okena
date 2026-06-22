@@ -37,6 +37,7 @@ impl Terminal {
         // implicit reference point has moved, so the next Above jump
         // should start over from the newest prompt.
         *self.prompt_jump_index.lock() = None;
+        *self.failed_jump_index.lock() = None;
     }
 
     /// Scroll up by lines

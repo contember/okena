@@ -67,6 +67,7 @@ pub use okena_views_terminal::actions::{
     SendTab, SendBacktab, ZoomIn, ZoomOut, ResetZoom,
     ToggleFullscreen, FullscreenNextTerminal, FullscreenPrevTerminal,
     JumpToPreviousPrompt, JumpToNextPrompt,
+    JumpToPreviousFailedCommand, JumpToNextFailedCommand,
 };
 
 // Sidebar-specific actions (defined in okena-views-sidebar crate)
@@ -299,6 +300,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "SearchPrev" => Some(KeyBinding::new(keystroke, SearchPrev, context)),
         "JumpToPreviousPrompt" => Some(KeyBinding::new(keystroke, JumpToPreviousPrompt, context)),
         "JumpToNextPrompt" => Some(KeyBinding::new(keystroke, JumpToNextPrompt, context)),
+        "JumpToPreviousFailedCommand" => Some(KeyBinding::new(keystroke, JumpToPreviousFailedCommand, context)),
+        "JumpToNextFailedCommand" => Some(KeyBinding::new(keystroke, JumpToNextFailedCommand, context)),
         "CloseSearch" => Some(KeyBinding::new(keystroke, CloseSearch, context)),
         "ShowKeybindings" => Some(KeyBinding::new(keystroke, ShowKeybindings, context)),
         "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),

@@ -162,6 +162,20 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             }
     }
 
+    pub(super) fn handle_jump_prev_failed(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref terminal) = self.terminal
+            && terminal.jump_to_prev_failed_command() {
+                cx.notify();
+            }
+    }
+
+    pub(super) fn handle_jump_next_failed(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref terminal) = self.terminal
+            && terminal.jump_to_next_failed_command() {
+                cx.notify();
+            }
+    }
+
     pub(super) fn handle_file_drop(&mut self, paths: &ExternalPaths, _cx: &mut Context<Self>) {
         let Some(ref terminal) = self.terminal else {
             return;

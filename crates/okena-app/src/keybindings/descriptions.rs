@@ -5,7 +5,7 @@ use super::{
     AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy,
     CreateWorktree, FocusActiveProject, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
     FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate,
-    JumpToNextPrompt, JumpToPreviousPrompt,
+    JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt,
     MinimizeTerminal, NewProject, NewWindow, OpenSettingsFile, Paste, Quit, ResetZoom, ScrollDown, ScrollUp,
     Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer, ReviewChanges,
     ShowContentSearch, ShowFileSearch, ShowHookLog, ShowLogConsole, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
@@ -246,6 +246,24 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Scroll forward to the next shell prompt (OSC 133)",
             category: "Terminal",
             factory: || Box::new(JumpToNextPrompt),
+        },
+    );
+    map.insert(
+        "JumpToPreviousFailedCommand",
+        ActionDescription {
+            name: "Jump to Previous Failed Command",
+            description: "Scroll to the previous command that exited with a non-zero status (OSC 133)",
+            category: "Terminal",
+            factory: || Box::new(JumpToPreviousFailedCommand),
+        },
+    );
+    map.insert(
+        "JumpToNextFailedCommand",
+        ActionDescription {
+            name: "Jump to Next Failed Command",
+            description: "Scroll forward to the next command that exited with a non-zero status (OSC 133)",
+            category: "Terminal",
+            factory: || Box::new(JumpToNextFailedCommand),
         },
     );
 

@@ -289,6 +289,15 @@ impl KeybindingConfig {
         );
 
         bindings.insert(
+            "JumpToPreviousFailedCommand".to_string(),
+            vec![KeybindingEntry::new("cmd-shift-up", Some("TerminalPane"))],
+        );
+        bindings.insert(
+            "JumpToNextFailedCommand".to_string(),
+            vec![KeybindingEntry::new("cmd-shift-down", Some("TerminalPane"))],
+        );
+
+        bindings.insert(
             "TogglePaneSwitcher".to_string(),
             vec![
                 KeybindingEntry::new("cmd-`", None),

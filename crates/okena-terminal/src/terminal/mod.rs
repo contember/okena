@@ -224,6 +224,14 @@ pub struct Terminal {
     /// GPUI thread only.
     pub(super) prompt_jump_index: Mutex<Option<usize>>,
 
+    /// Reverse index into the current list of prompts that produced a
+    /// non-zero exit code (0 = newest failure). `Some` while the user is
+    /// walking through failed commands with
+    /// `jump_to_prev/next_failed_command`; reset to `None` on any output or
+    /// scroll so the next walk starts from the most recent failure again.
+    /// GPUI thread only.
+    pub(super) failed_jump_index: Mutex<Option<usize>>,
+
     /// Shell process PID. Set by `set_shell_pid` (called from GPUI thread
     /// after PTY spawn), read by `shell_pid` and `has_running_child`.
     /// GPUI thread only.
@@ -370,6 +378,7 @@ impl Terminal {
             prompt_tracker: Mutex::new(PromptTracker::new()),
             command_finished_pending: AtomicBool::new(false),
             prompt_jump_index: Mutex::new(None),
+            failed_jump_index: Mutex::new(None),
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),
             waiting_for_input: AtomicBool::new(false),

@@ -35,5 +35,7 @@ gpui::actions!(
         FullscreenPrevTerminal,
         JumpToPreviousPrompt,
         JumpToNextPrompt,
+        JumpToPreviousFailedCommand,
+        JumpToNextFailedCommand,
     ]
 );

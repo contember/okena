@@ -5,7 +5,8 @@ use okena_core::api::ActionRequest;
 use crate::actions::{
     AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
     FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
-    JumpToNextPrompt, JumpToPreviousPrompt, MinimizeTerminal, Paste, ResetZoom, Search,
+    JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt,
+    MinimizeTerminal, Paste, ResetZoom, Search,
     SearchNext, SearchPrev, SendBacktab, SendEscape, SendTab, SplitHorizontal, SplitVertical,
     ToggleFullscreen, ZoomIn, ZoomOut,
 };
@@ -143,6 +144,8 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             .on_action(cx.listener(|this, _: &SearchPrev, _window, cx| { this.prev_match(cx); }))
             .on_action(cx.listener(|this, _: &JumpToPreviousPrompt, _window, cx| { this.handle_jump_prev_prompt(cx); }))
             .on_action(cx.listener(|this, _: &JumpToNextPrompt, _window, cx| { this.handle_jump_next_prompt(cx); }))
+            .on_action(cx.listener(|this, _: &JumpToPreviousFailedCommand, _window, cx| { this.handle_jump_prev_failed(cx); }))
+            .on_action(cx.listener(|this, _: &JumpToNextFailedCommand, _window, cx| { this.handle_jump_next_failed(cx); }))
             .on_action(cx.listener(|this, _: &FocusLeft, window, cx| { this.handle_navigation(NavigationDirection::Left, window, cx); }))
             .on_action(cx.listener(|this, _: &FocusRight, window, cx| { this.handle_navigation(NavigationDirection::Right, window, cx); }))
             .on_action(cx.listener(|this, _: &FocusUp, window, cx| { this.handle_navigation(NavigationDirection::Up, window, cx); }))
