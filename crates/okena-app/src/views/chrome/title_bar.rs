@@ -277,6 +277,15 @@ impl Render for TitleBar {
                         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                         { let _ = this; }
                     }))
+                    // Clear a pending move if the press ends elsewhere (mouse-up
+                    // missed off-element), so a later bare hover can't trigger a
+                    // spurious window move. Mirrors Zed's own title bar.
+                    .on_mouse_down_out(cx.listener(|this, _, _, _cx| {
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        { this.should_move = false; }
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                        { let _ = this; }
+                    }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _cx| {
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
                         { this.should_move = false; }
