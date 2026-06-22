@@ -567,6 +567,12 @@ impl MarkdownDocument {
         div()
             .flex()
             .flex_wrap()
+            // `min-width: 0` lets this inline-flow container shrink below its
+            // min-content size when it's a flex child (e.g. a list item's content
+            // next to the bullet). Without it, `min-width: auto` pins the flex
+            // item to its widest word and the wrapping height is measured at that
+            // narrow width — inflating the block with a huge vertical gap.
+            .min_w_0()
             .items_baseline()
             .text_size(ui_text_xl(cx))
             .line_height(px(22.0))

@@ -13,3 +13,6 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", package
 
 pulldown-cmark = "0.12"
 serde_yaml_ng = "0.10"
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
