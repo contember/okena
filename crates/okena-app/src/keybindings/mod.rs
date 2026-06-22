@@ -39,6 +39,7 @@ actions!(
         ShowFileSearch,
         ShowContentSearch,
         ShowProjectSwitcher,
+        JumpToProjectTerminal,
         ShowDiffViewer,
         ReviewChanges,
         CheckForUpdates,
@@ -131,6 +132,9 @@ pub fn reload_keybindings(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", SendTab, Some("TerminalPane")),
         KeyBinding::new("shift-tab", SendBacktab, Some("TerminalPane")),
+        // Override gpui-component Root's global `tab` → focus_next so the
+        // project switcher can use Tab to jump into a project's terminal.
+        KeyBinding::new("tab", JumpToProjectTerminal, Some("ProjectSwitcher")),
     ]);
 
     cx.bind_keys([
@@ -195,6 +199,9 @@ pub fn register_keybindings(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", SendTab, Some("TerminalPane")),
         KeyBinding::new("shift-tab", SendBacktab, Some("TerminalPane")),
+        // Override gpui-component Root's global `tab` → focus_next so the
+        // project switcher can use Tab to jump into a project's terminal.
+        KeyBinding::new("tab", JumpToProjectTerminal, Some("ProjectSwitcher")),
     ]);
 
     // Register sidebar navigation keybindings (not user-configurable)

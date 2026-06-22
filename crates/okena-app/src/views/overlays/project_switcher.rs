@@ -5,7 +5,7 @@
 //! - Space: Toggle project overview visibility
 //! - Type to filter projects
 
-use crate::keybindings::Cancel;
+use crate::keybindings::{Cancel, JumpToProjectTerminal};
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_ms};
 use crate::views::components::list_overlay::FilterResult;
@@ -479,16 +479,22 @@ impl Render for ProjectSwitcher {
         modal_backdrop("project-switcher-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("ProjectSwitcher")
-            .items_start()
-            .pt(px(80.0))
+            .items_center()
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                 this.close(cx);
+            }))
+            // Tab is captured by a dedicated keybinding in the "ProjectSwitcher"
+            // context (mod.rs), because gpui-component's Root binds `tab` to
+            // focus navigation globally and would otherwise swallow it before it
+            // reaches the on_key_down handler below.
+            .on_action(cx.listener(|this, _: &JumpToProjectTerminal, _window, cx| {
+                this.jump_into_selected(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match handle_list_overlay_key(
                     &mut this.state,
                     event,
-                    &[("space", "toggle"), ("tab", "jump")],
+                    &[("space", "toggle")],
                 ) {
                     ListOverlayAction::Close => this.close(cx),
                     ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
@@ -502,9 +508,6 @@ impl Render for ProjectSwitcher {
                     }
                     ListOverlayAction::Custom(action) if action == "toggle" => {
                         this.toggle_visibility_selected(cx);
-                    }
-                    ListOverlayAction::Custom(action) if action == "jump" => {
-                        this.jump_into_selected(cx);
                     }
                     _ => {}
                 }
