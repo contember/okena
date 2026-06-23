@@ -55,6 +55,7 @@ impl Terminal {
 
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
+        okena_core::render_stats::tick("pty_output");
         *self.last_output_time.lock() = Instant::now();
     }
 

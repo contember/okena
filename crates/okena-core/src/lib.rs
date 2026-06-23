@@ -4,6 +4,7 @@ pub mod api;
 pub mod keys;
 pub mod process;
 pub mod profiles;
+pub mod render_stats;
 pub mod selection;
 pub mod send_payload;
 pub mod shell;

@@ -493,6 +493,7 @@ impl WindowView {
 
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        okena_core::render_stats::tick("window_render");
         let t = theme(cx);
 
         // Get overlay visibility state from overlay manager
