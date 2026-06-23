@@ -1043,3 +1043,269 @@ fn test_parse_osc133_kind() {
     );
     assert_eq!(parse_osc133_kind(b'Z', &[]), None);
 }
+
+// ── Agent status (OSC 9001) ──────────────────────────────────────────────
+
+fn b64(s: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(s)
+}
+
+#[test]
+fn test_agent_status_sets_lifecycle_without_notification() {
+    use okena_core::agent_status::{AgentLifecycle, AgentStatus};
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    assert_eq!(terminal.agent_status(), None);
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+
+    assert_eq!(
+        terminal.agent_status(),
+        Some(AgentStatus::new(AgentLifecycle::Working)),
+    );
+    // `working` is a non-notifying state.
+    assert!(terminal.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn test_agent_status_done_with_custom_message_notifies() {
+    use okena_core::agent_status::AgentLifecycle;
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    let msg = "running tests 3/5";
+    terminal.process_output(format!("\x1b]9001;st=done;msg={}\x07", b64(msg)).as_bytes());
+
+    let status = terminal.agent_status().expect("status set");
+    assert_eq!(status.lifecycle, AgentLifecycle::Done);
+    assert_eq!(status.custom.as_deref(), Some(msg));
+
+    // A transition into `done` queues a notification carrying the custom text.
+    assert_eq!(terminal.take_pending_notifications(), vec![body(msg)]);
+}
+
+#[test]
+fn test_agent_status_blocked_without_message_uses_default_body() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    terminal.process_output(b"\x1b]9001;st=blocked\x07");
+
+    assert_eq!(
+        terminal.take_pending_notifications(),
+        vec![body("Agent needs your input")],
+    );
+}
+
+#[test]
+fn test_agent_status_notifies_only_on_transition() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+    assert!(terminal.take_pending_notifications().is_empty());
+
+    // First `done` notifies...
+    terminal.process_output(b"\x1b]9001;st=done\x07");
+    assert_eq!(terminal.take_pending_notifications(), vec![body("Agent finished")]);
+
+    // ...a repeated identical `done` does not (no transition).
+    terminal.process_output(b"\x1b]9001;st=done\x07");
+    assert!(terminal.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn test_agent_status_clear_removes_status() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+    assert!(terminal.agent_status().is_some());
+
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    assert_eq!(terminal.agent_status(), None);
+}
+
+#[test]
+fn test_agent_status_unknown_state_left_untouched() {
+    use okena_core::agent_status::{AgentLifecycle, AgentStatus};
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+    // An unknown / missing state must not clear or change the current status,
+    // and must never produce a notification.
+    terminal.process_output(b"\x1b]9001;st=bogus\x07");
+    terminal.process_output(b"\x1b]9001;msg=abc\x07");
+
+    assert_eq!(
+        terminal.agent_status(),
+        Some(AgentStatus::new(AgentLifecycle::Working)),
+    );
+    assert!(terminal.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn test_agent_status_parses_labels_json() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    let lbl = b64(r#"{"stage":"verify","eta":"5m"}"#);
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+
+    let status = terminal.agent_status().expect("status set");
+    assert_eq!(status.labels.get("stage").map(String::as_str), Some("verify"));
+    assert_eq!(status.labels.get("eta").map(String::as_str), Some("5m"));
+}
+
+#[test]
+fn test_agent_status_malformed_base64_drops_field_but_keeps_lifecycle() {
+    use okena_core::agent_status::AgentLifecycle;
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    // `***` is not valid base64 — the custom text is dropped, but the
+    // lifecycle still applies.
+    terminal.process_output(b"\x1b]9001;st=working;msg=***\x07");
+
+    let status = terminal.agent_status().expect("status set");
+    assert_eq!(status.lifecycle, AgentLifecycle::Working);
+    assert_eq!(status.custom, None);
+}
+
+#[test]
+fn test_agent_status_st_terminator() {
+    use okena_core::agent_status::{AgentLifecycle, AgentStatus};
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    // ST-terminated form (ESC \) is equally valid.
+    terminal.process_output(b"\x1b]9001;st=idle\x1b\\");
+
+    assert_eq!(
+        terminal.agent_status(),
+        Some(AgentStatus::new(AgentLifecycle::Idle)),
+    );
+}
+
+#[test]
+fn test_agent_status_empty_message_uses_default_body() {
+    // A `msg=` that decodes to "" must not produce an empty notification (or an
+    // empty rendered custom) — it falls back to the lifecycle default, same as
+    // omitting `msg=` entirely.
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    terminal.process_output(b"\x1b]9001;st=blocked;msg=\x07");
+
+    let status = terminal.agent_status().expect("status set");
+    assert_eq!(status.custom, None);
+    assert_eq!(
+        terminal.take_pending_notifications(),
+        vec![body("Agent needs your input")],
+    );
+}
+
+#[test]
+fn test_agent_status_oversized_fields_are_bounded() {
+    use okena_core::agent_status::{MAX_CUSTOM_LEN, MAX_LABELS};
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    // A hostile pane pushes a multi-MB custom string and a huge labels map.
+    // Both must be clamped (not stored verbatim) and must not panic.
+    let huge = "A".repeat(2_000_000);
+    let mut json = String::from("{");
+    for i in 0..200 {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str(&format!("\"k{i}\":\"v\""));
+    }
+    json.push('}');
+    terminal.process_output(
+        format!("\x1b]9001;st=working;msg={};lbl={}\x07", b64(&huge), b64(&json)).as_bytes(),
+    );
+
+    let status = terminal.agent_status().expect("status set");
+    assert!(status.custom.as_ref().expect("custom set").len() <= MAX_CUSTOM_LEN);
+    assert!(status.labels.len() <= MAX_LABELS);
+}
+
+#[test]
+fn test_agent_status_marks_remote_dirty_on_change_only() {
+    // `remote_dirty` is the only signal that pushes agent status to remote
+    // clients (the PTY loop drains it to bump state_version), so guard its
+    // edges: a first status, a custom-text-only change at the same lifecycle,
+    // and clear-from-set are all dirty; an identical repeat and clear-from-none
+    // are not.
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+    assert!(terminal.take_remote_dirty());
+    assert!(!terminal.take_remote_dirty()); // one-shot
+
+    // Custom-text-only change at the SAME lifecycle still counts.
+    terminal.process_output(format!("\x1b]9001;st=working;msg={}\x07", b64("step 1")).as_bytes());
+    assert!(terminal.take_remote_dirty());
+    terminal.process_output(format!("\x1b]9001;st=working;msg={}\x07", b64("step 2")).as_bytes());
+    assert!(terminal.take_remote_dirty());
+
+    // A byte-identical repeat is not a change.
+    terminal.process_output(format!("\x1b]9001;st=working;msg={}\x07", b64("step 2")).as_bytes());
+    assert!(!terminal.take_remote_dirty());
+
+    // clear with a prior status is a change; clear with none is not.
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    assert!(terminal.take_remote_dirty());
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    assert!(!terminal.take_remote_dirty());
+}
+
+#[test]
+fn test_agent_session_captured_from_label_and_survives_clear() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    assert_eq!(terminal.agent_session(), None);
+
+    let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    let lbl = b64(&format!(
+        r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"/tmp/t.jsonl"}}"#
+    ));
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+
+    let session = terminal.agent_session().expect("session captured");
+    assert_eq!(session.agent, "claude-code");
+    assert_eq!(session.session_id, uuid);
+    assert_eq!(session.transcript_path.as_deref(), Some("/tmp/t.jsonl"));
+    assert!(terminal.take_agent_session_dirty());
+    assert!(!terminal.take_agent_session_dirty()); // one-shot
+
+    // Sticky: a `clear` drops the ephemeral status but KEEPS the session, so the
+    // pane can still offer to resume after the agent ends.
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    assert_eq!(terminal.agent_status(), None);
+    assert_eq!(
+        terminal.agent_session().map(|s| s.session_id),
+        Some(uuid.to_string()),
+    );
+}
+
+#[test]
+fn test_agent_session_rejects_non_uuid_session_id() {
+    // A hostile / malformed session id is ignored — never stored, so it can
+    // never reach a resume command. The lifecycle still applies.
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+
+    let lbl = b64(r#"{"agent":"claude-code","session_id":"$(rm -rf ~)"}"#);
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+
+    assert!(terminal.agent_status().is_some());
+    assert_eq!(terminal.agent_session(), None);
+    assert!(!terminal.take_agent_session_dirty());
+}

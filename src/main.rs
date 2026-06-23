@@ -328,6 +328,17 @@ fn run_headless(listen_addr: IpAddr) {
     });
 }
 
+/// Build and install the agent-harness registry — one entry per AI agent
+/// harness, keyed by agent id. Each `okena-ext-*` crate contributes how to
+/// resume its sessions / parse its transcripts; the core/app stay
+/// harness-agnostic and dispatch by the `agent` id captured via OSC 9001.
+fn init_agent_harnesses() {
+    let mut registry = okena_core::agent_harness::AgentHarnessRegistry::new();
+    registry.register(okena_ext_claude::register_harness());
+    registry.register(okena_ext_codex::register_harness());
+    okena_core::agent_harness::init(registry);
+}
+
 fn main() {
     // Handle --version before initializing anything (used by updater validation)
     if std::env::args().any(|a| a == "--version") {
@@ -502,6 +513,11 @@ fn main() {
         }
     };
 
+    // Install the per-harness agent-session registry (resume command + transcript
+    // parsing, dispatched by agent id). gpui-free, so it's shared by BOTH the
+    // desktop and headless paths — do it before the branch below.
+    init_agent_harnesses();
+
     if headless {
         let Some(addr) = listen_addr else {
             eprintln!("Headless mode requires --listen <addr>, e.g. --headless --listen 0.0.0.0");
@@ -581,6 +597,7 @@ fn main() {
                             default_shell: s.settings.default_shell.clone(),
                             hooks: s.settings.hooks.clone(),
                             ctrl_c_copies_selection: s.settings.terminal_ctrl_c_copies_selection,
+                            auto_resume_agent_sessions: s.settings.auto_resume_agent_sessions,
                         }).ok()
                     }
                     "git" => {

@@ -52,6 +52,7 @@ mod tests {
                             default_shell: s.settings.default_shell.clone(),
                             hooks: s.settings.hooks.clone(),
                             ctrl_c_copies_selection: s.settings.terminal_ctrl_c_copies_selection,
+                            auto_resume_agent_sessions: s.settings.auto_resume_agent_sessions,
                         }).ok(),
                         "git" => serde_json::to_value(&okena_views_git::settings::GitViewSettings {
                             diff_view_mode: s.settings.diff_view_mode,

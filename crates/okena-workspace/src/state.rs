@@ -518,6 +518,51 @@ impl Workspace {
             }
     }
 
+    /// Persist the AI agent session captured for a terminal (agent-status OSC
+    /// `lbl=`). Called from the PTY event loop when
+    /// `Terminal::take_agent_session_dirty` fires. Idempotent — no save when
+    /// unchanged.
+    pub fn set_agent_session(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        session: okena_core::agent_session::AgentSession,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.project_mut(project_id)
+            && project.agent_sessions.get(terminal_id) != Some(&session)
+        {
+            project.agent_sessions.insert(terminal_id.to_string(), session);
+            self.notify_data(cx);
+        }
+    }
+
+    /// The persisted agent session for a terminal, if any. Read on restore to
+    /// decide whether to offer / auto-run a resume.
+    pub fn agent_session(
+        &self,
+        project_id: &str,
+        terminal_id: &str,
+    ) -> Option<okena_core::agent_session::AgentSession> {
+        self.project(project_id)
+            .and_then(|p| p.agent_sessions.get(terminal_id).cloned())
+    }
+
+    /// Drop a terminal's persisted agent session (the terminal was permanently
+    /// closed), so `workspace.json` doesn't accumulate orphans.
+    pub fn remove_agent_session(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.project_mut(project_id)
+            && project.agent_sessions.remove(terminal_id).is_some()
+        {
+            self.notify_data(cx);
+        }
+    }
+
     pub fn register_hook_terminal(
         &mut self,
         project_id: &str,
@@ -947,6 +992,7 @@ mod workspace_tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -1710,6 +1756,7 @@ mod gpui_tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,

@@ -220,6 +220,12 @@ pub struct ApiProject {
     pub show_in_overview: bool,
     pub layout: Option<ApiLayoutNode>,
     pub terminal_names: std::collections::HashMap<String, String>,
+    /// Per-terminal agent status (`OSC 9001`) for terminals in this project that
+    /// currently have one. Lets remote / mobile clients show the same agent
+    /// indicators as the desktop. Runtime-only; omitted when empty.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub terminal_agent_status:
+        std::collections::HashMap<String, crate::agent_status::AgentStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_status: Option<ApiGitStatus>,
     #[serde(default)]
@@ -751,6 +757,18 @@ mod tests {
                     ],
                 }),
                 terminal_names: [("t1".into(), "bash".into())].into_iter().collect(),
+                terminal_agent_status: [(
+                    "t1".to_string(),
+                    crate::agent_status::AgentStatus {
+                        lifecycle: crate::agent_status::AgentLifecycle::Working,
+                        custom: Some("running tests 3/5".into()),
+                        labels: [("stage".to_string(), "verify".to_string())]
+                            .into_iter()
+                            .collect(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 git_status: None,
                 folder_color: FolderColor::Blue,
                 services: vec![],

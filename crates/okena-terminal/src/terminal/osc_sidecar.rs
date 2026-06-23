@@ -1,7 +1,10 @@
 use alacritty_terminal::vte::Perform;
 use base64::Engine as _;
+use okena_core::agent_session::AgentSession;
+use okena_core::agent_status::{AgentLifecycle, AgentStatus};
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::app_version::app_version;
@@ -56,6 +59,10 @@ impl OscSidecar {
         reported_cwd: Arc<Mutex<Option<String>>>,
         pending_notifications: Arc<Mutex<Vec<TerminalNotification>>>,
         progress: Arc<Mutex<Option<TerminalProgress>>>,
+        agent_status: Arc<Mutex<Option<AgentStatus>>>,
+        remote_dirty: Arc<AtomicBool>,
+        agent_session: Arc<Mutex<Option<AgentSession>>>,
+        agent_session_dirty: Arc<AtomicBool>,
         transport: Arc<dyn TerminalTransport>,
         terminal_id: String,
     ) -> Self {
@@ -65,6 +72,10 @@ impl OscSidecar {
                 reported_cwd,
                 pending_notifications,
                 progress,
+                agent_status,
+                remote_dirty,
+                agent_session,
+                agent_session_dirty,
                 transport,
                 terminal_id,
                 osc99_pending: HashMap::new(),
@@ -86,6 +97,24 @@ struct SidecarPerform {
     /// `None` when cleared (`st=0`). Overwritten on each progress sequence and
     /// read by the GPUI thread via `Terminal::progress`.
     progress: Arc<Mutex<Option<TerminalProgress>>>,
+    /// Latest agent status reported via the agent-status OSC, or `None` when
+    /// never set / cleared (`st=clear`). Overwritten on each sequence and read
+    /// by the GPUI thread via `Terminal::agent_status`.
+    agent_status: Arc<Mutex<Option<AgentStatus>>>,
+    /// One-shot "remote-visible state changed since last drain" edge, shared
+    /// with `Terminal`. Set whenever a runtime-only signal here changes state
+    /// remote clients should see (currently agent status), consumed by the PTY
+    /// event loop (`take_remote_dirty`) to bump the remote `state_version` so
+    /// remote / mobile clients re-fetch. Generic by design — not agent-specific.
+    /// Mirrors `bell_pending`.
+    remote_dirty: Arc<AtomicBool>,
+    /// Sticky agent session identity (`agent` + `session_id` + `transcript_path`)
+    /// captured from the `lbl=` of an agent-status OSC. Unlike `agent_status`
+    /// it survives `st=clear`; the app layer persists it for resume + stats.
+    agent_session: Arc<Mutex<Option<AgentSession>>>,
+    /// One-shot edge set when `agent_session` changes; drained by the PTY event
+    /// loop to persist the session. Mirrors `remote_dirty`.
+    agent_session_dirty: Arc<AtomicBool>,
     transport: Arc<dyn TerminalTransport>,
     terminal_id: String,
     /// In-progress `OSC 99` notifications keyed by `i=` id, awaiting their
@@ -258,6 +287,166 @@ impl SidecarPerform {
             _ => return,
         };
     }
+
+    /// Handle Okena's agent-status protocol
+    /// `OSC 9001 ; st=<state> [; msg=<b64>] [; lbl=<b64-json>]`.
+    ///
+    /// An AI coding agent (or a thin hook) pushes its own lifecycle here:
+    /// - `st=working|blocked|done|idle` sets the lifecycle.
+    /// - `st=clear` removes the status entirely.
+    /// - `msg=` carries base64(UTF-8) free-form text (e.g. "running tests 3/5").
+    /// - `lbl=` carries base64 of a flat JSON `{"k":"v"}` object of extras.
+    ///
+    /// `msg`/`lbl` are base64-encoded so their values stay `;`/ST-safe (the VTE
+    /// parser splits OSC params on `;`). A missing or unknown `st` leaves the
+    /// current status untouched — a malformed sequence can never panic or
+    /// spuriously clear an active status.
+    ///
+    /// On a transition *into* a notifying state (`blocked` / `done`) a
+    /// [`TerminalNotification`] is queued so the GPUI layer raises a desktop
+    /// notification — reusing the same drain + focused-pane suppression as
+    /// `OSC 9` notifications.
+    fn handle_agent_status(&mut self, params: &[&[u8]]) {
+        // params[0] is the OSC number; the rest are `key=value` pairs.
+        let mut st: Option<&str> = None;
+        let mut msg_b64: Option<&str> = None;
+        let mut lbl_b64: Option<&str> = None;
+        for kv in &params[1..] {
+            let Ok(s) = std::str::from_utf8(kv) else {
+                continue;
+            };
+            let mut it = s.splitn(2, '=');
+            let key = it.next().unwrap_or("").trim();
+            let val = it.next().unwrap_or("").trim();
+            match key {
+                "st" => st = Some(val),
+                "msg" => msg_b64 = Some(val),
+                "lbl" => lbl_b64 = Some(val),
+                _ => {}
+            }
+        }
+
+        let Some(st) = st else {
+            log::debug!(
+                "agent-status[{}]: OSC 9001 with no st= field — ignored",
+                self.terminal_id
+            );
+            return; // no state field — nothing to do
+        };
+
+        if st == "clear" {
+            let mut slot = self.agent_status.lock();
+            let changed = slot.is_some();
+            *slot = None;
+            drop(slot);
+            if changed {
+                self.remote_dirty.store(true, Ordering::Relaxed);
+            }
+            log::debug!(
+                "agent-status[{}]: clear (changed={changed})",
+                self.terminal_id
+            );
+            return;
+        }
+        let Some(lifecycle) = AgentLifecycle::from_token(st) else {
+            log::debug!(
+                "agent-status[{}]: unknown st={st:?} — ignored, status left as-is",
+                self.terminal_id
+            );
+            return; // unknown state — ignore, leave current status as-is
+        };
+
+        // Decode the agent-supplied fields BEFORE taking the lock — base64 of a
+        // hostile multi-MB payload must not run while holding `agent_status`.
+        // `new_clamped` bounds the decoded sizes (a pane could otherwise pin
+        // unbounded memory we then re-serialize to every remote client) and
+        // maps an empty `msg=` to `None` so a notifying state keeps its default
+        // body instead of an empty string.
+        let custom = msg_b64.and_then(decode_osc_base64);
+        let labels = lbl_b64
+            .and_then(decode_osc_base64)
+            .map(|json| okena_core::agent_status::parse_labels_json(&json))
+            .unwrap_or_default();
+        let new_status = AgentStatus::new_clamped(lifecycle, custom, labels);
+
+        // Durable session capture (resume + transcript stats). The `agent` +
+        // `session_id` labels are the pane's *sticky* session identity, NOT part
+        // of the ephemeral status — record them on a separate field that
+        // survives `st=clear`, so the pane can later offer to resume or show
+        // stats. Require both (without an `agent` id we don't know which harness
+        // could resume it) and validate the id looks like a UUID: it's
+        // untrusted in-band data that may reach a resume command.
+        if let (Some(agent), Some(sid)) = (
+            new_status.labels.get("agent"),
+            new_status.labels.get("session_id"),
+        ) {
+            if okena_core::agent_session::is_uuid_like(sid) {
+                let session = AgentSession {
+                    agent: agent.clone(),
+                    session_id: sid.clone(),
+                    transcript_path: new_status.labels.get("transcript_path").cloned(),
+                };
+                let mut s = self.agent_session.lock();
+                if s.as_ref() != Some(&session) {
+                    *s = Some(session);
+                    self.agent_session_dirty.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+
+        // Notify only on a *transition* into a notifying state, so repeated
+        // identical reports don't ping. Decide while holding the slot (we need
+        // the previous value), then release it before touching the notification
+        // queue to keep lock scopes from overlapping.
+        let mut slot = self.agent_status.lock();
+        let previous_lifecycle = slot.as_ref().map(|s| s.lifecycle);
+        let notify_body = (previous_lifecycle != Some(lifecycle) && lifecycle.notifies())
+            .then(|| new_status.custom.clone().unwrap_or_else(|| agent_default_body(lifecycle)));
+        // Any change to the stored status (lifecycle, custom text, or labels)
+        // is worth pushing to remote clients.
+        let changed = slot.as_ref() != Some(&new_status);
+        *slot = Some(new_status);
+        drop(slot);
+
+        log::debug!(
+            "agent-status[{}]: {:?} -> {:?} (changed={changed}, notify={})",
+            self.terminal_id,
+            previous_lifecycle,
+            lifecycle,
+            notify_body.is_some()
+        );
+
+        if changed {
+            self.remote_dirty.store(true, Ordering::Relaxed);
+        }
+        if let Some(body) = notify_body {
+            self.pending_notifications
+                .lock()
+                .push(TerminalNotification { title: None, body });
+        }
+    }
+}
+
+/// Decode a base64(UTF-8) OSC field, tolerating a missing-pad variant (same
+/// leniency as the `OSC 99` payload decoder). Returns `None` on undecodable or
+/// non-UTF-8 input so a malformed field is simply dropped.
+fn decode_osc_base64(s: &str) -> Option<String> {
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(s.as_bytes())
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(s.as_bytes()))
+        .ok()?;
+    String::from_utf8(decoded).ok()
+}
+
+/// Default notification body when an agent reports a notifying state without
+/// its own `msg=` text.
+fn agent_default_body(lifecycle: AgentLifecycle) -> String {
+    match lifecycle {
+        AgentLifecycle::Blocked => "Agent needs your input".to_string(),
+        AgentLifecycle::Done => "Agent finished".to_string(),
+        // Non-notifying states never reach here (guarded by `notifies()`).
+        AgentLifecycle::Working | AgentLifecycle::Idle => String::new(),
+    }
 }
 
 impl Perform for SidecarPerform {
@@ -357,6 +546,8 @@ impl Perform for SidecarPerform {
                 }
             }
             b"99" => self.handle_osc99(params),
+            // Okena's private agent-status protocol; see `handle_agent_status`.
+            b"9001" => self.handle_agent_status(params),
             _ => {}
         }
     }

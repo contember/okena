@@ -287,6 +287,17 @@ pub(crate) async fn remote_command_loop(
                         }).collect()
                     };
 
+                    // Snapshot per-terminal agent status (OSC 9001) for terminals
+                    // that currently report one, so remote/mobile clients can show
+                    // the same indicators as the desktop.
+                    let agent_status_map: HashMap<String, okena_core::agent_status::AgentStatus> = {
+                        let registry = terminals.lock();
+                        registry
+                            .iter()
+                            .filter_map(|(id, term)| term.agent_status().map(|s| (id.clone(), s)))
+                            .collect()
+                    };
+
                     // Build a lookup map for projects
                     let project_map: std::collections::HashMap<&str, &crate::workspace::state::ProjectData> =
                         data.projects.iter().map(|p| (p.id.as_str(), p)).collect();
@@ -333,6 +344,18 @@ pub(crate) async fn remote_command_loop(
                             show_in_overview: api_project_visibility(&p.id, hidden_project_ids),
                             layout: p.layout.as_ref().map(|l| l.to_api_with_sizes(&size_map)),
                             terminal_names: p.terminal_names.clone(),
+                            terminal_agent_status: p
+                                .layout
+                                .as_ref()
+                                .map(|l| {
+                                    l.collect_terminal_ids()
+                                        .into_iter()
+                                        .filter_map(|tid| {
+                                            agent_status_map.get(&tid).map(|s| (tid, s.clone()))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
                             git_status,
                             folder_color: p.folder_color,
                             services,

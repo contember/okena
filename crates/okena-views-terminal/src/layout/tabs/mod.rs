@@ -16,6 +16,7 @@ use okena_terminal::terminal::TerminalProgressState;
 use okena_workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use gpui_component::tooltip::Tooltip;
 use gpui::prelude::*;
 use std::collections::HashSet;
 
@@ -381,16 +382,29 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 _ => None,
             };
 
-            let (is_waiting, idle_label, progress) = terminal_id.as_ref().map_or((false, None, None), |tid| {
-                let guard = terminals.lock();
-                guard.get(tid).map_or((false, None, None), |t| {
-                    let progress = t.progress();
-                    if t.is_waiting_for_input() {
-                        (true, Some(t.idle_duration_display()), progress)
-                    } else {
-                        (false, None, progress)
-                    }
-                })
+            let (is_waiting, idle_label, progress, agent_status) =
+                terminal_id.as_ref().map_or((false, None, None, None), |tid| {
+                    let guard = terminals.lock();
+                    guard.get(tid).map_or((false, None, None, None), |t| {
+                        let progress = t.progress();
+                        let agent_status = t.agent_status();
+                        if t.is_waiting_for_input() {
+                            (true, Some(t.idle_duration_display()), progress, agent_status)
+                        } else {
+                            (false, None, progress, agent_status)
+                        }
+                    })
+                });
+
+            // Agent lifecycle (if the pane is running an agent that reports via
+            // OSC 9001) takes precedence over the generic idle/hook coloring,
+            // and its free-form text shows in the tab tooltip.
+            let agent_tooltip: Option<String> = agent_status.as_ref().map(|a| {
+                let life = a.lifecycle.label();
+                match a.custom.as_deref() {
+                    Some(c) if !c.is_empty() => format!("{life} · {c}"),
+                    _ => format!("agent {life}"),
+                }
             });
 
             let is_hook = terminal_id.as_ref().is_some_and(|tid| {
@@ -417,6 +431,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             div()
                 .id(ElementId::Name(format!("tab-{}-{:?}", i, layout_path).into()))
                 .cursor_pointer()
+                .when_some(agent_tooltip, |d, text| {
+                    d.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                })
                 .relative()
                 .flex_shrink_0()
                 .max_w(px(200.0))
@@ -485,7 +502,17 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             }))
                             .into_any_element()
                     } else {
-                        let icon_color = if is_hook { rgb(t.term_yellow) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
+                        let icon_color = if let Some(a) = agent_status.as_ref() {
+                            rgb(a.lifecycle.theme_color(&t))
+                        } else if is_hook {
+                            rgb(t.term_yellow)
+                        } else if is_waiting {
+                            rgb(t.border_idle)
+                        } else if is_active {
+                            rgb(t.success)
+                        } else {
+                            rgb(t.text_muted)
+                        };
                         h_flex()
                             .gap(px(6.0))
                             .overflow_hidden()

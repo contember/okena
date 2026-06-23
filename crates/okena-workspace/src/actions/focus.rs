@@ -200,9 +200,16 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Focus a terminal by its ID (finds path automatically)
+    /// Focus a terminal by its ID, *revealing* it first (finds path automatically).
     ///
-    /// This is a convenience method that looks up the layout path and calls set_focused_terminal.
+    /// This is the shared "navigate to this terminal" primitive behind agent-row
+    /// / sidebar / notification clicks and remote focus requests. It activates
+    /// the tabs along the path, then calls [`FocusManager::reveal_terminal`] so
+    /// the target becomes visible even when the view is currently zoomed into
+    /// another project or has a different terminal fullscreened — retargeting
+    /// the active view mode onto the target rather than focusing a pane the
+    /// current view is hiding. (Use `set_focused_terminal` for clicks on a pane
+    /// that's already on screen.)
     pub fn focus_terminal_by_id(
         &mut self,
         focus_manager: &mut FocusManager,
@@ -219,8 +226,19 @@ impl Workspace {
                             layout.activate_tabs_along_path(&path);
                         }
                     self.notify_data(cx);
-                    // Focus the terminal without changing which projects are shown
-                    self.set_focused_terminal(focus_manager, project_id.to_string(), path, cx);
+                    // Reveal: retarget the active zoom/fullscreen onto the target
+                    // so it's actually visible, then focus it.
+                    focus_manager.reveal_terminal(
+                        project_id.to_string(),
+                        path,
+                        terminal_id.to_string(),
+                    );
+                    // Record access time for recency sorting + stamp activity so
+                    // the activity-sorted sidebar surfaces the project just moved
+                    // into. `bump_activity` notifies + persists (debounced).
+                    self.touch_project(project_id);
+                    self.bump_activity(project_id, cx);
+                    cx.notify();
                 }
     }
 }

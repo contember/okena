@@ -110,6 +110,7 @@ impl Sidebar {
                         }
                     }))
                     .children(flat_elements)
+                    .child(self.render_agents_section(cx))
                     .child(self.render_remote_section(cx)),
             )
     }
