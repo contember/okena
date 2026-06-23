@@ -207,6 +207,17 @@ pub async fn run_pty_loop(
             if process_activity_edges(&dirty_terminal_ids, &terminals, &reactor) {
                 state_version.send_modify(|v| *v += 1);
             }
+
+            // Agent status is runtime-only, so its dirty edge must advance the
+            // daemon's state version explicitly for remote clients.
+            if drain_remote_dirty(&dirty_terminal_ids, &terminals) {
+                state_version.send_modify(|v| *v += 1);
+            }
+
+            // Agent sessions are sticky on Terminal but persistent in the
+            // workspace. The workspace tick observer handles the durable save
+            // and subsequent state-version bump.
+            persist_agent_sessions(&dirty_terminal_ids, &terminals, &reactor);
         }
 
         if !exit_events.is_empty() {
@@ -467,6 +478,58 @@ fn process_activity_edges(
         ws.bump_activity(pid, &mut cx);
     }
     true
+}
+
+/// Consume runtime-only terminal changes that remote clients must observe.
+fn drain_remote_dirty(dirty_terminal_ids: &[String], terminals: &TerminalsRegistry) -> bool {
+    let registry = terminals.lock();
+    let mut changed = false;
+    for terminal_id in dirty_terminal_ids {
+        if registry
+            .get(terminal_id)
+            .is_some_and(|terminal| terminal.take_remote_dirty())
+        {
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Persist agent sessions captured by the terminal OSC sidecar.
+fn persist_agent_sessions(
+    dirty_terminal_ids: &[String],
+    terminals: &TerminalsRegistry,
+    reactor: &PtyLoopReactor,
+) {
+    let captured: Vec<(String, okena_core::agent_session::AgentSession)> = {
+        let registry = terminals.lock();
+        dirty_terminal_ids
+            .iter()
+            .filter_map(|terminal_id| {
+                let terminal = registry.get(terminal_id)?;
+                if !terminal.take_agent_session_dirty() {
+                    return None;
+                }
+                terminal
+                    .agent_session()
+                    .map(|session| (terminal_id.clone(), session))
+            })
+            .collect()
+    };
+    if captured.is_empty() {
+        return;
+    }
+
+    let mut cx = reactor.workspace_cx();
+    let mut workspace = reactor.workspace.lock();
+    for (terminal_id, session) in captured {
+        if let Some(project_id) = workspace
+            .find_project_for_terminal(&terminal_id)
+            .map(|project| project.id.clone())
+        {
+            workspace.set_agent_session(&project_id, &terminal_id, session, &mut cx);
+        }
+    }
 }
 
 struct ExitHandlingContext<'a> {
@@ -974,6 +1037,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -1004,6 +1068,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::from([(
                 hook_terminal_id.to_string(),
@@ -1060,6 +1125,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,

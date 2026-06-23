@@ -3373,6 +3373,18 @@ pub async fn daemon_command_loop(
                         .collect()
                 };
 
+                // Agent status is runtime-only and lives on the terminal
+                // registry, so gather it alongside the terminal sizes.
+                let agent_statuses: HashMap<String, okena_core::agent_status::AgentStatus> = {
+                    let registry = terminals.lock();
+                    registry
+                        .iter()
+                        .filter_map(|(id, term)| {
+                            term.agent_status().map(|status| (id.clone(), status))
+                        })
+                        .collect()
+                };
+
                 // Source of truth for runtime visibility (per-window viewport).
                 let hidden_project_ids = &data.main_window.hidden_project_ids;
 
@@ -3432,6 +3444,7 @@ pub async fn daemon_command_loop(
                     &services_by_project,
                     hidden_project_ids,
                     &size_map,
+                    &agent_statuses,
                     windows,
                     hooks,
                 );
@@ -5673,6 +5686,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -6030,6 +6044,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -6770,6 +6785,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -7012,6 +7028,7 @@ mod tests {
                 is_remote: false,
                 connection_id: None,
                 service_terminals: Default::default(),
+                agent_sessions: Default::default(),
                 default_shell: None,
                 hook_terminals: Default::default(),
                 pinned: false,
@@ -8489,6 +8506,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,

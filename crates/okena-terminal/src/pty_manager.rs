@@ -882,6 +882,13 @@ impl PtyManager {
             }
         }
 
+        // Expose the pane's slave pty so agent hooks without a controlling
+        // terminal can emit in-band status updates through `$OKENA_TTY`.
+        #[cfg(unix)]
+        if let Some(path) = slave_pty_path(pair.master.as_ref()) {
+            cmd.env("OKENA_TTY", path);
+        }
+
         // Spawn the process
         let child = pair.slave.spawn_command(cmd)?;
 
@@ -2352,6 +2359,20 @@ fn first_proc_child(pid: u32) -> Option<u32> {
 #[cfg(not(unix))]
 fn first_proc_child(_pid: u32) -> Option<u32> {
     None
+}
+
+/// Resolve the slave device path for a pty master.
+#[cfg(unix)]
+fn slave_pty_path(master: &dyn MasterPty) -> Option<String> {
+    let fd = master.as_raw_fd()?;
+    let ptr = unsafe { libc::ptsname(fd) };
+    if ptr.is_null() {
+        return None;
+    }
+    unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 #[cfg(test)]

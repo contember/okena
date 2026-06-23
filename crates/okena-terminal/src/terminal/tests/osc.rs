@@ -1250,3 +1250,319 @@ fn test_process_palette_answers_color_query_without_per_terminal_palette() {
         "unexpected reply: {reply:?}"
     );
 }
+
+// ── Agent status (OSC 9001) ──────────────────────────────────────────────
+
+fn b64(s: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(s)
+}
+
+#[test]
+fn test_agent_status_sets_lifecycle_without_notification() {
+    use okena_core::agent_status::{AgentLifecycle, AgentStatus};
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    assert_eq!(terminal.agent_status(), None);
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+
+    assert_eq!(
+        terminal.agent_status(),
+        Some(AgentStatus::new(AgentLifecycle::Working)),
+    );
+    assert!(terminal.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn test_agent_status_done_with_custom_message_notifies() {
+    use okena_core::agent_status::AgentLifecycle;
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    let msg = "running tests 3/5";
+    terminal.process_output(format!("\x1b]9001;st=done;msg={}\x07", b64(msg)).as_bytes());
+
+    let status = terminal.agent_status().expect("status set");
+    assert_eq!(status.lifecycle, AgentLifecycle::Done);
+    assert_eq!(status.custom.as_deref(), Some(msg));
+    assert_eq!(terminal.take_pending_notifications(), vec![body(msg)]);
+}
+
+#[test]
+fn test_agent_status_blocked_without_message_uses_default_body() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=blocked\x07");
+
+    assert_eq!(
+        terminal.take_pending_notifications(),
+        vec![body("Agent needs your input")],
+    );
+}
+
+#[test]
+fn test_agent_status_notifies_only_on_transition() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+    assert!(terminal.take_pending_notifications().is_empty());
+    terminal.process_output(b"\x1b]9001;st=done\x07");
+    assert_eq!(
+        terminal.take_pending_notifications(),
+        vec![body("Agent finished")]
+    );
+    terminal.process_output(b"\x1b]9001;st=done\x07");
+    assert!(terminal.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn test_agent_status_clear_removes_status() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+    assert!(terminal.agent_status().is_some());
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    assert_eq!(terminal.agent_status(), None);
+}
+
+#[test]
+fn test_agent_status_unknown_state_left_untouched() {
+    use okena_core::agent_status::{AgentLifecycle, AgentStatus};
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+    terminal.process_output(b"\x1b]9001;st=bogus\x07");
+    terminal.process_output(b"\x1b]9001;msg=abc\x07");
+
+    assert_eq!(
+        terminal.agent_status(),
+        Some(AgentStatus::new(AgentLifecycle::Working)),
+    );
+    assert!(terminal.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn test_agent_status_parses_labels_json() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    let lbl = b64(r#"{"stage":"verify","eta":"5m"}"#);
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+
+    let status = terminal.agent_status().expect("status set");
+    assert_eq!(
+        status.labels.get("stage").map(String::as_str),
+        Some("verify")
+    );
+    assert_eq!(status.labels.get("eta").map(String::as_str), Some("5m"));
+}
+
+#[test]
+fn test_agent_status_malformed_base64_drops_field_but_keeps_lifecycle() {
+    use okena_core::agent_status::AgentLifecycle;
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=working;msg=***\x07");
+
+    let status = terminal.agent_status().expect("status set");
+    assert_eq!(status.lifecycle, AgentLifecycle::Working);
+    assert_eq!(status.custom, None);
+}
+
+#[test]
+fn test_agent_status_st_terminator() {
+    use okena_core::agent_status::{AgentLifecycle, AgentStatus};
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=idle\x1b\\");
+
+    assert_eq!(
+        terminal.agent_status(),
+        Some(AgentStatus::new(AgentLifecycle::Idle)),
+    );
+}
+
+#[test]
+fn test_agent_status_empty_message_uses_default_body() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=blocked;msg=\x07");
+
+    let status = terminal.agent_status().expect("status set");
+    assert_eq!(status.custom, None);
+    assert_eq!(
+        terminal.take_pending_notifications(),
+        vec![body("Agent needs your input")],
+    );
+}
+
+#[test]
+fn test_agent_status_oversized_fields_are_bounded() {
+    use okena_core::agent_status::{MAX_CUSTOM_LEN, MAX_LABELS};
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    let huge = "A".repeat(2_000_000);
+    let mut json = String::from("{");
+    for i in 0..200 {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str(&format!("\"k{i}\":\"v\""));
+    }
+    json.push('}');
+    terminal.process_output(
+        format!(
+            "\x1b]9001;st=working;msg={};lbl={}\x07",
+            b64(&huge),
+            b64(&json)
+        )
+        .as_bytes(),
+    );
+
+    let status = terminal.agent_status().expect("status set");
+    assert!(status.custom.as_ref().expect("custom set").len() <= MAX_CUSTOM_LEN);
+    assert!(status.labels.len() <= MAX_LABELS);
+}
+
+#[test]
+fn test_agent_status_marks_remote_dirty_on_change_only() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+    assert!(terminal.take_remote_dirty());
+    assert!(!terminal.take_remote_dirty());
+
+    terminal.process_output(format!("\x1b]9001;st=working;msg={}\x07", b64("step 1")).as_bytes());
+    assert!(terminal.take_remote_dirty());
+    terminal.process_output(format!("\x1b]9001;st=working;msg={}\x07", b64("step 2")).as_bytes());
+    assert!(terminal.take_remote_dirty());
+
+    terminal.process_output(format!("\x1b]9001;st=working;msg={}\x07", b64("step 2")).as_bytes());
+    assert!(!terminal.take_remote_dirty());
+
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    assert!(terminal.take_remote_dirty());
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    assert!(!terminal.take_remote_dirty());
+}
+
+#[test]
+fn test_agent_session_captured_from_label_and_survives_clear() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    assert_eq!(terminal.agent_session(), None);
+
+    let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    let lbl = b64(&format!(
+        r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"/tmp/t.jsonl"}}"#
+    ));
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+
+    let session = terminal.agent_session().expect("session captured");
+    assert_eq!(session.agent, "claude-code");
+    assert_eq!(session.session_id, uuid);
+    assert_eq!(session.transcript_path.as_deref(), Some("/tmp/t.jsonl"));
+    assert!(terminal.take_agent_session_dirty());
+    assert!(!terminal.take_agent_session_dirty());
+
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    assert_eq!(terminal.agent_status(), None);
+    assert_eq!(
+        terminal.agent_session().map(|s| s.session_id),
+        Some(uuid.to_string()),
+    );
+}
+
+#[test]
+fn test_agent_session_rejects_non_uuid_session_id() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    let lbl = b64(r#"{"agent":"claude-code","session_id":"$(rm -rf ~)"}"#);
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+
+    assert!(terminal.agent_status().is_some());
+    assert_eq!(terminal.agent_session(), None);
+    assert!(!terminal.take_agent_session_dirty());
+}

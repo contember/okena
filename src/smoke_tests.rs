@@ -56,6 +56,7 @@ mod tests {
                                 ctrl_c_copies_selection: s
                                     .settings
                                     .terminal_ctrl_c_copies_selection,
+                                auto_resume_agent_sessions: s.settings.auto_resume_agent_sessions,
                             })
                             .ok()
                         }

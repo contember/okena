@@ -956,6 +956,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals,
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
