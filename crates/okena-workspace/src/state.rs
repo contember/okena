@@ -123,7 +123,15 @@ impl Workspace {
     /// Notify that persistent data changed. Bumps version, calls cx.notify(),
     /// and refreshes all windows to bypass `.cached()` view wrappers.
     /// Use this instead of cx.notify() when mutating `self.data`.
+    ///
+    /// `refresh_windows()` is the heavy hammer: it bypasses EVERY `.cached()`
+    /// view (project columns, sidebar — and the terminal grids), forcing them
+    /// all to re-render. That's necessary so cached chrome reflects structural
+    /// data changes, but it means callers fired in a hot loop will re-shape
+    /// every visible terminal grid each time. Keep such callers rare or
+    /// throttled (see `bump_activity`).
     pub fn notify_data(&mut self, cx: &mut Context<Self>) {
+        okena_core::render_stats::tick("workspace_refresh");
         self.data_version += 1;
         cx.notify();
         cx.refresh_windows();
@@ -162,6 +170,23 @@ impl Workspace {
             .unwrap_or_default()
             .as_millis() as u64;
         if let Some(project) = self.project_mut(project_id) {
+            // Throttle per project. Activity stamping drives only the
+            // recency-sorted sidebar, which doesn't need sub-second precision —
+            // but it's hit on every command finish (OSC 133 ;D), focus, and
+            // bell. Each unthrottled stamp calls `notify_data` →
+            // `refresh_windows()`, which bypasses every `.cached()` view and
+            // re-shapes ALL visible terminal grids. A terminal finishing
+            // commands rapidly therefore pinned the renderer at full tilt
+            // (render-stats showed ~18 full-window refreshes/s re-rendering
+            // every pane). One stamp/sec per project keeps ordering correct
+            // while collapsing the refresh storm. The throttle is per project,
+            // so a different project's activity still re-sorts promptly.
+            const ACTIVITY_STAMP_MIN_INTERVAL_MS: u64 = 1000;
+            if let Some(prev) = project.last_activity_at
+                && now.saturating_sub(prev) < ACTIVITY_STAMP_MIN_INTERVAL_MS
+            {
+                return;
+            }
             project.last_activity_at = Some(now);
             self.notify_data(cx);
         }
