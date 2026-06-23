@@ -859,6 +859,7 @@ mod shutdown_tests {
             hooks: Default::default(),
             connection_id: None,
             service_terminals: HashMap::from([("web".to_string(), "service".to_string())]),
+            agent_sessions: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::from([(
                 "hook".to_string(),
@@ -959,6 +960,7 @@ mod shutdown_tests {
             hooks: Default::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -1044,6 +1046,7 @@ mod shutdown_tests {
             hooks: Default::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,

@@ -145,6 +145,9 @@ pub struct TerminalViewSettings {
     /// character the layout composes.
     #[serde(default)]
     pub option_as_meta: bool,
+    /// Resume a captured agent conversation on restore when enabled.
+    #[serde(default)]
+    pub auto_resume_agent_sessions: bool,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -176,6 +179,7 @@ pub fn terminal_view_settings(cx: &gpui::App) -> TerminalViewSettings {
             drag_selects_in_mouse_mode: false,
             double_click_selects_in_mouse_mode: false,
             option_as_meta: false,
+            auto_resume_agent_sessions: false,
         })
 }
 

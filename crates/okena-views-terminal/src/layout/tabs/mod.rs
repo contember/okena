@@ -10,6 +10,7 @@ use crate::simple_input::SimpleInput;
 use crate::terminal_view_settings;
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_files::theme::theme;
 use okena_terminal::terminal::TerminalProgressState;
@@ -386,19 +387,30 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 _ => None,
             };
 
-            let (is_waiting, idle_label, progress, has_bell) = terminal_id.as_ref().map_or((false, None, None, false), |tid| {
-                let guard = terminals.lock();
-                guard.get(tid).map_or((false, None, None, false), |t| {
-                    let progress = t.progress();
-                    // An inactive tab hides its pane, so the tab stands in for the
-                    // pane's attention border and reports the same two signals.
-                    let bell = t.has_bell() || t.has_notification();
-                    if t.is_waiting_for_input() {
-                        (true, Some(t.idle_duration_display()), progress, bell)
-                    } else {
-                        (false, None, progress, bell)
-                    }
-                })
+            let (is_waiting, idle_label, progress, agent_status, has_bell) =
+                terminal_id.as_ref().map_or((false, None, None, None, false), |tid| {
+                    let guard = terminals.lock();
+                    guard.get(tid).map_or((false, None, None, None, false), |t| {
+                        let progress = t.progress();
+                        let agent_status = t.agent_status();
+                        let bell = t.has_bell() || t.has_notification();
+                        if t.is_waiting_for_input() {
+                            (true, Some(t.idle_duration_display()), progress, agent_status, bell)
+                        } else {
+                            (false, None, progress, agent_status, bell)
+                        }
+                    })
+                });
+
+            // Agent lifecycle (if the pane is running an agent that reports via
+            // OSC 9001) takes precedence over the generic idle/hook coloring,
+            // and its free-form text shows in the tab tooltip.
+            let agent_tooltip: Option<String> = agent_status.as_ref().map(|a| {
+                let life = a.lifecycle.label();
+                match a.custom.as_deref() {
+                    Some(c) if !c.is_empty() => format!("{life} · {c}"),
+                    _ => format!("agent {life}"),
+                }
             });
 
             let is_hook = terminal_id.as_ref().is_some_and(|tid| {
@@ -425,6 +437,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             div()
                 .id(ElementId::Name(format!("tab-{}-{:?}", i, layout_path).into()))
                 .cursor_pointer()
+                .when_some(agent_tooltip, |d, text| {
+                    d.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                })
                 .relative()
                 .flex_shrink_0()
                 .max_w(px(200.0))
@@ -493,11 +508,20 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             }))
                             .into_any_element()
                     } else {
-                        // Bell outranks the rest: it is the one state the user is
-                        // being asked to come back to. Same glyph and color as the
-                        // sidebar's terminal rows.
-                        let icon_color = if has_bell { rgb(t.border_bell) } else if is_hook { rgb(t.term_yellow) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
                         let icon_path = if has_bell { "icons/bell.svg" } else { "icons/terminal.svg" };
+                        let icon_color = if has_bell {
+                            rgb(t.border_bell)
+                        } else if let Some(a) = agent_status.as_ref() {
+                            rgb(a.lifecycle.theme_color(&t))
+                        } else if is_hook {
+                            rgb(t.term_yellow)
+                        } else if is_waiting {
+                            rgb(t.border_idle)
+                        } else if is_active {
+                            rgb(t.success)
+                        } else {
+                            rgb(t.text_muted)
+                        };
                         h_flex()
                             .gap(px(6.0))
                             .overflow_hidden()

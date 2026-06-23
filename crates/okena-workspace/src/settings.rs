@@ -322,6 +322,14 @@ pub struct AppSettings {
     /// Session backend for terminal persistence (tmux/screen/none/auto)
     #[serde(default)]
     pub session_backend: SessionBackend,
+    /// Automatically resume a pane's AI agent session (e.g. `claude --resume
+    /// <id>`) on restore, when one was captured before the restart. Opt-in
+    /// (default off). When off, the captured session is still persisted and
+    /// shown — just not auto-run. Note: terminal IDs (and thus the captured
+    /// session) only survive a restart when a session backend is configured, so
+    /// this is effectively a no-op with `session_backend = none`.
+    #[serde(default)]
+    pub auto_resume_agent_sessions: bool,
 
     // File opener settings
     /// Editor command to open file paths (e.g. "code", "cursor", "zed", "subl", "vim")
@@ -498,6 +506,7 @@ impl Default for AppSettings {
             show_shell_selector: false,
             auto_hide_single_terminal_header: false,
             session_backend: SessionBackend::default(),
+            auto_resume_agent_sessions: false,
             file_opener: default_file_opener(),
             hooks: HooksConfig::default(),
             diff_view_mode: DiffViewMode::default(),
