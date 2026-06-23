@@ -4,7 +4,7 @@
 use gpui::{
     AnyView, Bounds, Context, CursorStyle, Decorations, DispatchPhase, Hitbox, HitboxBehavior,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
-    Render, ResizeEdge, Size, StyleRefinement, Styled, Window, canvas, div, point, prelude::FluentBuilder, px,
+    Render, ResizeEdge, Size, Styled, Window, canvas, div, point, prelude::FluentBuilder, px,
 };
 
 /// Edge detection zone size (pixels) for CSD resize handles.
@@ -94,7 +94,16 @@ impl Render for SimpleRoot {
                     .absolute(),
                 )
             })
-            .child(self.view.clone().cached(StyleRefinement::default().size_full()))
+            // NOTE: do NOT wrap the view in `.cached()`. The root is the common
+            // ancestor of every view, so any descendant invalidation marks it
+            // dirty (GPUI ancestor-marking) — its cache would never hit. Worse,
+            // a cached view re-rendering sets `window.refreshing = true` for its
+            // entire subtree, which bypasses EVERY nested `.cached()` (project
+            // columns, terminal panes). Caching the root therefore defeats all
+            // nested caching: render-stats showed every column and pane
+            // re-rendering on every window draw. Render the root uncached so
+            // nested caches actually work and only dirty views re-render.
+            .child(self.view.clone())
     }
 }
 
