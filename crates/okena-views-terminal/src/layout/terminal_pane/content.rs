@@ -512,7 +512,6 @@ impl TerminalContent {
 
 impl Render for TerminalContent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        okena_core::render_stats::tick("terminal_content_render");
         let t = theme(cx);
         let is_focused = self.focus_handle.is_focused(window);
 

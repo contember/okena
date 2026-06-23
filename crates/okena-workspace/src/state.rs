@@ -131,7 +131,6 @@ impl Workspace {
     /// every visible terminal grid each time. Keep such callers rare or
     /// throttled (see `bump_activity`).
     pub fn notify_data(&mut self, cx: &mut Context<Self>) {
-        okena_core::render_stats::tick("workspace_refresh");
         self.data_version += 1;
         cx.notify();
         cx.refresh_windows();
