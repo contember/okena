@@ -68,7 +68,7 @@ pub fn has_uncommitted_changes(path: &Path) -> bool {
         return false;
     };
 
-    let Ok(iter) = platform
+    let Ok(iter) = crate::gix_helpers::single_threaded(platform)
         .untracked_files(gix::status::UntrackedFiles::Files)
         .into_iter(None)
     else {
@@ -146,9 +146,7 @@ pub(crate) fn tracked_diff_counts(path: &Path) -> Option<Vec<(String, usize, usi
     // One parallel HEAD → index → worktree walk. Rename tracking is disabled to
     // match `--no-renames`: a rename surfaces as a delete of the old path plus
     // an add of the new one.
-    let iter = repo
-        .status(gix::progress::Discard)
-        .ok()?
+    let iter = crate::gix_helpers::single_threaded(repo.status(gix::progress::Discard).ok()?)
         .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
         .untracked_files(gix::status::UntrackedFiles::Files)
         .into_iter(None)

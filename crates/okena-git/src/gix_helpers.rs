@@ -64,6 +64,21 @@ pub(crate) fn open(path: &Path) -> Option<gix::Repository> {
     Some(local)
 }
 
+/// Cap a `gix` status walk to a single worker thread.
+///
+/// By default gix runs the index→worktree walk (directory walk + blob hashing)
+/// across one thread per logical core. The status poller already fans out
+/// across (nearly) every project in parallel, so that per-walk pool just churns
+/// ~16 short-lived threads per walk — tens of thousands of thread spawns over a
+/// session — for no throughput gain, while dominating CPU (the `gitoxide.in_par`
+/// pool was the single largest cost in profiling). One thread per walk keeps
+/// total concurrency bounded by the number of repos, not repos × cores.
+pub(crate) fn single_threaded<'repo, P: gix::Progress>(
+    platform: gix::status::Platform<'repo, P>,
+) -> gix::status::Platform<'repo, P> {
+    platform.index_worktree_options_mut(|opts| opts.thread_limit = Some(1))
+}
+
 /// List untracked files honoring `.gitignore`, with paths relative to
 /// `query_path` (matches the previous `git -C path ls-files --others
 /// --exclude-standard` behavior, including for monorepo subdirs).
@@ -97,7 +112,7 @@ pub(crate) fn list_untracked_files(query_path: &Path) -> Option<Vec<String>> {
             return None;
         }
     };
-    let iter = match platform
+    let iter = match single_threaded(platform)
         .untracked_files(gix::status::UntrackedFiles::Files)
         .into_iter(None)
     {
