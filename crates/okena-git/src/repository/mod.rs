@@ -38,7 +38,7 @@ pub use status::{
     count_ahead_behind, count_ahead_behind_vs, count_unpushed_commits, get_current_branch,
     get_head_sha, get_status, has_uncommitted_changes, StatusFetch,
 };
-pub(crate) use status::tracked_diff_counts;
+pub(crate) use status::worktree_diff;
 pub use worktree::{
     create_worktree, create_worktree_with_start_point, list_git_worktrees, remove_worktree,
     remove_worktree_fast,

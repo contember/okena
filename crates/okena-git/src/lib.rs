@@ -249,10 +249,13 @@ pub fn invalidate_cache(path: &Path) {
 pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
     let mut summaries = Vec::new();
 
-    // Tracked changes vs HEAD via gix (no subprocess), the structured
-    // equivalent of `git diff --numstat --no-renames HEAD`. Best-effort: a
-    // transient walk failure yields no tracked entries rather than erroring.
-    for (file, added, removed) in repository::tracked_diff_counts(path).unwrap_or_default() {
+    // Single gix walk yields both tracked changes vs HEAD (the structured
+    // equivalent of `git diff --numstat --no-renames HEAD`) and untracked
+    // files. Best-effort: a transient walk failure yields no entries rather
+    // than erroring.
+    let diff = repository::worktree_diff(path).unwrap_or_default();
+
+    for (file, added, removed) in diff.tracked {
         summaries.push(FileDiffSummary {
             path: file,
             added,
@@ -261,8 +264,8 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
         });
     }
 
-    // Get untracked files (best effort: silently skip on transient gix failure)
-    for file in crate::gix_helpers::list_untracked_files(path).unwrap_or_default() {
+    // Untracked files count each line as an addition.
+    for file in diff.untracked {
         let file_path = path.join(&file);
         let added = std::fs::read_to_string(&file_path)
             .map(|c| c.lines().count())

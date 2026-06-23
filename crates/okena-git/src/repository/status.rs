@@ -121,11 +121,25 @@ pub fn get_pushed_sha(path: &Path) -> Option<String> {
     Some(id.to_hex().to_string())
 }
 
-/// Per-file added/removed line counts for every tracked path that differs from
-/// HEAD, returned as `(repo-relative path, added, removed)` — the structured
-/// equivalent of `git diff --numstat --no-renames HEAD`. Untracked files are
-/// *not* included; callers handle those separately. Binary files appear with
-/// `(.., 0, 0)`, matching numstat's `-`/`-`.
+/// Tracked per-file diff counts and the untracked-file list, produced by a
+/// single working-tree walk. See [`worktree_diff`].
+#[derive(Default)]
+pub(crate) struct WorktreeDiff {
+    /// Per-file added/removed line counts for every tracked path that differs
+    /// from HEAD, as `(repo-relative path, added, removed)` — the structured
+    /// equivalent of `git diff --numstat --no-renames HEAD`. Binary files
+    /// appear with `(.., 0, 0)`, matching numstat's `-`/`-`.
+    pub tracked: Vec<(String, usize, usize)>,
+    /// Untracked file paths, relative to the queried path (monorepo-subdir
+    /// prefix stripped, matching the previous standalone untracked listing).
+    pub untracked: Vec<String>,
+}
+
+/// Tracked diff counts **and** the untracked-file list from one HEAD → index →
+/// worktree walk. gix's status walk already surfaces untracked entries, so
+/// collecting them in the same pass avoids a second full worktree traversal —
+/// previously each project paid for two walks per poll (this plus a separate
+/// untracked listing), and the 5s poller fans this out across ~every project.
 ///
 /// Computed entirely in-process via gix — no subprocess spawn. This replaced
 /// the `git diff --numstat HEAD` spawn that was the last one in the 5s
@@ -135,7 +149,7 @@ pub fn get_pushed_sha(path: &Path) -> Option<String> {
 /// Returns `None` on a transient failure (couldn't open the repo, init the
 /// status walk, or an iteration step errored) so the polling watcher can keep
 /// the last known counts — see `StatusFetch::Transient`.
-pub(crate) fn tracked_diff_counts(path: &Path) -> Option<Vec<(String, usize, usize)>> {
+pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     let repo = crate::gix_helpers::open(path)?;
     let workdir = repo.workdir()?.to_path_buf();
 
@@ -143,9 +157,23 @@ pub(crate) fn tracked_diff_counts(path: &Path) -> Option<Vec<(String, usize, usi
     // leaves this `None`, so every tracked blob diffs against an empty source.
     let head_tree = repo.head_tree().ok();
 
+    // Prefix from workdir down to the queried path, so untracked paths are
+    // reported relative to the (possibly monorepo-subdir) project — matching the
+    // previous standalone untracked listing. Tracked counts stay repo-relative.
+    let canonical_query = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
+    let untracked_prefix: String = canonical_query
+        .strip_prefix(&canonical_workdir)
+        .ok()
+        .map(|p| {
+            let s = p.to_string_lossy().to_string();
+            if s.is_empty() { String::new() } else { format!("{}/", s) }
+        })
+        .unwrap_or_default();
+
     // One parallel HEAD → index → worktree walk. Rename tracking is disabled to
     // match `--no-renames`: a rename surfaces as a delete of the old path plus
-    // an add of the new one.
+    // an add of the new one. Capped to one thread (see `single_threaded`).
     let iter = crate::gix_helpers::single_threaded(repo.status(gix::progress::Discard).ok()?)
         .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
         .untracked_files(gix::status::UntrackedFiles::Files)
@@ -156,20 +184,30 @@ pub(crate) fn tracked_diff_counts(path: &Path) -> Option<Vec<(String, usize, usi
     // both the tree→index and index→worktree phases (staged *and* further
     // edited); dedup so we count it once. We recompute each path's counts from
     // HEAD-blob vs worktree-file directly, so the staging split doesn't matter.
+    // Untracked files surface as `DirectoryContents` entries — collect those in
+    // the same pass instead of walking the worktree a second time.
     let mut changed: std::collections::HashSet<gix::bstr::BString> = std::collections::HashSet::new();
+    let mut untracked: Vec<String> = Vec::new();
     for item in iter {
         let item = item.ok()?;
-        // Untracked entries are the callers' separate concern — skip them here.
-        if matches!(
-            item,
-            gix::status::Item::IndexWorktree(gix::status::index_worktree::Item::DirectoryContents { .. })
-        ) {
+        if let gix::status::Item::IndexWorktree(
+            gix::status::index_worktree::Item::DirectoryContents { entry, .. },
+        ) = &item
+        {
+            if matches!(entry.status, gix::dir::entry::Status::Untracked) {
+                let rela = entry.rela_path.to_string();
+                if untracked_prefix.is_empty() {
+                    untracked.push(rela);
+                } else if let Some(stripped) = rela.strip_prefix(&untracked_prefix) {
+                    untracked.push(stripped.to_string());
+                }
+            }
             continue;
         }
         changed.insert(item.location().to_owned());
     }
 
-    let mut counts = Vec::with_capacity(changed.len());
+    let mut tracked = Vec::with_capacity(changed.len());
     for rela in &changed {
         let rela_bstr = gix::bstr::BStr::new(rela);
         let rela_path = gix::path::from_bstr(rela_bstr);
@@ -180,14 +218,14 @@ pub(crate) fn tracked_diff_counts(path: &Path) -> Option<Vec<(String, usize, usi
         // Binary files report `-`/`-` (i.e. 0/0) in numstat. Record them with
         // zero counts rather than diffing — they still belong in per-file lists.
         if is_binary(&head_blob) || is_binary(&wt_bytes) {
-            counts.push((name, 0, 0));
+            tracked.push((name, 0, 0));
             continue;
         }
         let (added, removed) = diff_line_counts(&head_blob, &wt_bytes);
-        counts.push((name, added, removed));
+        tracked.push((name, added, removed));
     }
 
-    Some(counts)
+    Some(WorktreeDiff { tracked, untracked })
 }
 
 /// Get diff statistics (total lines added, lines removed) for the working
@@ -196,17 +234,19 @@ pub(crate) fn tracked_diff_counts(path: &Path) -> Option<Vec<(String, usize, usi
 /// Returns `None` on a transient failure so the polling watcher keeps the last
 /// known +/- instead of blanking the badge — see `StatusFetch::Transient`.
 fn get_diff_stats(path: &Path) -> Option<(usize, usize)> {
+    // Single walk yields both tracked counts and untracked files. A None means
+    // the gix status walk failed transiently — propagate so we don't undercount.
+    let diff = worktree_diff(path)?;
+
     let (mut added, mut removed) = (0usize, 0usize);
-    for (_path, a, r) in tracked_diff_counts(path)? {
+    for (_path, a, r) in &diff.tracked {
         added += a;
         removed += r;
     }
 
-    // Untracked files: count each line as an addition. A None here means the
-    // gix status walk failed transiently — propagate so we don't undercount.
-    let untracked = crate::gix_helpers::list_untracked_files(path)?;
-    for file in untracked {
-        let file_path = path.join(&file);
+    // Untracked files: count each line as an addition.
+    for file in &diff.untracked {
+        let file_path = path.join(file);
         if let Ok(content) = std::fs::read_to_string(&file_path) {
             added += content.lines().count();
         }
