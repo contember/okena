@@ -689,6 +689,10 @@ impl ProjectColumn {
                 .on_mouse_down(MouseButton::Right, context_menu_handler)
                 .child(
                     h_flex()
+                        // Fill the row so the git status row can right-align its
+                        // base-compare chip via its internal flex spacer.
+                        .flex_1()
+                        .min_w_0()
                         .gap(px(6.0))
                         .overflow_hidden()
                         .child(worktree_dot)
