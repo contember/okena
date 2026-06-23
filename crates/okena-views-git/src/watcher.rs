@@ -188,52 +188,48 @@ impl GitStatusWatcher {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut cycle: u64 = 0;
             loop {
-                // Collect locally visible + remotely subscribed non-remote projects.
+                // Collect the projects to poll: visible in *some* window, plus
+                // any with a remotely subscribed terminal — all non-remote.
                 //
-                // Multi-window: previously we restricted to main's visible set,
-                // but a project may be shown ONLY in an extra (per PRD rule
-                // 3b-ii, new projects added from window N are hidden in all
-                // other windows including main). Polling only main's visible
-                // projects left those extras without branch / diff-stat data.
-                // Poll the full local project list — git status is fast and
-                // bounded, and any window that ever surfaces a project gets
-                // its data.
-                // `projects`: every non-remote project (+ remotely subscribed
-                //   ones) — git status (gix, cheap) is polled for all of them.
-                // `gh_ids`: the subset eligible for the expensive `gh` PR/CI
-                //   fan-out — projects visible in some window, plus any with a
-                //   remotely subscribed terminal. A project sitting in a
-                //   collapsed folder or hidden in every window doesn't need its
-                //   PR/CI polled until it's actually shown.
+                // Git status is only fanned out across this set, NOT every local
+                // project. Polling all projects every 5s re-walks ~every working
+                // tree (gix dir-walk + content hashing) even when nothing
+                // changed, which profiling showed to be the single largest idle
+                // CPU cost under many projects. Hidden projects keep their last
+                // cached status and the branch-only warmup, and refresh on their
+                // next poll once they become visible.
+                //
+                // Multi-window: `all_visible_project_ids()` is the union of
+                // visible projects across main + all extra windows, so a project
+                // shown ONLY in an extra window is still polled (per PRD rule
+                // 3b-ii, projects added from window N are hidden elsewhere).
+                //
+                // `gh_ids` is the same set; the expensive `gh` PR/CI fan-out is
+                // gated further by cycle cadence below.
                 let (projects, gh_ids): (Vec<(String, String)>, HashSet<String>) = cx.update(|cx| {
                     let ws = workspace.read(cx);
-
-                    let mut project_ids: HashSet<String> = ws.projects()
-                        .iter()
-                        .filter(|p| !p.is_remote)
-                        .map(|p| p.id.clone())
-                        .collect();
 
                     let mut gh_ids = ws.all_visible_project_ids();
 
                     // Add projects with remotely subscribed terminals — they're
-                    // shown on a remote client, so poll their PR/CI too.
+                    // shown on a remote client, so poll their status + PR/CI too.
                     if let Ok(remote_terminals) = remote_subscribed_terminals.read() {
                         for terminal_ids in remote_terminals.values() {
                             for tid in terminal_ids {
                                 if let Some(p) = ws.find_project_for_terminal(tid)
                                     && !p.is_remote {
-                                        project_ids.insert(p.id.clone());
                                         gh_ids.insert(p.id.clone());
                                     }
                             }
                         }
                     }
 
-                    // Resolve to (id, path) pairs
+                    // Resolve to (id, path) pairs — non-remote only (git status
+                    // is local-only; `all_visible_project_ids` may include remote
+                    // projects, which we must not run gix against).
                     let projects = ws.projects()
                         .iter()
-                        .filter(|p| project_ids.contains(&p.id))
+                        .filter(|p| !p.is_remote && gh_ids.contains(&p.id))
                         .map(|p| (p.id.clone(), p.path.clone()))
                         .collect();
                     (projects, gh_ids)
