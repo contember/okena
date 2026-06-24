@@ -6168,6 +6168,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "okena-daemon-core"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "okena-core",
+ "okena-git",
+ "okena-hooks",
+ "okena-services",
+ "okena-state",
+ "okena-terminal",
+ "okena-workspace",
+ "parking_lot",
+ "tokio",
+]
+
+[[package]]
 name = "okena-ext-claude"
 version = "0.1.0"
 dependencies = [

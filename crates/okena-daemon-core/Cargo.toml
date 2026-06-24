@@ -1,0 +1,21 @@
+[package]
+name = "okena-daemon-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+# Logic crates the daemon drives. All gpui-optional crates are pulled with
+# `default-features = false` so NO gpui is linked into the headless daemon.
+okena-core = { path = "../okena-core" }
+okena-state = { path = "../okena-state" }
+okena-terminal = { path = "../okena-terminal" }
+okena-git = { path = "../okena-git" }
+okena-hooks = { path = "../okena-hooks", default-features = false }
+okena-workspace = { path = "../okena-workspace", default-features = false }
+okena-services = { path = "../okena-services", default-features = false }
+
+# Tokio reactor backing the gpui-free trait impls.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+parking_lot = "0.12"
+log = "0.4"
