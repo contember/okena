@@ -8,13 +8,14 @@
 use super::{
     ActionResult, ensure_terminal, find_terminal_path, spawn_uninitialized_terminals,
 };
+use crate::workspace::persistence::AppSettings;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::TerminalSize;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::Workspace;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
-use gpui::*;
+use okena_workspace::context::WorkspaceCx;
 use okena_core::keys::SpecialKey;
 use okena_core::types::SplitDirection;
 use okena_terminal::TerminalsRegistry;
@@ -25,10 +26,11 @@ pub(super) fn create(
     project_id: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.add_terminal(focus_manager, &project_id, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx)
 }
 
 pub(super) fn split(
@@ -39,10 +41,11 @@ pub(super) fn split(
     direction: SplitDirection,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.split_terminal(focus_manager, &project_id, &path, direction, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx)
 }
 
 pub(super) fn close(
@@ -52,7 +55,7 @@ pub(super) fn close(
     terminal_id: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let path = find_terminal_path(ws, &project_id, &terminal_id);
     match path {
@@ -73,7 +76,7 @@ pub(super) fn close_many(
     terminal_ids: Vec<String>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let mut last_err = None;
     for terminal_id in &terminal_ids {
@@ -100,7 +103,7 @@ pub(super) fn focus(
     focus_manager: &mut FocusManager,
     project_id: String,
     terminal_id: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let path = find_terminal_path(ws, &project_id, &terminal_id);
     match path {
@@ -192,7 +195,7 @@ pub(super) fn update_split_sizes(
     project_id: String,
     path: Vec<usize>,
     sizes: Vec<f32>,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.update_split_sizes(&project_id, &path, sizes, cx);
     ActionResult::Ok(None)
@@ -202,7 +205,7 @@ pub(super) fn toggle_minimized(
     ws: &mut Workspace,
     project_id: String,
     terminal_id: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.toggle_terminal_minimized_by_id(&project_id, &terminal_id, cx);
     ActionResult::Ok(None)
@@ -213,7 +216,7 @@ pub(super) fn set_fullscreen(
     focus_manager: &mut FocusManager,
     project_id: String,
     terminal_id: Option<String>,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     match terminal_id {
         Some(tid) => ws.set_fullscreen_terminal(focus_manager, project_id, tid, cx),
@@ -227,7 +230,7 @@ pub(super) fn rename(
     project_id: String,
     terminal_id: String,
     name: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.rename_terminal(&project_id, &terminal_id, name, cx);
     ActionResult::Ok(None)

@@ -6,11 +6,11 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::{ActionResult, find_first_terminal_id, spawn_uninitialized_terminals};
-use crate::settings::settings;
+use crate::workspace::persistence::AppSettings;
 use okena_terminal::backend::TerminalBackend;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
-use gpui::*;
+use okena_workspace::context::WorkspaceCx;
 use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
 
@@ -21,15 +21,16 @@ pub(super) fn add_project(
     path: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let project_id = ws.add_project(name, path, true, &settings(cx).hooks, window_id, cx);
+    let project_id = ws.add_project(name, path, true, &settings.hooks, window_id, cx);
     // Surface the newly-created project's id alongside the spawned terminal
     // ids so callers (e.g. the CLI `add-project` verb) can address the project
     // they just created without re-fetching state. `spawn_uninitialized_terminals`
     // returns `{ "terminal_ids": [...] }`; we merge `project_id` into that
     // object, leaving its terminal-spawning behavior unchanged.
-    match spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx) {
+    match spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx) {
         ActionResult::Ok(Some(serde_json::Value::Object(mut map))) => {
             map.insert(
                 "project_id".to_string(),
@@ -50,7 +51,7 @@ pub(super) fn reorder_in_folder(
     folder_id: String,
     project_id: String,
     new_index: usize,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.reorder_project_in_folder(&folder_id, &project_id, new_index, cx);
     ActionResult::Ok(None)
@@ -60,7 +61,7 @@ pub(super) fn set_project_color(
     ws: &mut Workspace,
     project_id: String,
     color: FolderColor,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.set_folder_color(&project_id, color, cx);
     ActionResult::Ok(None)
@@ -70,7 +71,7 @@ pub(super) fn set_folder_color(
     ws: &mut Workspace,
     folder_id: String,
     color: FolderColor,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.set_folder_item_color(&folder_id, color, cx);
     ActionResult::Ok(None)
@@ -80,7 +81,7 @@ pub(super) fn rename_project(
     ws: &mut Workspace,
     project_id: String,
     name: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
@@ -93,7 +94,7 @@ pub(super) fn rename_project_directory(
     ws: &mut Workspace,
     project_id: String,
     new_name: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if let Err(e) = super::validate_leaf_name(&new_name) {
         return ActionResult::Err(e);
@@ -123,12 +124,13 @@ pub(super) fn delete_project(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
     project_id: String,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
     }
-    let global_hooks = settings(cx).hooks.clone();
+    let global_hooks = settings.hooks.clone();
     ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
     ActionResult::Ok(None)
 }
@@ -139,7 +141,7 @@ pub(super) fn set_show_in_overview(
     window_id: WindowId,
     project_id: String,
     show: bool,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     apply_set_project_show_in_overview(ws, focus_manager, window_id, &project_id, show, cx)
 }
@@ -158,7 +160,7 @@ fn apply_set_project_show_in_overview(
     window_id: WindowId,
     project_id: &str,
     show: bool,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
@@ -180,29 +182,30 @@ pub(super) fn remove_worktree_project(
     focus_manager: &mut FocusManager,
     project_id: String,
     force: bool,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
     }
-    let global_hooks = settings(cx).hooks.clone();
+    let global_hooks = settings.hooks.clone();
     match ws.remove_worktree_project(focus_manager, &project_id, force, &global_hooks, cx) {
         Ok(()) => ActionResult::Ok(None),
         Err(e) => ActionResult::Err(e),
     }
 }
 
-pub(super) fn create_folder(ws: &mut Workspace, name: String, cx: &mut Context<Workspace>) -> ActionResult {
+pub(super) fn create_folder(ws: &mut Workspace, name: String, cx: &mut impl WorkspaceCx) -> ActionResult {
     let id = ws.create_folder(name, cx);
     ActionResult::Ok(Some(serde_json::json!({ "folder_id": id })))
 }
 
-pub(super) fn delete_folder(ws: &mut Workspace, folder_id: String, cx: &mut Context<Workspace>) -> ActionResult {
+pub(super) fn delete_folder(ws: &mut Workspace, folder_id: String, cx: &mut impl WorkspaceCx) -> ActionResult {
     ws.delete_folder(&folder_id, cx);
     ActionResult::Ok(None)
 }
 
-pub(super) fn rename_folder(ws: &mut Workspace, folder_id: String, name: String, cx: &mut Context<Workspace>) -> ActionResult {
+pub(super) fn rename_folder(ws: &mut Workspace, folder_id: String, name: String, cx: &mut impl WorkspaceCx) -> ActionResult {
     ws.rename_folder(&folder_id, name, cx);
     ActionResult::Ok(None)
 }
@@ -212,7 +215,7 @@ pub(super) fn move_to_folder(
     project_id: String,
     folder_id: String,
     position: Option<usize>,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
@@ -225,7 +228,7 @@ pub(super) fn move_out_of_folder(
     ws: &mut Workspace,
     project_id: String,
     top_level_index: usize,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
@@ -242,7 +245,8 @@ pub(super) fn create_worktree(
     create_branch: bool,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let project = match ws.project(&project_id) {
         Some(p) => p,
@@ -250,13 +254,13 @@ pub(super) fn create_worktree(
     };
     let project_path = std::path::PathBuf::from(&project.path);
     let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(&project_path);
-    let path_template = settings(cx).worktree.path_template.clone();
+    let path_template = settings.worktree.path_template.clone();
     let (worktree_path, wt_project_path) = okena_git::compute_target_paths(&git_root, &subdir, &path_template, &branch);
-    let global_hooks = settings(cx).hooks.clone();
+    let global_hooks = settings.hooks.clone();
 
     match ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &wt_project_path, create_branch, &global_hooks, window_id, cx) {
         Ok(new_project_id) => {
-            let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, cx);
+            let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, settings, cx);
             let terminal_id = ws.project(&new_project_id)
                 .and_then(|p| p.layout.as_ref())
                 .and_then(find_first_terminal_id);

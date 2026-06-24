@@ -14,8 +14,9 @@ impl WindowView {
     pub(super) fn spawn_terminals_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
         let backend = self.backend.clone();
         let terminals = self.terminals.clone();
+        let app_settings = settings(cx);
         self.workspace.update(cx, |ws, cx| {
-            spawn_uninitialized_terminals(ws, &project_id, &*backend, &terminals, cx);
+            spawn_uninitialized_terminals(ws, &project_id, &*backend, &terminals, &app_settings, cx);
         });
         self.sync_project_columns(cx);
     }

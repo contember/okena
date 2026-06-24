@@ -242,6 +242,11 @@ pub(crate) async fn remote_command_loop(
                                     return CommandResult::Err(format!("invalid window id: {bad}"));
                                 }
                             };
+                            // Snapshot app settings to thread into the gpui-free
+                            // `execute_action` (hooks / worktree template / default
+                            // shell). Read here on the gpui thread before the
+                            // nested entity updates borrow `cx`.
+                            let app_settings = crate::settings::settings(cx);
                             // Resolve focus_manager + window_id so the targeted
                             // (or focused) window's per-window state is the
                             // target for both focus mutations and per-window
@@ -258,7 +263,7 @@ pub(crate) async fn remote_command_loop(
                                 Some((window_id, focus_manager)) => {
                                     focus_manager.update(cx, |fm, cx| {
                                         let result = workspace.update(cx, |ws, cx| {
-                                            execute_action(action, ws, window_id, fm, &*backend, &terminals, cx)
+                                            execute_action(action, ws, window_id, fm, &*backend, &terminals, &app_settings, cx)
                                                 .into_command_result()
                                         });
                                         cx.notify();

@@ -170,6 +170,11 @@ impl ActionDispatcher {
                 let window_id = *window_id;
                 focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
+                        // Snapshot app settings (hooks / worktree template /
+                        // default shell) to thread into the gpui-free
+                        // `execute_action`. Owned clone, so no borrow conflict
+                        // with the `&mut cx` passed alongside it.
+                        let app_settings = crate::settings::settings(cx);
                         // Interactive closes go through the optimistic soft
                         // close: the pane is ejected immediately and the PTY's
                         // fate (kill now vs. keep for undo) is decided off the
@@ -205,13 +210,13 @@ impl ActionDispatcher {
                                         project_id: project_id.clone(),
                                         terminal_ids: remaining,
                                     },
-                                    ws, window_id, fm, &*backend, &terminals, cx,
+                                    ws, window_id, fm, &*backend, &terminals, &app_settings, cx,
                                 );
                                 return;
                             }
                             _ => {}
                         }
-                        execute_action(action, ws, window_id, fm, &*backend, &terminals, cx);
+                        execute_action(action, ws, window_id, fm, &*backend, &terminals, &app_settings, cx);
                     });
                     cx.notify();
                 });
