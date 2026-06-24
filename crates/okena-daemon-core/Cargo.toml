@@ -14,10 +14,14 @@ okena-git = { path = "../okena-git" }
 okena-hooks = { path = "../okena-hooks", default-features = false }
 okena-workspace = { path = "../okena-workspace", default-features = false }
 okena-services = { path = "../okena-services", default-features = false }
+# Theme data types (gpui-free with default-features = false: avoids the
+# `default = ["gpui"]` feature so no gpui is linked into the headless daemon).
+okena-theme = { path = "../okena-theme", default-features = false }
 
 # Tokio reactor backing the gpui-free trait impls.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 parking_lot = "0.12"
+serde_json = "1.0"
 log = "0.4"
 # PTY event channel type (`PtyEvent` receiver) shared with `okena-terminal`.
 async-channel = "2.3"
