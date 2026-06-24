@@ -585,7 +585,10 @@ fn project_env(
 }
 
 /// Fire the `on_project_open` hook for a project.
-#[cfg(feature = "gpui")]
+///
+/// GPUI-free: takes the `HookRunner`/`HookMonitor` services explicitly so the
+/// daemon reactor can drive it without an `&App`. Callers in scope of GPUI pass
+/// `try_runner(cx)`/`try_monitor(cx)`.
 pub fn fire_on_project_open(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -594,14 +597,13 @@ pub fn fire_on_project_open(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
     global_hooks: &HooksConfig,
-    cx: &App,
+    runner: Option<&HookRunner>,
+    monitor: Option<&HookMonitor>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_open) {
         let env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         log::info!("Running on_project_open hook for project '{}'", project_name);
-        let monitor = try_monitor(cx);
-        let runner = try_runner(cx);
-        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_project_open", project_name, runner.as_ref(), project_id, true) {
+        if let Some(result) = run_hook(cmd, env, monitor, "on_project_open", project_name, runner, project_id, true) {
             return vec![result];
         }
     }
@@ -610,7 +612,9 @@ pub fn fire_on_project_open(
 
 /// Fire the `on_project_close` hook for a project.
 /// Runs headlessly (no PTY terminal) since the project is being deleted.
-#[cfg(feature = "gpui")]
+///
+/// GPUI-free: takes the `HookMonitor` service explicitly (no runner — close
+/// hooks never spawn a PTY terminal).
 pub fn fire_on_project_close(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -619,18 +623,18 @@ pub fn fire_on_project_close(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
     global_hooks: &HooksConfig,
-    cx: &App,
+    monitor: Option<&HookMonitor>,
 ) {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_close) {
         let env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         log::info!("Running on_project_close hook for project '{}'", project_name);
-        let monitor = try_monitor(cx);
-        run_hook(cmd, env, monitor.as_ref(), "on_project_close", project_name, None, project_id, true);
+        run_hook(cmd, env, monitor, "on_project_close", project_name, None, project_id, true);
     }
 }
 
 /// Fire the `on_worktree_create` hook after a worktree is successfully created.
-#[cfg(feature = "gpui")]
+///
+/// GPUI-free: takes the `HookRunner`/`HookMonitor` services explicitly.
 pub fn fire_on_worktree_create(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -640,15 +644,14 @@ pub fn fire_on_worktree_create(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
     global_hooks: &HooksConfig,
-    cx: &App,
+    runner: Option<&HookRunner>,
+    monitor: Option<&HookMonitor>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_create) {
         let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_worktree_create hook for branch '{}'", branch);
-        let monitor = try_monitor(cx);
-        let runner = try_runner(cx);
-        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_worktree_create", project_name, runner.as_ref(), project_id, true) {
+        if let Some(result) = run_hook(cmd, env, monitor, "on_worktree_create", project_name, runner, project_id, true) {
             return vec![result];
         }
     }
@@ -657,6 +660,31 @@ pub fn fire_on_worktree_create(
 
 /// Fire the `on_worktree_close` hook after a worktree is successfully removed.
 /// Runs headlessly (no PTY terminal) since the worktree project is being deleted.
+///
+/// GPUI-free: takes the `HookMonitor` service explicitly (no runner — close
+/// hooks never spawn a PTY terminal).
+pub fn fire_on_worktree_close_with_services(
+    project_hooks: &HooksConfig,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    branch: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    global_hooks: &HooksConfig,
+    monitor: Option<&HookMonitor>,
+) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_close) {
+        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+        env.insert("OKENA_BRANCH".into(), branch.into());
+        log::info!("Running on_worktree_close hook for project '{}' (branch: {})", project_name, branch);
+        run_hook(cmd, env, monitor, "on_worktree_close", project_name, None, project_id, true);
+    }
+}
+
+/// GPUI wrapper around [`fire_on_worktree_close_with_services`]: reads the
+/// `HookMonitor` global from `&App` and delegates. Kept so existing `&App`
+/// callers (e.g. okena-app's pending-worktree-close path) compile unchanged.
 #[cfg(feature = "gpui")]
 pub fn fire_on_worktree_close(
     project_hooks: &HooksConfig,
@@ -669,13 +697,18 @@ pub fn fire_on_worktree_close(
     global_hooks: &HooksConfig,
     cx: &App,
 ) {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_close) {
-        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
-        env.insert("OKENA_BRANCH".into(), branch.into());
-        log::info!("Running on_worktree_close hook for project '{}' (branch: {})", project_name, branch);
-        let monitor = try_monitor(cx);
-        run_hook(cmd, env, monitor.as_ref(), "on_worktree_close", project_name, None, project_id, true);
-    }
+    let monitor = try_monitor(cx);
+    fire_on_worktree_close_with_services(
+        project_hooks,
+        project_id,
+        project_name,
+        project_path,
+        branch,
+        folder_id,
+        folder_name,
+        global_hooks,
+        monitor.as_ref(),
+    );
 }
 
 /// Bare sync hook runner for tests (no monitor, no runner).

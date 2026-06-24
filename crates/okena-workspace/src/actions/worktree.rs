@@ -80,7 +80,7 @@ impl Workspace {
         create_branch: bool,
         global_hooks: &HooksConfig,
         window_id: WindowId,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
@@ -115,7 +115,7 @@ impl Workspace {
         project_path: &str,
         global_hooks: &HooksConfig,
         window_id: WindowId,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
         self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, true, global_hooks, window_id, cx)
     }
@@ -136,7 +136,7 @@ impl Workspace {
         project_path: &str,
         global_hooks: &HooksConfig,
         window_id: WindowId,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
         self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, false, global_hooks, window_id, cx)
     }
@@ -152,7 +152,7 @@ impl Workspace {
         fire_hooks: bool,
         global_hooks: &HooksConfig,
         window_id: WindowId,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
         // Get parent project info
         let parent = self.project(parent_project_id)
@@ -220,6 +220,8 @@ impl Workspace {
             let folder = self.folder_for_project_or_parent(&id);
             let folder_id = folder.map(|f| f.id.as_str());
             let folder_name = folder.map(|f| f.name.as_str());
+            let runner = cx.hook_runner();
+            let monitor = cx.hook_monitor();
             let hook_results = hooks::fire_on_worktree_create(
                 &new_project_hooks,
                 &id,
@@ -229,7 +231,8 @@ impl Workspace {
                 folder_id,
                 folder_name,
                 global_hooks,
-                cx,
+                runner.as_ref(),
+                monitor.as_ref(),
             );
             self.register_hook_results(hook_results, cx);
         }
@@ -239,7 +242,7 @@ impl Workspace {
 
     /// Finalize a deferred worktree: set the layout from the parent and fire hooks.
     /// Called once the worktree directory exists on disk.
-    pub fn fire_worktree_hooks(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
+    pub fn fire_worktree_hooks(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
         let Some(project) = self.project(project_id) else { return };
         let hooks_config = project.hooks.clone();
         let name = project.name.clone();
@@ -263,6 +266,8 @@ impl Workspace {
         let folder = self.folder_for_project_or_parent(project_id);
         let folder_id = folder.map(|f| f.id.as_str());
         let folder_name = folder.map(|f| f.name.as_str());
+        let runner = cx.hook_runner();
+        let monitor = cx.hook_monitor();
         let hook_results = hooks::fire_on_worktree_create(
             &hooks_config,
             project_id,
@@ -272,7 +277,8 @@ impl Workspace {
             folder_id,
             folder_name,
             global_hooks,
-            cx,
+            runner.as_ref(),
+            monitor.as_ref(),
         );
         self.register_hook_results(hook_results, cx);
     }
@@ -420,7 +426,7 @@ impl Workspace {
     }
 
     /// Remove a worktree project and its git worktree
-    pub fn remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) -> Result<(), String> {
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
 
@@ -446,7 +452,8 @@ impl Workspace {
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
 
         // Fire on_worktree_close hook BEFORE removal so the hook has a valid CWD
-        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, cx);
+        let monitor = cx.hook_monitor();
+        hooks::fire_on_worktree_close_with_services(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, monitor.as_ref());
 
         // Remove the git worktree
         okena_git::remove_worktree(&worktree_path, force)
