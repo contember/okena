@@ -6,15 +6,15 @@ license = "MIT"
 
 [features]
 default = ["gpui"]
-gpui = ["dep:gpui", "okena-workspace/gpui"]
+gpui = ["dep:gpui", "okena-workspace/gpui", "okena-files/gpui", "okena-theme/gpui"]
 
 [dependencies]
 okena-core = { path = "../okena-core" }
 okena-terminal = { path = "../okena-terminal" }
 okena-workspace = { path = "../okena-workspace", default-features = false }
 okena-git = { path = "../okena-git" }
-okena-files = { path = "../okena-files" }
-okena-theme = { path = "../okena-theme" }
+okena-files = { path = "../okena-files", default-features = false }
+okena-theme = { path = "../okena-theme", default-features = false }
 
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
 

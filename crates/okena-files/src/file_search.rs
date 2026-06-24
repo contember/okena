@@ -3,12 +3,12 @@
 //! Provides a searchable list of files in the active project,
 //! similar to VS Code's Cmd+P file picker.
 
+use crate::file_scan::scan_files;
 use crate::list_overlay::ListOverlayConfig;
 use crate::theme::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
-use ignore::WalkBuilder;
 use okena_ui::badge::keyboard_hint;
 use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text};
 use okena_ui::empty_state::empty_state;
@@ -17,6 +17,11 @@ use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::selectable_list::selectable_list_item;
 use okena_ui::simple_input::{InputChangedEvent, SimpleInputState};
 use std::path::PathBuf;
+
+/// The flat file entry produced by the gpui-free scanner. Re-exported so the
+/// dialog and existing `okena_files::file_search::FileEntry` imports keep
+/// working after the scan logic moved to [`crate::file_scan`].
+pub use crate::file_scan::FileEntry;
 
 // Define Cancel action locally so we don't depend on the main app's keybindings
 gpui::actions!(okena_files, [Cancel]);
@@ -28,24 +33,6 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "zip", "tar", "gz", "rar", "7z",
     "pdf", "woff", "woff2", "ttf", "eot", "exe", "bin",
 ];
-
-/// Maximum number of files to keep in the fuzzy finder index.
-///
-/// The file viewer tree is now lazy (see `crate::list_directory`), so the cap
-/// only constrains the Cmd+P fuzzy finder. 25k covers all but the very
-/// largest monorepos while keeping `nucleo` per-keystroke matching snappy.
-const MAX_FILES: usize = 25_000;
-
-/// A file entry in the search list
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FileEntry {
-    /// Full path to the file
-    pub path: PathBuf,
-    /// Path relative to project root
-    pub relative_path: String,
-    /// Just the filename
-    pub filename: String,
-}
 
 /// Remembered state from the last file search session.
 ///
@@ -164,78 +151,11 @@ impl FileSearchDialog {
 
     /// Scan files in the project directory using the `ignore` crate.
     ///
-    /// `show_ignored` is additive: regular (non-gitignored) files are scanned
-    /// first, then gitignored files are appended up to `MAX_FILES`. Without
-    /// this two-pass split, a single huge gitignored directory (e.g. an
-    /// Android `build/` tree) can fill the cap alphabetically and crowd out
-    /// real project files later in the walk.
+    /// Thin delegate to the gpui-free [`crate::file_scan::scan_files`] so the
+    /// dialog's behavior is unchanged while the scanning logic stays usable
+    /// from headless (gpui-free) builds.
     pub fn scan_files(project_path: &PathBuf, show_ignored: bool) -> Vec<FileEntry> {
-        let mut files = Vec::new();
-        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-
-        Self::collect_files(project_path, false, &mut files, &mut seen);
-        if show_ignored {
-            Self::collect_files(project_path, true, &mut files, &mut seen);
-        }
-
-        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-        files
-    }
-
-    /// Walk the project, appending entries to `files` until `MAX_FILES` is
-    /// reached. `seen` tracks already-collected paths so the gitignored pass
-    /// doesn't duplicate the regular pass.
-    fn collect_files(
-        project_path: &PathBuf,
-        include_ignored: bool,
-        files: &mut Vec<FileEntry>,
-        seen: &mut std::collections::HashSet<PathBuf>,
-    ) {
-        let mut walk_builder = WalkBuilder::new(project_path);
-        walk_builder
-            .hidden(false)
-            .git_ignore(!include_ignored)
-            .git_global(!include_ignored)
-            .git_exclude(!include_ignored)
-            .max_depth(Some(15));
-
-        let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
-        for pattern in crate::content_search::ALWAYS_IGNORE {
-            let _ = override_builder.add(pattern);
-        }
-        if let Ok(overrides) = override_builder.build() {
-            walk_builder.overrides(overrides);
-        }
-
-        for entry in walk_builder.build().flatten() {
-            if files.len() >= MAX_FILES {
-                break;
-            }
-
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if !seen.insert(path.to_path_buf()) {
-                continue;
-            }
-
-            let filename = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-
-            let relative_path = path
-                .strip_prefix(project_path)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| filename.clone());
-
-            files.push(FileEntry {
-                path: path.to_path_buf(),
-                relative_path,
-                filename,
-            });
-        }
+        scan_files(project_path, show_ignored)
     }
 
     /// Save current state for next open.

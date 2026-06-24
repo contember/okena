@@ -11,7 +11,7 @@ pub(super) fn list_files(ws: &Workspace, project_id: String, show_ignored: bool)
                 Ok(c) => c,
                 Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
             };
-            let files = okena_files::file_search::FileSearchDialog::scan_files(&path, show_ignored);
+            let files = okena_files::file_scan::scan_files(&path, show_ignored);
             ActionResult::Ok(Some(serde_json::to_value(files).expect("BUG: FileEntry must serialize")))
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),
