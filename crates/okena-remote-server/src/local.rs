@@ -17,6 +17,7 @@ use base64::Engine as _;
 use okena_workspace::persistence::config_dir;
 use rand::Rng as _;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// Loopback host every local client connects on. `remote.json` records only the
 /// port — the daemon always binds loopback for local use.
@@ -159,6 +160,45 @@ pub fn mint_local_token() -> Result<MintedToken, String> {
     mint_local_token_in(&config_dir())
 }
 
+/// Spawn a headless daemon: this same executable with `--headless --listen
+/// 127.0.0.1`, which binds a loopback port (preferring 19100–19200, else
+/// OS-assigned) and writes `remote.json`.
+///
+/// The caller owns the returned [`std::process::Child`]. In the UI-owned
+/// lifecycle the desktop kills it when the last window closes; mint the token
+/// *before* spawning so the fresh daemon loads it at startup (no reload needed).
+pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
+    let exe = std::env::current_exe()?;
+    std::process::Command::new(exe)
+        .arg("--headless")
+        .arg("--listen")
+        .arg(LOCAL_HOST)
+        .spawn()
+}
+
+/// Poll an explicit config dir until a live daemon is discoverable or `timeout`
+/// elapses (testable core). Polls every 50ms.
+pub fn wait_until_ready_in(dir: &Path, timeout: Duration) -> Option<LocalDaemon> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(daemon) = discover_in(dir)
+            && (daemon.pid == 0 || is_process_alive(daemon.pid))
+        {
+            return Some(daemon);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Poll the user's config dir until a live daemon appears or `timeout` elapses.
+/// Used after [`spawn_daemon`] to wait for the daemon to bind + advertise.
+pub fn wait_until_ready(timeout: Duration) -> Option<LocalDaemon> {
+    wait_until_ready_in(&config_dir(), timeout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +297,38 @@ mod tests {
     #[test]
     fn current_process_is_alive() {
         assert!(is_process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn wait_returns_immediately_when_daemon_present() {
+        let dir = temp_dir();
+        std::fs::write(
+            dir.join("remote.json"),
+            format!(r#"{{"port": 19100, "pid": {}, "tls": false}}"#, std::process::id()),
+        )
+        .unwrap();
+        let found = wait_until_ready_in(&dir, Duration::from_secs(2));
+        assert_eq!(found.map(|d| d.port), Some(19100));
+    }
+
+    #[test]
+    fn wait_times_out_when_absent() {
+        let dir = temp_dir();
+        let start = Instant::now();
+        assert_eq!(wait_until_ready_in(&dir, Duration::from_millis(120)), None);
+        assert!(start.elapsed() < Duration::from_secs(2), "should give up near the timeout");
+    }
+
+    #[test]
+    fn wait_skips_stale_dead_pid() {
+        let dir = temp_dir();
+        // pid 0 is treated as "unknown -> assume alive"; use a very high pid that
+        // is almost certainly dead to exercise the liveness rejection path.
+        std::fs::write(
+            dir.join("remote.json"),
+            r#"{"port": 19100, "pid": 2147483646, "tls": false}"#,
+        )
+        .unwrap();
+        assert_eq!(wait_until_ready_in(&dir, Duration::from_millis(120)), None);
     }
 }
