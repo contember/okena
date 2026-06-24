@@ -26,7 +26,7 @@ okena-app-core = { path = "../okena-app-core", default-features = false }
 okena-remote-server = { path = "../okena-remote-server", default-features = false }
 
 # Tokio reactor backing the gpui-free trait impls.
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
 parking_lot = "0.12"
 serde_json = "1.0"
 log = "0.4"
@@ -34,7 +34,7 @@ log = "0.4"
 async-channel = "2.3"
 # Window-id parsing (the gpui-free `parse_window_id` copy).
 uuid = { version = "1.10", features = ["v4"] }
-
-[dev-dependencies]
-# Test-only stub `TerminalBackend` returns `anyhow::Result` (the trait's error type).
+# `DaemonCore::new` / `run` return `anyhow::Result`, and `?` over
+# `RemoteServer::start` (which returns `anyhow::Result`) + the tokio runtime
+# builder (`io::Result`) coalesce through it.
 anyhow = "1.0"
