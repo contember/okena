@@ -6168,6 +6168,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "okena-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "okena-daemon-core",
+ "okena-workspace",
+]
+
+[[package]]
 name = "okena-daemon-core"
 version = "0.1.0"
 dependencies = [

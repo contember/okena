@@ -1,0 +1,18 @@
+[package]
+name = "okena-daemon"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[[bin]]
+name = "okena-daemon"
+path = "src/main.rs"
+
+[dependencies]
+okena-daemon-core = { path = "../okena-daemon-core" }
+# Pulled gpui-free: okena-workspace defaults to the `gpui` feature, so we must
+# opt out of default features to keep this binary 100% GPUI-free.
+okena-workspace = { path = "../okena-workspace", default-features = false }
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
