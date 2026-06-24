@@ -39,6 +39,10 @@ web/dist/
 # claude
 .claude/settings.local.json
 
+# agents ignore symlinks from .claude and CLADUE.md
+.agents
+AGENTS.md
+
 # Ralph loop runtime artifacts
 plans/observer-*.log
 plans/overseer-*.log
