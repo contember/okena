@@ -6171,6 +6171,7 @@ dependencies = [
 name = "okena-daemon-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "log",
  "okena-core",
  "okena-git",
