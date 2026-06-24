@@ -81,8 +81,10 @@ impl RemoteInfo {
 }
 
 /// GPUI global wrapper for RemoteInfo.
+#[cfg(feature = "gpui")]
 #[derive(Clone)]
 pub struct GlobalRemoteInfo(pub RemoteInfo);
 
+#[cfg(feature = "gpui")]
 impl gpui::Global for GlobalRemoteInfo {}
 
