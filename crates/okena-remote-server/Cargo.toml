@@ -6,13 +6,16 @@ license = "MIT"
 
 [features]
 default = ["gpui"]
-gpui = ["dep:gpui"]
+# Forward gpui to okena-workspace so the GUI consumer keeps the gpui-backed
+# items (e.g. GlobalRemoteInfo); with the feature off the crate compiles
+# gpui-free so the headless daemon can link it.
+gpui = ["dep:gpui", "okena-workspace/gpui"]
 
 [dependencies]
 okena-core = { path = "../okena-core" }
 okena-transport = { path = "../okena-transport", features = ["client"] }
 okena-terminal = { path = "../okena-terminal" }
-okena-workspace = { path = "../okena-workspace" }
+okena-workspace = { path = "../okena-workspace", default-features = false }
 
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
 
