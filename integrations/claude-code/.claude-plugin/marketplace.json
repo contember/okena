@@ -1,0 +1,15 @@
+{
+  "name": "okena",
+  "owner": {
+    "name": "Okena"
+  },
+  "description": "Okena integrations for Claude Code.",
+  "plugins": [
+    {
+      "name": "okena-lifecycle",
+      "source": "./okena-lifecycle",
+      "description": "Report Claude Code lifecycle to Okena (tab indicator, sidebar Agents section, desktop notifications) via OSC 9001.",
+      "version": "0.2.0"
+    }
+  ]
+}

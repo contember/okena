@@ -582,6 +582,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
             default_shell: None::<ShellType>,
             hook_terminals: HashMap::<String, HookTerminalEntry>::new(),
             pinned: false,

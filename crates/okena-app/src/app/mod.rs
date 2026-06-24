@@ -922,6 +922,14 @@ impl Okena {
                         // Stamp project activity for any command that finished
                         // this batch (OSC 133 ;D), independent of bell/OSC alerts.
                         this.process_command_finished_activity(&dirty_terminal_ids, cx);
+                        // Push runtime-only terminal state (e.g. agent status,
+                        // OSC 9001) to remote clients by bumping state_version
+                        // when any terminal marked itself remote-dirty this batch.
+                        this.process_remote_dirty(&dirty_terminal_ids);
+                        // Persist any captured AI agent session (OSC 9001 lbl=)
+                        // into its project so a pane can offer to resume it after
+                        // a restart.
+                        this.process_agent_session_dirty(&dirty_terminal_ids, cx);
                         // Answer (or, when disabled, drop) OSC 52 clipboard
                         // read requests queued by these terminals.
                         this.process_clipboard_reads(&dirty_terminal_ids, cx);

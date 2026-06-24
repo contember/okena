@@ -66,6 +66,38 @@ impl Terminal {
         *self.progress.lock()
     }
 
+    /// Latest agent status reported via the agent-status OSC (`OSC 9001`), or
+    /// `None` when no agent has reported one (or it was cleared). Read each
+    /// render to drive the per-tab indicator and the sidebar "Agents" section.
+    pub fn agent_status(&self) -> Option<okena_core::agent_status::AgentStatus> {
+        self.agent_status.lock().clone()
+    }
+
+    /// Consume the one-shot "remote-visible state changed since last drain"
+    /// edge. Returns true if anything marked it since the previous call, then
+    /// resets it. The PTY event loop uses this to bump the remote
+    /// `state_version` so remote / mobile clients re-fetch.
+    pub fn take_remote_dirty(&self) -> bool {
+        self.remote_dirty
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The durable agent session captured for this pane (`agent` + `session_id`
+    /// + optional `transcript_path`), or `None` if none has been reported.
+    /// Unlike [`agent_status`](Self::agent_status) this is **sticky** — it
+    /// survives `st=clear` — since it's the identity used for resume + transcript
+    /// stats, persisted into `workspace.json` by the app layer.
+    pub fn agent_session(&self) -> Option<okena_core::agent_session::AgentSession> {
+        self.agent_session.lock().clone()
+    }
+
+    /// Consume the one-shot "agent session changed since last drain" edge. The
+    /// PTY event loop uses this to persist the new session into `workspace.json`.
+    pub fn take_agent_session_dirty(&self) -> bool {
+        self.agent_session_dirty
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Push the active theme palette so the event listener can answer
     /// OSC 10/11/12/4 color queries with real theme colors. Called from the
     /// render loop on every frame; writes are cheap and uncontested.

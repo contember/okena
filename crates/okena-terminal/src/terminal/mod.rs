@@ -1,6 +1,8 @@
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::vte::ansi::{CursorShape as VteCursorShape, CursorStyle as VteCursorStyle, Processor};
+use okena_core::agent_session::AgentSession;
+use okena_core::agent_status::AgentStatus;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
@@ -197,6 +199,35 @@ pub struct Terminal {
     /// on `st=0`), GPUI reads via `progress`. GPUI thread only.
     pub(super) progress: Arc<Mutex<Option<TerminalProgress>>>,
 
+    /// Latest agent status reported via the agent-status OSC (`OSC 9001`), or
+    /// `None` when never set / cleared. `Arc` shared with `OscSidecar`: the
+    /// sidecar overwrites it on each sequence, GPUI reads via `agent_status`.
+    /// Runtime-only (never persisted). GPUI thread only.
+    pub(super) agent_status: Arc<Mutex<Option<AgentStatus>>>,
+
+    /// One-shot "remote-visible state changed since last drain" edge. `Arc`
+    /// shared with `OscSidecar`: any runtime-only signal whose change remote
+    /// clients should see (currently agent status, `OSC 9001`) stores into it,
+    /// and the PTY event loop consumes it via `take_remote_dirty` to bump the
+    /// remote `state_version` so remote / mobile clients re-fetch. Generic by
+    /// design — a new such signal (e.g. progress, `OSC 9;4`) sets this same flag
+    /// instead of growing its own changed-edge + per-feature drain in
+    /// `okena-app`. Mirrors `bell_pending`.
+    pub(super) remote_dirty: Arc<AtomicBool>,
+
+    /// Durable agent session captured from the agent-status OSC `lbl=` (`agent`
+    /// + `session_id` + `transcript_path`). `Arc` shared with `OscSidecar`.
+    /// Unlike `agent_status` this is **sticky** — it survives `st=clear` —
+    /// because it's the pane's session identity used for resume + transcript
+    /// stats, and is persisted into `workspace.json` by the app layer (so,
+    /// unlike agent status, it is *not* runtime-only).
+    pub(super) agent_session: Arc<Mutex<Option<AgentSession>>>,
+
+    /// One-shot "agent session changed since last drain" edge, shared with
+    /// `OscSidecar`. Set when `agent_session` changes; the PTY event loop drains
+    /// it via `take_agent_session_dirty` to persist the new session.
+    pub(super) agent_session_dirty: Arc<AtomicBool>,
+
     /// Per-renderer focus state for DEC focus reports. A terminal can appear
     /// in multiple windows, so focus reports are derived from the aggregate
     /// instead of whichever view rendered last.
@@ -375,10 +406,18 @@ impl Terminal {
         let reported_cwd = Arc::new(Mutex::new(None));
         let pending_notifications = Arc::new(Mutex::new(Vec::new()));
         let progress = Arc::new(Mutex::new(None));
+        let agent_status = Arc::new(Mutex::new(None));
+        let remote_dirty = Arc::new(AtomicBool::new(false));
+        let agent_session = Arc::new(Mutex::new(None));
+        let agent_session_dirty = Arc::new(AtomicBool::new(false));
         let osc_sidecar = Mutex::new(OscSidecar::new(
             reported_cwd.clone(),
             pending_notifications.clone(),
             progress.clone(),
+            agent_status.clone(),
+            remote_dirty.clone(),
+            agent_session.clone(),
+            agent_session_dirty.clone(),
             transport.clone(),
             terminal_id.clone(),
         ));
@@ -405,6 +444,10 @@ impl Terminal {
             reported_cwd,
             pending_notifications,
             progress,
+            agent_status,
+            remote_dirty,
+            agent_session,
+            agent_session_dirty,
             focus_report_state: Mutex::new(FocusReportState::default()),
             osc_sidecar,
             prompt_sidecar: Mutex::new(PromptSidecar::new()),

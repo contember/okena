@@ -358,6 +358,28 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             &settings.default_shell,
         );
 
+        // On restore, optionally resume the pane's captured AI agent session.
+        // This function only runs when the terminal wasn't already in the
+        // registry (a fresh reconnect after restart), so resume can't fire
+        // mid-session. Gated by the opt-in setting and dispatched to the right
+        // harness by the session's `agent` id. The persisted session — and the
+        // terminal_id it's keyed by — only survives a restart with a session
+        // backend, so this is a no-op under `session_backend = none`.
+        let resume_line: Option<String> = if settings.auto_resume_agent_sessions {
+            ws.agent_session(&self.project_id, &terminal_id)
+                .and_then(|session| {
+                    okena_core::agent_harness::for_agent(&session.agent).and_then(|harness| {
+                        harness.resume_command(
+                            &session.session_id,
+                            std::path::Path::new(&self.project_path),
+                        )
+                    })
+                })
+                .map(|argv| argv.join(" "))
+        } else {
+            None
+        };
+
         match self
             .backend
             .reconnect_terminal(&terminal_id, &self.project_path, Some(&shell))
@@ -366,6 +388,18 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             Err(e) => {
                 log::error!("Failed to reconnect terminal {}: {}", terminal_id, e);
             }
+        }
+
+        // Type the resume command once the freshly-reconnected shell has settled.
+        if let Some(line) = resume_line {
+            let transport = self.backend.transport();
+            let tid = terminal_id.clone();
+            let payload = format!("{line}\n");
+            cx.spawn(async move |_this: WeakEntity<TerminalPane<D>>, _cx| {
+                smol::Timer::after(std::time::Duration::from_millis(1500)).await;
+                transport.send_input(&tid, payload.as_bytes());
+            })
+            .detach();
         }
 
         let size = TerminalSize::default();

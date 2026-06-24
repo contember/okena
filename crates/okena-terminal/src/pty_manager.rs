@@ -363,6 +363,27 @@ impl PtyManager {
             }
         }
 
+        // Expose the pane's slave pty path so processes that lack a controlling
+        // terminal can still write in-band escape sequences to this pane. A
+        // Claude Code hook (and any agent hook) runs with no `/dev/tty`, so it
+        // can't address the terminal the usual way; it opens `$OKENA_TTY`
+        // instead. Writing to the slave reaches Okena's master reader, so it
+        // works through a session backend (dtach/tmux) that nests another pty on
+        // first launch. Set via the same `cmd.env` channel as
+        // `OKENA_TERMINAL_ID`.
+        //
+        // CAVEAT: like `OKENA_TERMINAL_ID`, this is captured into the shell's
+        // environment at first spawn, not refreshed per-attach. On *reattach* to
+        // a pre-existing dtach/tmux session the already-running shell keeps the
+        // original value while Okena has opened a new slave pty — `$OKENA_TTY`
+        // then points at the old (closed) device and the hook's write is a
+        // silent no-op. Refreshing it on each attach (e.g. tmux
+        // `set-environment`) is a known follow-up; see docs/agent-status.md.
+        #[cfg(unix)]
+        if let Some(path) = slave_pty_path(pair.master.as_ref()) {
+            cmd.env("OKENA_TTY", path);
+        }
+
         // Spawn the process
         let child = pair.slave.spawn_command(cmd)?;
 
@@ -1390,4 +1411,24 @@ fn first_proc_child(pid: u32) -> Option<u32> {
 #[cfg(not(unix))]
 fn first_proc_child(_pid: u32) -> Option<u32> {
     None
+}
+
+/// Resolve the slave device path (e.g. `/dev/pts/3`) for a pty from its master
+/// fd, via `ptsname`. Used to export `OKENA_TTY` so hooks without a controlling
+/// terminal can still write to the pane.
+#[cfg(unix)]
+fn slave_pty_path(master: &dyn MasterPty) -> Option<String> {
+    let fd = master.as_raw_fd()?;
+    // SAFETY: `fd` is the live pty master. `ptsname` returns a pointer into a
+    // static buffer valid until the next `ptsname` call; terminal creation is
+    // serialized on the GPUI thread, so nothing can race that buffer here.
+    let ptr = unsafe { libc::ptsname(fd) };
+    if ptr.is_null() {
+        return None;
+    }
+    let path = unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_str()
+        .ok()?
+        .to_string();
+    Some(path)
 }

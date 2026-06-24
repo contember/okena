@@ -1,10 +1,12 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+mod harness;
 mod status;
 mod settings;
 pub mod usage;
 mod ui_helpers;
 
+pub use harness::register_harness;
 pub use usage::resolve_claude_dir;
 
 use gpui::{AppContext as _, AnyView};

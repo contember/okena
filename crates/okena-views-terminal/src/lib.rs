@@ -88,6 +88,10 @@ pub struct TerminalViewSettings {
     /// When true, Ctrl+C copies the active selection (and clears it) instead of sending SIGINT.
     /// Ctrl+C without a selection always sends SIGINT.
     pub ctrl_c_copies_selection: bool,
+    /// Auto-resume a pane's captured AI agent session (`claude --resume <id>`,
+    /// …) when reconnecting it on restore. Opt-in; off by default.
+    #[serde(default)]
+    pub auto_resume_agent_sessions: bool,
 }
 
 /// Read current terminal view settings from ExtensionSettingsStore.
@@ -110,6 +114,7 @@ pub fn terminal_view_settings(cx: &gpui::App) -> TerminalViewSettings {
             default_shell: okena_terminal::shell_config::ShellType::Default,
             hooks: Default::default(),
             ctrl_c_copies_selection: false,
+            auto_resume_agent_sessions: false,
         })
 }
 

@@ -347,6 +347,9 @@ impl HeadlessApp {
 
                 // Collect exit events for service manager processing
                 let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
+                // Terminals that produced output this batch — used to drain the
+                // runtime-only `remote_dirty` edge (agent status, OSC 9001).
+                let mut data_terminal_ids: Vec<String> = Vec::new();
 
                 // Process first event (broadcasting handled by PtyOutputSink in reader threads)
                 match &event {
@@ -355,6 +358,8 @@ impl HeadlessApp {
                         if let Some(terminal) = terminals_guard.get(terminal_id) {
                             terminal.process_output(data);
                         }
+                        drop(terminals_guard);
+                        data_terminal_ids.push(terminal_id.clone());
                     }
                     PtyEvent::Exit { terminal_id, exit_code } => {
                         pty_manager.cleanup_exited(terminal_id);
@@ -370,12 +375,27 @@ impl HeadlessApp {
                             if let Some(terminal) = terminals_guard.get(terminal_id) {
                                 terminal.process_output(data);
                             }
+                            drop(terminals_guard);
+                            data_terminal_ids.push(terminal_id.clone());
                         }
                         PtyEvent::Exit { terminal_id, exit_code } => {
                             pty_manager.cleanup_exited(terminal_id);
                             exit_events.push((terminal_id.clone(), *exit_code));
                         }
                     }
+                }
+
+                // Push runtime-only terminal state (agent status, OSC 9001) to
+                // remote clients: drain the remote-dirty edge for terminals that
+                // produced output this batch and bump state_version if any
+                // changed. Without this, headless serializes terminal_agent_status
+                // on GetState but never signals subscribers to re-fetch, so agent
+                // indicators would stay stale until an unrelated change. Mirrors
+                // the desktop loop (Okena::process_remote_dirty).
+                if !data_terminal_ids.is_empty()
+                    && super::notifications::drain_remote_dirty(&terminals, &data_terminal_ids)
+                {
+                    state_version.send_modify(|v| *v += 1);
                 }
 
                 if !exit_events.is_empty() {

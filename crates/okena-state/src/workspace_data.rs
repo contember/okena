@@ -170,6 +170,12 @@ pub struct ProjectData {
     /// Used to reconnect to persistent sessions across restarts
     #[serde(default)]
     pub service_terminals: HashMap<String, String>,
+    /// Per-terminal AI agent session (terminal_id -> session) captured in-band
+    /// via the agent-status OSC `lbl=`. Persisted so a pane can offer to resume
+    /// its agent (`claude --resume <id>`, …) after a restart. Harness-agnostic:
+    /// the session's `agent` field selects which harness resumes it.
+    #[serde(default)]
+    pub agent_sessions: HashMap<String, okena_core::agent_session::AgentSession>,
     /// Per-project default shell (overrides global default when ShellType::Default is used)
     #[serde(default)]
     pub default_shell: Option<ShellType>,
@@ -262,6 +268,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,

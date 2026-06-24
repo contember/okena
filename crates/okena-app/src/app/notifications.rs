@@ -24,6 +24,25 @@ use notify_rust::Notification;
 
 use super::Okena;
 
+/// Drain the generic "remote-visible state changed" edge for the given
+/// terminals; returns true if any was set. Shared by the desktop ([`Okena`])
+/// and the headless PTY loops so they can't diverge on whether a runtime-only
+/// terminal signal (currently agent status, `OSC 9001`) bumps the remote
+/// `state_version`. See [`Okena::process_remote_dirty`].
+pub(crate) fn drain_remote_dirty(
+    terminals: &crate::views::window::TerminalsRegistry,
+    terminal_ids: &[String],
+) -> bool {
+    let reg = terminals.lock();
+    let mut dirty = false;
+    for tid in terminal_ids {
+        if reg.get(tid).is_some_and(|t| t.take_remote_dirty()) {
+            dirty = true;
+        }
+    }
+    dirty
+}
+
 /// Where a clicked desktop notification should send the user: the exact
 /// terminal that raised the alert.
 #[derive(Clone, Debug)]
@@ -227,6 +246,64 @@ impl Okena {
             return;
         }
         self.bump_activity_for_terminals(finished.iter().map(|s| s.as_str()), cx);
+    }
+
+    /// Drain the generic "remote-visible state changed" edge for each dirty
+    /// terminal and bump the remote `state_version` once if any was marked.
+    ///
+    /// Some terminal state is runtime-only on `Terminal` (currently agent
+    /// status, `OSC 9001`) — it never flows through the workspace, so the
+    /// workspace-change observer that normally bumps `state_version` won't fire
+    /// for it. Any such signal stores into the shared `remote_dirty` edge on
+    /// `Terminal`; this single drain turns it into a push, so subscribed remote
+    /// / mobile clients re-fetch `/v1/state`. Generic by design — a new
+    /// runtime-only signal reuses this drain instead of adding its own.
+    pub(super) fn process_remote_dirty(&mut self, dirty_terminal_ids: &[String]) {
+        if drain_remote_dirty(&self.terminals, dirty_terminal_ids) {
+            self.state_version.send_modify(|v| *v += 1);
+        }
+    }
+
+    /// Drain the per-terminal "agent session changed" edge and persist any new
+    /// session into its project's `agent_sessions` (workspace.json). The runtime
+    /// capture lives on `Terminal` (sticky — it survives `st=clear`); this drain
+    /// is what makes it durable, so a pane can offer to resume its agent after a
+    /// restart.
+    pub(super) fn process_agent_session_dirty(
+        &mut self,
+        dirty_terminal_ids: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        // Collect (project, terminal, session) for terminals whose edge fired,
+        // releasing the registry lock before mutating the workspace.
+        let mut to_persist: Vec<(String, String, okena_core::agent_session::AgentSession)> =
+            Vec::new();
+        {
+            let reg = self.terminals.lock();
+            for tid in dirty_terminal_ids {
+                let Some(term) = reg.get(tid) else { continue };
+                if !term.take_agent_session_dirty() {
+                    continue;
+                }
+                let Some(session) = term.agent_session() else { continue };
+                if let Some(pid) = self
+                    .workspace
+                    .read(cx)
+                    .find_project_for_terminal(tid)
+                    .map(|p| p.id.clone())
+                {
+                    to_persist.push((pid, tid.clone(), session));
+                }
+            }
+        }
+        if to_persist.is_empty() {
+            return;
+        }
+        self.workspace.update(cx, |ws, cx| {
+            for (pid, tid, session) in to_persist {
+                ws.set_agent_session(&pid, &tid, session, cx);
+            }
+        });
     }
 
     /// Answer (or silently deny) OSC 52 clipboard *read* requests
