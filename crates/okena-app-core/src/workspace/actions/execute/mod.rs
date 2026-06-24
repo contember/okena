@@ -16,7 +16,7 @@ mod tab;
 mod terminal;
 
 use okena_core::api::{ActionRequest, CommandResult};
-use crate::settings::settings;
+use crate::workspace::persistence::AppSettings;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
@@ -24,7 +24,7 @@ use okena_terminal::TerminalsRegistry;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::hooks;
 use crate::workspace::state::{LayoutNode, WindowId, Workspace};
-use gpui::*;
+use okena_workspace::context::WorkspaceCx;
 use std::sync::Arc;
 
 /// Result of executing an action.
@@ -48,6 +48,10 @@ impl ActionResult {
 ///
 /// This is the single source of truth for all client-facing actions.
 /// Both desktop UI handlers and the remote API delegate here.
+// Takes the workspace, focus manager, backend, terminals registry, settings
+// and cx as distinct dependencies; bundling them into a context struct would
+// obscure more than it clarifies here (matching the sub-handler modules).
+#[allow(clippy::too_many_arguments)]
 pub fn execute_action(
     action: ActionRequest,
     ws: &mut Workspace,
@@ -55,15 +59,16 @@ pub fn execute_action(
     focus_manager: &mut FocusManager,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     match action {
         // ── Terminal ops ─────────────────────────────────────────────
         ActionRequest::CreateTerminal { project_id } => {
-            terminal::create(ws, focus_manager, project_id, backend, terminals, cx)
+            terminal::create(ws, focus_manager, project_id, backend, terminals, settings, cx)
         }
         ActionRequest::SplitTerminal { project_id, path, direction } => {
-            terminal::split(ws, focus_manager, project_id, path, direction, backend, terminals, cx)
+            terminal::split(ws, focus_manager, project_id, path, direction, backend, terminals, settings, cx)
         }
         ActionRequest::CloseTerminal { project_id, terminal_id } => {
             terminal::close(ws, focus_manager, project_id, terminal_id, backend, terminals, cx)
@@ -107,7 +112,7 @@ pub fn execute_action(
 
         // ── Tab / pane-move ops ──────────────────────────────────────
         ActionRequest::AddTab { project_id, path, in_group } => {
-            tab::add_tab(ws, focus_manager, project_id, path, in_group, backend, terminals, cx)
+            tab::add_tab(ws, focus_manager, project_id, path, in_group, backend, terminals, settings, cx)
         }
         ActionRequest::SetActiveTab { project_id, path, index } => {
             tab::set_active_tab(ws, project_id, path, index, cx)
@@ -183,7 +188,7 @@ pub fn execute_action(
 
         // ── Project / folder / worktree ops ──────────────────────────
         ActionRequest::AddProject { name, path } => {
-            project::add_project(ws, window_id, name, path, backend, terminals, cx)
+            project::add_project(ws, window_id, name, path, backend, terminals, settings, cx)
         }
         ActionRequest::ReorderProjectInFolder { folder_id, project_id, new_index } => {
             project::reorder_in_folder(ws, folder_id, project_id, new_index, cx)
@@ -201,13 +206,13 @@ pub fn execute_action(
             project::rename_project_directory(ws, project_id, new_name, cx)
         }
         ActionRequest::DeleteProject { project_id } => {
-            project::delete_project(ws, focus_manager, project_id, cx)
+            project::delete_project(ws, focus_manager, project_id, settings, cx)
         }
         ActionRequest::SetProjectShowInOverview { project_id, show, window: _ } => {
             project::set_show_in_overview(ws, focus_manager, window_id, project_id, show, cx)
         }
         ActionRequest::RemoveWorktreeProject { project_id, force } => {
-            project::remove_worktree_project(ws, focus_manager, project_id, force, cx)
+            project::remove_worktree_project(ws, focus_manager, project_id, force, settings, cx)
         }
         ActionRequest::CreateFolder { name } => project::create_folder(ws, name, cx),
         ActionRequest::DeleteFolder { folder_id } => project::delete_folder(ws, folder_id, cx),
@@ -221,7 +226,7 @@ pub fn execute_action(
             project::move_out_of_folder(ws, project_id, top_level_index, cx)
         }
         ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
-            project::create_worktree(ws, window_id, project_id, branch, create_branch, backend, terminals, cx)
+            project::create_worktree(ws, window_id, project_id, branch, create_branch, backend, terminals, settings, cx)
         }
 
         // Service actions are handled by the remote command loop directly
@@ -306,7 +311,8 @@ pub fn spawn_uninitialized_terminals(
     project_id: &str,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     // Don't spawn terminals for projects whose worktree is still being created
     if ws.is_creating_project(project_id) {
@@ -332,13 +338,12 @@ pub fn spawn_uninitialized_terminals(
     }
     log::info!("spawn_uninitialized_terminals: project={}, uninitialized_count={}", project_id, uninitialized.len());
 
-    let app_settings = settings(cx);
-    let global_default = app_settings.default_shell.clone();
-    let global_hooks = app_settings.hooks;
+    let global_default = settings.default_shell.clone();
+    let global_hooks = settings.hooks.clone();
 
     // Resolve shell_wrapper and on_create once for all terminals in this project
     let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
-    let on_create_cmd = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), &global_hooks, cx);
+    let on_create_cmd = hooks::resolve_terminal_on_create_simple(&project_hooks, parent_hooks.as_ref(), &global_hooks);
     let folder = ws.folder_for_project_or_parent(project_id);
     let folder_id = folder.map(|f| f.id.as_str());
     let folder_name = folder.map(|f| f.name.as_str());
