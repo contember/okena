@@ -7,9 +7,13 @@ pub use okena_core::theme::{
 };
 
 pub mod custom;
+#[cfg(feature = "gpui")]
 mod gpui_helpers;
 mod app_theme;
 
+#[cfg(feature = "gpui")]
 pub use gpui_helpers::{with_alpha, ansi_to_hsla, GlobalThemeProvider, theme};
-pub use app_theme::{AppTheme, GlobalTheme, theme_entity};
+pub use app_theme::AppTheme;
+#[cfg(feature = "gpui")]
+pub use app_theme::{GlobalTheme, theme_entity};
 pub use custom::{CustomThemeConfig, CustomThemeColors, get_themes_dir, load_custom_themes};
