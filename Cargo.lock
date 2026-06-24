@@ -6058,6 +6058,7 @@ dependencies = [
  "okena-ext-updater",
  "okena-extensions",
  "okena-files",
+ "okena-remote-server",
  "okena-terminal",
  "okena-ui",
  "okena-views-git",

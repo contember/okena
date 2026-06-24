@@ -26,6 +26,11 @@ okena-views-terminal = { path = "crates/okena-views-terminal" }
 okena-views-git = { path = "crates/okena-views-git" }
 okena-ui = { path = "crates/okena-ui" }
 
+# `--daemon-client` startup: ensure_local_daemon() (discover-or-spawn the local
+# headless daemon + mint a loopback token). Already a transitive dep via
+# okena-app, so this adds no new linkage — only a direct path to the `local` API.
+okena-remote-server = { path = "crates/okena-remote-server" }
+
 # Extension system — registered at startup in main.rs.
 okena-extensions = { path = "crates/okena-extensions" }
 okena-ext-claude = { path = "crates/okena-ext-claude" }

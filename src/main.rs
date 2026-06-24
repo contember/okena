@@ -492,14 +492,25 @@ fn main() {
     let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
     let headless = explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
 
+    // `--daemon-client`: run the desktop as a thin client of a local headless
+    // daemon. Off by default → byte-for-byte identical classic behavior. Only
+    // applies to the GUI path; headless IS the daemon, so it ignores the flag.
+    let daemon_client = args.iter().any(|a| a == "--daemon-client");
+
     // Acquire instance lock to prevent multiple Okena processes from
-    // clobbering each other's workspace.json.
-    let _instance_lock = match persistence::acquire_instance_lock() {
-        Ok(guard) => guard,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
+    // clobbering each other's workspace.json. In `--daemon-client` mode the
+    // daemon owns the lock + workspace.json (§5 single-writer), so the GUI
+    // client must NOT acquire it.
+    let _instance_lock = if daemon_client {
+        None
+    } else {
+        Some(match persistence::acquire_instance_lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        })
     };
 
     if headless {
@@ -646,22 +657,28 @@ fn main() {
         let app_settings = settings_entity.read(cx).get().clone();
 
 
-        // Load or create workspace
-        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
-            log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
-            let backup_path = persistence::get_workspace_path().with_extension("json.bak");
-            ToastManager::post(
-                Toast::error(format!(
-                    "Workspace file was corrupted. A backup was saved to {}. \
-                     Starting with default workspace. Auto-save is disabled to protect your data — \
-                     restart the app after fixing the file.",
-                    backup_path.display()
-                ))
-                    .with_ttl(std::time::Duration::from_secs(30)),
-                cx,
-            );
-            persistence::default_workspace()
-        });
+        // Load or create workspace. In `--daemon-client` mode the daemon owns
+        // the real workspace (it holds the instance lock + workspace.json); the
+        // GUI starts empty and projects arrive via the mirror snapshot.
+        let workspace_data = if daemon_client {
+            workspace::state::WorkspaceData::empty()
+        } else {
+            persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
+                log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
+                let backup_path = persistence::get_workspace_path().with_extension("json.bak");
+                ToastManager::post(
+                    Toast::error(format!(
+                        "Workspace file was corrupted. A backup was saved to {}. \
+                         Starting with default workspace. Auto-save is disabled to protect your data — \
+                         restart the app after fixing the file.",
+                        backup_path.display()
+                    ))
+                        .with_ttl(std::time::Duration::from_secs(30)),
+                    cx,
+                );
+                persistence::default_workspace()
+            })
+        };
 
         // Create theme entity from settings, restoring custom theme if applicable
         let theme_entity = cx.new(|_cx| {
@@ -701,6 +718,22 @@ fn main() {
         // Create PTY manager with session backend from settings
         let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
         let pty_manager = Arc::new(pty_manager);
+
+        // `--daemon-client`: discover-or-spawn the local headless daemon and
+        // mint a loopback token. Blocking (up to ~10s on a cold spawn). The user
+        // explicitly opted in, so a failure is fatal. `None` in classic mode →
+        // `Okena::new` keeps its current in-process behavior unchanged.
+        let local_daemon = if daemon_client {
+            match okena_remote_server::local::ensure_local_daemon() {
+                Ok(ensured) => Some(ensured),
+                Err(e) => {
+                    eprintln!("Failed to start local daemon (--daemon-client): {e}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
 
         // Create the main window
         #[allow(
@@ -810,7 +843,7 @@ fn main() {
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
-                    Okena::new(workspace_data, pty_manager.clone(), pty_events, listen_addr, window, cx)
+                    Okena::new(workspace_data, pty_manager.clone(), pty_events, listen_addr, local_daemon, window, cx)
                 });
                 cx.new(|cx| Root::new(okena, window, cx))
             },
