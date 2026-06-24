@@ -19,6 +19,8 @@ okena-services = { path = "../okena-services", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 parking_lot = "0.12"
 log = "0.4"
+# PTY event channel type (`PtyEvent` receiver) shared with `okena-terminal`.
+async-channel = "2.3"
 
 [dev-dependencies]
 # Test-only stub `TerminalBackend` returns `anyhow::Result` (the trait's error type).

@@ -13,11 +13,20 @@
 //! - [`okena_services::manager`]'s `ServiceCx` / `ServiceHandle` /
 //!   `ServiceAsyncCx` (see [`service_cx`])
 //!
-//! The observer tasks, PTY event loop, git polling, and command loop are *not*
-//! wired here — they are later steps. This step only proves the trait impls
-//! compile and link zero gpui.
+//! This crate also provides the self-contained, gpui-free async tasks the
+//! daemon runs on its reactor:
+//!
+//! - the observer tasks (see [`observers`]),
+//! - the PTY event loop ([`pty_loop::run_pty_loop`]), and
+//! - the git-status poller ([`git_poll::run_git_poll`]).
+//!
+//! Each takes its dependencies as parameters; the (later) `DaemonCore::new`
+//! wires them onto the tokio `LocalSet` / multi-thread runtime. The remote
+//! command loop is the only piece still to come.
 
+pub mod git_poll;
 pub mod observers;
+pub mod pty_loop;
 pub mod reactor;
 pub mod service_cx;
 pub mod workspace_cx;
