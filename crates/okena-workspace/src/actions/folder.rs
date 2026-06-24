@@ -276,7 +276,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
     use gpui::AppContext as _;
     use crate::state::{FolderData, LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};

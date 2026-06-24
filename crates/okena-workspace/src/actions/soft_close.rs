@@ -256,7 +256,7 @@ impl Workspace {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod tests {
     use gpui::AppContext as _;
 

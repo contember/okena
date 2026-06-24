@@ -225,7 +225,7 @@ impl Workspace {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
     use gpui::AppContext as _;
     use crate::focus::FocusManager;
