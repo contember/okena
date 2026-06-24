@@ -9,6 +9,7 @@ use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_terminal::TerminalsRegistry;
 use okena_state::HooksConfig;
 use crate::hook_monitor::{HookMonitor, HookStatus};
+#[cfg(feature = "gpui")]
 use gpui::App;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ impl HookRunner {
     }
 }
 
+#[cfg(feature = "gpui")]
 impl gpui::Global for HookRunner {}
 
 /// Pending terminal-backed hook actions paired with their env vars, returned
@@ -351,11 +353,13 @@ fn resolve_hook_with_parent(
 }
 
 /// Try to get the global HookMonitor from GPUI context.
+#[cfg(feature = "gpui")]
 pub fn try_monitor(cx: &App) -> Option<HookMonitor> {
     cx.try_global::<HookMonitor>().cloned()
 }
 
 /// Try to get the global HookRunner from GPUI context.
+#[cfg(feature = "gpui")]
 pub fn try_runner(cx: &App) -> Option<HookRunner> {
     cx.try_global::<HookRunner>().cloned()
 }
@@ -581,6 +585,7 @@ fn project_env(
 }
 
 /// Fire the `on_project_open` hook for a project.
+#[cfg(feature = "gpui")]
 pub fn fire_on_project_open(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -605,6 +610,7 @@ pub fn fire_on_project_open(
 
 /// Fire the `on_project_close` hook for a project.
 /// Runs headlessly (no PTY terminal) since the project is being deleted.
+#[cfg(feature = "gpui")]
 pub fn fire_on_project_close(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -624,6 +630,7 @@ pub fn fire_on_project_close(
 }
 
 /// Fire the `on_worktree_create` hook after a worktree is successfully created.
+#[cfg(feature = "gpui")]
 pub fn fire_on_worktree_create(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -650,6 +657,7 @@ pub fn fire_on_worktree_create(
 
 /// Fire the `on_worktree_close` hook after a worktree is successfully removed.
 /// Runs headlessly (no PTY terminal) since the worktree project is being deleted.
+#[cfg(feature = "gpui")]
 pub fn fire_on_worktree_close(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -873,6 +881,7 @@ pub fn fire_worktree_removed(
 
 /// Resolve the `terminal.on_create` hook command.
 /// Returns the command string if configured at any level (project/parent/global).
+#[cfg(feature = "gpui")]
 pub fn resolve_terminal_on_create(
     project_hooks: &HooksConfig,
     parent_hooks: Option<&HooksConfig>,
@@ -905,6 +914,7 @@ pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str, env_vars: &HashMa
 
 /// Fire the `terminal.on_close` hook after a terminal PTY exits.
 /// Runs headlessly (no PTY runner) since the terminal just exited.
+#[cfg(feature = "gpui")]
 pub fn fire_terminal_on_close(
     project_hooks: &HooksConfig,
     parent_hooks: Option<&HooksConfig>,
