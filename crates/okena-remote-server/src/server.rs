@@ -272,25 +272,8 @@ fn cleanup_stale_remote_json() {
     };
 
     if let Some(pid) = json.get("pid").and_then(|v| v.as_u64())
-        && !is_process_alive(pid as u32) {
+        && !crate::local::is_process_alive(pid as u32) {
             log::info!("Removing stale remote.json (pid {} is dead)", pid);
             let _ = std::fs::remove_file(&path);
         }
-}
-
-/// Check if a process with the given PID is still running.
-fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // signal 0 checks if process exists without sending a signal
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        // On non-Unix platforms, assume the process may be alive to avoid
-        // accidentally removing a valid remote.json. The stale file is
-        // harmless — the port will simply fail to bind and we'll pick another.
-        let _ = pid;
-        true
-    }
 }
