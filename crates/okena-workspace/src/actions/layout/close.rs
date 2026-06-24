@@ -1,13 +1,13 @@
 //! Terminal and tab close operations.
 
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::state::{LayoutNode, Workspace};
-use gpui::*;
 
 impl Workspace {
     /// Close a terminal at a path.
     /// Returns the terminal IDs that were removed from the layout.
-    pub fn close_terminal(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) -> Vec<String> {
+    pub fn close_terminal(&mut self, project_id: &str, path: &[usize], cx: &mut impl WorkspaceCx) -> Vec<String> {
         if let Some(project) = self.project_mut(project_id)
             && let Some(ref mut layout) = project.layout {
                 if path.is_empty() {
@@ -55,7 +55,7 @@ impl Workspace {
 
     /// Close a terminal and focus its sibling (reverse of splitting).
     /// Returns the terminal IDs that were removed from the layout.
-    pub fn close_terminal_and_focus_sibling(&mut self, focus_manager: &mut FocusManager, project_id: &str, path: &[usize], cx: &mut Context<Self>) -> Vec<String> {
+    pub fn close_terminal_and_focus_sibling(&mut self, focus_manager: &mut FocusManager, project_id: &str, path: &[usize], cx: &mut impl WorkspaceCx) -> Vec<String> {
         if path.is_empty() {
             // Closing root - remove layout (project becomes bookmark)
             let removed = self.close_terminal(project_id, path, cx);
@@ -135,7 +135,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         tab_index: usize,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Vec<String> {
         let applied = self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Tabs { children, active_tab } = node {
@@ -175,7 +175,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         keep_index: usize,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Vec<String> {
         let applied = self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Tabs { children, .. } = node {
@@ -202,7 +202,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         from_index: usize,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Vec<String> {
         let applied = self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Tabs { children, active_tab } = node {

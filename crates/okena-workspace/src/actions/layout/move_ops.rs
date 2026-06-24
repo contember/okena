@@ -5,9 +5,9 @@
 // clarifies here.
 #![allow(clippy::too_many_arguments)]
 
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::state::{DropZone, LayoutNode, SplitDirection, Workspace};
-use gpui::*;
 
 impl Workspace {
     /// Move a terminal pane to a new position relative to a target terminal.
@@ -23,7 +23,7 @@ impl Workspace {
         target_project_id: &str,
         target_terminal_id: &str,
         zone: DropZone,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         // Self-drop check
         if source_terminal_id == target_terminal_id {
@@ -45,7 +45,7 @@ impl Workspace {
         source_terminal_id: &str,
         target_terminal_id: &str,
         zone: DropZone,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let project = match self.project(project_id) {
             Some(p) => p,
@@ -136,7 +136,7 @@ impl Workspace {
         target_project_id: &str,
         target_terminal_id: &str,
         zone: DropZone,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         // Find project indices (needed for split borrows)
         let src_idx = match self.data.projects.iter().position(|p| p.id == source_project_id) {
@@ -298,7 +298,7 @@ impl Workspace {
         target_project_id: &str,
         tabs_path: &[usize],
         insert_index: Option<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if source_project_id == target_project_id {
             self.move_terminal_to_tab_group_same_project(focus_manager, source_project_id, terminal_id, tabs_path, insert_index, cx);
@@ -315,7 +315,7 @@ impl Workspace {
         terminal_id: &str,
         tabs_path: &[usize],
         insert_index: Option<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let project = match self.project(project_id) {
             Some(p) => p,
@@ -435,7 +435,7 @@ impl Workspace {
         target_project_id: &str,
         tabs_path: &[usize],
         insert_index: Option<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let src_idx = match self.data.projects.iter().position(|p| p.id == source_project_id) {
             Some(i) => i,

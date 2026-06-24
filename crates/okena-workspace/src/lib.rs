@@ -2,6 +2,7 @@
 
 pub mod access_history;
 pub mod actions;
+pub mod context;
 pub mod focus;
 pub mod hook_monitor;
 pub mod hooks;

@@ -5,9 +5,9 @@
 //! desktop layer drives the timer + toast; this module owns the layout
 //! bookkeeping: recording the close, restoring it, and finalizing the kill.
 
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::state::{LayoutNode, PendingClose, RestoredClose, Workspace};
-use gpui::*;
 
 /// Outcome of resolving an optimistic close once the (off-thread) busy check
 /// has come back. The terminal was already removed from the layout when the
@@ -39,7 +39,7 @@ impl Workspace {
         path: &[usize],
         terminal_id: &str,
         toast_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let pre_close_layout = self.project(project_id).and_then(|p| p.layout.clone());
 
@@ -80,7 +80,7 @@ impl Workspace {
     /// real teardown (the Okena observer drains `pending_terminal_kills` and
     /// calls `pty_manager.kill` + removes it from the registry). Idempotent —
     /// returns false if there was no pending close for this terminal.
-    pub fn finalize_soft_close(&mut self, terminal_id: &str, cx: &mut Context<Self>) -> bool {
+    pub fn finalize_soft_close(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) -> bool {
         if self.take_pending_close(terminal_id).is_none() {
             return false;
         }
@@ -104,7 +104,7 @@ impl Workspace {
         &mut self,
         terminal_id: &str,
         busy: bool,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> PendingDecision {
         if !self.has_pending_close(terminal_id) {
             return PendingDecision::Raced;
@@ -128,7 +128,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         terminal_id: &str,
         alive: bool,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> bool {
         let pending = match self.take_pending_close(terminal_id) {
             Some(p) => p,
@@ -200,7 +200,7 @@ impl Workspace {
     /// still sitting in the layout, remove that pane (it can't be reconnected, and
     /// a lingering layout node would respawn a fresh shell on the next render).
     /// Returns true if a breadcrumb was consumed. Idempotent.
-    pub fn reap_restored_close(&mut self, terminal_id: &str, cx: &mut Context<Self>) -> bool {
+    pub fn reap_restored_close(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) -> bool {
         let Some(idx) = self
             .restored_closes
             .iter()

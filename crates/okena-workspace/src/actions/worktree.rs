@@ -4,6 +4,7 @@
 //! worktree projects, plus worktree-specific properties and ordering.
 
 use okena_core::theme::FolderColor;
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
@@ -20,12 +21,12 @@ impl Workspace {
     /// viewport model, hidden state IS persisted -- the bump is unconditional,
     /// even for ids that do not currently match a project. Unknown extra ids
     /// are a silent no-op (close-race contract inherited from `toggle_hidden`).
-    pub fn toggle_worktree_visibility(&mut self, window_id: WindowId, project_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_worktree_visibility(&mut self, window_id: WindowId, project_id: &str, cx: &mut impl WorkspaceCx) {
         self.toggle_hidden(window_id, project_id, cx);
     }
 
     /// Set or clear the color override for a worktree project
-    pub fn set_worktree_color_override(&mut self, project_id: &str, color: Option<FolderColor>, cx: &mut Context<Self>) {
+    pub fn set_worktree_color_override(&mut self, project_id: &str, color: Option<FolderColor>, cx: &mut impl WorkspaceCx) {
         self.with_project(project_id, cx, |project| {
             if let Some(ref mut wt) = project.worktree_info {
                 wt.color_override = color;
@@ -37,7 +38,7 @@ impl Workspace {
     }
 
     /// Reorder a worktree within its parent's worktree_ids list
-    pub fn reorder_worktree(&mut self, parent_id: &str, worktree_id: &str, new_index: usize, cx: &mut Context<Self>) {
+    pub fn reorder_worktree(&mut self, parent_id: &str, worktree_id: &str, new_index: usize, cx: &mut impl WorkspaceCx) {
         if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_id)
             && let Some(current_index) = parent.worktree_ids.iter().position(|id| id == worktree_id) {
                 let id = parent.worktree_ids.remove(current_index);
