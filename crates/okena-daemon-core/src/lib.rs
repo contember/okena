@@ -17,6 +17,7 @@
 //! wired here — they are later steps. This step only proves the trait impls
 //! compile and link zero gpui.
 
+pub mod observers;
 pub mod reactor;
 pub mod service_cx;
 pub mod workspace_cx;
