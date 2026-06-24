@@ -277,7 +277,7 @@ pub(super) fn create_worktree(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod set_show_in_overview_tests {
     use super::{apply_set_project_show_in_overview, ActionResult};
     use crate::workspace::state::{ProjectData, Workspace, WindowId, WindowState, WorkspaceData};

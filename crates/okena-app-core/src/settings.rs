@@ -3,22 +3,34 @@
 //! Provides app-wide access to settings through the GlobalSettings global.
 //! Settings are automatically persisted to disk with debouncing.
 
+#[cfg(feature = "gpui")]
 use okena_terminal::session_backend::SessionBackend;
+#[cfg(feature = "gpui")]
 use okena_terminal::shell_config::ShellType;
+#[cfg(feature = "gpui")]
 use okena_theme::ThemeMode;
+#[cfg(feature = "gpui")]
 use okena_workspace::toast::ToastManager;
-use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
+use crate::workspace::persistence::{load_settings, save_settings, get_settings_path};
+#[cfg(feature = "gpui")]
+use crate::workspace::persistence::AppSettings;
+#[cfg(feature = "gpui")]
 use gpui::*;
+#[cfg(feature = "gpui")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "gpui")]
 use std::sync::Arc;
 
 /// Global settings wrapper for app-wide access
+#[cfg(feature = "gpui")]
 #[derive(Clone)]
 pub struct GlobalSettings(pub Entity<SettingsState>);
 
+#[cfg(feature = "gpui")]
 impl Global for GlobalSettings {}
 
 /// Settings state that can be observed and updated
+#[cfg(feature = "gpui")]
 pub struct SettingsState {
     pub settings: AppSettings,
     save_pending: Arc<AtomicBool>,
@@ -30,6 +42,7 @@ pub struct SettingsState {
 }
 
 /// Macro to generate setter methods with clamping and auto-save
+#[cfg(feature = "gpui")]
 macro_rules! setting_setter {
     // For f32 values with min/max clamping
     ($fn_name:ident, $field:ident, f32, $min:expr, $max:expr) => {
@@ -61,6 +74,7 @@ macro_rules! setting_setter {
     };
 }
 
+#[cfg(feature = "gpui")]
 impl SettingsState {
     pub fn new(settings: AppSettings) -> Self {
         let baseline = settings.worktree.path_template.clone();
@@ -391,11 +405,13 @@ impl SettingsState {
 }
 
 /// Get the global settings entity
+#[cfg(feature = "gpui")]
 pub fn settings_entity(cx: &App) -> Entity<SettingsState> {
     cx.global::<GlobalSettings>().0.clone()
 }
 
 /// Get a copy of the current settings
+#[cfg(feature = "gpui")]
 pub fn settings(cx: &App) -> AppSettings {
     settings_entity(cx).read(cx).settings.clone()
 }
@@ -430,6 +446,7 @@ pub fn open_settings_file() {
 }
 
 /// Initialize global settings - call this at app startup
+#[cfg(feature = "gpui")]
 pub fn init_settings(cx: &mut App) -> Entity<SettingsState> {
     let settings = load_settings();
     let entity = cx.new(|_cx| SettingsState::new(settings));
