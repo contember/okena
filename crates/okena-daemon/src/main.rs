@@ -18,6 +18,27 @@ use okena_workspace::persistence;
 use okena_workspace::settings::load_settings;
 
 fn main() -> anyhow::Result<()> {
+    // 0. Resolve the active profile (env-only: the spawning desktop propagates
+    //    OKENA_PROFILE; a standalone daemon reads the default / last-used). This
+    //    makes get_config_dir() resolve the SAME profile dir the desktop uses, so
+    //    both read/write the same workspace. Must run before logging (which uses
+    //    the profile's paths) and before load_settings()/load_workspace().
+    let profile_paths = match okena_core::profiles::resolve_active_profile(None) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    // SAFETY: called before any threads are spawned; no concurrent env access.
+    unsafe { std::env::set_var("OKENA_PROFILE", &profile_paths.id) };
+    okena_core::profiles::init_profile(profile_paths);
+    if let Err(e) =
+        okena_core::profiles::migrate_legacy_layout_if_needed(okena_core::profiles::current())
+    {
+        eprintln!("Warning: profile migration failed: {e}");
+    }
+
     // 1. Logging: env_logger driven by RUST_LOG, defaulting to "info".
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 

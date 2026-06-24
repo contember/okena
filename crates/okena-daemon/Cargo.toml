@@ -10,6 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 okena-daemon-core = { path = "../okena-daemon-core" }
+# gpui-free: provides the profile resolution used to honor OKENA_PROFILE so the
+# daemon lands in the same config dir as the spawning desktop.
+okena-core = { path = "../okena-core" }
 # Pulled gpui-free: okena-workspace defaults to the `gpui` feature, so we must
 # opt out of default features to keep this binary 100% GPUI-free.
 okena-workspace = { path = "../okena-workspace", default-features = false }
