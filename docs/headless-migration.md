@@ -146,9 +146,19 @@ rails".
 | **Phase 0 — spike + full action-layer migration** | `9ae348f4` | `WorkspaceCx` reactor trait (`notify`/`refresh_views`) in `crates/okena-workspace/src/context.rs`. Whole action/state layer of `okena-workspace` converted from `&mut Context<Workspace>` to `&mut impl WorkspaceCx` **except** the hook chain (which needs `&App` for `HookMonitor`/`HookRunner` globals — deferred to Phase E). Non-breaking: `Context<'_, Workspace>: WorkspaceCx`, so every existing caller still compiles. 294/294 tests green. No `as`/`unsafe`/downcast. |
 | **Phase 1a — shared local toolkit** | `f6b1e812` | `okena_remote_server::local`: `discover()` / `running_daemon()` (parse `remote.json`), `is_process_alive()`, `mint_local_token()` (local-trust via `remote_secret`). CLI `register` DRYed onto it. |
 | **Phase 1b — spawn/wait primitives** | `36d580b7` | `spawn_daemon()` (`--headless --listen 127.0.0.1`, caller owns the `Child`) + `wait_until_ready()` (poll `remote.json`, skip stale pid). Toolkit complete: discover + mint + spawn + wait. |
+| **Phase 1c — ensure_local_daemon** | `0b954560` | `ensure_local_daemon_in()` orchestration (discover-or-spawn → mint → `notify_auth_reload`), `EnsuredDaemon` (only the spawner kills its `Child`). |
+| **Phase E — gpui-optional crate track** | `dffc5244` `7dfece2c` `8f705eca` `73e474a4` `f723f8a0` `06e1d0f1` `260572fd` `10ae40d8` `470648a1` `b7f45ecd` `56b64515` | Made `gpui` an optional feature across the daemon dependency tree (hooks → workspace → services → app-core → theme → files → remote-server), extending `WorkspaceCx` with the hook accessors and adding the `ServiceCx`/`ServiceHandle`/`ServiceAsyncCx` trait family so the action + service layers run reactor-agnostic. Milestone: the entire daemon graph compiles **gpui-free** (`cargo tree -i gpui` empty for each crate). No `as`/`unsafe`/type-hacks. |
+| **Phase E — `okena-daemon-core`** | `d3f36d25` `0817c5a5` `d6dc1841` `076d80de` `1333940a` `760265a6` | New gpui-free crate: `DaemonReactor` + tokio impls of the reactor traits; the observer reactor (autosave / `state_version` / service-sync, re-entrancy-guarded); the PTY event loop; the git-status poller; `daemon_config` (gpui-free settings/theme handlers); `daemon_command_loop` (gpui-free port of `remote_command_loop`); and `DaemonCore::{new,run}` wiring the `RemoteServer` + reactor + all loops inside a `LocalSet`. 24 tests; gpui gate empty. |
+| **Phase F — `okena-daemon` binary** | `48e77591` | Standalone, 100% gpui-free headless server binary wrapping `okena-daemon-core` (mirrors `run_headless` without GPUI). `cargo tree -i gpui -p okena-daemon` is **empty** — the standalone-binary goal is met. Smoke-verified end-to-end (isolated `XDG_CONFIG_HOME`): boots → loads settings/workspace → dtach auto-detect → dual-stack TLS server + pairing code + `remote.json` → observer reactor fires on the `LocalSet` (`load_project_services`) → `/health` ok → after pairing, `/v1/state` returns a full `StateResponse` (the whole `RemoteServer → bridge → daemon_command_loop → GetState` path). |
 
-Branch: `refactorx/full-headless`. Working tree clean (untracked `profile.json.gz`
-is not ours — leave it).
+Branch: `refactorx/full-headless`. My commits are atomic and listed above; the
+unrelated `M` working-tree entries + untracked `profile.json.gz` are not ours —
+leave them.
+
+**Daemon-core is complete and the standalone gpui-free binary ships.** What
+remains is the **GUI-as-client track (Phases B–D)** + pointing `spawn_daemon()` at
+the new `okena-daemon` binary — these need a run-capable session (the GPUI desktop
+can't be verified headless).
 
 **Key spike conclusions carried forward:**
 - The action layer needs only `notify`/`refresh_views` — **no `spawn` on the trait.**
