@@ -17,14 +17,15 @@
 //! daemon runs on its reactor:
 //!
 //! - the observer tasks (see [`observers`]),
-//! - the PTY event loop ([`pty_loop::run_pty_loop`]), and
-//! - the git-status poller ([`git_poll::run_git_poll`]).
+//! - the PTY event loop ([`pty_loop::run_pty_loop`]),
+//! - the git-status poller ([`git_poll::run_git_poll`]),
+//! - the remote command loop ([`command_loop::daemon_command_loop`]), and
 //! - the gpui-free settings/theme handlers ([`daemon_config`]).
 //!
 //! Each takes its dependencies as parameters; the (later) `DaemonCore::new`
-//! wires them onto the tokio `LocalSet` / multi-thread runtime. The remote
-//! command loop is the only piece still to come.
+//! wires them onto the tokio `LocalSet` / multi-thread runtime.
 
+pub mod command_loop;
 pub mod daemon_config;
 pub mod git_poll;
 pub mod observers;

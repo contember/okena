@@ -6174,15 +6174,20 @@ dependencies = [
  "anyhow",
  "async-channel 2.5.0",
  "log",
+ "okena-app-core",
  "okena-core",
  "okena-git",
  "okena-hooks",
+ "okena-remote-server",
  "okena-services",
  "okena-state",
  "okena-terminal",
+ "okena-theme",
  "okena-workspace",
  "parking_lot",
+ "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
