@@ -48,6 +48,23 @@ pub struct WorkspaceData {
 }
 
 impl WorkspaceData {
+    /// An empty workspace: no projects, no folders. Used as the GUI client's
+    /// starting state in `--daemon-client` mode — the daemon owns the real
+    /// workspace and its projects arrive via the mirror snapshot
+    /// (`apply_remote_snapshot`), so the client must not seed a default project.
+    pub fn empty() -> Self {
+        WorkspaceData {
+            version: default_workspace_version(),
+            projects: Vec::new(),
+            project_order: Vec::new(),
+            folders: Vec::new(),
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
     /// Return a copy with all remote projects, remote folders, and their
     /// associated widths/heights stripped out (for saving to disk).
     ///

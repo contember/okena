@@ -213,6 +213,9 @@ pub struct Okena {
     /// XDG notification, the thread sends a `NotificationJump` here and the
     /// click loop focuses the originating pane. See `app/notifications.rs`.
     notification_jump_tx: async_channel::Sender<notifications::NotificationJump>,
+    /// Child of a daemon WE spawned in `--daemon-client` mode; killed on app
+    /// quit. `None` if we attached to an existing daemon or in classic mode.
+    spawned_daemon: Option<std::process::Child>,
 }
 
 impl Okena {
@@ -221,9 +224,14 @@ impl Okena {
         pty_manager: Arc<PtyManager>,
         pty_events: Receiver<PtyEvent>,
         listen_addr: Option<IpAddr>,
+        local_daemon: Option<okena_remote_server::local::EnsuredDaemon>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // In `--daemon-client` mode the daemon is the single writer (§5):
+        // it owns persistence + the instance lock. The GUI's `Workspace` is a
+        // pure mirror, so its autosave observer must be inert.
+        let daemon_client = local_daemon.is_some();
         let force_remote = listen_addr.is_some();
         let listen_addr = listen_addr.unwrap_or_else(|| {
             cx.global::<GlobalSettings>().0.read(cx).get()
@@ -250,6 +258,12 @@ impl Okena {
         let last_saved_version_for_observer = last_saved_version.clone();
         let workspace_for_save = workspace.clone();
         cx.observe(&workspace, move |_this, _workspace, cx| {
+            // §5 single-writer: in `--daemon-client` mode the daemon owns
+            // persistence + the instance lock; the GUI's `Workspace` is a pure
+            // mirror and must never write workspace.json.
+            if daemon_client {
+                return;
+            }
             // Check if persistent data actually changed
             let current_version = _workspace.read(cx).data_version();
             if current_version == last_saved_version_for_observer.load(Ordering::Relaxed) {
@@ -341,6 +355,31 @@ impl Okena {
             rm.start_token_refresh_task(cx);
         });
 
+        // `--daemon-client` mode: register the implicit, trusted loopback
+        // connection to our local daemon so its projects mirror into the GUI.
+        // We own the spawned child (if any) and kill it on quit; an attached
+        // daemon (`spawned == None`) is left alone (§ risk: only the spawner
+        // kills). The connection uses a fixed id so it's recognizable and
+        // dedup-safe, and is never written to settings — `add_connection` does
+        // not persist, and the only insertion site
+        // (`OverlayManagerEvent::RemoteConnected`) is never fired for it.
+        let spawned_daemon = local_daemon.and_then(|ensured| {
+            let cfg = okena_transport::client::RemoteConnectionConfig {
+                id: "local-daemon".to_string(),
+                name: "Local".to_string(),
+                host: ensured.daemon.host().to_string(),
+                port: ensured.daemon.port,
+                saved_token: Some(ensured.token.clone()),
+                token_obtained_at: None,
+                tls: false,
+                pinned_cert_sha256: None,
+            };
+            if let Err(e) = remote_manager.update(cx, |rm, cx| rm.add_connection(cfg, cx)) {
+                log::error!("Failed to register local-daemon loopback connection: {e}");
+            }
+            ensured.spawned
+        });
+
         // Observe window bounds changes to force re-render
         cx.observe_window_bounds(window, |_this, _window, cx| {
             cx.notify();
@@ -422,6 +461,7 @@ impl Okena {
             service_manager: service_manager.clone(),
             remote_manager: remote_manager.clone(),
             notification_jump_tx,
+            spawned_daemon,
         };
 
         // Propagate claude config dir to spawned PTYs so `claude` CLI invocations inside
@@ -471,6 +511,18 @@ impl Okena {
                     this.pty_manager.kill(tid);
                     reg.remove(tid);
                 }
+            }
+            async {}
+        })
+        .detach();
+
+        // UI-owned daemon lifecycle: kill the daemon WE spawned in
+        // `--daemon-client` mode when the app quits. A daemon we merely attached
+        // to (`spawned_daemon == None`) is left running for any other UIs.
+        cx.on_app_quit(move |this: &mut Self, _cx| {
+            if let Some(mut child) = this.spawned_daemon.take() {
+                let _ = child.kill();
+                let _ = child.wait();
             }
             async {}
         })
