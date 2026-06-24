@@ -253,6 +253,41 @@ daemon over loopback, exactly as a remote project does today. This is where
 protocol gaps surface, so it goes behind a `--daemon-client` (or settings) dev flag
 first.
 
+**Prerequisite — move the single-writer to the daemon (do this FIRST).** Today the
+GUI acquires `persistence::acquire_instance_lock()` at startup (`src/main.rs:497`,
+impl `crates/okena-workspace/src/persistence.rs:75`) and owns `workspace.json`
+writes. In daemon-client mode the **daemon** must be the sole writer of the profile
+(lock + `workspace.json` + autosave); the desktop client must NOT acquire the lock
+or write the workspace, or the two clobber each other. Concretely:
+1. `DaemonCore::new` acquires the instance lock (hold the `LockGuard` for the
+   daemon's lifetime). The daemon already owns autosave (the observer reactor).
+2. In daemon-client mode the desktop skips `acquire_instance_lock()` and treats its
+   `Workspace` as **mirror-only** (no autosave observer). In classic mode it still
+   acquires it. This is gated by the same dev flag as the rest of Phase B.
+3. `ensure_local_daemon` (already built, `okena_remote_server::local`) is the
+   desktop's entry: discover-or-spawn the daemon, mint a loopback token, connect.
+This is the Phase-A2 / instance-lock conflict folded into Phase B — it is the one
+hard ordering constraint and must land before the desktop attaches as a client.
+
+**Exact seams (from the desktop architecture map):** the local-vs-remote split is
+cleanly keyed on `project.is_remote` + the `ActionDispatcher` enum, so "local
+project via daemon" reuses the remote path wholesale. The touch points:
+- **Dispatch:** `ActionDispatcher::{Local,Remote}` + `dispatcher_for_project`
+  (`crates/okena-app/src/action_dispatch.rs:34,78,94,110,224`). Local projects in
+  daemon-client mode take the `Remote` branch (visual actions stay client-side; the
+  rest go over the wire).
+- **Column/render:** `create_local_column` vs `create_remote_column`
+  (`crates/okena-app/src/views/window/mod.rs:744`,`:677`); snapshot apply
+  `apply_remote_snapshot` (`crates/okena-workspace/src/remote_apply.rs:55`, via
+  `state.rs:892`).
+- **Providers (per-project `is_remote` branch):** `build_git_provider` /
+  `build_project_fs` / `build_blame_provider`
+  (`crates/okena-app/src/views/window/handlers.rs:59,124,171`).
+- **In-process pieces that become daemon-only:** `Okena::start_pty_event_loop`
+  (`app/mod.rs:660`), the in-process `ServiceManager` (`app/mod.rs:315`) and
+  `GitStatusWatcher` (`app/mod.rs:356`) wiring, the conditional self-hosted server
+  (`app/mod.rs:571`).
+
 **Mechanism (reuse, don't rebuild):**
 - The daemon owns the local project (it added it / loaded it from disk). The GUI
   receives it through `apply_remote_snapshot` like any mirrored project — same
