@@ -22,10 +22,15 @@
 //! - the remote command loop ([`command_loop::daemon_command_loop`]), and
 //! - the gpui-free settings/theme handlers ([`daemon_config`]).
 //!
-//! Each takes its dependencies as parameters; the (later) `DaemonCore::new`
+//! Each takes its dependencies as parameters; [`DaemonCore::new`](daemon::DaemonCore::new)
 //! wires them onto the tokio `LocalSet` / multi-thread runtime.
+//!
+//! Finally, [`daemon`] assembles all of the above into [`DaemonCore`] — the
+//! complete, GPUI-free headless daemon that owns the runtime + remote server and
+//! runs the reactor until shutdown.
 
 pub mod command_loop;
+pub mod daemon;
 pub mod daemon_config;
 pub mod git_poll;
 pub mod observers;
@@ -33,3 +38,5 @@ pub mod pty_loop;
 pub mod reactor;
 pub mod service_cx;
 pub mod workspace_cx;
+
+pub use daemon::{DaemonCore, DaemonParams};
