@@ -65,7 +65,7 @@ use okena_remote_server::auth::AuthStore;
 use okena_remote_server::bridge::{self, BridgeReceiver};
 use okena_remote_server::pty_broadcaster::PtyBroadcaster;
 use okena_remote_server::server::RemoteServer;
-use okena_workspace::persistence::AppSettings;
+use okena_workspace::persistence::{acquire_instance_lock, AppSettings, LockGuard};
 use okena_workspace::state::{Workspace, WorkspaceData};
 use parking_lot::Mutex;
 use tokio::sync::watch;
@@ -126,6 +126,11 @@ pub struct DaemonCore {
     settings: Arc<Mutex<AppSettings>>,
     /// GPUI-free settings/theme handler for the app-scoped remote actions.
     daemon_config: DaemonConfig,
+    /// Single-writer instance lock (§5). The daemon is the sole owner of the
+    /// profile's `workspace.json` + lock; held for the daemon's lifetime so a
+    /// second instance (or a classic in-process GUI) cannot clobber the profile.
+    /// Released on drop at the end of [`run`](DaemonCore::run).
+    _instance_lock: LockGuard,
 }
 
 impl DaemonCore {
@@ -138,6 +143,14 @@ impl DaemonCore {
     /// The reactor tasks are NOT started here — that is [`run`](DaemonCore::run)'s
     /// job (they need a `LocalSet`).
     pub fn new(params: DaemonParams) -> anyhow::Result<Self> {
+        // ── 0. Acquire the single-writer instance lock FIRST ─────────────────
+        // §5: exactly one process owns the profile's persistence + lock. The
+        // daemon is that process; the `--daemon-client` GUI deliberately skips
+        // the lock. Acquire before binding a port / writing `remote.json` so a
+        // collision fails fast with no side effects. Held for the daemon's
+        // lifetime (dropped at the end of `run`).
+        let instance_lock = acquire_instance_lock()?;
+
         // ── 1. Multi-thread tokio runtime backing the reactor ────────────────
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -227,6 +240,7 @@ impl DaemonCore {
             git_status_tx,
             settings,
             daemon_config,
+            _instance_lock: instance_lock,
         })
     }
 
@@ -251,6 +265,9 @@ impl DaemonCore {
             git_status_tx,
             settings,
             daemon_config,
+            // Bound (not `..`) so the lock is held until the end of `run`, then
+            // released on drop after the server is stopped.
+            _instance_lock,
         } = self;
         let handle = runtime.handle().clone();
         let local = tokio::task::LocalSet::new();
