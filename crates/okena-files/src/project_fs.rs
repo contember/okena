@@ -1,7 +1,7 @@
 //! ProjectFs trait and implementations for local and remote file operations.
 
 use crate::content_search::{ContentSearchConfig, FileSearchResult, SearchMode};
-use crate::file_search::FileEntry;
+use crate::file_scan::FileEntry;
 use crate::list_directory::DirEntry;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -82,7 +82,7 @@ impl LocalProjectFs {
 
 impl ProjectFs for LocalProjectFs {
     fn list_files(&self, show_ignored: bool) -> Vec<FileEntry> {
-        crate::file_search::FileSearchDialog::scan_files(&self.path, show_ignored)
+        crate::file_scan::scan_files(&self.path, show_ignored)
     }
 
     fn list_directory(
