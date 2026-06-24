@@ -1,3 +1,4 @@
+#[cfg(feature = "gpui")]
 use gpui::*;
 use okena_core::theme::{ThemeColors, ThemeMode, DARK_THEME, LIGHT_THEME, PASTEL_DARK_THEME, HIGH_CONTRAST_THEME};
 
@@ -87,11 +88,14 @@ impl AppTheme {
 }
 
 /// Wrapper for global theme entity
+#[cfg(feature = "gpui")]
 pub struct GlobalTheme(pub Entity<AppTheme>);
 
+#[cfg(feature = "gpui")]
 impl Global for GlobalTheme {}
 
 /// Get the theme entity for observation
+#[cfg(feature = "gpui")]
 pub fn theme_entity(cx: &App) -> Entity<AppTheme> {
     cx.global::<GlobalTheme>().0.clone()
 }
