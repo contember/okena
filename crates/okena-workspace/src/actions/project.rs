@@ -3,6 +3,7 @@
 //! Actions for creating, modifying, and deleting projects.
 
 use okena_core::theme::FolderColor;
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
@@ -83,7 +84,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         window_id: WindowId,
         project_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if self.project(project_id).is_none() {
             return;
@@ -167,6 +168,9 @@ impl Workspace {
     /// `Okena::focus_manager_for_active_window` (slice 05 cri 13). When
     /// only main exists (zero extras), the rule degenerates to a no-op
     /// for the hide-elsewhere step, matching pre-multi-window behavior.
+    // GPUI-coupled: fires on_project_open hooks, which read the HookMonitor /
+    // HookRunner GPUI globals via `&App`. Stays on `Context` until hook services
+    // move into the daemon reactor (Fáze 4).
     pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, global_hooks: &HooksConfig, window_id: WindowId, cx: &mut Context<Self>) -> String {
         let path = expand_tilde(&path);
 
@@ -214,7 +218,7 @@ impl Workspace {
     }
 
     /// Add a new terminal to a project by splitting the root layout
-    pub fn add_terminal(&mut self, focus_manager: &mut FocusManager, project_id: &str, cx: &mut Context<Self>) {
+    pub fn add_terminal(&mut self, focus_manager: &mut FocusManager, project_id: &str, cx: &mut impl WorkspaceCx) {
         if let Some(project) = self.project_mut(project_id) {
             if let Some(ref old_layout) = project.layout {
                 let old_layout = old_layout.clone();
@@ -245,7 +249,7 @@ impl Workspace {
         project_id: &str,
         command: &str,
         env_vars: &HashMap<String, String>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if let Some(project) = self.project_mut(project_id) {
             let new_node = LayoutNode::new_terminal_with_command(command, env_vars);
@@ -264,7 +268,7 @@ impl Workspace {
     }
 
     /// Rename a project
-    pub fn rename_project(&mut self, project_id: &str, new_name: String, cx: &mut Context<Self>) {
+    pub fn rename_project(&mut self, project_id: &str, new_name: String, cx: &mut impl WorkspaceCx) {
         self.with_project(project_id, cx, |project| {
             project.name = new_name;
             true
@@ -272,7 +276,7 @@ impl Workspace {
     }
 
     /// Rename a project's directory path and update the project name to match
-    pub fn rename_project_directory(&mut self, project_id: &str, new_path: String, new_name: String, cx: &mut Context<Self>) {
+    pub fn rename_project_directory(&mut self, project_id: &str, new_path: String, new_name: String, cx: &mut impl WorkspaceCx) {
         self.with_project(project_id, cx, |project| {
             project.path = new_path;
             project.name = new_name;
@@ -281,7 +285,7 @@ impl Workspace {
     }
 
     /// Set the folder color for a project (also propagates to worktree children without overrides)
-    pub fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut Context<Self>) {
+    pub fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut impl WorkspaceCx) {
         let is_worktree = self.project(project_id)
             .and_then(|p| p.worktree_info.as_ref())
             .is_some();
@@ -317,6 +321,8 @@ impl Workspace {
     }
 
     /// Delete a project
+    // GPUI-coupled: fires on_project_close hooks (HookMonitor global via `&App`).
+    // Stays on `Context` until hook services move into the daemon reactor (Fáze 4).
     pub fn delete_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
         // Queue all project terminals for killing before removing state.
         // Okena (which owns PtyManager) drains this queue via observer.
@@ -399,7 +405,7 @@ impl Workspace {
     /// Move a project to a new position in the top-level order.
     /// Also removes the project from any folder it may be in.
     /// Worktree children are moved along with their parent.
-    pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
+    pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut impl WorkspaceCx) {
         // Remove from any folder first
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
@@ -465,7 +471,7 @@ impl Workspace {
     /// layer setter does not notify, so the single trailing `notify_data` keeps
     /// the auto-save observer's debounce cadence identical to the pre-migration
     /// body.
-    pub fn update_project_widths(&mut self, window_id: WindowId, widths: HashMap<String, f32>, cx: &mut Context<Self>) {
+    pub fn update_project_widths(&mut self, window_id: WindowId, widths: HashMap<String, f32>, cx: &mut impl WorkspaceCx) {
         if let Some(w) = self.data.window_mut(window_id) {
             w.project_widths.clear();
         }
@@ -476,13 +482,13 @@ impl Workspace {
     }
 
     /// Update service panel height for a project
-    pub fn update_service_panel_height(&mut self, project_id: &str, height: f32, cx: &mut Context<Self>) {
+    pub fn update_service_panel_height(&mut self, project_id: &str, height: f32, cx: &mut impl WorkspaceCx) {
         self.data.service_panel_heights.insert(project_id.to_string(), height);
         self.notify_data(cx);
     }
 
     /// Update hook panel height for a project
-    pub fn update_hook_panel_height(&mut self, project_id: &str, height: f32, cx: &mut Context<Self>) {
+    pub fn update_hook_panel_height(&mut self, project_id: &str, height: f32, cx: &mut impl WorkspaceCx) {
         self.data.hook_panel_heights.insert(project_id.to_string(), height);
         self.notify_data(cx);
     }

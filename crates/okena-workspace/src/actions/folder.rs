@@ -3,12 +3,12 @@
 //! Actions for creating, modifying, and deleting sidebar folders.
 
 use okena_core::theme::FolderColor;
+use crate::context::WorkspaceCx;
 use crate::state::{FolderData, WindowId, Workspace};
-use gpui::*;
 
 impl Workspace {
     /// Create a new folder, appending it to project_order
-    pub fn create_folder(&mut self, name: String, cx: &mut Context<Self>) -> String {
+    pub fn create_folder(&mut self, name: String, cx: &mut impl WorkspaceCx) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         self.data.folders.push(FolderData {
             id: id.clone(),
@@ -22,7 +22,7 @@ impl Workspace {
     }
 
     /// Delete a folder, splicing its contained projects back into project_order at the folder's position
-    pub fn delete_folder(&mut self, folder_id: &str, cx: &mut Context<Self>) {
+    pub fn delete_folder(&mut self, folder_id: &str, cx: &mut impl WorkspaceCx) {
         let project_ids = self.data.folders.iter()
             .find(|f| f.id == folder_id)
             .map(|f| f.project_ids.clone())
@@ -43,7 +43,7 @@ impl Workspace {
     }
 
     /// Rename a folder
-    pub fn rename_folder(&mut self, folder_id: &str, new_name: String, cx: &mut Context<Self>) {
+    pub fn rename_folder(&mut self, folder_id: &str, new_name: String, cx: &mut impl WorkspaceCx) {
         if let Some(folder) = self.folder_mut(folder_id) {
             folder.name = new_name;
             self.notify_data(cx);
@@ -51,7 +51,7 @@ impl Workspace {
     }
 
     /// Set the color for a folder
-    pub fn set_folder_item_color(&mut self, folder_id: &str, color: FolderColor, cx: &mut Context<Self>) {
+    pub fn set_folder_item_color(&mut self, folder_id: &str, color: FolderColor, cx: &mut impl WorkspaceCx) {
         if let Some(folder) = self.folder_mut(folder_id) {
             folder.folder_color = color;
             self.notify_data(cx);
@@ -91,7 +91,7 @@ impl Workspace {
     ///
     /// Unknown extra ids inherit the silent no-op contract from
     /// `set_folder_collapsed`.
-    pub fn toggle_folder_collapsed(&mut self, window_id: WindowId, folder_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_folder_collapsed(&mut self, window_id: WindowId, folder_id: &str, cx: &mut impl WorkspaceCx) {
         if !self.data.folders.iter().any(|f| f.id == folder_id) {
             return;
         }
@@ -100,7 +100,7 @@ impl Workspace {
     }
 
     /// Move a project into a folder at a given position
-    pub fn move_project_to_folder(&mut self, project_id: &str, folder_id: &str, position: Option<usize>, cx: &mut Context<Self>) {
+    pub fn move_project_to_folder(&mut self, project_id: &str, folder_id: &str, position: Option<usize>, cx: &mut impl WorkspaceCx) {
         // Remove from any current folder
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
@@ -119,7 +119,7 @@ impl Workspace {
 
     /// Move a project out of its folder into the top-level project_order
     #[allow(dead_code)]
-    pub fn move_project_out_of_folder(&mut self, project_id: &str, top_level_index: usize, cx: &mut Context<Self>) {
+    pub fn move_project_out_of_folder(&mut self, project_id: &str, top_level_index: usize, cx: &mut impl WorkspaceCx) {
         // Remove from any folder
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
@@ -134,7 +134,7 @@ impl Workspace {
 
     /// Reorder a project within a folder
     #[allow(dead_code)]
-    pub fn reorder_project_in_folder(&mut self, folder_id: &str, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
+    pub fn reorder_project_in_folder(&mut self, folder_id: &str, project_id: &str, new_index: usize, cx: &mut impl WorkspaceCx) {
         if let Some(folder) = self.folder_mut(folder_id)
             && let Some(current) = folder.project_ids.iter().position(|id| id == project_id) {
                 let id = folder.project_ids.remove(current);
@@ -150,7 +150,7 @@ impl Workspace {
     }
 
     /// Reorder any top-level item (project or folder) in project_order
-    pub fn move_item_in_order(&mut self, item_id: &str, new_index: usize, cx: &mut Context<Self>) {
+    pub fn move_item_in_order(&mut self, item_id: &str, new_index: usize, cx: &mut impl WorkspaceCx) {
         if let Some(current) = self.data.project_order.iter().position(|id| id == item_id) {
             let id = self.data.project_order.remove(current);
             let target = if new_index > current {

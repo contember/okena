@@ -3,8 +3,8 @@
 //! Actions for managing individual terminals within projects.
 
 use okena_terminal::shell_config::ShellType;
+use crate::context::WorkspaceCx;
 use crate::state::{LayoutNode, Workspace};
-use gpui::*;
 
 impl Workspace {
     /// Set terminal ID at a layout path
@@ -13,7 +13,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         terminal_id: String,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.with_project(project_id, cx, |project| {
             if let Some(ref mut layout) = project.layout
@@ -32,7 +32,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         shell_type: ShellType,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Terminal { shell_type: st, .. } = node {
@@ -59,7 +59,7 @@ impl Workspace {
         project_id: &str,
         terminal_id: &str,
         new_name: String,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let terminal_id = terminal_id.to_string();
         self.with_project(project_id, cx, |project| {
@@ -75,7 +75,7 @@ impl Workspace {
         project_id: &str,
         terminal_id: &str,
         hidden: bool,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let terminal_id = terminal_id.to_string();
         self.with_project(project_id, cx, |project| {
@@ -85,7 +85,7 @@ impl Workspace {
     }
 
     /// Restore (un-minimize) a terminal at a path
-    pub fn restore_terminal(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) {
+    pub fn restore_terminal(&mut self, project_id: &str, path: &[usize], cx: &mut impl WorkspaceCx) {
         self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Terminal { minimized, .. } = node {
                 *minimized = false;
@@ -101,7 +101,7 @@ impl Workspace {
         &mut self,
         project_id: &str,
         terminal_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if let Some(project) = self.project_mut(project_id)
             && let Some(ref mut layout) = project.layout
@@ -131,7 +131,7 @@ impl Workspace {
         &mut self,
         project_id: &str,
         path: &[usize],
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> bool {
         self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Terminal { terminal_id: Some(_), detached, .. } = node
@@ -145,7 +145,7 @@ impl Workspace {
 
     /// Re-attach a detached terminal back to its original location.
     /// Scans all project layouts to find the terminal and clear the detached flag.
-    pub fn attach_terminal(&mut self, terminal_id: &str, cx: &mut Context<Self>) {
+    pub fn attach_terminal(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) {
         for project in &mut self.data.projects {
             if let Some(ref mut layout) = project.layout
                 && let Some(path) = layout.find_terminal_path(terminal_id) {
@@ -192,7 +192,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         zoom: f32,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let clamped = zoom.clamp(0.5, 3.0);
         self.with_layout_node(project_id, path, cx, |node| {

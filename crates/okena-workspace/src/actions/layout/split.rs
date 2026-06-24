@@ -1,8 +1,8 @@
 //! Split operations: `split_terminal`, split-size updates, equalize.
 
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::state::{LayoutNode, SplitDirection, Workspace};
-use gpui::*;
 
 impl Workspace {
     /// Split a terminal at a path
@@ -12,7 +12,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         direction: SplitDirection,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         log::info!("Workspace::split_terminal called for project {} at path {:?}", project_id, path);
 
@@ -76,7 +76,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         new_sizes: Vec<f32>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Split { sizes, .. } = node {
@@ -96,7 +96,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         new_sizes: Vec<f32>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if let Some(project) = self.project_mut(project_id)
             && let Some(ref mut layout) = project.layout
@@ -108,7 +108,7 @@ impl Workspace {
     }
 
     /// Equalize pane sizes in the focused terminal's parent split.
-    pub fn equalize_focused_split(&mut self, focus_manager: &FocusManager, cx: &mut Context<Self>) {
+    pub fn equalize_focused_split(&mut self, focus_manager: &FocusManager, cx: &mut impl WorkspaceCx) {
         if let Some(target) = focus_manager.focused_terminal_state()
             && let Some(project) = self.project_mut(&target.project_id)
                 && let Some(ref mut layout) = project.layout {

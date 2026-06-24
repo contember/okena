@@ -8,9 +8,9 @@
 //! every caller threads in the focus state belonging to the window driving
 //! the action -- mutations stay scoped to that window.
 
+use crate::context::WorkspaceCx;
 use crate::focus::{FocusManager, FocusTarget};
 use crate::state::{Workspace, WindowId};
-use gpui::*;
 
 impl Workspace {
     /// Set focused project (focus mode)
@@ -22,7 +22,7 @@ impl Workspace {
         &mut self,
         focus_manager: &mut FocusManager,
         project_id: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         // Clear fullscreen without restoring old project_id (we're overriding it)
         focus_manager.clear_fullscreen_without_restore();
@@ -44,7 +44,7 @@ impl Workspace {
         &mut self,
         focus_manager: &mut FocusManager,
         project_id: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         focus_manager.clear_fullscreen_without_restore();
         focus_manager.set_focused_project_id_individual(project_id.clone());
@@ -72,7 +72,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         window_id: WindowId,
         folder_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let selecting = self.active_folder_filter(window_id).map(|s| s.as_str()) != Some(folder_id);
         if selecting {
@@ -133,7 +133,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         project_id: String,
         terminal_id: String,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         log::info!("set_fullscreen_terminal called with project_id={}, terminal_id={}", project_id, terminal_id);
 
@@ -156,7 +156,7 @@ impl Workspace {
     /// Exit fullscreen mode
     ///
     /// Restores focus to the previously focused terminal and project view mode.
-    pub fn exit_fullscreen(&mut self, focus_manager: &mut FocusManager, cx: &mut Context<Self>) {
+    pub fn exit_fullscreen(&mut self, focus_manager: &mut FocusManager, cx: &mut impl WorkspaceCx) {
         focus_manager.exit_fullscreen();
         cx.notify();
     }
@@ -169,7 +169,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         project_id: String,
         layout_path: Vec<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         // Update FocusManager
         focus_manager.focus_terminal(project_id.clone(), layout_path.clone());
@@ -187,7 +187,7 @@ impl Workspace {
     ///
     /// This is typically called when entering a modal context (search, rename, etc.)
     /// The current focus is saved for restoration when the modal closes.
-    pub fn clear_focused_terminal(&mut self, focus_manager: &mut FocusManager, cx: &mut Context<Self>) {
+    pub fn clear_focused_terminal(&mut self, focus_manager: &mut FocusManager, cx: &mut impl WorkspaceCx) {
         focus_manager.enter_modal();
         cx.notify();
     }
@@ -195,7 +195,7 @@ impl Workspace {
     /// Restore focused terminal after modal dismissal
     ///
     /// Called when exiting a modal context to restore the previous focus.
-    pub fn restore_focused_terminal(&mut self, focus_manager: &mut FocusManager, cx: &mut Context<Self>) {
+    pub fn restore_focused_terminal(&mut self, focus_manager: &mut FocusManager, cx: &mut impl WorkspaceCx) {
         focus_manager.exit_modal();
         cx.notify();
     }
@@ -208,7 +208,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         project_id: &str,
         terminal_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if let Some(project) = self.project(project_id)
             && let Some(ref layout) = project.layout

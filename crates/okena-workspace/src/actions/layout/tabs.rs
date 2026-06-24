@@ -1,8 +1,8 @@
 //! Tab group operations: add, set-active, reorder.
 
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::state::{LayoutNode, Workspace};
-use gpui::*;
 
 impl Workspace {
     /// Add a new tab - either to existing tab group (if parent is Tabs) or create new tab group
@@ -11,7 +11,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         project_id: &str,
         path: &[usize],
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         log::info!("Workspace::add_tab called for project {} at path {:?}", project_id, path);
 
@@ -50,7 +50,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         project_id: &str,
         tabs_path: &[usize],
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let mut new_tab_index = 0;
         self.with_layout_node(project_id, tabs_path, cx, |node| {
@@ -77,7 +77,7 @@ impl Workspace {
         project_id: &str,
         path: &[usize],
         tab_index: usize,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Tabs { active_tab, .. } = node {
@@ -96,7 +96,7 @@ impl Workspace {
         path: &[usize],
         from_index: usize,
         to_index: usize,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Tabs { children, active_tab } = node {
