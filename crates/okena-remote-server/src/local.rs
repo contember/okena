@@ -56,16 +56,23 @@ pub fn discover() -> Option<LocalDaemon> {
     discover_in(&config_dir())
 }
 
-/// Discover a local daemon and confirm its process is actually alive — guards
-/// against a stale `remote.json` left by a crashed daemon. A recorded pid of 0
-/// (unknown) is treated as "assume alive".
-pub fn running_daemon() -> Option<LocalDaemon> {
-    let daemon = discover()?;
+/// Discover a live daemon from an explicit config dir (testable core). Confirms
+/// the recorded process is actually alive — guards against a stale `remote.json`
+/// left by a crashed daemon. A recorded pid of 0 (unknown) is "assume alive".
+pub fn running_daemon_in(dir: &Path) -> Option<LocalDaemon> {
+    let daemon = discover_in(dir)?;
     if daemon.pid == 0 || is_process_alive(daemon.pid) {
         Some(daemon)
     } else {
         None
     }
+}
+
+/// Discover a local daemon and confirm its process is actually alive — guards
+/// against a stale `remote.json` left by a crashed daemon. A recorded pid of 0
+/// (unknown) is treated as "assume alive".
+pub fn running_daemon() -> Option<LocalDaemon> {
+    running_daemon_in(&config_dir())
 }
 
 /// Check whether a process with the given pid is still running.
@@ -199,6 +206,73 @@ pub fn wait_until_ready(timeout: Duration) -> Option<LocalDaemon> {
     wait_until_ready_in(&config_dir(), timeout)
 }
 
+/// Result of ensuring a local daemon is available.
+pub struct EnsuredDaemon {
+    pub daemon: LocalDaemon,
+    /// Plaintext bearer token to authenticate the client connection.
+    pub token: String,
+    /// `Some` ONLY when we spawned the daemon in this call. UI-owned lifecycle:
+    /// the caller kills only what it spawned; never kill a daemon we merely attached to.
+    pub spawned: Option<std::process::Child>,
+}
+
+/// Best-effort: tell an already-running daemon to reload its token file.
+/// A freshly spawned daemon reads tokens at startup, so this is only needed on the
+/// attach path. Failures are ignored — the worst case is the caller's connection
+/// attempt fails and retries.
+pub fn notify_auth_reload(port: u16) {
+    let url = format!("http://{LOCAL_HOST}:{port}/v1/auth/reload");
+    let _ = reqwest::blocking::Client::new()
+        .post(&url)
+        .timeout(Duration::from_secs(5))
+        .send();
+}
+
+/// Ensure a local daemon is reachable from an explicit config dir (testable
+/// core), returning a token to authenticate against it.
+///
+/// ATTACH path — a live daemon already runs: mint a token and tell it to reload,
+/// leaving `spawned = None` (we don't own its lifecycle). SPAWN path — none runs:
+/// mint the token *first* so the fresh daemon loads it at startup, spawn it, and
+/// wait for it to advertise. We own the spawned [`std::process::Child`]
+/// (`spawned = Some`), killing it on timeout.
+pub fn ensure_local_daemon_in(
+    dir: &Path,
+    spawn_timeout: Duration,
+) -> Result<EnsuredDaemon, String> {
+    if let Some(daemon) = running_daemon_in(dir) {
+        // Attach: an already-running daemon must be told to reload the new token.
+        let token = mint_local_token_in(dir)?.token;
+        notify_auth_reload(daemon.port);
+        return Ok(EnsuredDaemon {
+            daemon,
+            token,
+            spawned: None,
+        });
+    }
+
+    // Spawn: mint before spawning so the fresh daemon loads the token at startup.
+    let token = mint_local_token_in(dir)?.token;
+    let mut child = spawn_daemon().map_err(|e| format!("Failed to spawn daemon: {e}"))?;
+    match wait_until_ready_in(dir, spawn_timeout) {
+        Some(daemon) => Ok(EnsuredDaemon {
+            daemon,
+            token,
+            spawned: Some(child),
+        }),
+        None => {
+            let _ = child.kill();
+            Err("Daemon did not become ready in time.".into())
+        }
+    }
+}
+
+/// Ensure a local daemon is reachable from the user's config dir, returning a
+/// token to authenticate against it.
+pub fn ensure_local_daemon() -> Result<EnsuredDaemon, String> {
+    ensure_local_daemon_in(&config_dir(), Duration::from_secs(10))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +340,36 @@ mod tests {
             .encode(auth::compute_hmac(&secret, minted.token.as_bytes()));
         assert_eq!(persisted[0].token_hmac, expected);
         assert_eq!(persisted[0].id, minted.token_id);
+    }
+
+    #[test]
+    fn ensure_attaches_to_running_daemon() {
+        let dir = temp_dir();
+        let secret = vec![3u8; 32];
+        std::fs::write(dir.join("remote_secret"), &secret).unwrap();
+        // pid = this process so the liveness check treats the daemon as alive;
+        // the port is fake, so the reload POST just fails silently.
+        std::fs::write(
+            dir.join("remote.json"),
+            format!(r#"{{"port": 19199, "pid": {}, "tls": false}}"#, std::process::id()),
+        )
+        .unwrap();
+
+        let ensured = ensure_local_daemon_in(&dir, Duration::from_millis(200))
+            .expect("attach should succeed");
+        assert!(ensured.spawned.is_none(), "must not spawn when one is running");
+        assert_eq!(ensured.daemon.port, 19199);
+
+        // The returned token must validate against the secret — its HMAC has to
+        // appear in remote_tokens.json (mirrors mint_writes_validatable_token).
+        let raw = std::fs::read_to_string(dir.join("remote_tokens.json")).unwrap();
+        let persisted: Vec<PersistedToken> = serde_json::from_str(&raw).unwrap();
+        let expected = base64::engine::general_purpose::STANDARD
+            .encode(auth::compute_hmac(&secret, ensured.token.as_bytes()));
+        assert!(
+            persisted.iter().any(|t| t.token_hmac == expected),
+            "minted token's HMAC must be persisted"
+        );
     }
 
     #[test]
