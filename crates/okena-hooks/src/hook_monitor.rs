@@ -48,6 +48,7 @@ struct HookMonitorInner {
 #[derive(Clone)]
 pub struct HookMonitor(Arc<Mutex<HookMonitorInner>>);
 
+#[cfg(feature = "gpui")]
 impl gpui::Global for HookMonitor {}
 
 impl Default for HookMonitor {
