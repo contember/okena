@@ -12,6 +12,7 @@ use crate::focus::FocusManager;
 use crate::lifecycle::ProjectLifecycleTracker;
 use crate::remote_sync::{PendingRemoteFocus, RemoteProjectSnapshot, RemoteSyncState};
 use crate::visibility::compute_visible_projects;
+#[cfg(feature = "gpui")]
 use gpui::*;
 use std::collections::HashMap;
 
@@ -23,9 +24,11 @@ pub use okena_state::{
 };
 
 /// Global workspace wrapper for app-wide access (used by quit handler)
+#[cfg(feature = "gpui")]
 #[derive(Clone)]
 pub struct GlobalWorkspace(pub Entity<Workspace>);
 
+#[cfg(feature = "gpui")]
 impl Global for GlobalWorkspace {}
 
 /// GPUI Entity for workspace state.
@@ -1705,7 +1708,7 @@ mod workspace_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
     use gpui::AppContext as _;
     use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, WindowBounds, WindowId, WindowState, Workspace, WorkspaceData};

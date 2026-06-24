@@ -14,7 +14,9 @@
 //! `execute_action` code path with no GPUI in scope — the seam that makes the
 //! GPUI-free daemon a swap behind the protocol rather than a rewrite.
 
+#[cfg(feature = "gpui")]
 use crate::state::Workspace;
+#[cfg(feature = "gpui")]
 use gpui::Context;
 
 /// The reactor capabilities the workspace action/state layer needs.
@@ -51,6 +53,7 @@ pub trait WorkspaceCx {
     fn hook_monitor(&self) -> Option<okena_hooks::HookMonitor>;
 }
 
+#[cfg(feature = "gpui")]
 impl WorkspaceCx for Context<'_, Workspace> {
     fn notify(&mut self) {
         // The inherent `Context::notify` shadows this trait method during

@@ -9,7 +9,6 @@ use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
 use crate::state::{LayoutNode, ProjectData, Workspace, WindowId};
-use gpui::*;
 use std::collections::HashMap;
 
 impl Workspace {

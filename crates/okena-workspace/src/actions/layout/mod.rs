@@ -43,5 +43,5 @@ impl Workspace {
 #[cfg(test)]
 mod tests_simulate;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod tests_gpui;
