@@ -8,7 +8,6 @@ use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
 use crate::state::{LayoutNode, ProjectData, Workspace, WindowId};
-use gpui::*;
 use std::collections::HashMap;
 
 /// Pick a replacement focus target after hiding `hidden_id`.
@@ -168,10 +167,7 @@ impl Workspace {
     /// `Okena::focus_manager_for_active_window` (slice 05 cri 13). When
     /// only main exists (zero extras), the rule degenerates to a no-op
     /// for the hide-elsewhere step, matching pre-multi-window behavior.
-    // GPUI-coupled: fires on_project_open hooks, which read the HookMonitor /
-    // HookRunner GPUI globals via `&App`. Stays on `Context` until hook services
-    // move into the daemon reactor (Fáze 4).
-    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, global_hooks: &HooksConfig, window_id: WindowId, cx: &mut Context<Self>) -> String {
+    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, global_hooks: &HooksConfig, window_id: WindowId, cx: &mut impl WorkspaceCx) -> String {
         let path = expand_tilde(&path);
 
         // Auto-detect WSL UNC paths and set default shell accordingly
@@ -212,7 +208,9 @@ impl Workspace {
         let folder = self.folder_for_project_or_parent(&id);
         let folder_id = folder.map(|f| f.id.as_str());
         let folder_name = folder.map(|f| f.name.as_str());
-        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, folder_id, folder_name, global_hooks, cx);
+        let runner = cx.hook_runner();
+        let monitor = cx.hook_monitor();
+        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, folder_id, folder_name, global_hooks, runner.as_ref(), monitor.as_ref());
         self.register_hook_results(hook_results, cx);
         id
     }
@@ -321,9 +319,7 @@ impl Workspace {
     }
 
     /// Delete a project
-    // GPUI-coupled: fires on_project_close hooks (HookMonitor global via `&App`).
-    // Stays on `Context` until hook services move into the daemon reactor (Fáze 4).
-    pub fn delete_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
+    pub fn delete_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
         // Queue all project terminals for killing before removing state.
         // Okena (which owns PtyManager) drains this queue via observer.
         if let Some(project) = self.project(project_id) {
@@ -398,7 +394,8 @@ impl Workspace {
         self.notify_data(cx);
 
         if let Some((project_hooks, id, name, path)) = hook_info {
-            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, cx);
+            let monitor = cx.hook_monitor();
+            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, monitor.as_ref());
         }
     }
 
