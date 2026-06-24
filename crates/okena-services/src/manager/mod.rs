@@ -7,9 +7,12 @@
 //! - [`port_detection`] — centralized listening-port discovery poller
 
 mod commands;
+mod context;
 mod docker;
 mod lifecycle;
 mod port_detection;
+
+pub use context::{ServiceAsyncCx, ServiceCx, ServiceHandle};
 
 use crate::config::ServiceDefinition;
 use okena_terminal::backend::TerminalBackend;
