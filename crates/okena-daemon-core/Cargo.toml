@@ -17,6 +17,13 @@ okena-services = { path = "../okena-services", default-features = false }
 # Theme data types (gpui-free with default-features = false: avoids the
 # `default = ["gpui"]` feature so no gpui is linked into the headless daemon).
 okena-theme = { path = "../okena-theme", default-features = false }
+# Action execution glue (`execute_action`, `ensure_terminal`, `ActionResult`).
+# `default-features = false` drops its `gpui` default feature so the headless
+# daemon links no gpui.
+okena-app-core = { path = "../okena-app-core", default-features = false }
+# Remote bridge types (`BridgeReceiver`, `BridgeMessage`, `RemoteCommand`).
+# `default-features = false` drops its `gpui` default feature.
+okena-remote-server = { path = "../okena-remote-server", default-features = false }
 
 # Tokio reactor backing the gpui-free trait impls.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
@@ -25,6 +32,8 @@ serde_json = "1.0"
 log = "0.4"
 # PTY event channel type (`PtyEvent` receiver) shared with `okena-terminal`.
 async-channel = "2.3"
+# Window-id parsing (the gpui-free `parse_window_id` copy).
+uuid = { version = "1.10", features = ["v4"] }
 
 [dev-dependencies]
 # Test-only stub `TerminalBackend` returns `anyhow::Result` (the trait's error type).
