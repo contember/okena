@@ -1,9 +1,11 @@
 //! Docker Compose service discovery, log-viewer PTYs, and status polling.
 
-use super::{ServiceInstance, ServiceKind, ServiceManager, ServiceStatus};
+use super::{
+    ServiceAsyncCx, ServiceCx, ServiceHandle, ServiceInstance, ServiceKind, ServiceManager,
+    ServiceStatus,
+};
 use crate::config::ServiceDefinition;
 use crate::docker_compose;
-use gpui::{Context, WeakEntity};
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::collections::HashMap;
@@ -20,7 +22,7 @@ impl ServiceManager {
         project_id: &str,
         project_path: &str,
         docker_config: Option<&crate::config::DockerComposeConfig>,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         // Check if explicitly disabled
         if docker_config.as_ref().is_some_and(|dc| dc.enabled == Some(false)) {
@@ -43,7 +45,7 @@ impl ServiceManager {
         let project_path = project_path.to_string();
 
         // Move docker subprocess calls to background executor
-        cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
+        cx.spawn_main(async move |this, cx| {
             let service_names = {
                 let path = project_path.clone();
                 let file = compose_file.clone();
@@ -92,8 +94,7 @@ impl ServiceManager {
                 this.start_docker_status_poller(&project_id, &project_path, &compose_file, cx);
                 cx.notify();
             });
-        })
-        .detach();
+        });
     }
 
     /// Reload Docker Compose services on config reload.
@@ -102,7 +103,7 @@ impl ServiceManager {
         project_id: &str,
         project_path: &str,
         docker_config: Option<&crate::config::DockerComposeConfig>,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         // Stop existing poller
         if let Some(cancel) = self.docker_pollers.remove(project_id) {
@@ -136,7 +137,7 @@ impl ServiceManager {
         &mut self,
         project_id: &str,
         service_name: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
@@ -206,7 +207,7 @@ impl ServiceManager {
         project_id: &str,
         project_path: &str,
         compose_file: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         // Cancel any existing poller for this project
         if let Some(old_cancel) = self.docker_pollers.remove(project_id) {
@@ -220,9 +221,9 @@ impl ServiceManager {
         let path = project_path.to_string();
         let file = compose_file.to_string();
 
-        cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
+        cx.spawn_main(async move |this, cx| {
             // Small initial delay
-            cx.background_executor().timer(Duration::from_secs(1)).await;
+            cx.timer(Duration::from_secs(1)).await;
 
             let mut consecutive_failures: u32 = 0;
 
@@ -288,8 +289,8 @@ impl ServiceManager {
                 } else {
                     (5u64 << consecutive_failures.min(4)).min(60)
                 };
-                cx.background_executor().timer(Duration::from_secs(delay)).await;
+                cx.timer(Duration::from_secs(delay)).await;
             }
-        }).detach();
+        });
     }
 }

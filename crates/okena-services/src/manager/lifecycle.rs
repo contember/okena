@@ -1,8 +1,7 @@
 //! Project service set lifecycle: load, unload, reload `okena.yaml`.
 
-use super::{ServiceInstance, ServiceKind, ServiceManager, ServiceStatus};
+use super::{ServiceCx, ServiceInstance, ServiceKind, ServiceManager, ServiceStatus};
 use crate::config::load_project_config;
-use gpui::Context;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::collections::HashMap;
@@ -19,7 +18,7 @@ impl ServiceManager {
         project_id: &str,
         project_path: &str,
         saved_terminal_ids: &HashMap<String, String>,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         log::info!("[services] load_project_services project_id={} path={}", project_id, project_path);
         let config = match load_project_config(project_path) {
@@ -99,7 +98,7 @@ impl ServiceManager {
         service_name: &str,
         project_path: &str,
         saved_terminal_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
@@ -153,7 +152,7 @@ impl ServiceManager {
     }
 
     /// Stop all running services for a project and remove all instances/configs.
-    pub fn unload_project_services(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn unload_project_services(&mut self, project_id: &str, cx: &mut impl ServiceCx) {
         // Stop Docker status poller
         if let Some(cancel) = self.docker_pollers.remove(project_id) {
             cancel.store(true, Ordering::Relaxed);
@@ -187,7 +186,7 @@ impl ServiceManager {
         &mut self,
         project_id: &str,
         project_path: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let new_config = match load_project_config(project_path) {
             Ok(Some(config)) => config,
