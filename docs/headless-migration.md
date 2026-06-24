@@ -50,6 +50,53 @@ End-state process split:
 | **Daemon** (`okena --headless` during strangler, then the standalone `okena-daemon` binary) | `Workspace` (authoritative), `PtyManager`, `execute_action`, `ServiceManager`, hooks, git watcher, persistence + instance lock, the HTTP/WS server. **No gpui linked.** |
 | **GUI** | `WindowView` / `ProjectColumn` / layout views, a **mirror** `Workspace` (read-only projection via `apply_remote_snapshot`), per-window focus state, the remote-client state machine. No PTYs, no `execute_action`, no persistence. |
 
+### 1b. The split rule: DATA vs PRESENTATION (not local vs remote)
+
+The boundary between daemon and client is **data vs presentation**, not "local vs
+remote":
+
+- **Daemon owns DATA**: projects, layout *as data* (the tree, not pixels),
+  terminals + PTYs, git status, services, and **persisted config including the
+  theme *preference***.
+- **Client owns PRESENTATION**: rendering, *applying* the theme (gpui colors,
+  fonts), focus, window geometry, and — for the CLI — output formatting.
+
+The protocol carries **data**; each client renders it its own way. Consequences:
+
+- **Theme**: the daemon stores the *preference* (a string/enum in `settings.json`,
+  broadcast to clients) but never renders — the GUI applies gpui colors, the CLI
+  ignores it. (This is exactly why `okena-theme`'s data is gpui-free while the gpui
+  conversions are behind the `gpui` feature.)
+- **CLI**: just another thin protocol client — it gets a `StateResponse` (data) and
+  formats plain text itself. No "UI-specific" thing crosses the wire pre-rendered.
+- A client decides **per request**: a presentation concern (theme, focus, display)
+  it handles locally; a workspace concern (create terminal, git diff) it sends to
+  the daemon. No second "intercepting" server is needed.
+
+### 1c. Remotes: Model A — the UI is the aggregation hub (chosen)
+
+Okena aggregates local + multiple remote daemons in one sidebar (unlike VS Code,
+where one window = one backend). So we must choose who aggregates. **Decision:
+Model A — the UI is the hub.**
+
+- The UI connects directly to its **local daemon** (loopback, for local projects)
+  **and** to each **remote daemon** (for remote projects), all over the same
+  protocol. "Local" is just *a connection to 127.0.0.1*. The UI's existing
+  `RemoteConnectionManager` already does the multi-connect; the local-daemon
+  connection is the only new piece.
+- **The local daemon handles only its own machine** (local projects + their
+  PTY/services/git). It does NOT connect to or proxy remotes — that keeps the
+  daemon simple and remote PTY at one hop (remote→UI, no double-hop relay).
+- Trade-off accepted: a mobile/web/CLI client connected to the local daemon sees
+  only that machine's projects, not the remotes the desktop UI aggregates.
+
+This is **not a one-way door**: because everything speaks the same protocol, the
+remote-connection-manager can later move *into* the daemon (Model B — daemon as a
+gateway/aggregator visible to all clients, remotes persisting across UI restarts)
+behind the same protocol, if/when that property is wanted. Model A is chosen now
+for least change + best remote-PTY performance; Model B is the eventual option, not
+a prerequisite.
+
 ---
 
 ## 2. Why this is tractable: the seam already exists
