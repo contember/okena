@@ -21,6 +21,7 @@
 //! via the impls below.
 
 use super::ServiceManager;
+#[cfg(feature = "gpui")]
 use gpui::{AsyncApp, Context, WeakEntity};
 use std::future::Future;
 use std::time::Duration;
@@ -110,6 +111,7 @@ pub trait ServiceAsyncCx {
 
 // --- GPUI implementers ---------------------------------------------------
 
+#[cfg(feature = "gpui")]
 impl ServiceCx for Context<'_, ServiceManager> {
     type Handle = WeakEntity<ServiceManager>;
     type AsyncCx = AsyncApp;
@@ -131,6 +133,7 @@ impl ServiceCx for Context<'_, ServiceManager> {
     }
 }
 
+#[cfg(feature = "gpui")]
 impl ServiceHandle for WeakEntity<ServiceManager> {
     type AsyncCx = AsyncApp;
 
@@ -145,6 +148,7 @@ impl ServiceHandle for WeakEntity<ServiceManager> {
     }
 }
 
+#[cfg(feature = "gpui")]
 impl ServiceAsyncCx for AsyncApp {
     type ReentryCx<'a> = Context<'a, ServiceManager>;
 
