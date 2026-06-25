@@ -101,7 +101,6 @@ use okena_app::terminal::pty_manager::PtyManager;
 use okena_app::theme::{AppTheme, GlobalTheme, ThemeMode};
 use okena_app::views::panels::toast::ToastManager;
 use okena_app::workspace::persistence;
-use okena_app::workspace::state::GlobalWorkspace;
 use okena_core::profiles;
 
 /// Quit action handler - flushes pending saves before exiting
@@ -111,11 +110,12 @@ fn quit(_: &Quit, cx: &mut App) {
         gs.0.read(cx).flush_pending_save();
     }
 
-    // Flush pending workspace save
-    if let Some(gw) = cx.try_global::<GlobalWorkspace>()
-        && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
-            log::error!("Failed to flush workspace on quit: {}", e);
-        }
+    // NOTE: do NOT save workspace.json here. The GUI is a daemon client and its
+    // Workspace is a read-only MIRROR (project/folder ids are prefixed
+    // `remote:local-daemon:…`). The daemon is the single writer (§5) and owns
+    // workspace.json; writing the mirror here clobbered it with prefixed-id /
+    // empty-extra_windows garbage (corrupting projects + wiping multi-window
+    // state on the next launch).
 
     cx.quit();
 }
@@ -833,11 +833,9 @@ fn main() {
                 gs.0.read(cx).flush_pending_save();
             }
 
-            // Flush pending workspace save
-            if let Some(gw) = cx.try_global::<GlobalWorkspace>()
-                && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
-                    log::error!("Failed to flush workspace on quit: {}", e);
-                }
+            // NOTE: do NOT save workspace.json here — the daemon is the single
+            // writer (§5) and the GUI's Workspace is a read-only mirror. See the
+            // `quit` handler above for why writing it here corrupts the profile.
             async {}
         });
     });
