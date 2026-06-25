@@ -83,6 +83,16 @@ impl ProjectColumn {
             cx.observe(watcher, |_, _, cx| cx.notify()).detach();
         }
 
+        // Observe the workspace itself. In daemon-client mode there is no local
+        // git_watcher (it's `None`); the header reads git status from the remote
+        // snapshot, which is refreshed via `apply_remote_snapshot` +
+        // `notify_ui_only` on the Workspace. Since ProjectColumn renders inside a
+        // `.cached()` view, only a notify from an entity it observes repaints it
+        // — without this observer remote git-status updates (branch, ahead/behind,
+        // diff stats) never reach the header chip and go stale. Services don't
+        // hit this because ServicePanel already observes the workspace.
+        cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
+
         let initial_service_height = workspace.read(cx).data.service_panel_heights
             .get(&project_id).copied().unwrap_or(200.0);
 
