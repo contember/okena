@@ -125,7 +125,14 @@ fn main() -> anyhow::Result<()> {
     // 5. Build params (read TLS out before moving `settings`) and run. `run`
     //    blocks until the bridge closes or ctrl-c arrives — that is expected,
     //    the daemon is UI-owned.
-    let tls_enabled = settings.remote_tls_enabled;
+    //
+    // TLS policy by deployment mode (architecture §1): a LOCAL loopback daemon
+    // (spawned by the desktop on 127.0.0.1) serves plain http — loopback is
+    // trusted, TLS there is pure overhead and adds handshake fragility (the
+    // client connects plain and would otherwise TOFU-upgrade). Only a STANDALONE
+    // server bound to a non-loopback address honors `remote_tls_enabled` for
+    // off-host clients.
+    let tls_enabled = !listen_addr.is_loopback() && settings.remote_tls_enabled;
     let params = DaemonParams {
         workspace_data,
         settings,
