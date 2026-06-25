@@ -1,12 +1,11 @@
 use crate::action_dispatch::ActionDispatcher;
 use crate::settings::{settings, GlobalSettings};
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
-use crate::workspace::persistence;
 use crate::workspace::requests::{
     FolderOverlay, FolderOverlayKind, OverlayRequest, ProjectOverlay, ProjectOverlayKind,
     SidebarRequest,
 };
-use crate::workspace::state::{GlobalWorkspace, LayoutNode, Workspace};
+use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
 
 use okena_core::api::ActionRequest;
@@ -526,13 +525,14 @@ impl WindowView {
             gs.0.read(cx).flush_pending_save();
         }
 
-        // 2. Flush workspace
-        if let Some(gw) = cx.try_global::<GlobalWorkspace>()
-            && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
-                log::error!("Failed to flush workspace before profile switch: {e}");
-            }
+        // NOTE: do NOT flush workspace.json here. The GUI is a daemon client and
+        // its Workspace is a read-only mirror (prefixed ids) — the daemon is the
+        // single writer (§5). Writing it would clobber the daemon's file with
+        // mirror garbage (see the quit handlers in src/main.rs). The current
+        // profile's daemon owns its own persistence; the relaunch below starts
+        // the new profile's daemon.
 
-        // 3. Spawn current_exe with --profile <id>. Strip any existing --profile arg
+        // 2. Spawn current_exe with --profile <id>. Strip any existing --profile arg
         //    so we don't double-pass it.
         match std::env::current_exe() {
             Ok(exe) => {
