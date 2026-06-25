@@ -651,7 +651,18 @@ fn main() {
         // workspace.json); the GUI is always a thin client and starts empty —
         // projects arrive via the mirror snapshot (apply_remote_snapshot) from
         // the loopback daemon connection registered in Okena::new.
-        let workspace_data = workspace::state::WorkspaceData::empty();
+        let mut workspace_data = workspace::state::WorkspaceData::empty();
+        // Restore CLIENT-OWNED window layout (which windows are open + their OS
+        // bounds + per-window viewport). This is presentation the GUI owns
+        // locally — separate from the daemon's workspace.json. Populating it
+        // before the main window opens restores main bounds (read below) and
+        // lets the startup extras-observer in `Okena::new` reopen every extra
+        // window the user had. Snapshots don't clobber it (apply_remote_snapshot
+        // never overwrites main_window/extra_windows).
+        if let Some(layout) = persistence::load_window_layout() {
+            workspace_data.main_window = layout.main_window;
+            workspace_data.extra_windows = layout.extra_windows;
+        }
 
         // Create theme entity from settings, restoring custom theme if applicable
         let theme_entity = cx.new(|_cx| {
