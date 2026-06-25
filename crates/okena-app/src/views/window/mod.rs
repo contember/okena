@@ -4,7 +4,6 @@ mod render;
 mod sidebar;
 mod terminal_actions;
 
-use crate::git::watcher::GitStatusWatcher;
 use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::{TerminalBackend, LocalBackend};
@@ -135,8 +134,6 @@ pub struct WindowView {
     hscroll_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// Remote connection manager (set after creation)
     remote_manager: Option<Entity<RemoteConnectionManager>>,
-    /// Git status watcher (set by Okena after creation)
-    git_watcher: Option<Entity<GitStatusWatcher>>,
     /// Whether the pane switcher overlay is active
     pane_switch_active: bool,
     /// Pane switcher overlay entity (separate entity for proper focus handling)
@@ -329,7 +326,6 @@ impl WindowView {
             hscroll_bounds: Rc::new(RefCell::new(None)),
             service_manager: None,
             remote_manager: None,
-            git_watcher: None,
             pane_switch_active: false,
             pane_switcher_entity: None,
             last_scroll_project: None,
@@ -465,14 +461,6 @@ impl WindowView {
     /// Tab); arrow/click switches leave this unset and only ensure visibility.
     pub fn request_center_on_next_navigation(&mut self) {
         self.center_next_navigation = true;
-    }
-
-    /// Set the git watcher entity (called by Okena after creation).
-    pub fn set_git_watcher(&mut self, watcher: Entity<GitStatusWatcher>, cx: &mut Context<Self>) {
-        self.git_watcher = Some(watcher);
-        // Drop existing local columns so they get recreated with the watcher
-        self.project_columns.retain(|id, _| id.starts_with("remote:"));
-        self.sync_project_columns(cx);
     }
 
     /// Set the remote connection manager (called after creation by Okena).

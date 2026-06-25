@@ -8,31 +8,18 @@ mod remote_config;
 
 pub use detached_overlays::open_detached_overlay;
 
-use crate::git::watcher::GitStatusWatcher;
-use crate::workspace::worktree_sync::WorktreeSyncWatcher;
-use crate::remote::auth::AuthStore;
-use crate::remote::bridge;
-use crate::remote::pty_broadcaster::PtyBroadcaster;
-use crate::remote::server::RemoteServer;
-use crate::remote::{GlobalRemoteInfo, RemoteInfo};
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
 use crate::settings::{GlobalSettings, settings};
-use crate::views::panels::toast::ToastManager;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_ext_claude::resolve_claude_dir;
 use crate::views::window::{TerminalsRegistry, WindowView};
-use crate::workspace::persistence;
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
-use okena_core::api::ApiGitStatus;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::watch as tokio_watch;
 
 fn is_default_claude_dir(claude_dir: &Path) -> bool {
     let Some(home) = dirs::home_dir() else {
@@ -96,6 +83,9 @@ fn sync_claude_pty_env(pty_manager: &Arc<PtyManager>, cx: &App) {
 
 /// Set up an observer that loads/unloads service configs when projects change.
 /// Handles deferred worktrees by skipping projects whose directory doesn't exist yet.
+///
+/// Used by the headless daemon (`HeadlessApp`), which is the real service owner.
+/// The GUI is a thin client and never runs services in-process.
 pub(crate) fn observe_project_services<T: 'static>(
     workspace: &Entity<Workspace>,
     service_manager: &Entity<ServiceManager>,
@@ -179,32 +169,6 @@ pub struct Okena {
     pub(crate) terminals: TerminalsRegistry,
     /// Track which detached windows we've already opened
     pub(crate) opened_detached_windows: HashSet<String>,
-    /// Flag indicating workspace needs to be saved (for debouncing)
-    /// Note: Field is read by spawned tasks, not directly
-    #[allow(dead_code)]
-    save_pending: Arc<AtomicBool>,
-    // ── Git status watcher ────────────────────────────────────────────
-    #[allow(dead_code)]
-    git_watcher: Entity<GitStatusWatcher>,
-    // ── Worktree sync watcher ────────────────────────────────────────
-    #[allow(dead_code)]
-    worktree_sync: Entity<WorktreeSyncWatcher>,
-    git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
-    remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>>,
-    next_remote_connection_id: Arc<AtomicU64>,
-    // ── Remote control fields ───────────────────────────────────────────
-    remote_server: Option<RemoteServer>,
-    pub auth_store: Arc<AuthStore>,
-    pub(crate) pty_broadcaster: Arc<PtyBroadcaster>,
-    pub(crate) state_version: Arc<tokio_watch::Sender<u64>>,
-    remote_info: RemoteInfo,
-    listen_addr: IpAddr,
-    /// Serve the remote server over TLS (mirrors settings.remote_tls_enabled).
-    remote_tls_enabled: bool,
-    /// Whether the listen address was forced via CLI --listen flag
-    force_remote: bool,
-    /// Service manager for project-scoped background processes
-    service_manager: Entity<ServiceManager>,
     /// Remote connection manager. Held so extras spawned at runtime can
     /// be wired with the same singleton main was wired with at startup
     /// (`open_extra_window` calls `set_remote_manager` on the new view).
@@ -223,87 +187,15 @@ impl Okena {
         workspace_data: WorkspaceData,
         pty_manager: Arc<PtyManager>,
         pty_events: Receiver<PtyEvent>,
-        listen_addr: Option<IpAddr>,
-        local_daemon: Option<okena_remote_server::local::EnsuredDaemon>,
+        local_daemon: okena_remote_server::local::EnsuredDaemon,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // In `--daemon-client` mode the daemon is the single writer (§5):
-        // it owns persistence + the instance lock. The GUI's `Workspace` is a
-        // pure mirror, so its autosave observer must be inert.
-        let daemon_client = local_daemon.is_some();
-        let force_remote = listen_addr.is_some();
-        let listen_addr = listen_addr.unwrap_or_else(|| {
-            cx.global::<GlobalSettings>().0.read(cx).get()
-                .remote_listen_address.parse::<IpAddr>()
-                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
-        });
-        let remote_tls_enabled = cx
-            .global::<GlobalSettings>()
-            .0
-            .read(cx)
-            .get()
-            .remote_tls_enabled;
-        // Create workspace entity
+        // Create workspace entity. The GUI is always a thin daemon client: the
+        // daemon owns persistence + the instance lock and is the single writer,
+        // so the GUI's `Workspace` is a pure mirror with no autosave.
         let workspace = cx.new(|_cx| Workspace::new(workspace_data));
         cx.set_global(GlobalWorkspace(workspace.clone()));
-
-        // Shared flag for debounced save
-        let save_pending = Arc::new(AtomicBool::new(false));
-        // Track last saved data_version to skip saves for UI-only changes
-        let last_saved_version = Arc::new(AtomicU64::new(0));
-
-        // Set up debounced auto-save on workspace changes
-        let save_pending_for_observer = save_pending.clone();
-        let last_saved_version_for_observer = last_saved_version.clone();
-        let workspace_for_save = workspace.clone();
-        cx.observe(&workspace, move |_this, _workspace, cx| {
-            // §5 single-writer: in `--daemon-client` mode the daemon owns
-            // persistence + the instance lock; the GUI's `Workspace` is a pure
-            // mirror and must never write workspace.json.
-            if daemon_client {
-                return;
-            }
-            // Check if persistent data actually changed
-            let current_version = _workspace.read(cx).data_version();
-            if current_version == last_saved_version_for_observer.load(Ordering::Relaxed) {
-                return; // UI-only change, skip save
-            }
-
-            save_pending_for_observer.store(true, Ordering::Relaxed);
-
-            let save_pending = save_pending_for_observer.clone();
-            let last_saved = last_saved_version_for_observer.clone();
-            let workspace = workspace_for_save.clone();
-            cx.spawn(async move |_, cx| {
-                smol::Timer::after(std::time::Duration::from_millis(500)).await;
-
-                if save_pending.swap(false, Ordering::Relaxed) {
-                    let (data, version) = cx.update(|cx| {
-                        let _slow = okena_core::timing::SlowGuard::new("workspace_save_clone");
-                        let ws = workspace.read(cx);
-                        (ws.data().clone(), ws.data_version())
-                    });
-                    // Run blocking fs IO off the GPUI main thread — on Windows
-                    // an AV scan or OneDrive sync of workspace.json can stall
-                    // for seconds and would otherwise freeze the UI.
-                    let save_result = smol::unblock(move || persistence::save_workspace(&data)).await;
-                    match save_result {
-                        Ok(()) => {
-                            last_saved.store(version, Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            log::error!("Failed to save workspace: {}", e);
-                            cx.update(|cx| {
-                                ToastManager::error(format!("Failed to save workspace: {}", e), cx);
-                            });
-                            // Don't update last_saved — next mutation will retry the save
-                        }
-                    }
-                }
-            }).detach();
-        })
-        .detach();
 
         // Shared terminals registry — one per Okena instance, threaded into
         // every WindowView (main + extras). Each TerminalPane looks up the
@@ -326,22 +218,6 @@ impl Okena {
         // every window's view + OS handle, so it executes these.
         cx.subscribe(&main_window, Self::handle_window_view_event).detach();
 
-        // Create service manager for project-scoped background processes
-        let local_backend_for_services: Arc<dyn crate::terminal::backend::TerminalBackend> =
-            Arc::new(crate::terminal::backend::LocalBackend::new(pty_manager.clone()));
-        let service_manager = cx.new(|_cx| {
-            ServiceManager::new(local_backend_for_services.clone(), terminals.clone())
-        });
-        main_window.update(cx, |rv, cx| {
-            rv.set_service_manager(service_manager.clone(), cx);
-        });
-
-        // Create HookRunner for PTY-backed hook execution
-        cx.set_global(crate::workspace::hooks::HookRunner::new(
-            local_backend_for_services.clone(),
-            terminals.clone(),
-        ));
-
         // Create remote connection manager and wire to main window
         let remote_manager = cx.new(|cx| {
             RemoteConnectionManager::new(terminals.clone(), cx)
@@ -355,15 +231,15 @@ impl Okena {
             rm.start_token_refresh_task(cx);
         });
 
-        // `--daemon-client` mode: register the implicit, trusted loopback
-        // connection to our local daemon so its projects mirror into the GUI.
-        // We own the spawned child (if any) and kill it on quit; an attached
-        // daemon (`spawned == None`) is left alone (§ risk: only the spawner
-        // kills). The connection uses a fixed id so it's recognizable and
-        // dedup-safe, and is never written to settings — `add_connection` does
-        // not persist, and the only insertion site
-        // (`OverlayManagerEvent::RemoteConnected`) is never fired for it.
-        let spawned_daemon = local_daemon.and_then(|ensured| {
+        // Register the implicit, trusted loopback connection to our local
+        // daemon so its projects mirror into the GUI. We own the spawned child
+        // (if any) and kill it on quit; an attached daemon (`spawned == None`)
+        // is left alone (§ risk: only the spawner kills). The connection uses a
+        // fixed id so it's recognizable and dedup-safe, and is never written to
+        // settings — `add_connection` does not persist, and the only insertion
+        // site (`OverlayManagerEvent::RemoteConnected`) is never fired for it.
+        let spawned_daemon = {
+            let ensured = local_daemon;
             let cfg = okena_transport::client::RemoteConnectionConfig {
                 id: okena_transport::client::LOCAL_DAEMON_CONNECTION_ID.to_string(),
                 name: "Local".to_string(),
@@ -378,57 +254,13 @@ impl Okena {
                 log::error!("Failed to register local-daemon loopback connection: {e}");
             }
             ensured.spawned
-        });
+        };
 
         // Observe window bounds changes to force re-render
         cx.observe_window_bounds(window, |_this, _window, cx| {
             cx.notify();
         })
         .detach();
-
-        // ── Git status watcher ─────────────────────────────────────────
-        let (git_status_tx, _) = tokio_watch::channel(HashMap::new());
-        let git_status_tx = Arc::new(git_status_tx);
-        let remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>> =
-            Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let next_remote_connection_id = Arc::new(AtomicU64::new(0));
-        let git_watcher = cx.new({
-            let workspace = workspace.clone();
-            let git_status_tx = git_status_tx.clone();
-            let remote_subscribed_terminals = remote_subscribed_terminals.clone();
-            |cx| GitStatusWatcher::new(workspace, git_status_tx, remote_subscribed_terminals, cx)
-        });
-
-        // ── Worktree sync watcher ─────────────────────────────────────
-        let worktree_sync = cx.new({
-            let workspace = workspace.clone();
-            |cx| WorktreeSyncWatcher::new(workspace, cx)
-        });
-
-        // Pass git_watcher to main window so ProjectColumns can observe it
-        main_window.update(cx, |rv, cx| {
-            rv.set_git_watcher(git_watcher.clone(), cx);
-        });
-
-        // ── Remote control setup ────────────────────────────────────────
-        let auth_store = Arc::new(AuthStore::new());
-        let pty_broadcaster = Arc::new(PtyBroadcaster::new());
-        // Publish PTY output directly from reader threads (bypasses GPUI event loop latency)
-        pty_manager.set_output_sink(pty_broadcaster.clone());
-        let (state_version_tx, _) = tokio_watch::channel(0u64);
-        let state_version = Arc::new(state_version_tx);
-        let remote_info = RemoteInfo::new();
-        cx.set_global(GlobalRemoteInfo(remote_info.clone()));
-
-        // Bump state_version on workspace changes
-        let sv = state_version.clone();
-        cx.observe(&workspace, move |_this, _workspace, _cx| {
-            sv.send_modify(|v| *v += 1);
-        })
-        .detach();
-
-        // Create bridge channel and start command loop
-        let (bridge_tx, bridge_rx) = bridge::bridge_channel();
 
         // Channel for clicked desktop notifications → "jump to that pane".
         let (notification_jump_tx, notification_jump_rx) = async_channel::unbounded();
@@ -444,21 +276,6 @@ impl Okena {
             pty_manager,
             terminals,
             opened_detached_windows: HashSet::new(),
-            save_pending,
-            git_watcher,
-            worktree_sync,
-            git_status_tx: git_status_tx.clone(),
-            remote_subscribed_terminals: remote_subscribed_terminals.clone(),
-            next_remote_connection_id: next_remote_connection_id.clone(),
-            remote_server: None,
-            auth_store: auth_store.clone(),
-            pty_broadcaster: pty_broadcaster.clone(),
-            state_version: state_version.clone(),
-            remote_info: remote_info.clone(),
-            listen_addr,
-            remote_tls_enabled,
-            force_remote,
-            service_manager: service_manager.clone(),
             remote_manager: remote_manager.clone(),
             notification_jump_tx,
             spawned_daemon,
@@ -478,11 +295,6 @@ impl Okena {
 
         // Route clicked desktop notifications back to their originating pane.
         manager.start_notification_click_loop(notification_jump_rx, cx);
-
-        // Start remote command bridge loop
-        let local_backend: Arc<dyn crate::terminal::backend::TerminalBackend> =
-            Arc::new(crate::terminal::backend::LocalBackend::new(manager.pty_manager.clone()));
-        manager.start_remote_command_loop(bridge_rx, local_backend, cx);
 
         // Kill orphaned terminals when projects are deleted
         cx.observe(&workspace, move |this, workspace, cx| {
@@ -587,125 +399,10 @@ impl Okena {
         })
         .detach();
 
-        // Observe workspace to load/unload service configs when projects change
-        observe_project_services(&workspace, &service_manager, cx);
-
-        // Observe service manager to sync terminal IDs back to workspace for persistence
-        {
-            let workspace_for_svc = workspace.clone();
-            cx.observe(&service_manager, move |_this, service_manager, cx| {
-                let sm = service_manager.read(cx);
-                // Collect project IDs that have services
-                let project_ids: Vec<String> = sm.instances().keys()
-                    .map(|(pid, _)| pid.clone())
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect();
-
-                let terminal_maps: Vec<(String, HashMap<String, String>)> = project_ids
-                    .into_iter()
-                    .map(|pid| {
-                        let ids = sm.service_terminal_ids(&pid);
-                        (pid, ids)
-                    })
-                    .collect();
-
-                workspace_for_svc.update(cx, |ws, cx| {
-                    for (project_id, terminals) in terminal_maps {
-                        ws.sync_service_terminals(&project_id, terminals, cx);
-                    }
-                });
-            })
-            .detach();
-        }
-
-        // Auto-start remote server if enabled in settings or forced via --remote
-        let settings = cx.global::<GlobalSettings>().0.clone();
-        if settings.read(cx).get().remote_server_enabled || force_remote {
-            manager.start_remote_server(bridge_tx.clone());
-        }
-
-        // Observe settings changes to start/stop server dynamically
-        let bridge_tx_for_observer = bridge_tx.clone();
-        cx.observe(&settings, move |this, settings, cx| {
-            let s = settings.read(cx).get();
-            let enabled = s.remote_server_enabled;
-            let running = this.remote_server.is_some();
-
-            let tls_enabled = s.remote_tls_enabled;
-
-            if enabled && !running {
-                // Update listen_addr from settings if not forced via CLI
-                if !this.force_remote
-                    && let Ok(addr) = s.remote_listen_address.parse::<IpAddr>() {
-                        this.listen_addr = addr;
-                    }
-                this.remote_tls_enabled = tls_enabled;
-                this.start_remote_server(bridge_tx_for_observer.clone());
-            } else if !enabled && running {
-                this.stop_remote_server();
-            } else if enabled && running && !this.force_remote {
-                // Restart if the listen address OR the TLS toggle changed.
-                let new_addr = s.remote_listen_address.parse::<IpAddr>().ok();
-                let addr_changed = new_addr.is_some_and(|a| a != this.listen_addr);
-                let tls_changed = tls_enabled != this.remote_tls_enabled;
-                if addr_changed || tls_changed {
-                    if let Some(a) = new_addr {
-                        this.listen_addr = a;
-                    }
-                    this.remote_tls_enabled = tls_enabled;
-                    this.stop_remote_server();
-                    this.start_remote_server(bridge_tx_for_observer.clone());
-                }
-            }
-        })
-        .detach();
-
         // Note: updater is now handled by the okena-ext-updater extension.
         // GlobalUpdateInfo is set in main.rs via okena_ext_updater::init().
 
         manager
-    }
-
-    /// Start the remote HTTP/WS server.
-    fn start_remote_server(&mut self, bridge_tx: bridge::BridgeSender) {
-        match RemoteServer::start(
-            bridge_tx,
-            self.auth_store.clone(),
-            self.pty_broadcaster.clone(),
-            self.state_version.clone(),
-            self.listen_addr,
-            self.git_status_tx.clone(),
-            self.remote_subscribed_terminals.clone(),
-            self.next_remote_connection_id.clone(),
-            self.remote_tls_enabled,
-        ) {
-            Ok(server) => {
-                let port = server.port();
-                let fingerprint = server.cert_fingerprint();
-                self.remote_info
-                    .set_active(port, self.auth_store.clone(), fingerprint);
-                log::info!("Remote server started on port {}", port);
-
-                let code = self.auth_store.get_or_create_code();
-                println!("Remote server listening on port {port}");
-                println!("Pairing code: {code} (expires in 60s)");
-                println!("Run `okena pair` anytime for a fresh code.");
-
-                self.remote_server = Some(server);
-            }
-            Err(e) => {
-                log::error!("Failed to start remote server: {}", e);
-            }
-        }
-    }
-
-    /// Stop the remote server.
-    fn stop_remote_server(&mut self) {
-        if let Some(mut server) = self.remote_server.take() {
-            server.stop();
-        }
-        self.remote_info.set_inactive();
     }
 
     /// Centralized PTY event loop - notifies all windows (main and detached)
@@ -807,18 +504,10 @@ impl Okena {
                             }
                         }
 
-                        // Let service manager handle service terminals (may keep
-                        // their UI Terminal for viewing crash output)
+                        // Services run in the daemon, not in this thin client, so
+                        // no local PTY exit is ever a service terminal.
                         let service_tids: std::collections::HashSet<String> =
-                            this.service_manager.update(cx, |sm, cx| {
-                                let mut handled = std::collections::HashSet::new();
-                                for (terminal_id, exit_code) in &exit_events {
-                                    if sm.handle_service_exit(terminal_id, *exit_code, cx) {
-                                        handled.insert(terminal_id.clone());
-                                    }
-                                }
-                                handled
-                            });
+                            std::collections::HashSet::new();
 
                         // Handle hook terminal exits (status updates, pending close, cleanup)
                         let hook_tids = this.handle_hook_terminal_exits(&exit_events, &service_tids, cx);
