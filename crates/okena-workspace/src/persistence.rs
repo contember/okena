@@ -446,7 +446,14 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
 }
 
 /// Schema version for the client-owned window-layout file.
-pub const WINDOW_LAYOUT_VERSION: u32 = 1;
+///
+/// v2: one-time visibility reset. v1 files accumulated a compounded
+/// `hidden_project_ids` set (the daemon's single-window `show_in_overview` was
+/// re-applied on every reconnect via `apply_initial_remote_project_visibility`),
+/// which eventually hid every project and left the main window empty on restart.
+/// On migration from v1 we clear the per-window hidden sets + folder filters so
+/// all projects reappear; the user re-curates and the bug no longer compounds.
+pub const WINDOW_LAYOUT_VERSION: u32 = 2;
 
 /// Process-level mutex serializing window-layout saves (mirrors WORKSPACE_LOCK
 /// — the debounced client save can fire concurrently during a window drag).
@@ -477,17 +484,42 @@ pub fn get_window_layout_path() -> PathBuf {
 }
 
 /// Load the client window layout, or `None` if absent/unreadable/corrupt (the
-/// app then falls back to a single default-bounds main window).
+/// app then falls back to a single default-bounds main window). Migrates older
+/// schema versions in place (see [`WINDOW_LAYOUT_VERSION`]).
 pub fn load_window_layout() -> Option<ClientWindowLayout> {
     let path = get_window_layout_path();
     let content = std::fs::read_to_string(&path).ok()?;
     match serde_json::from_str::<ClientWindowLayout>(&content) {
-        Ok(layout) => Some(layout),
+        Ok(mut layout) => {
+            migrate_window_layout(&mut layout);
+            Some(layout)
+        }
         Err(e) => {
             log::warn!("Failed to parse window-layout.json: {e}; ignoring.");
             None
         }
     }
+}
+
+/// Migrate a loaded window layout to the current schema version.
+///
+/// v1 → v2: clear the compounded per-window hidden sets + folder filters (see
+/// [`WINDOW_LAYOUT_VERSION`]) so all projects reappear after the visibility bug.
+fn migrate_window_layout(layout: &mut ClientWindowLayout) {
+    if layout.version < 2 {
+        layout.main_window.hidden_project_ids.clear();
+        layout.main_window.folder_filter = None;
+        for w in &mut layout.extra_windows {
+            w.hidden_project_ids.clear();
+            w.folder_filter = None;
+        }
+        log::info!(
+            "Migrated window-layout.json v{} → v2: reset per-window visibility \
+             (compounded hidden-set recovery).",
+            layout.version
+        );
+    }
+    layout.version = WINDOW_LAYOUT_VERSION;
 }
 
 /// Save the client window layout (main + extra windows) atomically (tmp + fsync
@@ -762,6 +794,39 @@ mod tests {
         let empty: ClientWindowLayout = serde_json::from_str("{}").unwrap();
         assert_eq!(empty.version, 0);
         assert!(empty.extra_windows.is_empty());
+    }
+
+    #[test]
+    fn migrate_window_layout_v1_resets_visibility() {
+        let mut main = WindowState::default();
+        main.hidden_project_ids.insert("remote:local-daemon:p1".to_string());
+        main.folder_filter = Some("f1".to_string());
+        let mut extra = WindowState::default();
+        extra.hidden_project_ids.insert("remote:local-daemon:p2".to_string());
+        let mut layout = ClientWindowLayout {
+            version: 1,
+            main_window: main,
+            extra_windows: vec![extra],
+        };
+
+        migrate_window_layout(&mut layout);
+
+        // v1 → v2 clears the compounded hidden sets + folder filters everywhere.
+        assert_eq!(layout.version, WINDOW_LAYOUT_VERSION);
+        assert!(layout.main_window.hidden_project_ids.is_empty());
+        assert!(layout.main_window.folder_filter.is_none());
+        assert!(layout.extra_windows[0].hidden_project_ids.is_empty());
+
+        // A current-version layout is left untouched.
+        let mut keep = WindowState::default();
+        keep.hidden_project_ids.insert("remote:local-daemon:p3".to_string());
+        let mut current = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: keep,
+            extra_windows: vec![],
+        };
+        migrate_window_layout(&mut current);
+        assert!(current.main_window.hidden_project_ids.contains("remote:local-daemon:p3"));
     }
 
     fn make_project(id: &str) -> ProjectData {
