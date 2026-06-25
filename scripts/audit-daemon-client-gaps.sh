@@ -43,8 +43,10 @@ echo
 # focus_*, set_folder_collapsed, set_active_tab, *_ui_only — all client-local-OK).
 CAT1_PATTERNS=(
   'persistence::save_workspace'
-  '\.add_project\('
-  '\.delete_project\('
+  # `ws.`-anchored so a view's own dispatch method (this.add_project /
+  # this.delete_project, which route to an ActionRequest) isn't a false positive.
+  '\bws\.add_project\('
+  '\bws\.delete_project\('
   '\.create_worktree_project\('
   '\.remove_worktree_project\('
   '\.add_discovered_worktree\('
