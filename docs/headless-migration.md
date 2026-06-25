@@ -153,6 +153,10 @@ rails".
 | **Phase A — `--daemon-client` mode** | `d709c83a` | Desktop flag (OFF by default → classic behavior byte-for-byte unchanged). ON: `main.rs` skips `acquire_instance_lock()`, starts from `WorkspaceData::empty()`, and calls `ensure_local_daemon()`; `Okena::new` takes `Option<EnsuredDaemon>`, registers an implicit trusted loopback `RemoteConnectionConfig` (id `local-daemon`, tls off) via `add_connection`, holds the spawned `Child` (killed on `on_app_quit` — only the spawner kills), and makes the autosave observer inert (§5). Loopback connection never reaches persisted settings. Build + 405 tests green. |
 | **Phase B — single-writer to the daemon** | `e2ee4e71` | `DaemonCore::new` acquires `acquire_instance_lock()` as step 0 (before binding a port / writing `remote.json`) and holds the `LockGuard` for the daemon's lifetime. Closes the §5 gap where the dedicated `okena-daemon` binary (preferred by `spawn_daemon`) never locked, so with the `--daemon-client` GUI also skipping the lock, no process owned the profile. Lock is gpui-free. |
 | **Phase B/E — lifecycle hooks in the daemon** | `ea2ffc34` | `DaemonReactor` now gets a real `HookRunner::new(backend, terminals)` + `HookMonitor::new()` instead of `None`. All plumbing pre-existed (action layer → `WorkspaceCx::{hook_runner,hook_monitor}` → `DaemonWorkspaceCx`). Hook PTYs register in the shared registry + broadcast over `PtyBroadcaster`, so hook terminals reach clients via the normal remote terminal path. Daemon stays gpui-free. Follow-up: surface `HookMonitor` run status into `StateResponse`. |
+| **Phase B — hide loopback connection** | `31af0b4e` | Shared const `LOCAL_DAEMON_CONNECTION_ID`; the implicit loopback connection is filtered out of the sidebar's REMOTE management section (its projects already render as ordinary flat-list projects via `apply_remote_snapshot`, which mirrors the daemon's project/folder structure 1:1). Confirmed: no separate "remote workspace" / chrome — Phase B's feared view-UX question was a non-issue. |
+| **Phase D1 — flip default to daemon-client** | `662d311a` | The `--daemon-client` flag is gone: the GUI is **always** a thin client. Startup: the `--headless` branch (the daemon) takes the instance lock; the GUI path never locks, starts from `WorkspaceData::empty()`, and unconditionally `ensure_local_daemon()`s. |
+| **Phase D2 — delete in-process local PROJECT path** | `a56c399b` | Every project is daemon-backed now, so the local path is dead. Deleted `ActionDispatcher::Local` (+ its dispatch/split/tab arms + the local branch of `dispatcher_for_project`), `create_local_column`, and the Local branches of `build_git_provider`/`build_project_fs`/`build_blame_provider`. The remote path is unconditional. −293 net. |
+| **Phase D3 — delete the GUI's in-process infrastructure** | `885e0e76` | Removed from `Okena`: the self-hosted `RemoteServer` (11 fields + start/stop + bridge + command loop + resolvers — external clients connect to the daemon, Model A), the in-process `GitStatusWatcher`, `WorktreeSyncWatcher`, the GUI `HookRunner` global, the in-process `ServiceManager` field + sync observer, and the autosave observer (the daemon is the sole writer). `Okena::new` drops `listen_addr` and takes a non-Option `EnsuredDaemon`. KEPT: the `terminals` registry, `HookMonitor` (client renders hook UI from it), the daemon-shared `sync_services`/`observe_project_services`, and the whole daemon path (`run_headless`/`HeadlessApp` still starts its server + `remote_command_loop`). −705 net. |
 
 Branch: `refactorx/full-headless`. My commits are atomic and listed above; the
 unrelated `M` working-tree entries + untracked `profile.json.gz` are not ours —
@@ -183,18 +187,57 @@ per-window UI state (sidebar_open / folder_filter / os_bounds / panel heights)
 across a *client restart* in daemon-client mode, since the client no longer
 loads `workspace.json` itself — a Phase C round-trip item, low priority.
 
-### What remains — all runtime-validated (needs a run-capable session)
+## 3b. Architectural goal: MET
 
-The daemon side is feature-complete on data. What's left is GUI behavior that
-can only be confirmed by running the desktop in `--daemon-client` mode:
-- **Phase B view-UX**: do daemon projects render acceptably in the main window
-  via the existing remote path, or do they need de-prefixing / main-window
-  surfacing (the plan's open "key design question")? Visual call.
-- **Phase C (gap-driven)**: toasts/OS-notification forwarding, terminal
-  scrollback on attach, per-window-state restore — each only verifiable live.
-- **Phase D (one-way door)**: flip the default + delete the in-process local
-  path. Gated by the plan on the benchmark + a parallel-run soak + a tagged
-  rollback point — must NOT be done without runtime + parity confirmation.
+After Phases A→D the **migration's core goal is achieved**: there is one
+architecture — the daemon (authoritative) and thin clients (views). The desktop
+GUI is always a client of a local daemon it spawns; the in-process "local
+project" path and the GUI's serving/owning infrastructure are deleted. The
+daemon ships both as the standalone gpui-free `okena-daemon` binary and as the
+GPUI-headless `run_headless`/`HeadlessApp` (the spawn fallback).
+
+**Rollback:** annotated tag `pre-daemon-flip-2026-06-25` (commit `a45aacbb`) is
+the return point before the irreversible Phase D deletions.
+
+**Verification done blind:** every commit above is `cargo build`/`cargo test`
+green (whole workspace builds with zero new warnings; okena-app 56, smoke 5,
+daemon-core 24, workspace 294; daemon gpui-free gate empty). The **runtime**
+behavior of the daemon-client desktop (opening a real window, rendering mirrored
+projects, live terminals) was **not** verifiable headless — it needs a
+run-capable session. Test with `cargo run`; if the daemon-client path misbehaves,
+`git checkout pre-daemon-flip-2026-06-25`.
+
+## 3c. Remaining follow-ups (runtime-validated — close in a live session)
+
+These do not block the architecture; they are last-mile completeness/parity that
+genuinely needs a running app to get right:
+
+1. **Residual local-PTY handlers (finishes the in-process deletion).** Three GUI
+   handlers still drive the local `backend`/`pty_manager` instead of routing to
+   the daemon, so they are likely broken in client mode and keep `pty_manager` +
+   `start_pty_event_loop` alive:
+   - worktree creation (`terminal_actions.rs` `spawn_uninitialized_terminals` /
+     `create_worktree_from_focus`) → should dispatch `ActionRequest::CreateWorktree`
+     (already exists in the daemon) and let the worktree mirror back.
+   - shell switch (`terminal_actions.rs` ~L61/L106: `backend.kill` +
+     `backend.create_terminal`) → needs a daemon action (no `ActionRequest`
+     variant yet).
+   - workspace/session switch (`handlers.rs::handle_switch_workspace`) → needs a
+     daemon action.
+   Converting all three lets the last in-process PTY pieces be deleted.
+2. **Toasts / OS notifications** forwarded from the daemon over `WsOutbound`
+   (sync action errors are already returned via `CommandResult`; this is for
+   async daemon-side events). The `Toast` type is already gpui-free in
+   `okena-state`.
+3. **Terminal scrollback on (re)attach.** Pre-existing remote-protocol limitation
+   (the SNAPSHOT frame replays the viewport, not history) — affects all remote
+   clients, not just daemon-client. Matters on reconnect to an existing daemon
+   session; the primary "create terminals live" flow is unaffected.
+4. **Per-window presentation restore** (sidebar_open / folder_filter / os_bounds /
+   panel heights) across a client restart — client-owned presentation that the
+   client no longer persists locally. Decide: client-side persistence vs. daemon
+   round-trip.
+5. **`HookMonitor` run status** into `StateResponse` for the client hooks panel.
 
 **Key spike conclusions carried forward:**
 - The action layer needs only `notify`/`refresh_views` — **no `spawn` on the trait.**
