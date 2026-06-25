@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+/// Connection id of the implicit, trusted loopback connection the desktop
+/// registers to its own local daemon in `--daemon-client` mode. It is not a
+/// user-managed remote: it is auto-registered, never persisted to settings, and
+/// hidden from the sidebar's REMOTE management section. Shared so the
+/// registration site (`Okena::new`) and the sidebar filter agree on the marker.
+pub const LOCAL_DAEMON_CONNECTION_ID: &str = "local-daemon";
+
 /// Configuration for a single remote server connection.
 /// Persisted in settings.json as part of `remote_connections`.
 #[derive(Clone, Debug, Serialize, Deserialize)]

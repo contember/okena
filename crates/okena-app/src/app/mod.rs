@@ -365,7 +365,7 @@ impl Okena {
         // (`OverlayManagerEvent::RemoteConnected`) is never fired for it.
         let spawned_daemon = local_daemon.and_then(|ensured| {
             let cfg = okena_transport::client::RemoteConnectionConfig {
-                id: "local-daemon".to_string(),
+                id: okena_transport::client::LOCAL_DAEMON_CONNECTION_ID.to_string(),
                 name: "Local".to_string(),
                 host: ensured.daemon.host().to_string(),
                 port: ensured.daemon.port,
