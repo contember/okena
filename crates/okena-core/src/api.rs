@@ -1,4 +1,5 @@
 use crate::keys::SpecialKey;
+use crate::shell::ShellType;
 use crate::theme::FolderColor;
 use crate::types::{DiffMode, SplitDirection};
 use serde::{Deserialize, Serialize};
@@ -236,6 +237,50 @@ pub struct ApiProject {
     pub worktree_info: Option<ApiWorktreeMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktree_ids: Vec<String>,
+    /// Whether this project is pinned to the top of the activity-sorted view.
+    /// Carried over the wire so daemon-client projects keep their pin marker
+    /// and stable pinned-tier ordering.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Unix-millis timestamp of last meaningful activity, driving the
+    /// activity-sorted sidebar order. Without it daemon-client projects would
+    /// all sort as "no activity".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<u64>,
+    /// Per-project default shell override (so the shell picker reflects the
+    /// current selection for daemon-client projects).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_shell: Option<ShellType>,
+    /// Lifecycle-hook terminals shown in the service panel. Projected onto the
+    /// wire so daemon-client projects surface their hook terminals (the domain
+    /// `HookTerminalEntry` lives in `okena-state` and can't be referenced here
+    /// without a dependency cycle — see [`ApiHookTerminalEntry`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook_terminals: Vec<ApiHookTerminalEntry>,
+}
+
+/// Wire mirror of `okena_state::HookTerminalStatus` (which can't be referenced
+/// from `okena-core` without a dependency cycle). Converted via
+/// `HookTerminalStatus::{to_api,from_api}` in `okena-state`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ApiHookTerminalStatus {
+    Running,
+    Succeeded,
+    Failed { exit_code: i32 },
+}
+
+/// Wire mirror of a hook terminal entry shown in the service panel. The
+/// terminal id (the map key in the domain type) is inlined here as `terminal_id`
+/// so the wire form is a flat list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiHookTerminalEntry {
+    pub terminal_id: String,
+    pub label: String,
+    pub status: ApiHookTerminalStatus,
+    pub hook_type: String,
+    pub command: String,
+    pub cwd: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -762,6 +807,17 @@ mod tests {
                 services: vec![],
                 worktree_info: None,
                 worktree_ids: vec![],
+                pinned: true,
+                last_activity_at: Some(1_700_000_000_000),
+                default_shell: Some(ShellType::Default),
+                hook_terminals: vec![ApiHookTerminalEntry {
+                    terminal_id: "h1".into(),
+                    label: "on_project_open".into(),
+                    status: ApiHookTerminalStatus::Failed { exit_code: 2 },
+                    hook_type: "on_project_open".into(),
+                    command: "echo hi".into(),
+                    cwd: "/tmp".into(),
+                }],
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,
@@ -799,6 +855,15 @@ mod tests {
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].id, "p1");
         assert!(matches!(parsed.projects[0].folder_color, FolderColor::Blue));
+        assert!(parsed.projects[0].pinned);
+        assert_eq!(parsed.projects[0].last_activity_at, Some(1_700_000_000_000));
+        assert_eq!(parsed.projects[0].default_shell, Some(ShellType::Default));
+        assert_eq!(parsed.projects[0].hook_terminals.len(), 1);
+        assert_eq!(parsed.projects[0].hook_terminals[0].terminal_id, "h1");
+        assert!(matches!(
+            parsed.projects[0].hook_terminals[0].status,
+            ApiHookTerminalStatus::Failed { exit_code: 2 }
+        ));
         assert!(parsed.fullscreen_terminal.is_none());
         assert_eq!(parsed.project_order, vec!["folder1", "p1"]);
         assert_eq!(parsed.folders.len(), 1);

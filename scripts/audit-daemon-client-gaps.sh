@@ -99,8 +99,14 @@ PAIRS=(
 )
 
 # Domain fields that are intentionally NOT on the wire (client-local presentation
-# or daemon-internal), so they don't count as gaps.
-CAT2_IGNORE='^(version|service_panel_heights|hook_panel_heights)$'
+# or daemon-internal), so they don't count as gaps:
+#   connection_id / is_remote — set by the client's snapshot reconciler, not the
+#                               daemon (the daemon's own projects are is_remote=false).
+#   service_terminals         — daemon-internal persistence routing; the client
+#                               gets live service terminal ids via ApiServiceInfo.
+# Still-visible deferred gaps (NOT ignored): `hooks` and `hidden_terminals` need a
+# wire projection (HooksConfig lives in okena-state and would need an Api mirror).
+CAT2_IGNORE='^(version|service_panel_heights|hook_panel_heights|connection_id|is_remote|service_terminals)$'
 
 cat2_hits=0
 for pair in "${PAIRS[@]}"; do
