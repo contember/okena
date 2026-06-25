@@ -80,8 +80,14 @@ pub enum OverlayManagerEvent {
     // Boxed: WorkspaceData is large and would bloat every event otherwise.
     SwitchWorkspace(Box<WorkspaceData>),
 
-    /// Worktree dialog created a new project
-    WorktreeCreated(String),
+    /// Worktree dialog confirmed: create a worktree on the parent project.
+    /// The host dispatches `ActionRequest::CreateWorktree`; the daemon creates
+    /// the worktree + its terminals, which mirror back.
+    WorktreeCreateRequested {
+        project_id: String,
+        branch: String,
+        create_branch: bool,
+    },
 
     /// Shell selector selected a shell for a terminal
     ShellSelected {
@@ -102,8 +108,13 @@ pub enum OverlayManagerEvent {
     /// Context menu: Rename directory on disk
     RenameDirectory { project_id: String, project_path: String },
 
-    /// Context menu: Close worktree project
+    /// Context menu: Close worktree project (opens the confirm dialog)
     CloseWorktree { project_id: String },
+
+    /// Close-worktree dialog confirmed: remove the worktree project. The host
+    /// dispatches `ActionRequest::RemoveWorktreeProject`; the removal mirrors
+    /// back. (The dialog's in-process git pipeline already ran before this.)
+    WorktreeRemoveRequested { project_id: String, force: bool },
 
     /// Context menu: Delete project
     DeleteProject { project_id: String },
@@ -651,8 +662,12 @@ impl OverlayManager {
                 WorktreeDialogEvent::Close => {
                     this.close_modal(cx);
                 }
-                WorktreeDialogEvent::Created(new_project_id) => {
-                    cx.emit(OverlayManagerEvent::WorktreeCreated(new_project_id.clone()));
+                WorktreeDialogEvent::RequestCreate { project_id, branch, create_branch } => {
+                    cx.emit(OverlayManagerEvent::WorktreeCreateRequested {
+                        project_id: project_id.clone(),
+                        branch: branch.clone(),
+                        create_branch: *create_branch,
+                    });
                     this.close_modal(cx);
                 }
             }
@@ -674,9 +689,24 @@ impl OverlayManager {
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
         let app_settings = crate::settings::settings(cx);
-        open_overlay!(self, cx, CloseWorktreeDialogEvent, |cx| {
+        let entity = cx.new(|cx| {
             CloseWorktreeDialog::new(workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
         });
+        cx.subscribe(&entity, |this, _, event: &CloseWorktreeDialogEvent, cx| {
+            match event {
+                CloseWorktreeDialogEvent::Closed => {
+                    this.close_modal(cx);
+                }
+                CloseWorktreeDialogEvent::RequestRemove { project_id, force } => {
+                    cx.emit(OverlayManagerEvent::WorktreeRemoveRequested {
+                        project_id: project_id.clone(),
+                        force: *force,
+                    });
+                }
+            }
+        })
+        .detach();
+        self.open_modal(entity, cx);
     }
 
     // ========================================================================
@@ -1139,14 +1169,20 @@ impl OverlayManager {
         self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
-        let focus_manager = self.focus_manager.clone();
         let window_id = self.window_id;
-        let hooks = crate::settings::settings(cx).hooks.clone();
-        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, focus_manager, project_id, position, hooks, window_id, cx));
+        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, project_id, position, window_id, cx));
 
         cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
-            if event.is_close() {
-                this.hide_worktree_list(cx);
+            match event {
+                WorktreeListPopoverEvent::Close => {
+                    this.hide_worktree_list(cx);
+                }
+                WorktreeListPopoverEvent::DeleteProject { project_id } => {
+                    this.hide_worktree_list(cx);
+                    cx.emit(OverlayManagerEvent::DeleteProject {
+                        project_id: project_id.clone(),
+                    });
+                }
             }
         }).detach();
 

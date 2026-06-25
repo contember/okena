@@ -21,6 +21,14 @@ mod view;
 pub enum CloseWorktreeDialogEvent {
     /// Dialog closed (either cancelled or worktree was removed)
     Closed,
+    /// Remove the worktree project. The daemon owns the worktree project, so
+    /// the host dispatches `ActionRequest::RemoveWorktreeProject { project_id,
+    /// force }`; the removal (and its hooks) mirror back.
+    ///
+    /// NOTE: the in-process git pipeline that runs *before* this (stash / fetch
+    /// / rebase / merge / push / delete-branch) still executes locally — those
+    /// steps have no `ActionRequest` yet (see the TODO in `execute.rs`).
+    RequestRemove { project_id: String, force: bool },
 }
 
 impl EventEmitter<CloseWorktreeDialogEvent> for CloseWorktreeDialog {}
@@ -46,7 +54,6 @@ pub(super) enum ProcessingState {
 /// Checks for dirty state and optionally merges the branch back.
 pub struct CloseWorktreeDialog {
     pub(super) workspace: Entity<Workspace>,
-    pub(super) focus_manager: Entity<okena_workspace::focus::FocusManager>,
     pub(super) focus_handle: FocusHandle,
     pub(super) project_id: String,
     pub(super) project_name: String,
@@ -69,7 +76,9 @@ pub struct CloseWorktreeDialog {
 impl CloseWorktreeDialog {
     pub fn new(
         workspace: Entity<Workspace>,
-        focus_manager: Entity<okena_workspace::focus::FocusManager>,
+        // The daemon owns worktree removal; the dialog no longer scrubs focus
+        // state itself, so this is unused (kept for call-site stability).
+        _focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         worktree_config: WorktreeConfig,
         hooks_config: HooksConfig,
@@ -92,7 +101,6 @@ impl CloseWorktreeDialog {
 
         Self {
             workspace,
-            focus_manager,
             focus_handle: cx.focus_handle(),
             project_id,
             project_name,

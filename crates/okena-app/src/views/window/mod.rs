@@ -289,15 +289,6 @@ impl WindowView {
                         dispatcher.dispatch(action, cx);
                     }
                 }));
-
-                // Settings callback
-                s.set_settings(Box::new(|cx| {
-                    let app_settings = crate::settings::settings(cx);
-                    okena_views_sidebar::SidebarSettings {
-                        worktree_path_template: app_settings.worktree.path_template.clone(),
-                        hooks: app_settings.hooks.clone(),
-                    }
-                }));
             });
         }
 
@@ -461,6 +452,20 @@ impl WindowView {
     /// Tab); arrow/click switches leave this unset and only ensure visibility.
     pub fn request_center_on_next_navigation(&mut self) {
         self.center_next_navigation = true;
+    }
+
+    /// The window-scoped id this view inhabits. Used by the `Okena` coordinator
+    /// (which has no dispatcher of its own) to build an `ActionDispatcher`.
+    pub(crate) fn window_id_for_dispatch(&self) -> WindowId {
+        self.window_id
+    }
+
+    /// The remote connection manager, if wired. Exposed so the `Okena`
+    /// coordinator can build an `ActionDispatcher` to route mirror-mutating
+    /// actions to the daemon — e.g. the deferred worktree-close removal
+    /// completed from the PTY exit handler.
+    pub(crate) fn remote_manager_for_dispatch(&self) -> Option<Entity<RemoteConnectionManager>> {
+        self.remote_manager.clone()
     }
 
     /// Set the remote connection manager (called after creation by Okena).

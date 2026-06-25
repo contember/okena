@@ -152,8 +152,6 @@ pub struct Sidebar {
     pub(crate) collapsed_groups: HashSet<(String, GroupKind)>,
     /// Parent project IDs with in-flight worktree creation (debounce guard)
     pub(crate) creating_worktree: HashSet<String>,
-    /// Callback to get settings
-    pub(crate) get_settings: Option<GetSettingsFn>,
     /// Callback to get remote connections
     pub(crate) get_remote_connections: Option<GetRemoteConnectionsFn>,
     /// Callback to send remote actions
@@ -226,7 +224,6 @@ impl Sidebar {
             service_manager: None,
             collapsed_groups: HashSet::new(),
             creating_worktree: HashSet::new(),
-            get_settings: None,
             get_remote_connections: None,
             send_remote_action: None,
             get_remote_folder: None,
@@ -258,11 +255,6 @@ impl Sidebar {
         self.dispatch_action = Some(f);
     }
 
-    /// Set the settings callback.
-    pub fn set_settings(&mut self, f: GetSettingsFn) {
-        self.get_settings = Some(f);
-    }
-
     /// Set the remote connections callback.
     pub fn set_remote_connections(&mut self, f: GetRemoteConnectionsFn) {
         self.get_remote_connections = Some(f);
@@ -283,11 +275,6 @@ impl Sidebar {
         if let Some(ref dispatch) = self.dispatch_action {
             (dispatch)(project_id, action, cx);
         }
-    }
-
-    /// Get the current sidebar settings.
-    pub(crate) fn sidebar_settings(&self, cx: &App) -> SidebarSettings {
-        self.get_settings.as_ref().map(|f| (f)(cx)).unwrap_or_default()
     }
 
     /// Check for double-click on terminal and return true if detected
