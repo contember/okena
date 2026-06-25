@@ -106,6 +106,9 @@ pub fn execute_action(
         ActionRequest::RenameTerminal { project_id, terminal_id, name } => {
             terminal::rename(ws, project_id, terminal_id, name, cx)
         }
+        ActionRequest::SwitchTerminalShell { project_id, terminal_id, shell } => {
+            terminal::switch_shell(ws, project_id, terminal_id, shell, backend, terminals, settings, cx)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             terminal::read_content(ws, terminal_id, backend, terminals)
         }

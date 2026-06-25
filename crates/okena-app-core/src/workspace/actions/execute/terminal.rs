@@ -10,6 +10,7 @@ use super::{
 };
 use crate::workspace::persistence::AppSettings;
 use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::TerminalSize;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::Workspace;
@@ -45,6 +46,37 @@ pub(super) fn split(
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.split_terminal(focus_manager, &project_id, &path, direction, cx);
+    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx)
+}
+
+/// Switch a terminal's shell: kill the old PTY, reset the layout node to
+/// uninitialized with the requested shell, then respawn it. Reuses
+/// `spawn_uninitialized_terminals` so the new PTY goes through the same
+/// shell-default resolution + shell-wrapper/on_create hook application as any
+/// freshly created terminal — keeping daemon shell-switch behavior identical to
+/// the old in-process GUI path.
+pub(super) fn switch_shell(
+    ws: &mut Workspace,
+    project_id: String,
+    terminal_id: String,
+    shell: ShellType,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let path = match find_terminal_path(ws, &project_id, &terminal_id) {
+        Some(p) => p,
+        None => return ActionResult::Err(format!("terminal not found: {}", terminal_id)),
+    };
+    // No-op if the shell is unchanged (mirrors the old GUI guard).
+    if ws.get_terminal_shell(&project_id, &path).as_ref() == Some(&shell) {
+        return ActionResult::Ok(None);
+    }
+    backend.kill(&terminal_id);
+    terminals.lock().remove(&terminal_id);
+    ws.set_terminal_shell(&project_id, &path, shell, cx);
+    ws.clear_terminal_id(&project_id, &path, cx);
     spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx)
 }
 

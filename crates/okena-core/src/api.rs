@@ -418,6 +418,15 @@ pub enum ActionRequest {
         terminal_id: String,
         name: String,
     },
+    /// Switch the shell of an existing terminal: the daemon kills the old PTY
+    /// and respawns at the same layout path with `shell` (resolving Default →
+    /// project default → global default and applying shell-wrapper/on_create
+    /// hooks, like any uninitialized terminal).
+    SwitchTerminalShell {
+        project_id: String,
+        terminal_id: String,
+        shell: ShellType,
+    },
     AddTab {
         project_id: String,
         path: Vec<usize>,
@@ -1021,6 +1030,11 @@ mod tests {
                 project_id: "p1".into(),
                 terminal_id: "t1".into(),
                 name: "my-term".into(),
+            },
+            ActionRequest::SwitchTerminalShell {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                shell: ShellType::Default,
             },
             ActionRequest::AddTab {
                 project_id: "p1".into(),
