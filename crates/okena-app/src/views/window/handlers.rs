@@ -204,8 +204,11 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            OverlayManagerEvent::SwitchWorkspace(data) => {
-                self.handle_switch_workspace((**data).clone(), cx);
+            OverlayManagerEvent::SessionAction(action) => {
+                // Sessions are workspace-global and the daemon owns the session
+                // files + authoritative state, so route to the local daemon
+                // connection directly (no project to resolve a dispatcher from).
+                self.dispatch_to_local_daemon(action.clone(), cx);
             }
             OverlayManagerEvent::WorktreeCreateRequested { project_id, branch, create_branch } => {
                 // The daemon creates the worktree, its project and its terminals;
@@ -512,42 +515,17 @@ impl WindowView {
         }
     }
 
-    /// Handle workspace switch from session manager.
-    ///
-    /// TODO(daemon): deferred. This still mutates the read-only mirror
-    /// (`replace_data`) + kills local PTYs, which is a silent no-op in client
-    /// mode — the daemon owns the workspace + terminals. Switching a session in
-    /// the daemon model is authoritative-daemon work (load a saved session, kill
-    /// its terminals, replace state, respawn) and forks on who owns sessions
-    /// (daemon-side Load/List/Save actions vs shipping WorkspaceData over the
-    /// wire). Left as the last known CAT-1 gap pending that decision; see
-    /// scripts/audit-daemon-client-gaps.sh.
-    pub(super) fn handle_switch_workspace(&mut self, data: crate::workspace::state::WorkspaceData, cx: &mut Context<Self>) {
-        // Kill all existing terminals
-        {
-            let terminals = self.terminals.lock();
-            for terminal in terminals.values() {
-                self.backend.kill(&terminal.terminal_id);
-            }
-        }
-        self.terminals.lock().clear();
-
-        // Clear project columns (will be recreated)
-        self.project_columns.clear();
-
-        // Update workspace with new data
-        let workspace = self.workspace.clone();
-        self.focus_manager.update(cx, |fm, cx| {
-            workspace.update(cx, |ws, cx| {
-                ws.replace_data(fm, data, cx);
+    /// Dispatch a workspace-global action (e.g. a session load/save/import/export)
+    /// to the local daemon connection. Unlike project actions there's no project
+    /// to resolve a dispatcher from, so it targets `LOCAL_DAEMON_CONNECTION_ID`
+    /// directly. The daemon owns session files + the authoritative workspace; for
+    /// load/import the swapped state mirrors back via the next snapshot.
+    pub(super) fn dispatch_to_local_daemon(&self, action: ActionRequest, cx: &mut Context<Self>) {
+        if let Some(ref rm) = self.remote_manager {
+            rm.update(cx, |rm, cx| {
+                rm.send_action(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID, action, cx);
             });
-            cx.notify();
-        });
-
-        // Sync project columns for new data
-        self.sync_project_columns(cx);
-
-        cx.notify();
+        }
     }
 
     /// Flush pending saves, spawn a new Okena process for `id`, then quit.

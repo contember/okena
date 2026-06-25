@@ -209,10 +209,9 @@ impl Okena {
         let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
 
         // Create the main window's per-window view, sharing the registry.
-        let pty_manager_clone = pty_manager.clone();
         let terminals_for_main = terminals.clone();
         let main_window = cx.new(|cx| {
-            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, terminals_for_main, window, cx)
+            WindowView::new(WindowId::Main, workspace.clone(), terminals_for_main, window, cx)
         });
 
         // Listen for cross-window requests (e.g. "jump into a project's terminal"

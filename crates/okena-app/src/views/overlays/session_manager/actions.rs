@@ -1,8 +1,5 @@
-use crate::settings::settings_entity;
-use crate::workspace::persistence::{
-    delete_session, export_workspace, import_workspace, load_session, rename_session, save_session,
-    session_exists,
-};
+use crate::workspace::persistence::{delete_session, rename_session, session_exists};
+use okena_core::api::ActionRequest;
 use gpui::*;
 
 use super::{SessionManager, SessionManagerEvent};
@@ -31,35 +28,25 @@ impl SessionManager {
             return;
         }
 
-        let data = self.workspace.read(cx).data().clone();
-        match save_session(&name, &data) {
-            Ok(()) => {
-                self.new_session_input.update(cx, |input, cx| {
-                    input.set_value("", cx);
-                });
-                self.refresh_sessions();
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to save session: {}", e));
-            }
-        }
+        // The daemon owns the authoritative workspace (local ids) + session
+        // files; saving from the client mirror would persist prefixed-id garbage.
+        // Dispatch SaveSession and let the daemon write its own data.
+        cx.emit(SessionManagerEvent::Action(ActionRequest::SaveSession { name }));
+        self.new_session_input.update(cx, |input, cx| {
+            input.set_value("", cx);
+        });
+        self.refresh_sessions();
+        self.error_message = None;
         cx.notify();
     }
 
     pub(super) fn load_session(&mut self, name: &str, cx: &mut Context<Self>) {
-        let backend = settings_entity(cx).read(cx).settings.session_backend;
-        match load_session(name, backend) {
-            Ok(data) => {
-                // Emit event to notify parent to switch workspace
-                cx.emit(SessionManagerEvent::SwitchWorkspace(Box::new(data)));
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to load session: {}", e));
-                cx.notify();
-            }
-        }
+        // The daemon loads its own session file + swaps state; the new workspace
+        // mirrors back via snapshot.
+        cx.emit(SessionManagerEvent::Action(ActionRequest::LoadSession {
+            name: name.to_string(),
+        }));
+        self.error_message = None;
     }
 
     pub(super) fn start_rename(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -151,17 +138,9 @@ impl SessionManager {
             return;
         }
 
-        let data = self.workspace.read(cx).data().clone();
-        match export_workspace(&data, std::path::Path::new(&path)) {
-            Ok(()) => {
-                self.error_message = None;
-                // Show success message briefly
-                log::info!("Workspace exported to {}", path);
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to export: {}", e));
-            }
-        }
+        // Export the DAEMON's authoritative workspace (not the client mirror).
+        cx.emit(SessionManagerEvent::Action(ActionRequest::ExportWorkspace { path }));
+        self.error_message = None;
         cx.notify();
     }
 
@@ -173,15 +152,9 @@ impl SessionManager {
             return;
         }
 
-        match import_workspace(std::path::Path::new(&path)) {
-            Ok(data) => {
-                cx.emit(SessionManagerEvent::SwitchWorkspace(Box::new(data)));
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to import: {}", e));
-                cx.notify();
-            }
-        }
+        // The daemon imports the file + swaps state; the result mirrors back.
+        cx.emit(SessionManagerEvent::Action(ActionRequest::ImportWorkspace { path }));
+        self.error_message = None;
+        cx.notify();
     }
 }
