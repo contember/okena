@@ -49,6 +49,7 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
         ahead: s.ahead,
         behind: s.behind,
         unpushed: s.unpushed,
+        review_base: s.review_base.clone(),
     }
 }
 
