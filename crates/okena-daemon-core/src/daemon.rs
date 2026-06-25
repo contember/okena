@@ -43,12 +43,14 @@
 //! with any other running instance. The wired-together pieces each have their
 //! own unit tests in their respective modules.
 //!
-//! ## Follow-ups
+//! ## Lifecycle hooks
 //!
-//! Lifecycle hooks are not wired yet: the reactor is built with
-//! `hook_runner = None` / `hook_monitor = None`, matching the current GUI
-//! headless mode (which also wires no `HookRunner` / `HookMonitor`). Adding them
-//! is a follow-up.
+//! The reactor is built with a real `HookRunner` / `HookMonitor` (constructed
+//! from the daemon's terminal backend + registry). The action layer reaches
+//! them through `WorkspaceCx::{hook_runner,hook_monitor}`, so project/worktree
+//! lifecycle hooks fire in the daemon and their PTYs reach clients over the
+//! normal remote terminal path. (Surfacing the `HookMonitor`'s in-flight/run
+//! status into `StateResponse` for a client-side hooks panel is a follow-up.)
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -57,6 +59,7 @@ use std::sync::atomic::AtomicU64;
 
 use async_channel::Receiver;
 use okena_core::api::ApiGitStatus;
+use okena_hooks::{HookMonitor, HookRunner};
 use okena_terminal::backend::{LocalBackend, TerminalBackend};
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_terminal::session_backend::SessionBackend;
@@ -168,15 +171,22 @@ impl DaemonCore {
 
         // ── 3. Workspace + reactor ───────────────────────────────────────────
         let workspace = Workspace::new(params.workspace_data);
-        // Hooks are `None, None` for now — parity with current headless mode,
-        // which wires no `HookRunner` / `HookMonitor`. Lifecycle hooks are a
-        // follow-up (see module docs).
+        // Lifecycle hooks: construct the same services the GUI sets as globals
+        // (`HookRunner::new(backend, terminals)` in app/mod.rs, `HookMonitor::new()`
+        // in main.rs). The action layer already reaches them through
+        // `WorkspaceCx::{hook_runner,hook_monitor}` (the daemon's
+        // `DaemonWorkspaceCx` returns these), and hook PTYs register in the same
+        // `terminals` registry + broadcast over the same `PtyBroadcaster`, so
+        // hook terminals reach clients via the normal remote terminal path. Both
+        // ctors are gpui-free (okena-hooks built without the gpui feature here).
+        let hook_runner = HookRunner::new(backend.clone(), terminals.clone());
+        let hook_monitor = HookMonitor::new();
         let reactor = Arc::new(DaemonReactor::new(
             workspace,
             backend.clone(),
             terminals.clone(),
-            None,
-            None,
+            Some(hook_runner),
+            Some(hook_monitor),
             handle.clone(),
         ));
 
