@@ -334,6 +334,14 @@ pub async fn daemon_command_loop(
                             color_override: wt.color_override,
                         }),
                         worktree_ids: p.worktree_ids.clone(),
+                        pinned: p.pinned,
+                        last_activity_at: p.last_activity_at,
+                        default_shell: p.default_shell.clone(),
+                        hook_terminals: p
+                            .hook_terminals
+                            .iter()
+                            .map(|(tid, e)| e.to_api(tid.clone()))
+                            .collect(),
                     }
                 };
 

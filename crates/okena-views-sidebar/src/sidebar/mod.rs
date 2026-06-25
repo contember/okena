@@ -636,9 +636,14 @@ impl SidebarProjectInfo {
     pub(crate) fn from_project(project: &ProjectData, workspace: &Workspace, window_id: WindowId) -> Self {
         let layout = project.layout.as_ref();
         // For worktree projects, show the git branch instead of the stored name.
+        // The branch comes from the daemon's git poll over the wire
+        // (`remote_snapshot().git_status.branch`) — a local `get_git_status` would
+        // return None in client mode since the daemon owns the working tree.
         let name = if project.worktree_info.is_some() {
-            okena_git::get_git_status(std::path::Path::new(&project.path))
-                .and_then(|s| s.branch)
+            workspace
+                .remote_snapshot(&project.id)
+                .and_then(|s| s.git_status.as_ref())
+                .and_then(|g| g.branch.clone())
                 .unwrap_or_else(|| project.name.clone())
         } else {
             project.name.clone()

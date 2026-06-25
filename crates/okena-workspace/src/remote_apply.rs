@@ -15,7 +15,10 @@ use std::collections::{HashMap, HashSet};
 use okena_core::api::StateResponse;
 use okena_transport::client::RemoteConnectionConfig;
 use okena_layout::LayoutNode;
-use okena_state::{FolderData, HooksConfig, ProjectData, WindowId, WorkspaceData, WorktreeMetadata};
+use okena_state::{
+    FolderData, HookTerminalEntry, HooksConfig, ProjectData, WindowId, WorkspaceData,
+    WorktreeMetadata,
+};
 
 use crate::remote_sync::RemoteSyncState;
 
@@ -127,6 +130,19 @@ pub fn apply_remote_snapshot(
                 let remote_host = Some(snap.config.host.clone());
                 let remote_git_status = api_project.git_status.clone();
 
+                // Daemon-owned per-project data surfaced for rendering: pin
+                // marker, activity-sort timestamp, shell-picker selection, and
+                // the hook terminals shown in the service panel (keys prefixed
+                // like terminal_names so they match the prefixed layout ids).
+                let remote_hook_terminals: HashMap<String, HookTerminalEntry> = api_project
+                    .hook_terminals
+                    .iter()
+                    .map(|api| {
+                        let (tid, entry) = HookTerminalEntry::from_api(api);
+                        (format!("remote:{}:{}", conn_id, tid), entry)
+                    })
+                    .collect();
+
                 if let Some(existing) = data.projects.iter_mut().find(|p| p.id == prefixed_id) {
                     existing.name = api_project.name.clone();
                     existing.path = api_project.path.clone();
@@ -152,6 +168,10 @@ pub fn apply_remote_snapshot(
                     existing.worktree_ids = api_project.worktree_ids.iter()
                         .map(|id| format!("remote:{}:{}", conn_id, id))
                         .collect();
+                    existing.pinned = api_project.pinned;
+                    existing.last_activity_at = api_project.last_activity_at;
+                    existing.default_shell = api_project.default_shell.clone();
+                    existing.hook_terminals = remote_hook_terminals;
                     // Don't overwrite show_in_overview — it's client-side state
                     // (the user may have toggled visibility locally).
                 } else {
@@ -190,10 +210,10 @@ pub fn apply_remote_snapshot(
                         is_remote: true,
                         connection_id: Some(conn_id_owned),
                         service_terminals: HashMap::new(),
-                        default_shell: None,
-                        hook_terminals: HashMap::new(),
-                        pinned: false,
-                        last_activity_at: None,
+                        default_shell: api_project.default_shell.clone(),
+                        hook_terminals: remote_hook_terminals,
+                        pinned: api_project.pinned,
+                        last_activity_at: api_project.last_activity_at,
                     });
                 }
                 // Update the transient remote snapshot regardless of create/update path.
@@ -350,7 +370,10 @@ fn apply_initial_remote_project_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okena_core::api::{ApiFolder, ApiLayoutNode, ApiProject, StateResponse};
+    use okena_core::api::{
+        ApiFolder, ApiHookTerminalEntry, ApiHookTerminalStatus, ApiLayoutNode, ApiProject,
+        StateResponse,
+    };
     use okena_core::theme::FolderColor;
 
     fn empty_data() -> WorkspaceData {
@@ -392,6 +415,10 @@ mod tests {
             services: Vec::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: Vec::new(),
         }
     }
 
@@ -447,6 +474,42 @@ mod tests {
         );
         // Transient snapshot host recorded.
         assert_eq!(rs.snapshot("remote:c1:a").unwrap().host.as_deref(), Some("c1.example.com"));
+    }
+
+    #[test]
+    fn applies_pinned_activity_shell_and_prefixed_hook_terminals() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let mut p = api_project("a", Some(terminal("ta")));
+        p.pinned = true;
+        p.last_activity_at = Some(1_700_000_000_000);
+        p.default_shell = Some(okena_core::shell::ShellType::Default);
+        p.hook_terminals = vec![ApiHookTerminalEntry {
+            terminal_id: "h1".into(),
+            label: "on_project_open".into(),
+            status: ApiHookTerminalStatus::Failed { exit_code: 3 },
+            hook_type: "on_project_open".into(),
+            command: "make".into(),
+            cwd: "/srv/a".into(),
+        }];
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![p], vec!["a".into()], vec![])),
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+
+        let proj = &data.projects[0];
+        assert!(proj.pinned);
+        assert_eq!(proj.last_activity_at, Some(1_700_000_000_000));
+        assert_eq!(proj.default_shell, Some(okena_core::shell::ShellType::Default));
+        // Hook-terminal map key is prefixed like the layout terminal ids.
+        let entry = proj.hook_terminals.get("remote:c1:h1").expect("prefixed hook terminal");
+        assert_eq!(entry.command, "make");
+        assert!(matches!(
+            entry.status,
+            okena_state::HookTerminalStatus::Failed { exit_code: 3 }
+        ));
     }
 
     #[test]
