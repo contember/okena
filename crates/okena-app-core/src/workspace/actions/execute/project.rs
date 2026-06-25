@@ -277,6 +277,52 @@ pub(super) fn create_worktree(
     }
 }
 
+/// Register an already-on-disk git worktree as a tracked project under its
+/// parent. The worktree path is discovered client-side from a local git scan
+/// (same filesystem for a local daemon) and passed verbatim — the daemon
+/// creates the project, links it to the parent's worktree list, and spawns its
+/// terminal. Mirrors the old in-process `add_discovered_worktree` +
+/// `add_to_worktree_ids` GUI path.
+pub(super) fn add_discovered_worktree(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    parent_project_id: String,
+    worktree_path: String,
+    branch: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&parent_project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", parent_project_id));
+    }
+    let new_id = match ws.add_discovered_worktree(&worktree_path, &branch, &parent_project_id, window_id) {
+        Some(id) => id,
+        None => {
+            return ActionResult::Err(format!(
+                "worktree already tracked or not addable: {}",
+                worktree_path
+            ));
+        }
+    };
+    ws.add_to_worktree_ids(&parent_project_id, &new_id);
+    // `add_discovered_worktree` deliberately doesn't notify (caller's job).
+    ws.notify_data(cx);
+    let result = spawn_uninitialized_terminals(ws, &new_id, backend, terminals, settings, cx);
+    let terminal_id = ws
+        .project(&new_id)
+        .and_then(|p| p.layout.as_ref())
+        .and_then(find_first_terminal_id);
+    match result {
+        ActionResult::Ok(_) => ActionResult::Ok(Some(serde_json::json!({
+            "project_id": new_id,
+            "terminal_id": terminal_id,
+        }))),
+        err => err,
+    }
+}
+
 #[cfg(all(test, feature = "gpui"))]
 mod set_show_in_overview_tests {
     use super::{apply_set_project_show_in_overview, ActionResult};

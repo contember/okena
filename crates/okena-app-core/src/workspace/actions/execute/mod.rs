@@ -109,6 +109,9 @@ pub fn execute_action(
         ActionRequest::SwitchTerminalShell { project_id, terminal_id, shell } => {
             terminal::switch_shell(ws, project_id, terminal_id, shell, backend, terminals, settings, cx)
         }
+        ActionRequest::AddDiscoveredWorktree { parent_project_id, worktree_path, branch } => {
+            project::add_discovered_worktree(ws, window_id, parent_project_id, worktree_path, branch, backend, terminals, settings, cx)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             terminal::read_content(ws, terminal_id, backend, terminals)
         }

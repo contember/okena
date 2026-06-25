@@ -271,6 +271,18 @@ impl WindowView {
                     }, cx);
                 }
             }
+            OverlayManagerEvent::AddDiscoveredWorktree { parent_project_id, worktree_path, branch } => {
+                // The daemon owns the project list: dispatch
+                // AddDiscoveredWorktree (resolving the connection from the
+                // parent project) and let the new worktree project mirror back.
+                if let Some(dispatcher) = self.dispatcher_for_project(parent_project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::AddDiscoveredWorktree {
+                        parent_project_id: parent_project_id.clone(),
+                        worktree_path: worktree_path.clone(),
+                        branch: branch.clone(),
+                    }, cx);
+                }
+            }
             OverlayManagerEvent::ConfigureHooks { project_id } => {
                 self.overlay_manager.update(cx, |om, cx| {
                     om.show_settings_for_project(project_id.clone(), cx);

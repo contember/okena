@@ -549,6 +549,14 @@ pub enum ActionRequest {
         #[serde(default)]
         create_branch: bool,
     },
+    /// Track an already-on-disk git worktree (discovered by a client-side git
+    /// scan) as a project under `parent_project_id`. The daemon creates the
+    /// project, links it to the parent, and spawns its terminal.
+    AddDiscoveredWorktree {
+        parent_project_id: String,
+        worktree_path: String,
+        branch: String,
+    },
     ListFiles {
         project_id: String,
         #[serde(default)]
@@ -1175,6 +1183,11 @@ mod tests {
             ActionRequest::RemoveWorktreeProject {
                 project_id: "p1".into(),
                 force: true,
+            },
+            ActionRequest::AddDiscoveredWorktree {
+                parent_project_id: "p1".into(),
+                worktree_path: "/home/user/projects/my-project-wt".into(),
+                branch: "feature/x".into(),
             },
             ActionRequest::CreateFolder {
                 name: "My Folder".into(),

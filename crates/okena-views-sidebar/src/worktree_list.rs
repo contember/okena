@@ -6,7 +6,7 @@
 use okena_ui::overlay::CloseEvent;
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_md};
-use okena_workspace::state::{WindowId, Workspace};
+use okena_workspace::state::Workspace;
 use gpui::*;
 use gpui::prelude::*;
 
@@ -19,6 +19,14 @@ pub enum WorktreeListPopoverEvent {
     /// project, so the host routes this to `ActionRequest::DeleteProject`
     /// rather than mutating the read-only mirror here.
     DeleteProject { project_id: String },
+    /// Track an already-on-disk worktree as a project. The daemon owns the
+    /// project list, so the host routes this to
+    /// `ActionRequest::AddDiscoveredWorktree` rather than mutating the mirror.
+    AddDiscoveredWorktree {
+        parent_project_id: String,
+        worktree_path: String,
+        branch: String,
+    },
 }
 
 impl CloseEvent for WorktreeListPopoverEvent {
@@ -30,12 +38,6 @@ impl EventEmitter<WorktreeListPopoverEvent> for WorktreeListPopover {}
 /// Standalone worktree list popover entity.
 pub struct WorktreeListPopover {
     workspace: Entity<Workspace>,
-    /// Spawning window for the multi-window new-project visibility rule
-    /// (PRD user story 14): a click that adds a discovered worktree
-    /// makes the new project visible in this window only, hidden in
-    /// every other window. Threaded from the originating `WindowView`
-    /// through `OverlayManager::show_worktree_list`.
-    window_id: WindowId,
     project_id: String,
     entries: Vec<(String, String)>,
     position: Point<Pixels>,
@@ -51,7 +53,6 @@ impl WorktreeListPopover {
         workspace: Entity<Workspace>,
         project_id: String,
         position: Point<Pixels>,
-        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
         let project_path = workspace.read(cx).project(&project_id)
@@ -63,7 +64,7 @@ impl WorktreeListPopover {
         let norm_git_root = okena_git::repository::normalize_path(&git_root);
         let entries = okena_git::repository::list_git_worktrees(&git_root);
         let focus_handle = cx.focus_handle();
-        Self { workspace, window_id, project_id, entries, position, focus_handle, norm_git_root, subdir }
+        Self { workspace, project_id, entries, position, focus_handle, norm_git_root, subdir }
     }
 
     /// Find a tracked worktree project by its worktree root path.
@@ -169,22 +170,14 @@ impl Render for WorktreeListPopover {
                                 cx.emit(WorktreeListPopoverEvent::DeleteProject { project_id: id });
                             }
                         } else {
-                            // TODO(daemon): tracking a discovered worktree mutates
-                            // the read-only mirror directly. There is no single
-                            // ActionRequest to attach an already-on-disk worktree
-                            // to the daemon's project list yet — needs a daemon-side
-                            // action (Batch B). Left as-is for now.
-                            let window_id = this.window_id;
-                            this.workspace.update(cx, |ws, cx| {
-                                if let Some(new_id) = ws.add_discovered_worktree(
-                                    &wt_path_clone,
-                                    &branch_clone,
-                                    &project_id,
-                                    window_id,
-                                ) {
-                                    ws.add_to_worktree_ids(&project_id, &new_id);
-                                }
-                                ws.notify_data(cx);
+                            // The daemon owns the project list — emit an event so
+                            // the host dispatches AddDiscoveredWorktree; the new
+                            // worktree project mirrors back. No direct mirror
+                            // mutation here.
+                            cx.emit(WorktreeListPopoverEvent::AddDiscoveredWorktree {
+                                parent_project_id: project_id.clone(),
+                                worktree_path: wt_path_clone.clone(),
+                                branch: branch_clone.clone(),
                             });
                         }
                         cx.notify();

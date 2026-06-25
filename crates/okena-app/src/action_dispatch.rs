@@ -542,6 +542,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             branch,
             create_branch,
         },
+        ActionRequest::AddDiscoveredWorktree {
+            parent_project_id,
+            worktree_path,
+            branch,
+        } => ActionRequest::AddDiscoveredWorktree {
+            parent_project_id: s(&parent_project_id),
+            worktree_path,
+            branch,
+        },
         ActionRequest::GitCommitGraph { project_id, count, branch } => ActionRequest::GitCommitGraph {
             project_id: s(&project_id),
             count,
