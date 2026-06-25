@@ -150,15 +150,51 @@ rails".
 | **Phase E — gpui-optional crate track** | `dffc5244` `7dfece2c` `8f705eca` `73e474a4` `f723f8a0` `06e1d0f1` `260572fd` `10ae40d8` `470648a1` `b7f45ecd` `56b64515` | Made `gpui` an optional feature across the daemon dependency tree (hooks → workspace → services → app-core → theme → files → remote-server), extending `WorkspaceCx` with the hook accessors and adding the `ServiceCx`/`ServiceHandle`/`ServiceAsyncCx` trait family so the action + service layers run reactor-agnostic. Milestone: the entire daemon graph compiles **gpui-free** (`cargo tree -i gpui` empty for each crate). No `as`/`unsafe`/type-hacks. |
 | **Phase E — `okena-daemon-core`** | `d3f36d25` `0817c5a5` `d6dc1841` `076d80de` `1333940a` `760265a6` | New gpui-free crate: `DaemonReactor` + tokio impls of the reactor traits; the observer reactor (autosave / `state_version` / service-sync, re-entrancy-guarded); the PTY event loop; the git-status poller; `daemon_config` (gpui-free settings/theme handlers); `daemon_command_loop` (gpui-free port of `remote_command_loop`); and `DaemonCore::{new,run}` wiring the `RemoteServer` + reactor + all loops inside a `LocalSet`. 24 tests; gpui gate empty. |
 | **Phase F — `okena-daemon` binary** | `48e77591` | Standalone, 100% gpui-free headless server binary wrapping `okena-daemon-core` (mirrors `run_headless` without GPUI). `cargo tree -i gpui -p okena-daemon` is **empty** — the standalone-binary goal is met. Smoke-verified end-to-end (isolated `XDG_CONFIG_HOME`): boots → loads settings/workspace → dtach auto-detect → dual-stack TLS server + pairing code + `remote.json` → observer reactor fires on the `LocalSet` (`load_project_services`) → `/health` ok → after pairing, `/v1/state` returns a full `StateResponse` (the whole `RemoteServer → bridge → daemon_command_loop → GetState` path). |
+| **Phase A — `--daemon-client` mode** | `d709c83a` | Desktop flag (OFF by default → classic behavior byte-for-byte unchanged). ON: `main.rs` skips `acquire_instance_lock()`, starts from `WorkspaceData::empty()`, and calls `ensure_local_daemon()`; `Okena::new` takes `Option<EnsuredDaemon>`, registers an implicit trusted loopback `RemoteConnectionConfig` (id `local-daemon`, tls off) via `add_connection`, holds the spawned `Child` (killed on `on_app_quit` — only the spawner kills), and makes the autosave observer inert (§5). Loopback connection never reaches persisted settings. Build + 405 tests green. |
+| **Phase B — single-writer to the daemon** | `e2ee4e71` | `DaemonCore::new` acquires `acquire_instance_lock()` as step 0 (before binding a port / writing `remote.json`) and holds the `LockGuard` for the daemon's lifetime. Closes the §5 gap where the dedicated `okena-daemon` binary (preferred by `spawn_daemon`) never locked, so with the `--daemon-client` GUI also skipping the lock, no process owned the profile. Lock is gpui-free. |
+| **Phase B/E — lifecycle hooks in the daemon** | `ea2ffc34` | `DaemonReactor` now gets a real `HookRunner::new(backend, terminals)` + `HookMonitor::new()` instead of `None`. All plumbing pre-existed (action layer → `WorkspaceCx::{hook_runner,hook_monitor}` → `DaemonWorkspaceCx`). Hook PTYs register in the shared registry + broadcast over `PtyBroadcaster`, so hook terminals reach clients via the normal remote terminal path. Daemon stays gpui-free. Follow-up: surface `HookMonitor` run status into `StateResponse`. |
 
 Branch: `refactorx/full-headless`. My commits are atomic and listed above; the
 unrelated `M` working-tree entries + untracked `profile.json.gz` are not ours —
 leave them.
 
-**Daemon-core is complete and the standalone gpui-free binary ships.** What
-remains is the **GUI-as-client track (Phases B–D)** + pointing `spawn_daemon()` at
-the new `okena-daemon` binary — these need a run-capable session (the GPUI desktop
-can't be verified headless).
+**Daemon-core is complete and the standalone gpui-free binary ships.** The
+desktop now also runs as a thin client via `--daemon-client` (spawns a daemon,
+mirrors its projects over loopback), with the daemon as the single writer and
+lifecycle hooks live.
+
+### StateResponse data parity — verified (static builder diff)
+
+A field-by-field comparison of the GUI's `StateResponse` builder
+(`app/remote_commands.rs` + `app/extras.rs::build_api_windows`) against the
+daemon's (`daemon-core/command_loop.rs` `GetState` arm) confirms **the core data
+is at full parity**: `ApiProject` (id/name/path/visibility/**layout+sizes**/
+terminal_names/git_status/folder_color/**services**/**worktree_info**/worktree_ids),
+`ApiFolder`, `ApiServiceInfo`, `ApiWorktreeMetadata`, `ApiGitStatus`,
+`project_order`, and `visible_project_ids` are all populated identically.
+
+The only daemon-stubbed fields are **per-window presentation state**:
+`focused_project_id`, `focused_terminal_id`, `fullscreen`, `bounds`,
+`sidebar_open`, `folder_filter`, and the multi-window `windows` list. These are
+**client-owned** in the data/presentation split (§1b) — the desktop client has
+real GPUI windows and tracks its own focus/bounds/sidebar locally, so the daemon
+correctly does not dictate them. The single genuine (minor) gap is **restoring**
+per-window UI state (sidebar_open / folder_filter / os_bounds / panel heights)
+across a *client restart* in daemon-client mode, since the client no longer
+loads `workspace.json` itself — a Phase C round-trip item, low priority.
+
+### What remains — all runtime-validated (needs a run-capable session)
+
+The daemon side is feature-complete on data. What's left is GUI behavior that
+can only be confirmed by running the desktop in `--daemon-client` mode:
+- **Phase B view-UX**: do daemon projects render acceptably in the main window
+  via the existing remote path, or do they need de-prefixing / main-window
+  surfacing (the plan's open "key design question")? Visual call.
+- **Phase C (gap-driven)**: toasts/OS-notification forwarding, terminal
+  scrollback on attach, per-window-state restore — each only verifiable live.
+- **Phase D (one-way door)**: flip the default + delete the in-process local
+  path. Gated by the plan on the benchmark + a parallel-run soak + a tagged
+  rollback point — must NOT be done without runtime + parity confirmation.
 
 **Key spike conclusions carried forward:**
 - The action layer needs only `notify`/`refresh_views` — **no `spawn` on the trait.**
