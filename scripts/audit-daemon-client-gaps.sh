@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+#
+# audit-daemon-client-gaps.sh — find daemon/client wiring "holes".
+#
+# In the daemon-client architecture the desktop GUI (crates/okena-app + the
+# gpui view crates) is a THIN CLIENT: its `Workspace` is a read-only MIRROR and
+# the daemon is the single writer + owner of PTYs/services/git. Two recurring
+# classes of bug ("X isn't transferred / X isn't wired") are statically
+# detectable:
+#
+#   CAT 1 — GUI does the daemon's job: a handler mutates the mirror Workspace,
+#           spawns/kills a local PTY, or writes persistence, instead of
+#           dispatching an ActionRequest to the daemon. (Silent no-op / wrong
+#           process write.)
+#   CAT 2 — daemon drops data: a field exists on a domain type but not on its
+#           wire `Api*` projection, so it never reaches the client. (Shows as
+#           empty/None — "unwired".)
+#
+# This is a heuristic linter, not a proof: CAT 1 uses a denylist of data-mutating
+# calls (visual/presentation mutations are allowlisted); CAT 2 is a field-name
+# diff. Triage each hit. Exit non-zero if any CAT 1 hit is found (CI-gateable).
+#
+# Usage:  scripts/audit-daemon-client-gaps.sh
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+red()   { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
+
+# GUI client crates that must NOT mutate workspace data / run local exec.
+GUI_GLOBS=(crates/okena-app/src crates/okena-views-sidebar/src \
+           crates/okena-views-git/src crates/okena-views-services/src \
+           crates/okena-views-terminal/src crates/okena-views-remote/src)
+
+bold "== CAT 1: GUI client doing the daemon's job (should be an ActionRequest) =="
+echo "   (each hit: a mirror write / local PTY / local persistence in client code)"
+echo
+
+# Data-mutating Workspace methods + local-exec + persistence that the client
+# must route to the daemon instead. Visual/presentation mutators are NOT here on
+# purpose (update_split_sizes, toggle_*minimized, set_fullscreen, exit_fullscreen,
+# focus_*, set_folder_collapsed, set_active_tab, *_ui_only — all client-local-OK).
+CAT1_PATTERNS=(
+  'persistence::save_workspace'
+  '\.add_project\('
+  '\.delete_project\('
+  '\.create_worktree_project\('
+  '\.remove_worktree_project\('
+  '\.add_discovered_worktree\('
+  '\.add_to_worktree_ids\('
+  '\.replace_data\('
+  '\.set_terminal_shell\('
+  'set_global\((crate::)?(workspace::)?hooks::HookRunner'
+  '\.backend\.create_terminal\('
+  '\.backend\.kill\('
+  'ServiceManager::new\('
+  'okena_git::get_git_status\('   # local git read — returns None in client mode
+)
+
+cat1_hits=0
+for pat in "${CAT1_PATTERNS[@]}"; do
+  # Exclude test modules, the snapshot reconciler, the action dispatcher, and
+  # the daemon/headless owners (legitimate writers).
+  matches=$(grep -rnE "$pat" "${GUI_GLOBS[@]}" 2>/dev/null \
+            | grep -vE '(/tests?/|_test\.rs|#\[cfg\(test\)\]|remote_apply\.rs|action_dispatch\.rs|/app/headless\.rs)' \
+            | grep -vE '^\s*//' )
+  if [ -n "$matches" ]; then
+    red "  ▸ $pat"
+    echo "$matches" | sed 's/^/      /'
+    cat1_hits=$((cat1_hits + $(echo "$matches" | grep -c .)))
+    echo
+  fi
+done
+[ "$cat1_hits" -eq 0 ] && green "  none" && echo
+
+bold "== CAT 2: domain fields dropped from the wire (Domain -> Api*) =="
+echo "   (each: a field on the domain struct with no same-named field on Api*)"
+echo
+
+# Extract `pub <field>:` names from a named struct block in a file.
+struct_fields() {
+  local file="$1" struct="$2"
+  awk -v s="pub struct $struct" '
+    $0 ~ s {inb=1}
+    inb && /^\}/ {inb=0}
+    inb && /^[[:space:]]*pub [a-z_]+:/ {
+      line=$0; sub(/^[[:space:]]*pub /,"",line); sub(/:.*/,"",line); print line
+    }
+  ' "$file" 2>/dev/null | sort -u
+}
+
+# pairs: "Domain|domain_file|Api|api_file"
+PAIRS=(
+  "GitStatus|crates/okena-git/src/lib.rs|ApiGitStatus|crates/okena-core/src/api.rs"
+  "ProjectData|crates/okena-state/src/workspace_data.rs|ApiProject|crates/okena-core/src/api.rs"
+  "FolderData|crates/okena-state/src/workspace_data.rs|ApiFolder|crates/okena-core/src/api.rs"
+  "WindowState|crates/okena-state/src/workspace_data.rs|ApiWindow|crates/okena-core/src/api.rs"
+)
+
+# Domain fields that are intentionally NOT on the wire (client-local presentation
+# or daemon-internal), so they don't count as gaps.
+CAT2_IGNORE='^(version|service_panel_heights|hook_panel_heights)$'
+
+cat2_hits=0
+for pair in "${PAIRS[@]}"; do
+  IFS='|' read -r dname dfile aname afile <<< "$pair"
+  dfields=$(struct_fields "$dfile" "$dname")
+  afields=$(struct_fields "$afile" "$aname")
+  [ -z "$dfields" ] && { red "  ! could not read $dname in $dfile (struct moved?)"; continue; }
+  missing=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    echo "$f" | grep -qE "$CAT2_IGNORE" && continue
+    # present if the same field name appears on the Api struct
+    echo "$afields" | grep -qxF "$f" || missing="$missing $f"
+  done <<< "$dfields"
+  if [ -n "$missing" ]; then
+    red "  ▸ $dname -> $aname  missing:$missing"
+    cat2_hits=$((cat2_hits + $(echo $missing | wc -w)))
+  else
+    green "  ✓ $dname -> $aname"
+  fi
+done
+echo
+
+bold "== summary =="
+echo "  CAT 1 (GUI doing daemon's job): $cat1_hits hit(s)"
+echo "  CAT 2 (fields dropped from wire): $cat2_hits field(s) — triage (some may be intentional client-local)"
+echo
+echo "  Note: heuristic. CAT 2 false-positives are expected for genuinely"
+echo "  client-local/derived fields; add them to CAT2_IGNORE once confirmed."
+
+# Gate on CAT 1 only (CAT 2 needs human triage).
+[ "$cat1_hits" -eq 0 ]
