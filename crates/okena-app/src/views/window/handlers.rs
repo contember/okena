@@ -513,6 +513,15 @@ impl WindowView {
     }
 
     /// Handle workspace switch from session manager.
+    ///
+    /// TODO(daemon): deferred. This still mutates the read-only mirror
+    /// (`replace_data`) + kills local PTYs, which is a silent no-op in client
+    /// mode — the daemon owns the workspace + terminals. Switching a session in
+    /// the daemon model is authoritative-daemon work (load a saved session, kill
+    /// its terminals, replace state, respawn) and forks on who owns sessions
+    /// (daemon-side Load/List/Save actions vs shipping WorkspaceData over the
+    /// wire). Left as the last known CAT-1 gap pending that decision; see
+    /// scripts/audit-daemon-client-gaps.sh.
     pub(super) fn handle_switch_workspace(&mut self, data: crate::workspace::state::WorkspaceData, cx: &mut Context<Self>) {
         // Kill all existing terminals
         {
