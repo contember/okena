@@ -209,6 +209,12 @@ pub struct ApiGitStatus {
     /// Commits not yet pushed to `origin/<branch>` (`None` if never pushed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unpushed: Option<usize>,
+    /// The base ref (e.g. `origin/main`) this branch is reviewed against,
+    /// driving the "Review changes" branch-vs-base diff chip. `None` if not
+    /// resolvable. Carried over the wire so daemon-client projects surface the
+    /// chip — without it the GUI hard-codes `None` and the chip never renders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -858,6 +864,7 @@ mod tests {
             ahead: Some(3),
             behind: Some(1),
             unpushed: Some(2),
+            review_base: Some("origin/main".into()),
         };
         let json = serde_json::to_string(&status).unwrap();
         let parsed: ApiGitStatus = serde_json::from_str(&json).unwrap();
@@ -865,6 +872,7 @@ mod tests {
         assert_eq!(parsed.ci_checks, status.ci_checks);
         assert_eq!(parsed.ahead, Some(3));
         assert_eq!(parsed.behind, Some(1));
+        assert_eq!(parsed.review_base.as_deref(), Some("origin/main"));
         assert_eq!(parsed.unpushed, Some(2));
         assert_eq!(parsed.ci_checks.as_ref().unwrap().checks[0].elapsed_label(), "1m5s");
     }

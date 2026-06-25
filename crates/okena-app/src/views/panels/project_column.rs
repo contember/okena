@@ -425,9 +425,10 @@ impl ProjectColumn {
                         ahead: g.ahead,
                         behind: g.behind,
                         unpushed: g.unpushed,
-                        // Not carried over the wire yet; remote projects don't
-                        // surface the "Review changes" chip.
-                        review_base: None,
+                        // Carried over the wire (ApiGitStatus.review_base) so the
+                        // "Review changes" branch-vs-base chip renders for
+                        // daemon-backed projects too.
+                        review_base: g.review_base.clone(),
                         default_branch: None,
                     })
             });
