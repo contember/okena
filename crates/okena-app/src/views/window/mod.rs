@@ -6,8 +6,6 @@ mod terminal_actions;
 
 use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
 use crate::services::manager::ServiceManager;
-use crate::terminal::backend::{TerminalBackend, LocalBackend};
-use crate::terminal::pty_manager::PtyManager;
 use crate::views::overlay_manager::OverlayManager;
 use crate::views::panels::project_column::ProjectColumn;
 use crate::views::sidebar_controller::SidebarController;
@@ -106,7 +104,6 @@ pub struct WindowView {
     focus_manager: Entity<FocusManager>,
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
-    backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
     sidebar: Entity<Sidebar>,
     /// Sidebar state controller
@@ -167,7 +164,6 @@ impl WindowView {
     pub fn new(
         window_id: WindowId,
         workspace: Entity<Workspace>,
-        pty_manager: Arc<PtyManager>,
         terminals: TerminalsRegistry,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -268,9 +264,6 @@ impl WindowView {
 
         let last_data_replacement_epoch = workspace.read(cx).data_replacement_epoch();
 
-        // Wrap PtyManager in LocalBackend for the TerminalBackend trait
-        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager));
-
         // Wire up sidebar callbacks
         {
             let workspace_for_dispatch = workspace.clone();
@@ -297,7 +290,6 @@ impl WindowView {
             focus_manager,
             workspace,
             request_broker,
-            backend,
             terminals,
             sidebar,
             sidebar_ctrl,

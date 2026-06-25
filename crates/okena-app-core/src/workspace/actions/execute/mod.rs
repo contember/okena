@@ -12,6 +12,7 @@
 mod files;
 mod git;
 mod project;
+mod session;
 mod tab;
 mod terminal;
 
@@ -237,6 +238,16 @@ pub fn execute_action(
         ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
             project::create_worktree(ws, window_id, project_id, branch, create_branch, backend, terminals, settings, cx)
         }
+
+        // ── Sessions (whole-workspace; daemon owns session files + state) ──
+        ActionRequest::LoadSession { name } => {
+            session::load_session_action(ws, focus_manager, name, backend, terminals, settings, cx)
+        }
+        ActionRequest::SaveSession { name } => session::save_session_action(ws, name),
+        ActionRequest::ImportWorkspace { path } => {
+            session::import_workspace_action(ws, focus_manager, path, backend, terminals, settings, cx)
+        }
+        ActionRequest::ExportWorkspace { path } => session::export_workspace_action(ws, path),
 
         // Service actions are handled by the remote command loop directly
         ActionRequest::StartService { .. }

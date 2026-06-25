@@ -3,12 +3,14 @@ mod render;
 
 use crate::views::components::SimpleInputState;
 use crate::workspace::persistence::{list_sessions, SessionInfo};
-use crate::workspace::state::{Workspace, WorkspaceData};
 use gpui::*;
 
-/// Session Manager overlay for managing multiple workspaces
+/// Session Manager overlay for managing multiple workspaces.
+///
+/// Holds no workspace handle: sessions are daemon-owned, so every mutating
+/// action is dispatched (via `SessionManagerEvent::Action`) to the local daemon
+/// rather than read/written from the client mirror.
 pub struct SessionManager {
-    pub(crate) workspace: Entity<Workspace>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) sessions: Vec<SessionInfo>,
     /// Input for new session name
@@ -32,7 +34,7 @@ pub(crate) enum SessionManagerTab {
 }
 
 impl SessionManager {
-    pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         let sessions = list_sessions().unwrap_or_default();
         let focus_handle = cx.focus_handle();
 
@@ -56,7 +58,6 @@ impl SessionManager {
         });
 
         Self {
-            workspace,
             focus_handle,
             sessions,
             new_session_input,
@@ -73,8 +74,10 @@ impl SessionManager {
 
 pub enum SessionManagerEvent {
     Close,
-    // Boxed: WorkspaceData is large and would bloat every event otherwise.
-    SwitchWorkspace(Box<WorkspaceData>),
+    /// A ready-to-dispatch session/workspace action for the host to route to the
+    /// local daemon (load/save/import/export). The daemon owns session files and
+    /// the authoritative workspace, so these never touch the client's mirror.
+    Action(okena_core::api::ActionRequest),
 }
 
 impl EventEmitter<SessionManagerEvent> for SessionManager {}

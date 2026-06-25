@@ -351,7 +351,7 @@ pub struct ApiFullscreen {
 }
 
 /// POST /v1/actions request body (tagged enum)
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionRequest {
     SendText {
@@ -661,6 +661,25 @@ pub enum ActionRequest {
     MoveProjectOutOfFolder {
         project_id: String,
         top_level_index: usize,
+    },
+
+    // ── Sessions (workspace-global; the daemon owns session files + state) ──
+    /// Load a saved session by name: the daemon reads its own session file
+    /// (local ids), kills all terminals, replaces its workspace, and respawns.
+    LoadSession {
+        name: String,
+    },
+    /// Save the daemon's current workspace as a named session file.
+    SaveSession {
+        name: String,
+    },
+    /// Import a workspace file from `path` and switch to it (like LoadSession).
+    ImportWorkspace {
+        path: String,
+    },
+    /// Export the daemon's current workspace to a file at `path`.
+    ExportWorkspace {
+        path: String,
     },
 
     // ── Settings (app-scoped; handled at the remote bridge) ───────────
@@ -1219,6 +1238,10 @@ mod tests {
                 project_id: "p1".into(),
                 top_level_index: 0,
             },
+            ActionRequest::LoadSession { name: "work".into() },
+            ActionRequest::SaveSession { name: "work".into() },
+            ActionRequest::ImportWorkspace { path: "/tmp/ws.json".into() },
+            ActionRequest::ExportWorkspace { path: "/tmp/ws.json".into() },
         ];
         for action in actions {
             let json = serde_json::to_string(&action).unwrap();

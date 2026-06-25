@@ -39,7 +39,7 @@ use crate::remote::GlobalRemoteInfo;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, ProjectOverlay, ProjectOverlayKind, SidebarRequest};
-use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
+use crate::workspace::state::{WindowId, Workspace};
 
 // Re-export generic overlay utilities from okena-ui
 pub use okena_ui::overlay::{CloseEvent, OverlaySlot};
@@ -76,9 +76,10 @@ impl CloseEvent for PairingDialogEvent {
 /// actions that need access to WindowView's state (terminals, PTY manager, etc.)
 #[derive(Clone)]
 pub enum OverlayManagerEvent {
-    /// Session manager requested workspace switch
-    // Boxed: WorkspaceData is large and would bloat every event otherwise.
-    SwitchWorkspace(Box<WorkspaceData>),
+    /// Session manager requested a session/workspace action (load/save/import/
+    /// export). The host dispatches it to the local daemon, which owns session
+    /// files + the authoritative workspace.
+    SessionAction(okena_core::api::ActionRequest),
 
     /// Worktree dialog confirmed: create a worktree on the parent project.
     /// The host dispatches `ActionRequest::CreateWorktree`; the daemon creates
@@ -570,15 +571,16 @@ impl OverlayManager {
         if self.is_modal::<SessionManager>() {
             self.close_modal(cx);
         } else {
-            let workspace = self.workspace.clone();
-            let manager = cx.new(|cx| SessionManager::new(workspace, cx));
+            let manager = cx.new(|cx| SessionManager::new(cx));
             cx.subscribe(&manager, |this, _, event: &SessionManagerEvent, cx| {
                 match event {
                     SessionManagerEvent::Close => {
                         this.close_modal(cx);
                     }
-                    SessionManagerEvent::SwitchWorkspace(data) => {
-                        cx.emit(OverlayManagerEvent::SwitchWorkspace(data.clone()));
+                    SessionManagerEvent::Action(action) => {
+                        cx.emit(OverlayManagerEvent::SessionAction(action.clone()));
+                        // Load/import close the manager (state swaps); save/export
+                        // are quick fire-and-forget — close in all cases.
                         this.close_modal(cx);
                     }
                 }

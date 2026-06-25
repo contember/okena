@@ -231,7 +231,6 @@ impl Okena {
     /// `extra_window_handles` maps.
     fn open_extra_window(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
-        let pty_manager = self.pty_manager.clone();
         let terminals = self.terminals.clone();
         let okena = cx.entity().clone();
 
@@ -298,7 +297,7 @@ impl Okena {
             },
             move |window, cx| {
                 let view = cx.new(|cx| {
-                    WindowView::new(window_id, workspace.clone(), pty_manager.clone(), terminals.clone(), window, cx)
+                    WindowView::new(window_id, workspace.clone(), terminals.clone(), window, cx)
                 });
                 let view_for_okena = view.clone();
                 let handle = window.window_handle();
