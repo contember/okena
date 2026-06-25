@@ -129,6 +129,19 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                         HashMap::new()
                                     }
                                 };
+                                // Terminals already present in the registry (so
+                                // `GetTerminalSizes` returned a size for them)
+                                // existed BEFORE this subscribe: their snapshot
+                                // reflects current state, so the pending PTY
+                                // events that the snapshot already accounts for
+                                // must be drained (replaying would garble the
+                                // display). Terminals absent here are spawned
+                                // lazily by `ensure_terminal` DURING this
+                                // subscribe — their snapshot was empty (the shell
+                                // hadn't printed yet), so their first output must
+                                // NOT be dropped.
+                                let pre_existing: std::collections::HashSet<String> =
+                                    sizes.keys().cloned().collect();
                                 let resp = serde_json::to_string(&WsOutbound::Subscribed { mappings, sizes }).expect("BUG: WsOutbound must serialize");
                                 if out_tx.send(Message::Text(resp.into())).await.is_err() {
                                     break;
@@ -138,9 +151,26 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                 if send_snapshots(&out_tx, &state, &terminal_ids, &subscribed_ids).await.is_err() {
                                     break;
                                 }
-                                // Drain PTY events that accumulated before/during snapshot generation.
-                                // The snapshot already contains their effects — replaying would garble the display.
-                                while pty_rx.try_recv().is_ok() {}
+                                // Selectively drain PTY events that accumulated
+                                // before/during snapshot generation. For
+                                // pre-existing terminals the snapshot already
+                                // contains their effects, so drop them. For
+                                // just-spawned terminals (subscribed but absent
+                                // from `pre_existing`) FORWARD the events — the
+                                // shell's first prompt arrives here and the empty
+                                // snapshot did not cover it, so dropping it would
+                                // leave the pane blank until the next keypress.
+                                if drain_or_forward_post_snapshot(
+                                    &out_tx,
+                                    &mut pty_rx,
+                                    &subscribed_ids,
+                                    &pre_existing,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
                             }
                             Ok(WsInbound::Unsubscribe { terminal_ids }) => {
                                 for id in &terminal_ids {
@@ -387,6 +417,95 @@ async fn ws_writer(
             break;
         }
     }
+}
+
+/// Drain the PTY events that accumulated before/during snapshot generation at
+/// subscribe time, discarding those already reflected in a terminal's snapshot
+/// and forwarding those that are not.
+///
+/// The plain blanket drain (`while pty_rx.try_recv().is_ok() {}`) is correct for
+/// terminals that already had a live PTY before this subscribe: their snapshot
+/// reflects current state, so replaying the queued events would garble the
+/// display. But a terminal spawned lazily *during* this subscribe (its
+/// `render_snapshot()` was empty because the shell hadn't printed yet) has its
+/// first output sitting in the queue — dropping it would leave the pane blank
+/// until the next keypress. So:
+///
+/// * events for `pre_existing` terminals (snapshot covers them) are dropped;
+/// * events for subscribed-but-just-spawned terminals are forwarded as the same
+///   resize-then-PTY frames the main loop sends;
+/// * events for non-subscribed terminals are dropped (not ours).
+///
+/// On `Lagged` the queued backlog is meaningless (we already lost events), so we
+/// simply stop draining; the main loop's own lag handling resynchronizes via
+/// fresh snapshots. Returns `Err(())` if a client send fails (caller breaks).
+async fn drain_or_forward_post_snapshot(
+    out_tx: &mpsc::Sender<Message>,
+    pty_rx: &mut broadcast::Receiver<crate::pty_broadcaster::PtyBroadcastEvent>,
+    subscribed_ids: &HashMap<String, u32>,
+    pre_existing: &std::collections::HashSet<String>,
+) -> Result<(), ()> {
+    use crate::pty_broadcaster::PtyBroadcastEvent;
+
+    // Coalesce forwarded output per stream and keep only the latest resize per
+    // terminal, matching the main loop's batching.
+    let mut batch: HashMap<u32, Vec<u8>> = HashMap::new();
+    let mut resize_msgs: Vec<WsOutbound> = Vec::new();
+
+    loop {
+        match pty_rx.try_recv() {
+            Ok(event) => match event {
+                PtyBroadcastEvent::Output { terminal_id, data } => {
+                    // Forward only for subscribed terminals that were NOT already
+                    // covered by a snapshot (i.e. just spawned this subscribe).
+                    if !pre_existing.contains(&terminal_id)
+                        && let Some(&stream_id) = subscribed_ids.get(&terminal_id)
+                    {
+                        batch.entry(stream_id).or_default().extend_from_slice(&data);
+                    }
+                }
+                PtyBroadcastEvent::Resized {
+                    terminal_id,
+                    cols,
+                    rows,
+                    server_owns,
+                } => {
+                    if !pre_existing.contains(&terminal_id)
+                        && subscribed_ids.contains_key(&terminal_id)
+                    {
+                        resize_msgs.retain(|m| {
+                            !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if *id == terminal_id)
+                        });
+                        resize_msgs.push(WsOutbound::TerminalResized {
+                            terminal_id,
+                            cols,
+                            rows,
+                            server_owns,
+                        });
+                    }
+                }
+            },
+            Err(broadcast::error::TryRecvError::Empty)
+            | Err(broadcast::error::TryRecvError::Lagged(_))
+            | Err(broadcast::error::TryRecvError::Closed) => break,
+        }
+    }
+
+    // Resize first (so the client updates its grid before applying PTY data),
+    // then the coalesced PTY frames — same ordering as the main broadcast arm.
+    for msg in resize_msgs {
+        let resp = serde_json::to_string(&msg).expect("BUG: WsOutbound must serialize");
+        if out_tx.send(Message::Text(resp.into())).await.is_err() {
+            return Err(());
+        }
+    }
+    for (stream_id, data) in batch {
+        let frame = build_pty_frame(stream_id, &data);
+        if out_tx.send(Message::Binary(frame.into())).await.is_err() {
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 /// Send snapshot frames for the given terminal IDs via the mpsc channel.

@@ -39,7 +39,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use okena_app_core::workspace::actions::execute::{ensure_terminal, execute_action};
+use okena_app_core::workspace::actions::execute::{
+    ensure_terminal, execute_action, spawn_uninitialized_terminals,
+};
 use okena_core::api::{
     ActionRequest, ApiFolder, ApiFullscreen, ApiGitStatus, ApiProject, ApiServiceInfo, ApiWindow,
     ApiWorktreeMetadata, CommandResult, StateResponse,
@@ -469,6 +471,79 @@ pub async fn daemon_command_loop(
     }
 }
 
+/// Materialize the PTYs for every restored project's uninitialized terminal
+/// slots at daemon startup.
+///
+/// Persisted `workspace.json` layouts carry terminal slots with
+/// `terminal_id: None` (the normal saved state). In daemon-client mode nobody
+/// ever materializes them: the GUI client cannot self-spawn over a remote
+/// backend, and the daemon only calls
+/// [`spawn_uninitialized_terminals`](okena_app_core::workspace::actions::execute::spawn_uninitialized_terminals)
+/// from the `CreateTerminal` / `SplitTerminal` / `AddProject` action arms — not
+/// on boot. A restored slot therefore never gets a PTY and renders blank
+/// forever.
+///
+/// This is the daemon's boot-time analogue of the GUI's
+/// `spawn_terminals_for_project` (fired on project creation): it walks EVERY
+/// loaded project and assigns ids + creates PTYs for its uninitialized slots,
+/// so `/v1/state` serves real ids and the snapshot/live-PTY path works.
+///
+/// All projects (not just the visible ones): the prior in-process GUI eagerly
+/// spawned terminals when a project column was created, regardless of overview
+/// visibility, and `hidden_project_ids` is a per-window viewport concern, not a
+/// "don't run this project" signal. Spawning everything keeps behavior simple
+/// and correct; project counts are small (one column per project), so this is
+/// not too heavy.
+///
+/// Runs on the LocalSet thread (mirroring the command loop's `execute_action`):
+/// PTY spawning and hook execution may reach the reactor, and the
+/// `WorkspaceCx::notify` bumps the `workspace_tick` whose observer task bumps
+/// `state_version`. The freshly-assigned ids bump `data_version`, so the
+/// existing autosave observer persists them — this introduces NO second writer.
+///
+/// Must be invoked AFTER `spawn_observers` (so the tick reaches them) and BEFORE
+/// the command loop starts serving clients (so `/v1/state` never exposes the
+/// transient null slots).
+pub fn materialize_uninitialized_terminals(
+    backend: &dyn TerminalBackend,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    terminals: &TerminalsRegistry,
+    settings: &Arc<Mutex<AppSettings>>,
+) {
+    // Snapshot the project ids under a short lock, then drop it before spawning
+    // (each `spawn_uninitialized_terminals` call re-locks the workspace itself).
+    let project_ids: Vec<String> = {
+        let ws = workspace.lock();
+        ws.data().projects.iter().map(|p| p.id.clone()).collect()
+    };
+
+    // Snapshot settings once, mirroring the command loop's `execute_action` arm.
+    let app_settings = settings.lock().clone();
+
+    for project_id in project_ids {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut ws = workspace.lock();
+        match spawn_uninitialized_terminals(
+            &mut ws,
+            &project_id,
+            backend,
+            terminals,
+            &app_settings,
+            &mut cx,
+        ) {
+            okena_app_core::workspace::actions::execute::ActionResult::Err(e) => {
+                log::error!(
+                    "startup: failed to materialize terminals for project {project_id}: {e}"
+                );
+            }
+            okena_app_core::workspace::actions::execute::ActionResult::Ok(_) => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,5 +866,144 @@ mod tests {
                 handle.await.expect("loop task joins");
             })
             .await;
+    }
+
+    // ── Startup terminal materialization ──────────────────────────────────────
+
+    /// A `WorkspaceData` carrying one project whose layout is a single
+    /// uninitialized terminal slot (`terminal_id: None`) — the normal persisted
+    /// state for a restored project. `path` is the project cwd the PTY spawns in.
+    fn workspace_with_uninitialized_terminal(path: &str) -> WorkspaceData {
+        use okena_state::{LayoutNode, ProjectData};
+        let project = ProjectData {
+            id: "p1".to_string(),
+            name: "Project p1".to_string(),
+            path: path.to_string(),
+            layout: Some(LayoutNode::Terminal {
+                terminal_id: None,
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            }),
+            terminal_names: Default::default(),
+            hidden_terminals: Default::default(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: Default::default(),
+            default_shell: None,
+            hook_terminals: Default::default(),
+            pinned: false,
+            last_activity_at: None,
+        };
+        WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["p1".to_string()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
+    /// `materialize_uninitialized_terminals` assigns a real `terminal_id` to a
+    /// restored `terminal_id: None` slot, creates the backing PTY (so it lands
+    /// in the registry), bumps `data_version` (so the autosave observer persists
+    /// the assigned id) and the `workspace_tick` (so the state-version observer
+    /// fires). This is the boot fix for blank restored terminals in
+    /// daemon-client mode.
+    #[test]
+    fn materialize_assigns_ids_and_spawns_ptys_for_restored_projects() {
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+        use okena_workspace::state::LayoutNode;
+
+        // A real, existing cwd for the spawned shell.
+        let tmp = std::env::temp_dir();
+        let tmp_path = tmp.to_str().expect("temp dir is utf-8");
+
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+
+        let workspace = Arc::new(Mutex::new(Workspace::new(
+            workspace_with_uninitialized_terminal(tmp_path),
+        )));
+        let settings = Arc::new(Mutex::new(default_settings()));
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+
+        // Preconditions: slot is uninitialized, registry empty, tick at 0.
+        let version_before = workspace.lock().data_version();
+        let tick_before = *workspace_tick.borrow();
+        assert!(terminals.lock().is_empty(), "registry starts empty");
+
+        materialize_uninitialized_terminals(
+            &*backend,
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            &terminals,
+            &settings,
+        );
+
+        // The slot now has an id, the PTY is in the registry, and both the
+        // persistent data_version and the notify tick advanced.
+        let ws = workspace.lock();
+        let project = ws.project("p1").expect("project p1 exists");
+        let assigned = match project.layout.as_ref().expect("layout present") {
+            LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+            other => panic!("expected a Terminal layout node, got {other:?}"),
+        };
+        let assigned = assigned.expect("terminal slot got a real id");
+        assert!(
+            terminals.lock().contains_key(&assigned),
+            "spawned PTY is registered under the assigned id"
+        );
+        assert!(
+            ws.data_version() > version_before,
+            "data_version advanced so autosave persists the assigned id"
+        );
+        assert!(
+            *workspace_tick.borrow() > tick_before,
+            "workspace_tick advanced so the state-version observer fires"
+        );
+    }
+
+    /// On an empty workspace `materialize_uninitialized_terminals` is a no-op:
+    /// no terminals spawned and the data_version is untouched.
+    #[test]
+    fn materialize_is_noop_for_empty_workspace() {
+        let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let settings = Arc::new(Mutex::new(default_settings()));
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+
+        let version_before = workspace.lock().data_version();
+        materialize_uninitialized_terminals(
+            &*backend,
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            &terminals,
+            &settings,
+        );
+
+        assert!(terminals.lock().is_empty(), "no terminals spawned");
+        assert_eq!(
+            workspace.lock().data_version(),
+            version_before,
+            "data_version untouched on empty workspace"
+        );
     }
 }
