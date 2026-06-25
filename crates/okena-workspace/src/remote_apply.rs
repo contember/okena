@@ -194,7 +194,6 @@ pub fn apply_remote_snapshot(
                         &prefixed_id,
                         &api_project.name,
                         &api_project.path,
-                        api_project.show_in_overview,
                     );
                     data.projects.push(ProjectData {
                         id: prefixed_id.clone(),
@@ -346,9 +345,16 @@ pub fn apply_remote_snapshot(
 
 /// Apply one-shot per-window visibility for a freshly materialized remote
 /// project. When a local window issued the create, the spawn intent ("visible
-/// in this window, hidden everywhere else") wins over the wire
-/// `show_in_overview` flag; otherwise the wire flag is translated into
-/// per-window hidden state on this first sync.
+/// in this window, hidden everywhere else") is applied. Otherwise the project is
+/// left visible in every window.
+///
+/// Per-window project visibility is CLIENT-owned: each window's
+/// `hidden_project_ids` is toggled locally (`toggle_project_overview_visibility`)
+/// and persisted in window-layout.json. The daemon has a single synthetic main
+/// window, so its wire `show_in_overview` must NOT drive client visibility —
+/// re-applying the daemon's (frozen, single-window) hidden set on every
+/// reconnect compounded across restarts until every project was hidden and the
+/// main window came up empty.
 fn apply_initial_remote_project_visibility(
     data: &mut WorkspaceData,
     remote_sync: &mut RemoteSyncState,
@@ -356,14 +362,9 @@ fn apply_initial_remote_project_visibility(
     prefixed_id: &str,
     name: &str,
     path: &str,
-    show_in_overview: bool,
 ) {
     if let Some(spawning_window) = remote_sync.take_project_visibility(connection_id, name, path) {
         data.add_project_hide_in_other_windows(prefixed_id, spawning_window);
-        return;
-    }
-    if !show_in_overview {
-        data.hide_project_in_all_windows(prefixed_id);
     }
 }
 
@@ -703,7 +704,6 @@ mod tests {
             "remote:conn:p1",
             "Project",
             "/repo/project",
-            true,
         );
 
         assert!(data.main_window.hidden_project_ids.contains("remote:conn:p1"));
@@ -720,7 +720,11 @@ mod tests {
     }
 
     #[test]
-    fn initial_visibility_without_pending_uses_wire_hidden_flag() {
+    fn initial_visibility_without_pending_leaves_project_visible() {
+        // Per-window visibility is client-owned: without a spawn intent a freshly
+        // synced project is left visible in every window. The daemon's
+        // single-window `show_in_overview` must NOT hide it (that compounded into
+        // an all-hidden main window across restarts).
         let mut data = empty_data();
         let extra = okena_state::WindowState::default();
         let extra_id = extra.id;
@@ -734,12 +738,11 @@ mod tests {
             "remote:conn:p1",
             "Project",
             "/repo/project",
-            false,
         );
 
-        assert!(data.main_window.hidden_project_ids.contains("remote:conn:p1"));
+        assert!(!data.main_window.hidden_project_ids.contains("remote:conn:p1"));
         assert!(
-            data.window(WindowId::Extra(extra_id)).unwrap()
+            !data.window(WindowId::Extra(extra_id)).unwrap()
                 .hidden_project_ids.contains("remote:conn:p1")
         );
     }
