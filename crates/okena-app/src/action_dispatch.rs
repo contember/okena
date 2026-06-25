@@ -390,6 +390,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             terminal_id: s(&terminal_id),
             name,
         },
+        ActionRequest::SwitchTerminalShell {
+            project_id,
+            terminal_id,
+            shell,
+        } => ActionRequest::SwitchTerminalShell {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            shell,
+        },
         ActionRequest::AddTab {
             project_id,
             path,

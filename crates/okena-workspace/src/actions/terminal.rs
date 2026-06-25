@@ -26,6 +26,22 @@ impl Workspace {
         });
     }
 
+    /// Clear the terminal id at a layout path (back to uninitialized) so a
+    /// subsequent `spawn_uninitialized_terminals` re-materializes it. Used by
+    /// shell-switch: kill the old PTY, clear the id, then respawn the node with
+    /// its new shell.
+    pub fn clear_terminal_id(&mut self, project_id: &str, path: &[usize], cx: &mut impl WorkspaceCx) {
+        self.with_project(project_id, cx, |project| {
+            if let Some(ref mut layout) = project.layout
+                && let Some(node) = layout.get_at_path_mut(path)
+                    && let LayoutNode::Terminal { terminal_id: id, .. } = node {
+                        *id = None;
+                        return true;
+                    }
+            false
+        });
+    }
+
     /// Set shell type for a terminal at a layout path
     pub fn set_terminal_shell(
         &mut self,

@@ -15,7 +15,7 @@ use super::WindowView;
 impl WindowView {
     /// Build an ActionDispatcher for the given project. Returns `None` if the
     /// project is unknown or its daemon connection is unavailable.
-    fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> Option<ActionDispatcher> {
+    pub(super) fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> Option<ActionDispatcher> {
         crate::action_dispatch::dispatcher_for_project(
             project_id,
             self.window_id,
