@@ -278,8 +278,6 @@ impl WindowView {
         {
             let workspace_for_dispatch = workspace.clone();
             let focus_manager_for_dispatch = focus_manager.clone();
-            let backend_for_dispatch = backend.clone();
-            let terminals_for_dispatch = terminals.clone();
             sidebar.update(cx, |s, _cx| {
                 // Dispatch action callback
                 s.set_dispatch_action(Box::new(move |project_id, action, cx| {
@@ -288,9 +286,6 @@ impl WindowView {
                         window_id,
                         &workspace_for_dispatch,
                         &focus_manager_for_dispatch,
-                        &Some(backend_for_dispatch.clone()),
-                        &terminals_for_dispatch,
-                        &None, // service_manager - wired later
                         &None, // remote_manager - wired later
                         cx,
                     ) {
@@ -584,13 +579,10 @@ impl WindowView {
         self.service_manager = Some(manager);
     }
 
-    /// Rebuild the sidebar dispatch action callback with current service/remote managers.
+    /// Rebuild the sidebar dispatch action callback with the current remote manager.
     fn rebuild_sidebar_dispatch(&self, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
-        let backend = self.backend.clone();
-        let terminals = self.terminals.clone();
-        let service_manager = self.service_manager.clone();
         let remote_manager = self.remote_manager.clone();
         let window_id = self.window_id;
         self.sidebar.update(cx, |s, _cx| {
@@ -600,9 +592,6 @@ impl WindowView {
                     window_id,
                     &workspace,
                     &focus_manager,
-                    &Some(backend.clone()),
-                    &terminals,
-                    &service_manager,
                     &remote_manager,
                     cx,
                 ) {
@@ -700,17 +689,14 @@ impl WindowView {
             .collect();
         self.project_columns.retain(|id, _| visible_ids.contains(id.as_str()));
 
-        // Create columns for new projects
-        for (project_id, is_remote, connection_id) in &visible_projects {
-            if !self.project_columns.contains_key(project_id) {
-                let entity = if *is_remote {
+        // Create columns for new projects. Every project is a remote project
+        // of the local daemon.
+        for (project_id, _is_remote, connection_id) in &visible_projects {
+            if !self.project_columns.contains_key(project_id)
+                && let Some(entity) =
                     self.create_remote_column(project_id, connection_id.as_deref(), cx)
-                } else {
-                    Some(self.create_local_column(project_id, cx))
-                };
-                if let Some(entity) = entity {
-                    self.project_columns.insert(project_id.clone(), entity);
-                }
+            {
+                self.project_columns.insert(project_id.clone(), entity);
             }
         }
     }
@@ -770,68 +756,6 @@ impl WindowView {
         }))
     }
 
-    /// Create a ProjectColumn for a local project.
-    fn create_local_column(
-        &self,
-        project_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Entity<ProjectColumn> {
-        let workspace_clone = self.workspace.clone();
-        let focus_manager_clone = self.focus_manager.clone();
-        let request_broker_clone = self.request_broker.clone();
-        let terminals_clone = self.terminals.clone();
-        let active_drag_clone = self.active_drag.clone();
-        let id = project_id.to_string();
-        let backend_clone = self.backend.clone();
-        let workspace_for_dispatch = self.workspace.clone();
-        let focus_manager_for_dispatch = self.focus_manager.clone();
-        let backend_for_dispatch = self.backend.clone();
-        let terminals_for_dispatch = self.terminals.clone();
-        let git_watcher = self.git_watcher.clone();
-
-        let git_provider = match self.build_git_provider(project_id, cx) {
-            Some(p) => p,
-            None => {
-                log::warn!("Cannot build git provider for project {}", project_id);
-                let path = self.workspace.read(cx).project(project_id)
-                    .map(|p| p.path.clone())
-                    .unwrap_or_default();
-                Arc::new(okena_views_git::diff_viewer::provider::LocalGitProvider::new(path))
-            }
-        };
-
-        let window_id = self.window_id;
-        let entity = cx.new(move |cx| {
-            let mut col = ProjectColumn::new(
-                window_id,
-                workspace_clone,
-                focus_manager_clone,
-                request_broker_clone,
-                id,
-                backend_clone,
-                terminals_clone,
-                active_drag_clone,
-                git_watcher,
-                git_provider,
-                cx,
-            );
-            col.set_action_dispatcher(Some(
-                crate::action_dispatch::ActionDispatcher::Local {
-                    workspace: workspace_for_dispatch,
-                    focus_manager: focus_manager_for_dispatch,
-                    backend: backend_for_dispatch,
-                    terminals: terminals_for_dispatch,
-                    service_manager: None, // set later via set_service_manager
-                    window_id,
-                },
-            ));
-            col
-        });
-        if let Some(ref sm) = self.service_manager {
-            entity.update(cx, |col, cx| col.set_service_manager(sm.clone(), cx));
-        }
-        entity
-    }
 }
 
 impl_focusable!(WindowView);

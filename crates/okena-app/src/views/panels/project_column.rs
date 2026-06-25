@@ -184,10 +184,6 @@ impl ProjectColumn {
 
     /// Set the service manager and observe it for changes.
     pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
-        // Also update the action dispatcher so it can route service actions locally
-        if let Some(ActionDispatcher::Local { ref mut service_manager, .. }) = self.action_dispatcher {
-            *service_manager = Some(manager.clone());
-        }
         // Sync dispatcher to service panel (may have been set before panel was created)
         self.sync_service_panel_dispatcher(cx);
         self.service_panel.update(cx, |sp, cx| {
