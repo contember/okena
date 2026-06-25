@@ -298,6 +298,27 @@ impl DaemonCore {
                 git_status_tx.clone(),
                 reactor.state_version.clone(),
             ));
+
+            // Materialize PTYs for every restored project's uninitialized
+            // terminal slots BEFORE the command loop starts serving clients.
+            // Persisted layouts carry `terminal_id: None` slots that nobody
+            // else spawns in daemon-client mode (the GUI client can't self-spawn
+            // over a remote backend), so they would render blank forever. This
+            // assigns ids + creates PTYs for all loaded projects; the assigned
+            // ids bump `data_version` (the existing autosave observer persists
+            // them — no second writer) and `workspace_tick` (whose observer,
+            // spawned above, bumps `state_version`). Runs on the LocalSet thread
+            // because PTY/hook spawning may reach the reactor.
+            crate::command_loop::materialize_uninitialized_terminals(
+                &*backend,
+                &reactor.workspace,
+                &reactor.workspace_tick,
+                &reactor.hook_runner,
+                &reactor.hook_monitor,
+                &terminals,
+                &settings,
+            );
+
             // The command loop is the "main" task; it runs until the bridge
             // closes. Race it against ctrl-c so the daemon can shut down cleanly.
             let cmd = crate::command_loop::daemon_command_loop(
