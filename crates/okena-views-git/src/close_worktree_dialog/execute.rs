@@ -33,7 +33,6 @@ impl CloseWorktreeDialog {
         let delete_branch_enabled = self.delete_branch_enabled;
         let is_dirty = self.is_dirty;
         let workspace = self.workspace.clone();
-        let focus_manager = self.focus_manager.clone();
 
         // Read hooks config and monitor before spawning
         let ws = workspace.read(cx);
@@ -516,43 +515,26 @@ impl CloseWorktreeDialog {
                     })
                 });
 
-                cx.update(|cx| {
-                    let result = focus_manager.update(cx, |fm, cx| {
-                        let result = workspace.update(cx, |ws, cx| {
-                            ws.remove_worktree_project(fm, &project_id, force_remove, &global_hooks, cx)
+                // TODO(daemon): the git-operation steps above (stash / fetch /
+                // rebase / merge / push / delete-branch) still run in-process on
+                // the client. They have no `ActionRequest` yet and must move to
+                // daemon-side actions (Batch B). Only the final worktree-project
+                // removal is routed to the daemon here.
+                //
+                // The daemon owns the worktree project: emit a request so the
+                // host dispatches `ActionRequest::RemoveWorktreeProject`; the
+                // removal and its `on_worktree_close` / `worktree_removed` hooks
+                // run on the daemon and mirror back. (Dispatch is fire-and-forget
+                // over the wire, so there is no synchronous Ok/Err to gate on —
+                // the dialog closes immediately.)
+                let _ = cx.update(|cx| {
+                    this.update(cx, |this, cx| {
+                        cx.emit(super::CloseWorktreeDialogEvent::RequestRemove {
+                            project_id: project_id.clone(),
+                            force: force_remove,
                         });
-                        cx.notify();
-                        result
-                    });
-
-                    match result {
-                        Ok(()) => {
-                            let _ = hooks::fire_worktree_removed(
-                                &project_hooks,
-                                &global_hooks,
-                                &project_id,
-                                &project_name,
-                                &project_path,
-                                &branch,
-                                &main_repo_path,
-                                folder_id.as_deref(),
-                                folder_name.as_deref(),
-                                monitor.as_ref(),
-                                runner.as_ref(),
-                            );
-
-                            let _ = this.update(cx, |this, cx| {
-                                this.close(cx);
-                            });
-                        }
-                        Err(e) => {
-                            let _ = this.update(cx, |this, cx| {
-                                this.error_message = Some(format!("Failed to remove worktree: {}", e));
-                                this.processing = ProcessingState::Idle;
-                                cx.notify();
-                            });
-                        }
-                    }
+                        this.close(cx);
+                    })
                 });
             }
         })

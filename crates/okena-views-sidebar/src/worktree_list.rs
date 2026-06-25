@@ -6,7 +6,6 @@
 use okena_ui::overlay::CloseEvent;
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_md};
-use okena_workspace::settings::HooksConfig;
 use okena_workspace::state::{WindowId, Workspace};
 use gpui::*;
 use gpui::prelude::*;
@@ -16,6 +15,10 @@ use crate::Cancel;
 /// Event emitted by WorktreeListPopover.
 pub enum WorktreeListPopoverEvent {
     Close,
+    /// Untrack (delete) a tracked worktree project. The daemon owns the
+    /// project, so the host routes this to `ActionRequest::DeleteProject`
+    /// rather than mutating the read-only mirror here.
+    DeleteProject { project_id: String },
 }
 
 impl CloseEvent for WorktreeListPopoverEvent {
@@ -27,7 +30,6 @@ impl EventEmitter<WorktreeListPopoverEvent> for WorktreeListPopover {}
 /// Standalone worktree list popover entity.
 pub struct WorktreeListPopover {
     workspace: Entity<Workspace>,
-    focus_manager: Entity<okena_workspace::focus::FocusManager>,
     /// Spawning window for the multi-window new-project visibility rule
     /// (PRD user story 14): a click that adds a discovered worktree
     /// makes the new project visible in this window only, hidden in
@@ -37,7 +39,6 @@ pub struct WorktreeListPopover {
     project_id: String,
     entries: Vec<(String, String)>,
     position: Point<Pixels>,
-    hooks: HooksConfig,
     focus_handle: FocusHandle,
     /// Normalized git root (for filtering out the main repo entry).
     norm_git_root: std::path::PathBuf,
@@ -48,10 +49,8 @@ pub struct WorktreeListPopover {
 impl WorktreeListPopover {
     pub fn new(
         workspace: Entity<Workspace>,
-        focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         position: Point<Pixels>,
-        hooks: HooksConfig,
         window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -64,7 +63,7 @@ impl WorktreeListPopover {
         let norm_git_root = okena_git::repository::normalize_path(&git_root);
         let entries = okena_git::repository::list_git_worktrees(&git_root);
         let focus_handle = cx.focus_handle();
-        Self { workspace, focus_manager, window_id, project_id, entries, position, hooks, focus_handle, norm_git_root, subdir }
+        Self { workspace, window_id, project_id, entries, position, focus_handle, norm_git_root, subdir }
     }
 
     /// Find a tracked worktree project by its worktree root path.
@@ -150,7 +149,6 @@ impl Render for WorktreeListPopover {
                 let project_id = self.project_id.clone();
                 let wt_path_clone = wt_path.clone();
                 let branch_clone = branch.clone();
-                let hooks = self.hooks.clone();
 
                 div()
                     .id(ElementId::Name(format!("wt-list-{}", wt_path).into()))
@@ -165,15 +163,17 @@ impl Render for WorktreeListPopover {
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         if is_tracked {
                             if let Some(id) = this.find_tracked_project_id(&wt_path_clone, cx) {
-                                let workspace = this.workspace.clone();
-                                this.focus_manager.update(cx, |fm, cx| {
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.delete_project(fm, &id, &hooks, cx);
-                                    });
-                                    cx.notify();
-                                });
+                                // Daemon owns the project — emit an event so the
+                                // host dispatches DeleteProject; the removal
+                                // mirrors back. No direct mirror mutation here.
+                                cx.emit(WorktreeListPopoverEvent::DeleteProject { project_id: id });
                             }
                         } else {
+                            // TODO(daemon): tracking a discovered worktree mutates
+                            // the read-only mirror directly. There is no single
+                            // ActionRequest to attach an already-on-disk worktree
+                            // to the daemon's project list yet — needs a daemon-side
+                            // action (Batch B). Left as-is for now.
                             let window_id = this.window_id;
                             this.workspace.update(cx, |ws, cx| {
                                 if let Some(new_id) = ws.add_discovered_worktree(

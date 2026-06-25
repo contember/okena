@@ -10,7 +10,7 @@ pub use detached_overlays::open_detached_overlay;
 
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
-use crate::settings::{GlobalSettings, settings};
+use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_ext_claude::resolve_claude_dir;
 use crate::views::window::{TerminalsRegistry, WindowView};
@@ -722,45 +722,63 @@ impl Okena {
                 monitor.finish_by_terminal_id(&tid, *exit_code);
             }
 
-            // Single workspace.update: set hook status, then handle pending close atomically.
-            // Pull the focus_manager from main_window so the delete_project call
-            // scrubs focus state on the main window's per-window manager.
-            let focus_manager = self.main_window.read(cx).focus_manager();
-            let pending_data = focus_manager.update(cx, |fm, cx| {
-                let pending_data = self.workspace.update(cx, |ws, cx| {
-                    // Update hook terminal status
-                    let status = if success {
-                        crate::workspace::state::HookTerminalStatus::Succeeded
-                    } else {
-                        let code = exit_code.map(|c| c as i32).unwrap_or(-1);
-                        crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }
-                    };
-                    ws.update_hook_terminal_status(&tid, status, cx);
+            // Single workspace.update: set hook status, then collect pending-close
+            // data atomically. The project removal itself is NOT done on the
+            // mirror — it is dispatched to the daemon as DeleteProject below.
+            let pending_data = self.workspace.update(cx, |ws, cx| {
+                // Update hook terminal status
+                let status = if success {
+                    crate::workspace::state::HookTerminalStatus::Succeeded
+                } else {
+                    let code = exit_code.map(|c| c as i32).unwrap_or(-1);
+                    crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }
+                };
+                ws.update_hook_terminal_status(&tid, status, cx);
 
-                    // Check for pending worktree close tied to this hook terminal
-                    let pending = ws.take_pending_worktree_close(&tid)?;
-                    let folder = ws.folder_for_project_or_parent(&pending.project_id);
-                    let hook_folder_id = folder.map(|f| f.id.clone());
-                    let hook_folder_name = folder.map(|f| f.name.clone());
-                    let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
-                        .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
-                        .unwrap_or((None, None));
-                    if success {
-                        ws.remove_hook_terminal(&tid, cx);
-                        // Collect remaining hook terminal IDs before deleting the project
-                        let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
-                        ws.delete_project(fm, &pending.project_id, &settings(cx).hooks, cx);
-                        Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
-                    } else {
-                        ws.finish_closing_project(&pending.project_id);
-                        None
-                    }
-                });
-                cx.notify();
-                pending_data
+                // Check for pending worktree close tied to this hook terminal
+                let pending = ws.take_pending_worktree_close(&tid)?;
+                let folder = ws.folder_for_project_or_parent(&pending.project_id);
+                let hook_folder_id = folder.map(|f| f.id.clone());
+                let hook_folder_name = folder.map(|f| f.name.clone());
+                let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
+                    .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
+                    .unwrap_or((None, None));
+                if success {
+                    ws.remove_hook_terminal(&tid, cx);
+                    // Collect remaining hook terminal IDs before removal
+                    let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
+                    Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
+                } else {
+                    ws.finish_closing_project(&pending.project_id);
+                    None
+                }
             });
+            self.workspace.update(cx, |_ws, cx| cx.notify());
 
             if let Some((pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name)) = pending_data {
+                // The daemon owns the project: dispatch DeleteProject so the
+                // removal mirrors back. (The mirror is read-only; we must not
+                // call ws.delete_project here.) Read the dispatch components out
+                // of the main window into owned handles first to avoid holding a
+                // borrow of `cx` across the dispatch.
+                let pid = pending.project_id.clone();
+                let (window_id, focus_manager, remote_manager) = {
+                    let mw = self.main_window.read(cx);
+                    (mw.window_id_for_dispatch(), mw.focus_manager(), mw.remote_manager_for_dispatch())
+                };
+                if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
+                    &pid,
+                    window_id,
+                    &self.workspace,
+                    &focus_manager,
+                    &remote_manager,
+                    cx,
+                ) {
+                    dispatcher.dispatch(
+                        okena_core::api::ActionRequest::DeleteProject { project_id: pid.clone() },
+                        cx,
+                    );
+                }
                 self.handle_pending_close_result(&tid, pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name, cx);
             }
             // Hook terminal persists — no auto-cleanup. User can dismiss manually or rerun.
@@ -770,6 +788,13 @@ impl Okena {
     }
 
     /// Handle the result of a pending worktree close after hook exit (success path only).
+    //
+    // TODO(daemon): this still runs in-process — it fires the
+    // `on_worktree_close` / `worktree_removed` hooks on the client and performs
+    // the actual `git worktree remove` locally (`remove_worktree_fast`). These
+    // git-operation / hook steps have no `ActionRequest` yet and must move to a
+    // daemon-side action (Batch B). The project-record removal itself is already
+    // routed to the daemon via `ActionRequest::DeleteProject` in the caller.
     // Threads the cohesive set of close-result params; no reusable grouping.
     #[allow(clippy::too_many_arguments)]
     fn handle_pending_close_result(

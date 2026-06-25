@@ -1,7 +1,6 @@
 use crate::settings::settings;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::views::panels::toast::ToastManager;
-use crate::workspace::actions::execute::spawn_uninitialized_terminals;
 use crate::workspace::hooks;
 use gpui::*;
 use std::sync::Arc;
@@ -9,18 +8,6 @@ use std::sync::Arc;
 use super::WindowView;
 
 impl WindowView {
-    /// Spawn terminals for all layout slots in a project that have terminal_id: None
-    /// Used after creating a worktree project to immediately populate terminals
-    pub(super) fn spawn_terminals_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
-        let backend = self.backend.clone();
-        let terminals = self.terminals.clone();
-        let app_settings = settings(cx);
-        self.workspace.update(cx, |ws, cx| {
-            spawn_uninitialized_terminals(ws, &project_id, &*backend, &terminals, &app_settings, cx);
-        });
-        self.sync_project_columns(cx);
-    }
-
     /// Switch terminal shell - kills old terminal and creates new one with the new shell.
     /// Used when user selects a different shell from the shell selector overlay.
     pub(super) fn switch_terminal_shell(

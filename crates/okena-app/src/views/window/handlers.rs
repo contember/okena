@@ -1,5 +1,5 @@
 use crate::action_dispatch::ActionDispatcher;
-use crate::settings::{settings, GlobalSettings};
+use crate::settings::GlobalSettings;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
 use crate::workspace::requests::{
     FolderOverlay, FolderOverlayKind, OverlayRequest, ProjectOverlay, ProjectOverlayKind,
@@ -207,8 +207,16 @@ impl WindowView {
             OverlayManagerEvent::SwitchWorkspace(data) => {
                 self.handle_switch_workspace((**data).clone(), cx);
             }
-            OverlayManagerEvent::WorktreeCreated(new_project_id) => {
-                self.spawn_terminals_for_project(new_project_id.clone(), cx);
+            OverlayManagerEvent::WorktreeCreateRequested { project_id, branch, create_branch } => {
+                // The daemon creates the worktree, its project and its terminals;
+                // they mirror back. No local mirror mutation or PTY spawn here.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::CreateWorktree {
+                        project_id: project_id.clone(),
+                        branch: branch.clone(),
+                        create_branch: *create_branch,
+                    }, cx);
+                }
             }
             OverlayManagerEvent::ShellSelected { shell_type, project_id, terminal_id } => {
                 self.switch_terminal_shell(project_id, terminal_id, shell_type.clone(), cx);
@@ -244,18 +252,23 @@ impl WindowView {
                 });
             }
             OverlayManagerEvent::DeleteProject { project_id } => {
-                // Collect hook terminal IDs before deleting so we can clean them from the registry
-                let hook_tids = self.workspace.read(cx).hook_terminal_ids_for_project(project_id);
-                let workspace = self.workspace.clone();
-                let pid = project_id.clone();
-                self.focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.delete_project(fm, &pid, &settings(cx).hooks, cx);
-                    });
-                    cx.notify();
-                });
-                for tid in hook_tids {
-                    self.terminals.lock().remove(&tid);
+                // The daemon owns the project: dispatch DeleteProject and let the
+                // removal (incl. hook terminals) mirror back. The GUI must not
+                // mutate its read-only mirror directly.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::DeleteProject {
+                        project_id: project_id.clone(),
+                    }, cx);
+                }
+            }
+            OverlayManagerEvent::WorktreeRemoveRequested { project_id, force } => {
+                // The daemon owns the worktree project: dispatch
+                // RemoveWorktreeProject and let the removal mirror back.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::RemoveWorktreeProject {
+                        project_id: project_id.clone(),
+                        force: *force,
+                    }, cx);
                 }
             }
             OverlayManagerEvent::ConfigureHooks { project_id } => {
