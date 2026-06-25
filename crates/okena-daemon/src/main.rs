@@ -10,12 +10,34 @@
 //! Wiring the desktop app's `spawn_daemon` to launch THIS binary (instead of
 //! `okena --headless`) is a follow-up — the desktop-as-client phase.
 
+use std::io::Write;
 use std::net::IpAddr;
 
 use anyhow::Context;
 use okena_daemon_core::{DaemonCore, DaemonParams};
 use okena_workspace::persistence;
 use okena_workspace::settings::load_settings;
+
+/// Writes to both stderr and a log file simultaneously (mirrors the GUI's
+/// `TeeWriter`). The daemon is spawned by the GUI with inherited stdio, so its
+/// stderr lands in the GUI's terminal; teeing to a dedicated `okena-daemon.log`
+/// keeps a durable record (incl. panics) separate from the GUI's `okena.log`.
+struct TeeWriter {
+    stderr: std::io::Stderr,
+    file: std::fs::File,
+}
+
+impl Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = self.stderr.write_all(buf);
+        self.file.write_all(buf)?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = self.stderr.flush();
+        self.file.flush()
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     // 0. Resolve the active profile (env-only: the spawning desktop propagates
@@ -32,6 +54,8 @@ fn main() -> anyhow::Result<()> {
     };
     // SAFETY: called before any threads are spawned; no concurrent env access.
     unsafe { std::env::set_var("OKENA_PROFILE", &profile_paths.id) };
+    // Capture the daemon log path BEFORE moving `profile_paths` into the global.
+    let daemon_log = profile_paths.root.join("okena-daemon.log");
     okena_core::profiles::init_profile(profile_paths);
     if let Err(e) =
         okena_core::profiles::migrate_legacy_layout_if_needed(okena_core::profiles::current())
@@ -39,8 +63,30 @@ fn main() -> anyhow::Result<()> {
         eprintln!("Warning: profile migration failed: {e}");
     }
 
-    // 1. Logging: env_logger driven by RUST_LOG, defaulting to "info".
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // 1. Logging: env_logger driven by RUST_LOG (default "info"), teed to
+    //    `okena-daemon.log` so the daemon's output + panics survive even though
+    //    its stderr is the GUI's inherited terminal. Best-effort: if the file
+    //    can't be opened we fall back to plain stderr.
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    if let Ok(file) = std::fs::File::create(&daemon_log) {
+        builder.target(env_logger::fmt::Target::Pipe(Box::new(TeeWriter {
+            stderr: std::io::stderr(),
+            file,
+        })));
+    }
+    builder.init();
+
+    // Log panics (with a backtrace) to okena-daemon.log. Without this a panic on
+    // the awaited path (command loop / startup) aborts the process leaving only
+    // the client's "connection refused" — no cause. The default hook still runs
+    // after, preserving normal stderr output.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!("daemon PANIC: {info}\n{backtrace}");
+        default_hook(info);
+    }));
 
     // 2. Optional `--listen <ip>` override. Parsing is intentionally minimal and
     //    dependency-free; the error messages mirror the GUI's `src/main.rs`.
