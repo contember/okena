@@ -16,8 +16,6 @@ use std::sync::Arc;
 use tokio::sync::watch as tokio_watch;
 use uuid::Uuid;
 
-use super::Okena;
-
 /// Parse a wire-format window id into a [`WindowId`].
 ///
 /// `"main"` maps to [`WindowId::Main`]; any other string is parsed as a UUID
@@ -457,82 +455,6 @@ pub(crate) async fn remote_command_loop(
         if let Some(reply) = msg.reply {
             let _ = reply.send(result);
         }
-    }
-}
-
-impl Okena {
-    /// Process commands from the remote API bridge.
-    /// Thin wrapper that spawns the shared `remote_command_loop`.
-    ///
-    /// Builds a focus-manager resolver that, per-action, asks the live `Okena`
-    /// entity which OS window currently has focus and returns that window's
-    /// `(WindowId, FocusManager)` (PRD cri 13). When the `Okena` weak handle
-    /// has been dropped (loop racing app shutdown) the resolver falls back to
-    /// `(WindowId::Main, captured main FocusManager)`.
-    pub(super) fn start_remote_command_loop(
-        &mut self,
-        bridge_rx: BridgeReceiver,
-        backend: Arc<dyn TerminalBackend>,
-        cx: &mut Context<Self>,
-    ) {
-        let workspace = self.workspace.clone();
-        let main_focus_manager = self.main_window.read(cx).focus_manager();
-        let okena_weak = cx.entity().downgrade();
-        let focus_okena_weak = okena_weak.clone();
-        let focus_manager_resolver: FocusManagerResolver =
-            Arc::new(move |cx: &App, target: Option<WindowId>| {
-                match focus_okena_weak.upgrade() {
-                    Some(okena) => okena.read(cx).focus_manager_for_window(cx, target),
-                    // Drop-race fallback (loop racing app shutdown): the live
-                    // Okena is gone, so honor only the focused/main default.
-                    None => match target {
-                        None | Some(WindowId::Main) => {
-                            Some((WindowId::Main, main_focus_manager.clone()))
-                        }
-                        Some(WindowId::Extra(_)) => None,
-                    },
-                }
-            });
-        let windows_okena_weak = okena_weak.clone();
-        let windows_resolver: WindowsResolver = Arc::new(move |cx: &App| {
-            windows_okena_weak
-                .upgrade()
-                .map(|okena| okena.read(cx).build_api_windows(cx))
-                .unwrap_or_default()
-        });
-        // Command-palette dispatch: resolve the target window and the named
-        // GUI action, then dispatch it into that window.
-        let dispatch_okena_weak = okena_weak;
-        let action_dispatcher: ActionDispatcher =
-            Arc::new(move |cx: &mut App, target: Option<WindowId>, name: &str| {
-                let okena = dispatch_okena_weak
-                    .upgrade()
-                    .ok_or_else(|| "app is shutting down".to_string())?;
-                let handle = okena
-                    .read(cx)
-                    .window_handle_for(cx, target)
-                    .ok_or_else(|| "window not found".to_string())?;
-                let descriptions = crate::keybindings::get_action_descriptions();
-                let desc = descriptions
-                    .get(name)
-                    .ok_or_else(|| format!("unknown command: {name}"))?;
-                let action = (desc.factory)();
-                handle
-                    .update(cx, |_view, window, cx| window.dispatch_action(action, cx))
-                    .map_err(|e| format!("dispatch failed: {e}"))
-            });
-        let terminals = self.terminals.clone();
-        let state_version = self.state_version.clone();
-        let git_status_tx = self.git_status_tx.clone();
-        let service_manager = self.service_manager.clone();
-
-        cx.spawn(async move |_this: WeakEntity<Okena>, cx: &mut AsyncApp| {
-            remote_command_loop(
-                bridge_rx, backend, workspace, focus_manager_resolver, windows_resolver, terminals,
-                state_version, git_status_tx, service_manager, action_dispatcher, cx,
-            ).await;
-        })
-        .detach();
     }
 }
 

@@ -813,7 +813,7 @@ fn main() {
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
-                    Okena::new(workspace_data, pty_manager.clone(), pty_events, listen_addr, Some(local_daemon), window, cx)
+                    Okena::new(workspace_data, pty_manager.clone(), pty_events, local_daemon, window, cx)
                 });
                 cx.new(|cx| Root::new(okena, window, cx))
             },
