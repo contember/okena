@@ -116,6 +116,14 @@ pub enum OverlayManagerEvent {
     /// back. (The dialog's in-process git pipeline already ran before this.)
     WorktreeRemoveRequested { project_id: String, force: bool },
 
+    /// Worktree list: track an already-on-disk worktree. The host dispatches
+    /// `ActionRequest::AddDiscoveredWorktree`; the new project mirrors back.
+    AddDiscoveredWorktree {
+        parent_project_id: String,
+        worktree_path: String,
+        branch: String,
+    },
+
     /// Context menu: Delete project
     DeleteProject { project_id: String },
 
@@ -1169,8 +1177,7 @@ impl OverlayManager {
         self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
-        let window_id = self.window_id;
-        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, project_id, position, window_id, cx));
+        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, project_id, position, cx));
 
         cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
             match event {
@@ -1181,6 +1188,18 @@ impl OverlayManager {
                     this.hide_worktree_list(cx);
                     cx.emit(OverlayManagerEvent::DeleteProject {
                         project_id: project_id.clone(),
+                    });
+                }
+                WorktreeListPopoverEvent::AddDiscoveredWorktree {
+                    parent_project_id,
+                    worktree_path,
+                    branch,
+                } => {
+                    this.hide_worktree_list(cx);
+                    cx.emit(OverlayManagerEvent::AddDiscoveredWorktree {
+                        parent_project_id: parent_project_id.clone(),
+                        worktree_path: worktree_path.clone(),
+                        branch: branch.clone(),
                     });
                 }
             }
