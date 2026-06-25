@@ -14,29 +14,17 @@ use okena_core::api::ActionRequest;
 use super::WindowView;
 
 impl WindowView {
-    /// Build an ActionDispatcher for the given project.
-    /// Returns Remote variant if the project is a remote project,
-    /// otherwise returns Local variant.
-    fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> ActionDispatcher {
-        let backend = Some(self.backend.clone());
+    /// Build an ActionDispatcher for the given project. Returns `None` if the
+    /// project is unknown or its daemon connection is unavailable.
+    fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> Option<ActionDispatcher> {
         crate::action_dispatch::dispatcher_for_project(
             project_id,
             self.window_id,
             &self.workspace,
             &self.focus_manager,
-            &backend,
-            &self.terminals,
-            &self.service_manager,
             &self.remote_manager,
             cx,
-        ).unwrap_or_else(|| ActionDispatcher::Local {
-            workspace: self.workspace.clone(),
-            focus_manager: self.focus_manager.clone(),
-            backend: self.backend.clone(),
-            terminals: self.terminals.clone(),
-            service_manager: self.service_manager.clone(),
-            window_id: self.window_id,
-        })
+        )
     }
 
     /// Resolve remote connection parameters for a remote project.
@@ -55,22 +43,18 @@ impl WindowView {
         Some((config.host.clone(), config.port, token, actual_id))
     }
 
-    /// Build a GitProvider for the given project (local or remote).
+    /// Build a GitProvider for the given project (served by the local daemon).
     pub(super) fn build_git_provider(
         &self,
         project_id: &str,
         cx: &Context<Self>,
     ) -> Option<std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::GitProvider>> {
-        use crate::views::overlays::diff_viewer::provider::{LocalGitProvider, RemoteGitProvider};
+        use crate::views::overlays::diff_viewer::provider::RemoteGitProvider;
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
-        if project.is_remote {
-            let conn_id = project.connection_id.as_ref()?;
-            let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-            Some(std::sync::Arc::new(RemoteGitProvider::new(host, port, token, actual_id)))
-        } else {
-            Some(std::sync::Arc::new(LocalGitProvider::new(project.path.clone())))
-        }
+        let conn_id = project.connection_id.as_ref()?;
+        let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        Some(std::sync::Arc::new(RemoteGitProvider::new(host, port, token, actual_id)))
     }
 
     /// Resolve the focused terminal_id from this window's focus_manager and the
@@ -120,7 +104,7 @@ impl WindowView {
         }
     }
 
-    /// Build a ProjectFs provider for the given project (local or remote).
+    /// Build a ProjectFs provider for the given project (served by the local daemon).
     fn build_project_fs(
         &self,
         project_id: &str,
@@ -128,17 +112,11 @@ impl WindowView {
     ) -> Option<std::sync::Arc<dyn okena_files::project_fs::ProjectFs>> {
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
-        if project.is_remote {
-            let conn_id = project.connection_id.as_ref()?;
-            let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-            Some(std::sync::Arc::new(okena_files::project_fs::RemoteProjectFs::new(
-                host, port, token, actual_id, project.name.clone(),
-            )))
-        } else {
-            Some(std::sync::Arc::new(okena_files::project_fs::LocalProjectFs::new(
-                project.path.clone(),
-            )))
-        }
+        let conn_id = project.connection_id.as_ref()?;
+        let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        Some(std::sync::Arc::new(okena_files::project_fs::RemoteProjectFs::new(
+            host, port, token, actual_id, project.name.clone(),
+        )))
     }
 
     /// Evict cached file viewers for projects that no longer exist.
@@ -165,9 +143,9 @@ impl WindowView {
         });
     }
 
-    /// Build a BlameProvider for the given project (local or remote). Returns
-    /// `None` only when project lookup fails — the provider itself surfaces
-    /// non-git / not-tracked errors at call time.
+    /// Build a BlameProvider for the given project (served by the local daemon).
+    /// Returns `None` only when project lookup fails — the provider itself
+    /// surfaces non-git / not-tracked errors at call time.
     pub(super) fn build_blame_provider(
         &self,
         project_id: &str,
@@ -175,17 +153,11 @@ impl WindowView {
     ) -> Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>> {
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
-        if project.is_remote {
-            let conn_id = project.connection_id.as_ref()?;
-            let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-            Some(std::sync::Arc::new(okena_views_git::blame::RemoteBlameProvider::new(
-                host, port, token, actual_id,
-            )))
-        } else {
-            Some(std::sync::Arc::new(okena_views_git::blame::LocalBlameProvider::new(
-                project.path.clone(),
-            )))
-        }
+        let conn_id = project.connection_id.as_ref()?;
+        let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        Some(std::sync::Arc::new(okena_views_git::blame::RemoteBlameProvider::new(
+            host, port, token, actual_id,
+        )))
     }
 }
 
@@ -243,10 +215,11 @@ impl WindowView {
                 self.switch_terminal_shell(project_id, terminal_id, shell_type.clone(), cx);
             }
             OverlayManagerEvent::AddTerminal { project_id } => {
-                let dispatcher = self.dispatcher_for_project(project_id, cx);
-                dispatcher.dispatch(ActionRequest::CreateTerminal {
-                    project_id: project_id.clone(),
-                }, cx);
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::CreateTerminal {
+                        project_id: project_id.clone(),
+                    }, cx);
+                }
             }
             OverlayManagerEvent::CreateWorktree { project_id, project_path } => {
                 self.overlay_manager.update(cx, |om, cx| {
@@ -292,10 +265,11 @@ impl WindowView {
                 });
             }
             OverlayManagerEvent::ReloadServices { project_id } => {
-                let dispatcher = self.dispatcher_for_project(project_id, cx);
-                dispatcher.dispatch(okena_core::api::ActionRequest::ReloadServices {
-                    project_id: project_id.clone(),
-                }, cx);
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(okena_core::api::ActionRequest::ReloadServices {
+                        project_id: project_id.clone(),
+                    }, cx);
+                }
             }
             OverlayManagerEvent::QuickCreateWorktree { project_id } => {
                 self.request_broker.update(cx, |broker, cx| {
@@ -423,24 +397,26 @@ impl WindowView {
                 cx.notify();
             }
             OverlayManagerEvent::TerminalSplit { project_id, layout_path, direction } => {
-                let dispatcher = self.dispatcher_for_project(project_id, cx);
-                dispatcher.dispatch(ActionRequest::SplitTerminal {
-                    project_id: project_id.clone(),
-                    path: layout_path.clone(),
-                    direction: *direction,
-                }, cx);
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::SplitTerminal {
+                        project_id: project_id.clone(),
+                        path: layout_path.clone(),
+                        direction: *direction,
+                    }, cx);
+                }
             }
             OverlayManagerEvent::TerminalClose { project_id, terminal_id } => {
-                let dispatcher = self.dispatcher_for_project(project_id, cx);
-                dispatcher.dispatch(ActionRequest::CloseTerminal {
-                    project_id: project_id.clone(),
-                    terminal_id: terminal_id.clone(),
-                }, cx);
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::CloseTerminal {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                    }, cx);
+                }
             }
             OverlayManagerEvent::TabClose { project_id, layout_path, tab_index } => {
                 let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
-                if let Some(tid) = terminal_ids.get(*tab_index).cloned() {
-                    let dispatcher = self.dispatcher_for_project(project_id, cx);
+                if let Some(tid) = terminal_ids.get(*tab_index).cloned()
+                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
                     dispatcher.dispatch(ActionRequest::CloseTerminal {
                         project_id: project_id.clone(),
                         terminal_id: tid,
@@ -453,8 +429,8 @@ impl WindowView {
                     .filter(|(i, _)| *i != *tab_index)
                     .map(|(_, id)| id)
                     .collect();
-                if !to_close.is_empty() {
-                    let dispatcher = self.dispatcher_for_project(project_id, cx);
+                if !to_close.is_empty()
+                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
                     dispatcher.dispatch(ActionRequest::CloseTerminals {
                         project_id: project_id.clone(),
                         terminal_ids: to_close,
@@ -464,8 +440,8 @@ impl WindowView {
             OverlayManagerEvent::TabCloseToRight { project_id, layout_path, tab_index } => {
                 let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
                 let to_close: Vec<String> = terminal_ids.into_iter().skip(tab_index + 1).collect();
-                if !to_close.is_empty() {
-                    let dispatcher = self.dispatcher_for_project(project_id, cx);
+                if !to_close.is_empty()
+                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
                     dispatcher.dispatch(ActionRequest::CloseTerminals {
                         project_id: project_id.clone(),
                         terminal_ids: to_close,
