@@ -20,6 +20,8 @@ use gpui::*;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 fn is_default_claude_dir(claude_dir: &Path) -> bool {
     let Some(home) = dirs::home_dir() else {
@@ -354,6 +356,51 @@ impl Okena {
             this.handle_extra_windows_changed(cx);
         })
         .detach();
+
+        // Client-owned window-layout autosave. The GUI (not the daemon) owns its
+        // window PRESENTATION — which windows are open, their OS bounds, and
+        // per-window viewport. The `observe_window_bounds → set_os_bounds` wiring
+        // in `WindowView::new` and the spawn/close mutations all bump
+        // `data_version`; this debounced observer persists the window layout to
+        // window-layout.json (NEVER workspace.json — the daemon is its single
+        // writer). Mirrors the daemon's workspace autosave. Without it, the
+        // captured bounds + extra-window set are lost on exit and only one window
+        // reopens next launch.
+        {
+            let save_pending = Arc::new(AtomicBool::new(false));
+            let last_saved_version = Arc::new(AtomicU64::new(0));
+            let workspace_for_save = workspace.clone();
+            cx.observe(&workspace, move |_this, ws_entity, cx| {
+                let current_version = ws_entity.read(cx).data_version();
+                if current_version == last_saved_version.load(Ordering::Relaxed) {
+                    return;
+                }
+                save_pending.store(true, Ordering::Relaxed);
+
+                let save_pending = save_pending.clone();
+                let last_saved = last_saved_version.clone();
+                let workspace = workspace_for_save.clone();
+                cx.spawn(async move |_, cx| {
+                    smol::Timer::after(Duration::from_millis(500)).await;
+                    if save_pending.swap(false, Ordering::Relaxed) {
+                        let (data, version) = cx.update(|cx| {
+                            let ws = workspace.read(cx);
+                            (ws.data().clone(), ws.data_version())
+                        });
+                        let save_result = smol::unblock(move || {
+                            crate::workspace::persistence::save_window_layout(&data)
+                        })
+                        .await;
+                        match save_result {
+                            Ok(()) => last_saved.store(version, Ordering::Relaxed),
+                            Err(e) => log::error!("Failed to save window layout: {}", e),
+                        }
+                    }
+                })
+                .detach();
+            })
+            .detach();
+        }
 
         // Scrub stale focus across every window's FocusManager on each
         // workspace change. Deleting a project from one window can leave

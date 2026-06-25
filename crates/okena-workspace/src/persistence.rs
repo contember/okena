@@ -445,6 +445,77 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     Ok(())
 }
 
+/// Schema version for the client-owned window-layout file.
+pub const WINDOW_LAYOUT_VERSION: u32 = 1;
+
+/// Process-level mutex serializing window-layout saves (mirrors WORKSPACE_LOCK
+/// — the debounced client save can fire concurrently during a window drag).
+static WINDOW_LAYOUT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Client-owned window layout: the per-window PRESENTATION state (which windows
+/// are open, their OS bounds, per-window viewport) that the desktop GUI persists
+/// locally — separate from the daemon-owned `workspace.json`. Restored on
+/// startup so multiple windows + their bounds survive a relaunch.
+///
+/// The GUI is a thin client of the daemon: the daemon owns project DATA (and is
+/// the single writer of workspace.json), while window geometry/visibility is
+/// client presentation and must not be round-tripped through the daemon — doing
+/// so clobbered multi-window state (see the `quit` handler in src/main.rs).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ClientWindowLayout {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub main_window: WindowState,
+    #[serde(default)]
+    pub extra_windows: Vec<WindowState>,
+}
+
+/// Path to the client-owned window-layout file (alongside settings.json).
+pub fn get_window_layout_path() -> PathBuf {
+    get_config_dir().join("window-layout.json")
+}
+
+/// Load the client window layout, or `None` if absent/unreadable/corrupt (the
+/// app then falls back to a single default-bounds main window).
+pub fn load_window_layout() -> Option<ClientWindowLayout> {
+    let path = get_window_layout_path();
+    let content = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<ClientWindowLayout>(&content) {
+        Ok(layout) => Some(layout),
+        Err(e) => {
+            log::warn!("Failed to parse window-layout.json: {e}; ignoring.");
+            None
+        }
+    }
+}
+
+/// Save the client window layout (main + extra windows) atomically (tmp + fsync
+/// + rename). Extracts only the presentation state from `data`; never touches
+/// workspace.json. Best-effort — a failure just means stale window restore.
+pub fn save_window_layout(data: &WorkspaceData) -> Result<()> {
+    let _guard = WINDOW_LAYOUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let layout = ClientWindowLayout {
+        version: WINDOW_LAYOUT_VERSION,
+        main_window: data.main_window.clone(),
+        extra_windows: data.extra_windows.clone(),
+    };
+    let path = get_window_layout_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&layout)?;
+    let tmp_path = path.with_extension("json.tmp");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
+
 /// Pre-deserialization JSON migration: fold legacy v0/v1 fields into
 /// `main_window` before the typed parse drops them.
 ///
@@ -661,6 +732,37 @@ pub fn default_workspace() -> WorkspaceData {
 mod tests {
     use super::*;
     use crate::state::{FolderData, SplitDirection};
+
+    #[test]
+    fn client_window_layout_round_trips() {
+        let mut extra = WindowState::default();
+        extra.hidden_project_ids.insert("remote:local-daemon:p1".to_string());
+        extra.os_bounds = Some(crate::state::WindowBounds {
+            origin_x: 100.0,
+            origin_y: 200.0,
+            width: 1280.0,
+            height: 720.0,
+        });
+        let layout = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: WindowState::default(),
+            extra_windows: vec![extra],
+        };
+        let json = serde_json::to_string(&layout).unwrap();
+        let parsed: ClientWindowLayout = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.version, WINDOW_LAYOUT_VERSION);
+        assert_eq!(parsed.extra_windows.len(), 1);
+        let b = parsed.extra_windows[0].os_bounds.unwrap();
+        assert_eq!(b.width, 1280.0);
+        assert!(parsed.extra_windows[0]
+            .hidden_project_ids
+            .contains("remote:local-daemon:p1"));
+
+        // An empty/absent file shape parses to defaults.
+        let empty: ClientWindowLayout = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.version, 0);
+        assert!(empty.extra_windows.is_empty());
+    }
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
