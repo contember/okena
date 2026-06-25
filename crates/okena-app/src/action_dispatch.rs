@@ -551,6 +551,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             worktree_path,
             branch,
         },
+        ActionRequest::RerunHook {
+            project_id,
+            terminal_id,
+        } => ActionRequest::RerunHook {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+        },
         ActionRequest::GitCommitGraph { project_id, count, branch } => ActionRequest::GitCommitGraph {
             project_id: s(&project_id),
             count,

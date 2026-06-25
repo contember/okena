@@ -112,6 +112,9 @@ pub fn execute_action(
         ActionRequest::AddDiscoveredWorktree { parent_project_id, worktree_path, branch } => {
             project::add_discovered_worktree(ws, window_id, parent_project_id, worktree_path, branch, backend, terminals, settings, cx)
         }
+        ActionRequest::RerunHook { project_id, terminal_id } => {
+            project::rerun_hook(ws, project_id, terminal_id, backend, terminals, cx)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             terminal::read_content(ws, terminal_id, backend, terminals)
         }

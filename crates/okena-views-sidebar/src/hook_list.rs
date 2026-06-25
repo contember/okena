@@ -1,5 +1,6 @@
 //! Hook terminal list rendering for the sidebar
 
+use okena_core::api::ActionRequest;
 use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_md;
 use okena_workspace::state::HookTerminalStatus;
@@ -128,8 +129,6 @@ impl Sidebar {
                     .when(!is_running, {
                         let terminal_id = terminal_id.clone();
                         let project_id = project_id.clone();
-                        let command = hook.command.clone();
-                        let cwd = hook.cwd.clone();
                         |el| el.child(
                             icon_button(
                                 ElementId::Name(format!("hook-rerun-{}", terminal_id).into()),
@@ -139,13 +138,7 @@ impl Sidebar {
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    this.rerun_hook_terminal(
-                                        &project_id,
-                                        &terminal_id,
-                                        &command,
-                                        &cwd,
-                                        cx,
-                                    );
+                                    this.rerun_hook_terminal(&project_id, &terminal_id, cx);
                                 })),
                         )
                     })
@@ -176,56 +169,18 @@ impl Sidebar {
             )
     }
 
-    /// Rerun a hook by killing the old PTY and creating a new one with the same command.
-    pub fn rerun_hook_terminal(
-        &self,
-        project_id: &str,
-        terminal_id: &str,
-        command: &str,
-        cwd: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(runner) = cx.try_global::<okena_workspace::hooks::HookRunner>().cloned() else {
-            log::warn!("Cannot rerun hook: no HookRunner available");
-            return;
-        };
-
-        // Kill old PTY
-        runner.backend.kill(terminal_id);
-
-        // Create new PTY with a live shell, then type the command into it
-        match runner.backend.create_terminal(cwd, None) {
-            Ok(new_terminal_id) => {
-                let transport = runner.backend.transport();
-                let terminal = std::sync::Arc::new(okena_terminal::terminal::Terminal::new(
-                    new_terminal_id.clone(),
-                    okena_terminal::terminal::TerminalSize::default(),
-                    transport.clone(),
-                    cwd.to_string(),
-                ));
-
-                // Replace in TerminalsRegistry: remove old, insert new (single lock)
-                let terminals = self.terminals.clone();
-                {
-                    let mut guard = terminals.lock();
-                    guard.remove(terminal_id);
-                    guard.insert(new_terminal_id.clone(), terminal);
-                }
-
-                // Update workspace: swap terminal ID in hook_terminals and layout
-                self.workspace.update(cx, |ws, cx| {
-                    ws.swap_hook_terminal_id(project_id, terminal_id, &new_terminal_id, cx);
-                });
-
-                // Type the command into the new shell
-                let cmd_with_newline = format!("{}\n", command);
-                transport.send_input(&new_terminal_id, cmd_with_newline.as_bytes());
-
-                log::info!("Hook rerun: replaced {} with {}", terminal_id, new_terminal_id);
-            }
-            Err(e) => {
-                log::error!("Failed to rerun hook terminal: {}", e);
-            }
-        }
+    /// Rerun a hook terminal: dispatch to the daemon, which kills the old PTY,
+    /// spawns a fresh shell at the hook's cwd, and re-types the stored command.
+    /// The daemon owns the hook terminal's command + cwd, so the action carries
+    /// only the ids.
+    pub fn rerun_hook_terminal(&self, project_id: &str, terminal_id: &str, cx: &mut Context<Self>) {
+        self.dispatch_action_for_project(
+            project_id,
+            ActionRequest::RerunHook {
+                project_id: project_id.to_string(),
+                terminal_id: terminal_id.to_string(),
+            },
+            cx,
+        );
     }
 }
