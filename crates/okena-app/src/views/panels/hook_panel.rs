@@ -46,6 +46,9 @@ pub struct HookPanel {
     panel_height: f32,
     /// Number of hook terminals last observed (for auto-open on new hooks).
     last_hook_count: usize,
+    /// Action dispatcher for routing hook actions (e.g. rerun) to the daemon.
+    /// Synced from the owning `ProjectColumn` (mirrors the ServicePanel wiring).
+    action_dispatcher: Option<ActionDispatcher>,
 }
 
 impl HookPanel {
@@ -116,7 +119,13 @@ impl HookPanel {
             terminal_pane: None,
             panel_height: initial_height,
             last_hook_count: initial_count,
+            action_dispatcher: None,
         }
+    }
+
+    /// Set the action dispatcher used to route hook actions to the daemon.
+    pub fn set_action_dispatcher(&mut self, dispatcher: Option<ActionDispatcher>) {
+        self.action_dispatcher = dispatcher;
     }
 
     /// Whether the hook panel is currently open.
@@ -214,50 +223,21 @@ impl HookPanel {
             .unwrap_or_default()
     }
 
-    /// Rerun a hook by killing the old PTY and creating a new one.
-    fn rerun_hook(&mut self, terminal_id: &str, command: &str, cwd: &str, cx: &mut Context<Self>) {
-        let Some(runner) = cx.try_global::<crate::workspace::hooks::HookRunner>().cloned() else {
-            log::warn!("Cannot rerun hook: no HookRunner available");
-            return;
-        };
-
-        // Kill old PTY
-        runner.backend.kill(terminal_id);
-
-        match runner.backend.create_terminal(cwd, None) {
-            Ok(new_terminal_id) => {
-                let transport = runner.backend.transport();
-                let terminal = Arc::new(okena_terminal::terminal::Terminal::new(
-                    new_terminal_id.clone(),
-                    okena_terminal::terminal::TerminalSize::default(),
-                    transport.clone(),
-                    cwd.to_string(),
-                ));
-
-                // Replace in TerminalsRegistry
-                {
-                    let mut guard = self.terminals.lock();
-                    guard.remove(terminal_id);
-                    guard.insert(new_terminal_id.clone(), terminal);
-                }
-
-                // Swap terminal ID in workspace
-                self.workspace.update(cx, |ws, cx| {
-                    ws.swap_hook_terminal_id(&self.project_id, terminal_id, &new_terminal_id, cx);
-                });
-
-                // Type the command into the new shell
-                let cmd_with_newline = format!("{}\n", command);
-                transport.send_input(&new_terminal_id, cmd_with_newline.as_bytes());
-
-                // Switch the panel to the new terminal
-                self.show_hook(&new_terminal_id, cx);
-
-                log::info!("Hook rerun: replaced {} with {}", terminal_id, new_terminal_id);
-            }
-            Err(e) => {
-                log::error!("Failed to rerun hook terminal: {}", e);
-            }
+    /// Rerun a hook terminal: dispatch to the daemon, which kills the old PTY,
+    /// spawns a fresh shell at the hook's cwd, and re-types the stored command.
+    /// The daemon owns the hook's command + cwd, so the action carries only the
+    /// ids; the swapped terminal id arrives via the next state snapshot.
+    fn rerun_hook(&mut self, terminal_id: &str, cx: &mut Context<Self>) {
+        if let Some(ref dispatcher) = self.action_dispatcher {
+            dispatcher.dispatch(
+                okena_core::api::ActionRequest::RerunHook {
+                    project_id: self.project_id.clone(),
+                    terminal_id: terminal_id.to_string(),
+                },
+                cx,
+            );
+        } else {
+            log::warn!("Cannot rerun hook: no action dispatcher wired");
         }
     }
 
@@ -559,8 +539,6 @@ impl HookPanel {
                     // Rerun button (always visible, dimmed when running)
                     let entity_rerun = entity.clone();
                     let tid_rerun = tid.clone();
-                    let command = entry.command.clone();
-                    let cwd = entry.cwd.clone();
                     let mut rerun_btn = icon_button_sized(
                         "hook-panel-rerun", "icons/refresh.svg", 22.0, 12.0, t,
                     );
@@ -574,7 +552,7 @@ impl HookPanel {
                                 cx.stop_propagation();
                                 if let Some(e) = entity_rerun.upgrade() {
                                     e.update(cx, |this, cx| {
-                                        this.rerun_hook(&tid_rerun, &command, &cwd, cx);
+                                        this.rerun_hook(&tid_rerun, cx);
                                     });
                                 }
                             });

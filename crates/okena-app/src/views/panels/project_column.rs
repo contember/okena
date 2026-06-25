@@ -192,10 +192,21 @@ impl ProjectColumn {
         });
     }
 
+    /// Sync the action dispatcher to the hook panel entity (mirrors the service
+    /// panel sync — the hook panel needs it to dispatch RerunHook to the daemon).
+    fn sync_hook_panel_dispatcher(&self, cx: &mut Context<Self>) {
+        let dispatcher = self.action_dispatcher.clone();
+        self.hook_panel.update(cx, |hp, _cx| {
+            hp.set_action_dispatcher(dispatcher);
+        });
+    }
+
     /// Set the service manager and observe it for changes.
     pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
-        // Sync dispatcher to service panel (may have been set before panel was created)
+        // Sync dispatcher to service + hook panels (may have been set before the
+        // panels were created).
         self.sync_service_panel_dispatcher(cx);
+        self.sync_hook_panel_dispatcher(cx);
         self.service_panel.update(cx, |sp, cx| {
             sp.set_service_manager(manager, cx);
         });
@@ -258,8 +269,11 @@ impl ProjectColumn {
 
     /// Observe workspace for remote service state changes (used for remote project columns).
     pub fn observe_remote_services(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) {
-        // Sync dispatcher to service panel (may have been set before panel was created)
+        // Sync dispatcher to service + hook panels (may have been set before the
+        // panels were created). This is the sync point for daemon-client columns,
+        // which is how the hook panel gets its dispatcher to route RerunHook.
         self.sync_service_panel_dispatcher(cx);
+        self.sync_hook_panel_dispatcher(cx);
         self.service_panel.update(cx, |sp, cx| {
             sp.observe_remote_services(workspace, cx);
         });

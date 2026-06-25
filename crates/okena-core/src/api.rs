@@ -557,6 +557,13 @@ pub enum ActionRequest {
         worktree_path: String,
         branch: String,
     },
+    /// Rerun a lifecycle-hook terminal. The daemon kills the old PTY, spawns a
+    /// fresh shell at the hook's cwd, and re-types the stored command — command
+    /// + cwd are read daemon-side from the hook terminal entry.
+    RerunHook {
+        project_id: String,
+        terminal_id: String,
+    },
     ListFiles {
         project_id: String,
         #[serde(default)]
@@ -1188,6 +1195,10 @@ mod tests {
                 parent_project_id: "p1".into(),
                 worktree_path: "/home/user/projects/my-project-wt".into(),
                 branch: "feature/x".into(),
+            },
+            ActionRequest::RerunHook {
+                project_id: "p1".into(),
+                terminal_id: "h1".into(),
             },
             ActionRequest::CreateFolder {
                 name: "My Folder".into(),

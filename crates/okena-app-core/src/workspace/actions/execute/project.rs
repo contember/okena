@@ -8,11 +8,13 @@
 use super::{ActionResult, find_first_terminal_id, spawn_uninitialized_terminals};
 use crate::workspace::persistence::AppSettings;
 use okena_terminal::backend::TerminalBackend;
+use okena_terminal::terminal::{Terminal, TerminalSize};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
 use okena_workspace::context::WorkspaceCx;
 use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
+use std::sync::Arc;
 
 pub(super) fn add_project(
     ws: &mut Workspace,
@@ -321,6 +323,49 @@ pub(super) fn add_discovered_worktree(
         }))),
         err => err,
     }
+}
+
+/// Rerun a lifecycle-hook terminal: kill the old PTY, spawn a fresh shell at the
+/// same cwd, swap the id in state (status back to Running), and type the stored
+/// command into the new shell. The daemon is authoritative for the hook's
+/// command + cwd (read from `hook_terminals`), so the action only carries the
+/// project + terminal ids. Mirrors the old in-process `rerun_hook` GUI path.
+pub(super) fn rerun_hook(
+    ws: &mut Workspace,
+    project_id: String,
+    terminal_id: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let (command, cwd) = match ws
+        .project(&project_id)
+        .and_then(|p| p.hook_terminals.get(&terminal_id))
+    {
+        Some(e) => (e.command.clone(), e.cwd.clone()),
+        None => return ActionResult::Err(format!("hook terminal not found: {}", terminal_id)),
+    };
+    backend.kill(&terminal_id);
+    let new_id = match backend.create_terminal(&cwd, None) {
+        Ok(id) => id,
+        Err(e) => return ActionResult::Err(format!("failed to spawn hook terminal: {}", e)),
+    };
+    let transport = backend.transport();
+    let terminal = Arc::new(Terminal::new(
+        new_id.clone(),
+        TerminalSize::default(),
+        transport.clone(),
+        cwd.clone(),
+    ));
+    {
+        let mut guard = terminals.lock();
+        guard.remove(&terminal_id);
+        guard.insert(new_id.clone(), terminal);
+    }
+    ws.swap_hook_terminal_id(&project_id, &terminal_id, &new_id, cx);
+    let cmd_with_newline = format!("{}\n", command);
+    transport.send_input(&new_id, cmd_with_newline.as_bytes());
+    ActionResult::Ok(Some(serde_json::json!({ "terminal_id": new_id })))
 }
 
 #[cfg(all(test, feature = "gpui"))]
