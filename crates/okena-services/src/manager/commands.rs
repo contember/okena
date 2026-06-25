@@ -52,7 +52,14 @@ impl ServiceManager {
                     let result = cx
                         .spawn_blocking(async move {
                             let mut cmd = okena_core::process::command("docker");
-                            cmd.args(["compose", "-f", &compose_file, "start", &name])
+                            // `up -d`, not `start`: `start` only (re)starts an
+                            // already-created container and does NOT resolve
+                            // `depends_on`, so a service like contember-engine
+                            // fails with "missing dependency postgres" when its
+                            // deps aren't already up. `up -d <svc>` creates +
+                            // starts the service and its dependency graph
+                            // (postgres first); it's idempotent for shared deps.
+                            cmd.args(["compose", "-f", &compose_file, "up", "-d", &name])
                                 .current_dir(&path);
                             okena_core::process::safe_output(&mut cmd)
                         })
