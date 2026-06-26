@@ -185,21 +185,33 @@ impl FileViewer {
             return;
         }
 
-        if new_path.exists() {
+        // Remote projects have no real local root: the tree node's `abs_path`
+        // is the fake `<project_id>/<relative_path>`. Recover the relative path
+        // by stripping the `project_id()` prefix (same convention as
+        // `render_context_menu` below).
+        let rel_root = PathBuf::from(self.project_fs.project_id());
+        let old_rel = old_path
+            .strip_prefix(&rel_root)
+            .unwrap_or(old_path.as_path())
+            .to_string_lossy()
+            .to_string();
+        let new_rel = new_path
+            .strip_prefix(&rel_root)
+            .unwrap_or(new_path.as_path())
+            .to_string_lossy()
+            .to_string();
+
+        if self.project_fs.rename_file(&old_rel, &new_name).is_err() {
             cx.notify();
             return;
         }
 
-        if let Err(_e) = std::fs::rename(&old_path, &new_path) {
-            cx.notify();
-            return;
-        }
-
-        let project_root = self.project_fs.project_root();
-        let old_rel = relative_for(&project_root, &old_path);
-        let new_rel = relative_for(&project_root, &new_path);
-
-        self.update_tabs_after_rename(&old_path, &new_path, old_rel.as_deref(), new_rel.as_deref());
+        self.update_tabs_after_rename(
+            &old_path,
+            &new_path,
+            Some(old_rel.as_str()),
+            Some(new_rel.as_str()),
+        );
         self.update_expanded_after_rename(&old_path, &new_path);
 
         self.refresh_file_tree_async(cx);
@@ -284,9 +296,9 @@ impl FileViewer {
     }
 
     fn update_expanded_after_rename(&mut self, old_path: &Path, new_path: &Path) {
-        let Some(project_path) = self.project_fs.project_root() else {
-            return;
-        };
+        // Remote projects have no local root; the fake tree paths are rooted at
+        // `project_id()`, so strip that prefix to recover folder-relative paths.
+        let project_path = PathBuf::from(self.project_fs.project_id());
         let old_rel = match old_path.strip_prefix(&project_path) {
             Ok(p) => p.to_string_lossy().to_string(),
             Err(_) => return,
@@ -332,12 +344,20 @@ impl FileViewer {
             return;
         };
 
-        let result = match &confirm.target {
-            TreeNodeTarget::File { path, .. } => std::fs::remove_file(path),
-            TreeNodeTarget::Folder { abs_path, .. } => std::fs::remove_dir_all(abs_path),
-        };
+        // Recover the target's project-relative path by stripping the
+        // `project_id()` prefix from the fake tree path (same convention as
+        // `render_context_menu`). The daemon's DeleteFile handles both files
+        // and folders.
+        let rel_root = PathBuf::from(self.project_fs.project_id());
+        let rel = confirm
+            .target
+            .abs_path()
+            .strip_prefix(&rel_root)
+            .unwrap_or(confirm.target.abs_path())
+            .to_string_lossy()
+            .to_string();
 
-        if let Err(e) = result {
+        if let Err(e) = self.project_fs.delete_file(&rel) {
             confirm.error_message = Some(format!("Failed to delete: {}", e));
             self.delete_confirm = Some(confirm);
             cx.notify();
@@ -348,8 +368,11 @@ impl FileViewer {
 
         // Invalidate just the parent directory so we don't re-fetch the whole
         // expanded tree for a single deletion.
-        let parent_rel = parent_relative_of_target(&confirm.target, &self.project_fs.project_root())
-            .unwrap_or_default();
+        let parent_rel = parent_relative_of_target(
+            &confirm.target,
+            &Some(PathBuf::from(self.project_fs.project_id())),
+        )
+        .unwrap_or_default();
         self.invalidate_directory(&parent_rel, cx);
         cx.notify();
     }
