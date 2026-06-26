@@ -201,34 +201,6 @@ impl Okena {
         }
     }
 
-    /// Drain the one-shot command-finished (OSC 133 ;D) edge for each dirty
-    /// terminal and stamp activity on the owning project. Called from the PTY
-    /// event loop alongside notification draining so a finished command floats
-    /// its project up in the activity-sorted sidebar — even with no bell.
-    pub(super) fn process_command_finished_activity(
-        &mut self,
-        dirty_terminal_ids: &[String],
-        cx: &mut Context<Self>,
-    ) {
-        // Drain edges first (cheap atomic swap); collect the terminals that
-        // actually saw a command finish. Almost every batch drains nothing.
-        let finished: Vec<String> = {
-            let reg = self.terminals.lock();
-            dirty_terminal_ids
-                .iter()
-                .filter(|tid| {
-                    reg.get(*tid)
-                        .is_some_and(|t| t.take_pending_command_finished())
-                })
-                .cloned()
-                .collect()
-        };
-        if finished.is_empty() {
-            return;
-        }
-        self.bump_activity_for_terminals(finished.iter().map(|s| s.as_str()), cx);
-    }
-
     /// Answer (or silently deny) OSC 52 clipboard *read* requests
     /// (`OSC 52 ; c ; ?`) queued by terminals that produced output this batch.
     /// Runs here, in the PTY event loop, because this is where the opt-in

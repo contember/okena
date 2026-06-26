@@ -10,38 +10,13 @@ pub use detached_overlays::open_detached_overlay;
 
 use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
 use crate::services::manager::ServiceManager;
-use crate::settings::GlobalSettings;
-use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::window::{TerminalsRegistry, WindowView};
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
-use async_channel::Receiver;
 use gpui::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-
-/// Push the resolved Claude config directory into the PTY manager as
-/// CLAUDE_CONFIG_DIR so `claude` invocations inside Okena terminals read the
-/// per-profile account.
-///
-/// Non-default dirs get an unconditional override for multi-profile users
-/// (otherwise account isolation would silently break for anyone with
-/// `CLAUDE_CONFIG_DIR` exported in their shell rc). The default `~/.claude` is
-/// actively *unset* instead so Claude Code uses its canonical Keychain service
-/// rather than creating a suffixed duplicate for the same path.
-///
-/// The resolution + override logic is the gpui-free
-/// [`okena_workspace::claude_env`] shared with the headless daemon, fed the same
-/// `AppSettings` the gpui `ExtensionSettingsStore` getter reads for the
-/// `claude-code` namespace.
-fn sync_claude_pty_env(pty_manager: &Arc<PtyManager>, cx: &App) {
-    let extra_env = {
-        let state = crate::settings::settings_entity(cx).read(cx);
-        okena_workspace::claude_env::claude_pty_env_for_settings(state.get())
-    };
-    pty_manager.set_extra_env(extra_env);
-}
 
 /// Set up an observer that loads/unloads service configs when projects change.
 /// Handles deferred worktrees by skipping projects whose directory doesn't exist yet.
@@ -127,7 +102,6 @@ pub struct Okena {
     /// remote-bridge boundary (PRD cri 13).
     pub(super) extra_window_handles: HashMap<WindowId, AnyWindowHandle>,
     pub(crate) workspace: Entity<Workspace>,
-    pub(crate) pty_manager: Arc<PtyManager>,
     pub(crate) terminals: TerminalsRegistry,
     /// Track which detached windows we've already opened
     pub(crate) opened_detached_windows: HashSet<String>,
@@ -147,8 +121,6 @@ pub struct Okena {
 impl Okena {
     pub fn new(
         workspace_data: WorkspaceData,
-        pty_manager: Arc<PtyManager>,
-        pty_events: Receiver<PtyEvent>,
         local_daemon: okena_remote_server::local::EnsuredDaemon,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -234,25 +206,12 @@ impl Okena {
             extra_windows: HashMap::new(),
             extra_window_handles: HashMap::new(),
             workspace: workspace.clone(),
-            pty_manager,
             terminals,
             opened_detached_windows: HashSet::new(),
             remote_manager: remote_manager.clone(),
             notification_jump_tx,
             spawned_daemon,
         };
-
-        // Propagate claude config dir to spawned PTYs so `claude` CLI invocations inside
-        // Okena terminals pick the same install as the status-bar widget.
-        sync_claude_pty_env(&manager.pty_manager, cx);
-        let settings_entity = cx.global::<GlobalSettings>().0.clone();
-        cx.observe(&settings_entity, move |this, _settings, cx| {
-            sync_claude_pty_env(&this.pty_manager, cx);
-        })
-        .detach();
-
-        // Start PTY event loop (centralized for all windows)
-        manager.start_pty_event_loop(pty_events, cx);
 
         // Route clicked desktop notifications back to their originating pane.
         manager.start_notification_click_loop(notification_jump_rx, cx);
@@ -292,7 +251,6 @@ impl Okena {
             if !kills.is_empty() {
                 let mut reg = this.terminals.lock();
                 for tid in &kills {
-                    this.pty_manager.kill(tid);
                     reg.remove(tid);
                 }
             }
@@ -310,7 +268,6 @@ impl Okena {
             if !ids.is_empty() {
                 let mut reg = this.terminals.lock();
                 for tid in &ids {
-                    this.pty_manager.kill(tid);
                     reg.remove(tid);
                 }
             }
@@ -439,482 +396,6 @@ impl Okena {
 
         manager
     }
-
-    /// Centralized PTY event loop - notifies all windows (main and detached)
-    fn start_pty_event_loop(
-        &mut self,
-        pty_events: Receiver<PtyEvent>,
-        cx: &mut Context<Self>,
-    ) {
-        let terminals = self.terminals.clone();
-        let pty_manager = self.pty_manager.clone();
-
-        // Per-turn work budget. A single high-bandwidth terminal (cat hugefile,
-        // `yes`, a runaway build log) can keep this loop draining the channel
-        // forever, starving input/render/resize for ALL terminals (they all
-        // funnel through this one loop on the GPUI thread). Once we've parsed
-        // this many bytes in one drain pass we stop, yield to the executor so
-        // input/render get scheduled, then loop back — the remaining events
-        // stay in the bounded channel and are picked up next turn (nothing is
-        // dropped). 256 KiB is a few render frames' worth of throughput while
-        // staying small enough to keep the UI responsive under sustained load.
-        const MAX_BYTES_PER_TURN: usize = 256 * 1024;
-
-        cx.spawn(async move |this: WeakEntity<Okena>, cx| {
-            loop {
-                let event = match pty_events.recv().await {
-                    Ok(event) => event,
-                    Err(_) => break,
-                };
-
-                let _slow = okena_core::timing::SlowGuard::new("Okena::pty_event_batch");
-
-                // Collect exit events and track which terminals received data
-                let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
-                let mut dirty_terminal_ids: Vec<String> = Vec::new();
-
-                // Bytes parsed so far in this drain pass (across batched events).
-                let mut bytes_this_turn: usize = 0;
-
-                // Process first event (broadcasting handled by PtyOutputSink in reader threads)
-                match &event {
-                    PtyEvent::Data { terminal_id, data } => {
-                        // Hold the registry lock only for the HashMap lookup —
-                        // clone the Arc<Terminal> out and drop the guard before
-                        // the (potentially long) ANSI parse, so send_input /
-                        // resize / kill on OTHER terminals don't block behind it.
-                        let term = terminals.lock().get(terminal_id).cloned();
-                        if let Some(term) = term {
-                            bytes_this_turn += data.len();
-                            term.process_output(data);
-                        }
-                        dirty_terminal_ids.push(terminal_id.clone());
-                    }
-                    PtyEvent::Exit { terminal_id, exit_code } => {
-                        // Clean up the PtyHandle (reader/writer threads) but don't
-                        // remove the UI Terminal yet — service manager may keep it
-                        // so users can see crash output.
-                        pty_manager.cleanup_exited(terminal_id);
-                        exit_events.push((terminal_id.clone(), *exit_code));
-                    }
-                }
-
-                // Drain any additional pending events (batch processing), but
-                // stop once we exceed the per-turn byte budget so we yield back
-                // to the executor instead of monopolizing the GPUI thread.
-                while bytes_this_turn < MAX_BYTES_PER_TURN {
-                    let event = match pty_events.try_recv() {
-                        Ok(event) => event,
-                        Err(_) => break,
-                    };
-                    match &event {
-                        PtyEvent::Data { terminal_id, data } => {
-                            // Clone the Arc out and drop the registry guard
-                            // before parsing (see note above).
-                            let term = terminals.lock().get(terminal_id).cloned();
-                            if let Some(term) = term {
-                                bytes_this_turn += data.len();
-                                term.process_output(data);
-                            }
-                            dirty_terminal_ids.push(terminal_id.clone());
-                        }
-                        PtyEvent::Exit { terminal_id, exit_code } => {
-                            pty_manager.cleanup_exited(terminal_id);
-                            exit_events.push((terminal_id.clone(), *exit_code));
-                        }
-                    }
-                }
-
-                // Notify main window after processing the batch
-                let _ = this.update(cx, |this, cx| {
-                    if !exit_events.is_empty() {
-                        // Two-phase hook exit handling:
-                        // Phase 1 (here): notify_exit unblocks any sync hook threads
-                        // waiting on a PTY terminal via mpsc::Receiver. This MUST happen
-                        // before handle_hook_terminal_exits (phase 2) which updates
-                        // workspace status and may trigger project removal.
-                        if let Some(monitor) = crate::workspace::hooks::try_monitor(cx) {
-                            for (terminal_id, exit_code) in &exit_events {
-                                monitor.notify_exit(terminal_id, *exit_code);
-                            }
-                        }
-
-                        // Services run in the daemon, not in this thin client, so
-                        // no local PTY exit is ever a service terminal.
-                        let service_tids: std::collections::HashSet<String> =
-                            std::collections::HashSet::new();
-
-                        // Handle hook terminal exits (status updates, pending close, cleanup)
-                        let hook_tids = this.handle_hook_terminal_exits(&exit_events, &service_tids, cx);
-
-                        // Fire terminal.on_close hook for user terminals (not service, not hook)
-                        let terminal_close_infos: Vec<_> = {
-                            let global_on_close = crate::settings::settings(cx).hooks.terminal.on_close.is_some();
-                            let ws = this.workspace.read(cx);
-                            exit_events.iter()
-                                .filter(|(tid, _)| !service_tids.contains(tid) && !hook_tids.contains(tid))
-                                .filter_map(|(tid, exit_code)| {
-                                    ws.find_project_for_terminal(tid).and_then(|p| {
-                                        let parent_on_close = p.worktree_info.as_ref()
-                                            .and_then(|wt| ws.project(&wt.parent_project_id))
-                                            .and_then(|pp| pp.hooks.terminal.on_close.as_ref())
-                                            .is_some();
-                                        if global_on_close || p.hooks.terminal.on_close.is_some() || parent_on_close {
-                                            let parent_hooks = p.worktree_info.as_ref()
-                                                .and_then(|wt| ws.project(&wt.parent_project_id))
-                                                .map(|pp| pp.hooks.clone());
-                                            let terminal_name = p.terminal_names.get(tid).cloned();
-                                            let is_worktree = p.worktree_info.is_some();
-                                            let folder = ws.folder_for_project_or_parent(&p.id);
-                                            let fid = folder.map(|f| f.id.clone());
-                                            let fname = folder.map(|f| f.name.clone());
-                                            Some((p.hooks.clone(), parent_hooks, p.id.clone(), p.name.clone(), p.path.clone(), tid.clone(), terminal_name, is_worktree, *exit_code, fid, fname))
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                })
-                                .collect()
-                        };
-                        for (project_hooks, parent_hooks, project_id, project_name, project_path, terminal_id, terminal_name, is_worktree, exit_code, folder_id, folder_name) in terminal_close_infos {
-                            crate::workspace::hooks::fire_terminal_on_close(
-                                &project_hooks, parent_hooks.as_ref(), &project_id, &project_name,
-                                &project_path, &terminal_id, terminal_name.as_deref(), is_worktree, exit_code,
-                                folder_id.as_deref(), folder_name.as_deref(), &crate::settings::settings(cx).hooks, cx,
-                            );
-                        }
-
-                        // Kill session backends and remove UI Terminals for non-service, non-hook terminals.
-                        // This is critical for dtach: the PTY exit only means the client disconnected,
-                        // but the dtach daemon keeps running. kill() ensures kill_session() is called
-                        // to SIGTERM the daemon and remove the socket file.
-                        {
-                            let mut reg = this.terminals.lock();
-                            for (terminal_id, _) in &exit_events {
-                                if !service_tids.contains(terminal_id) && !hook_tids.contains(terminal_id) {
-                                    this.pty_manager.kill(terminal_id);
-                                    reg.remove(terminal_id);
-                                }
-                            }
-                        }
-
-                        // If any exited terminal was mid soft-close, its undo toast
-                        // is now useless (the PTY is gone) and the pending record
-                        // would otherwise linger until the grace timer fired a
-                        // redundant kill — drop both now.
-                        let stale_toasts: Vec<String> = this.workspace.update(cx, |ws, _| {
-                            exit_events
-                                .iter()
-                                .filter_map(|(tid, _)| ws.cancel_pending_close(tid))
-                                .collect()
-                        });
-                        for toast_id in &stale_toasts {
-                            crate::workspace::toast::ToastManager::dismiss(toast_id, cx);
-                        }
-
-                        // If an exited terminal had just been *restored* by a
-                        // soft-close undo that raced this exit, its PTY is dead
-                        // now — the registry-based `alive` check let undo bring
-                        // back a doomed pane. Tear it back out so it doesn't
-                        // linger (and respawn a fresh shell on next render).
-                        this.workspace.update(cx, |ws, cx| {
-                            for (tid, _) in &exit_events {
-                                ws.reap_restored_close(tid, cx);
-                            }
-                        });
-                    }
-                    // Notify dirty terminal content panes directly (batched in one update).
-                    // All notifications happen in the same GPUI update → single layout pass.
-                    // Each terminal_id may be rendered by multiple panes (one per window
-                    // whose visible set includes its host project), so iterate the vec
-                    // and prune dead weaks lazily.
-                    if !dirty_terminal_ids.is_empty() {
-                        dirty_terminal_ids.dedup();
-                        let mut registry = crate::views::window::content_pane_registry().lock();
-                        let mut any_local_pane = false;
-                        for tid in &dirty_terminal_ids {
-                            let now_empty = if let Some(weaks) = registry.get_mut(tid) {
-                                if crate::views::window::notify_pane_weaks(weaks, cx) {
-                                    any_local_pane = true;
-                                }
-                                weaks.is_empty()
-                            } else {
-                                false
-                            };
-                            if now_empty {
-                                registry.remove(tid);
-                            }
-                        }
-                        drop(registry);
-                        // Remote-only terminals have no local content pane. Without
-                        // cx.notify(), GPUI's draw cycle won't run and the event loop
-                        // effectively stalls. Notify main_window to keep GPUI responsive
-                        // for bridge commands, state queries, and other remote work.
-                        if !any_local_pane {
-                            this.main_window.update(cx, |_, cx| cx.notify());
-                        }
-                    }
-
-                    // Check if any hook terminal reported its exit code via
-                    // OSC title (__okena_hook_exit:<code>). This happens when
-                    // keep_alive hooks finish their command but the PTY stays
-                    // alive as an interactive shell.
-                    if !dirty_terminal_ids.is_empty() {
-                        let terminals_guard = this.terminals.lock();
-                        let ws = this.workspace.read(cx);
-                        let mut status_updates: Vec<(String, crate::workspace::state::HookTerminalStatus)> = Vec::new();
-                        for tid in &dirty_terminal_ids {
-                            if ws.is_hook_terminal(tid).is_none() {
-                                continue;
-                            }
-                            if let Some(terminal) = terminals_guard.get(tid)
-                                && let Some(title) = terminal.title()
-                                    && let Some(code_str) = title.strip_prefix("__okena_hook_exit:") {
-                                        let exit_code = code_str.parse::<i32>().unwrap_or(-1);
-                                        let status = if exit_code == 0 {
-                                            crate::workspace::state::HookTerminalStatus::Succeeded
-                                        } else {
-                                            crate::workspace::state::HookTerminalStatus::Failed { exit_code }
-                                        };
-                                        status_updates.push((tid.clone(), status));
-                                    }
-                        }
-                        drop(terminals_guard);
-                        if !status_updates.is_empty() {
-                            this.workspace.update(cx, |ws, cx| {
-                                for (tid, status) in status_updates {
-                                    ws.update_hook_terminal_status(&tid, status, cx);
-                                }
-                            });
-                        }
-                    }
-
-                    // Drain OSC 9 / OSC 777 notifications for terminals that
-                    // produced output this batch and raise OS notifications
-                    // for background panes. Runs here (not in a pane's render)
-                    // so background tabs and detached windows are covered too.
-                    if !dirty_terminal_ids.is_empty() {
-                        this.process_terminal_notifications(&dirty_terminal_ids, cx);
-                        // Stamp project activity for any command that finished
-                        // this batch (OSC 133 ;D), independent of bell/OSC alerts.
-                        this.process_command_finished_activity(&dirty_terminal_ids, cx);
-                        // Answer (or, when disabled, drop) OSC 52 clipboard
-                        // read requests queued by these terminals.
-                        this.process_clipboard_reads(&dirty_terminal_ids, cx);
-                    }
-
-                    if !exit_events.is_empty() {
-                        // A terminal exited — every window rendering its
-                        // project column needs to re-render so the layout
-                        // reflects the removal. Fan out to all live windows.
-                        this.main_window.update(cx, |_, cx| cx.notify());
-                        for view in this.extra_windows.values() {
-                            view.update(cx, |_, cx| cx.notify());
-                        }
-                    }
-                });
-
-                // Cooperatively yield to the executor between drain passes so
-                // input, rendering, resize, and other terminals' parsing get
-                // scheduled even under a sustained high-bandwidth stream. The
-                // next recv().await picks up any events left in the channel, so
-                // the loop always makes progress and nothing is dropped.
-                smol::future::yield_now().await;
-            }
-        })
-        .detach();
-    }
-
-    // ── Hook terminal exit handling ──────────────────────────────────────
-
-    /// Process hook terminal exit events: update status, resolve pending worktree closes,
-    /// and schedule cleanup. Returns the set of terminal IDs that were hook terminals.
-    fn handle_hook_terminal_exits(
-        &mut self,
-        exit_events: &[(String, Option<u32>)],
-        service_tids: &std::collections::HashSet<String>,
-        cx: &mut Context<Self>,
-    ) -> std::collections::HashSet<String> {
-        let hook_tids: std::collections::HashSet<String> = {
-            let ws = self.workspace.read(cx);
-            exit_events.iter()
-                .filter(|(tid, _)| !service_tids.contains(tid))
-                .filter(|(tid, _)| ws.is_hook_terminal(tid).is_some())
-                .map(|(tid, _)| tid.clone())
-                .collect()
-        };
-
-        for (terminal_id, exit_code) in exit_events {
-            if !hook_tids.contains(terminal_id) {
-                continue;
-            }
-
-            let success = *exit_code == Some(0);
-            let tid = terminal_id.clone();
-
-            // Update HookMonitor so the hook log shows correct status
-            if let Some(monitor) = crate::workspace::hooks::try_monitor(cx) {
-                monitor.finish_by_terminal_id(&tid, *exit_code);
-            }
-
-            // Single workspace.update: set hook status, then collect pending-close
-            // data atomically. The project removal itself is NOT done on the
-            // mirror — it is dispatched to the daemon as DeleteProject below.
-            let pending_data = self.workspace.update(cx, |ws, cx| {
-                // Update hook terminal status
-                let status = if success {
-                    crate::workspace::state::HookTerminalStatus::Succeeded
-                } else {
-                    let code = exit_code.map(|c| c as i32).unwrap_or(-1);
-                    crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }
-                };
-                ws.update_hook_terminal_status(&tid, status, cx);
-
-                // Check for pending worktree close tied to this hook terminal
-                let pending = ws.take_pending_worktree_close(&tid)?;
-                let folder = ws.folder_for_project_or_parent(&pending.project_id);
-                let hook_folder_id = folder.map(|f| f.id.clone());
-                let hook_folder_name = folder.map(|f| f.name.clone());
-                let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
-                    .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
-                    .unwrap_or((None, None));
-                if success {
-                    ws.remove_hook_terminal(&tid, cx);
-                    // Collect remaining hook terminal IDs before removal
-                    let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
-                    Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
-                } else {
-                    ws.finish_closing_project(&pending.project_id);
-                    None
-                }
-            });
-            self.workspace.update(cx, |_ws, cx| cx.notify());
-
-            if let Some((pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name)) = pending_data {
-                // The daemon owns the project: dispatch DeleteProject so the
-                // removal mirrors back. (The mirror is read-only; we must not
-                // call ws.delete_project here.) Read the dispatch components out
-                // of the main window into owned handles first to avoid holding a
-                // borrow of `cx` across the dispatch.
-                let pid = pending.project_id.clone();
-                let (window_id, focus_manager, remote_manager) = {
-                    let mw = self.main_window.read(cx);
-                    (mw.window_id_for_dispatch(), mw.focus_manager(), mw.remote_manager_for_dispatch())
-                };
-                if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
-                    &pid,
-                    window_id,
-                    &self.workspace,
-                    &focus_manager,
-                    &remote_manager,
-                    cx,
-                ) {
-                    dispatcher.dispatch(
-                        okena_core::api::ActionRequest::DeleteProject { project_id: pid.clone() },
-                        cx,
-                    );
-                }
-                self.handle_pending_close_result(&tid, pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name, cx);
-            }
-            // Hook terminal persists — no auto-cleanup. User can dismiss manually or rerun.
-        }
-
-        hook_tids
-    }
-
-    /// Handle the result of a pending worktree close after hook exit (success path only).
-    //
-    // TODO(daemon): this still runs in-process — it fires the
-    // `on_worktree_close` / `worktree_removed` hooks on the client and performs
-    // the actual `git worktree remove` locally (`remove_worktree_fast`). These
-    // git-operation / hook steps have no `ActionRequest` yet and must move to a
-    // daemon-side action (Batch B). The project-record removal itself is already
-    // routed to the daemon via `ActionRequest::DeleteProject` in the caller.
-    // Threads the cohesive set of close-result params; no reusable grouping.
-    #[allow(clippy::too_many_arguments)]
-    fn handle_pending_close_result(
-        &mut self,
-        tid: &str,
-        pending: crate::workspace::state::PendingWorktreeClose,
-        project_path_for_git: Option<String>,
-        hook_info: Option<(crate::workspace::persistence::HooksConfig, String, String)>,
-        remaining_hook_tids: Vec<String>,
-        folder_id: Option<String>,
-        folder_name: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        log::info!("Pending worktree close: hook succeeded, removing project {}", pending.project_id);
-
-        let global_hooks = crate::settings::settings(cx).hooks;
-        let monitor = crate::workspace::hooks::try_monitor(cx);
-        let runner = crate::workspace::hooks::try_runner(cx);
-        // Clean up primary and any other persisted hook terminals in a single lock
-        {
-            let mut guard = self.terminals.lock();
-            guard.remove(tid);
-            for hook_tid in &remaining_hook_tids {
-                guard.remove(hook_tid);
-            }
-        }
-
-        // Fire lifecycle hooks
-        if let Some((project_hooks, project_name, project_path)) = hook_info {
-            crate::workspace::hooks::fire_on_worktree_close(
-                &project_hooks,
-                &pending.project_id,
-                &project_name,
-                &project_path,
-                &pending.branch,
-                folder_id.as_deref(),
-                folder_name.as_deref(),
-                &global_hooks,
-                cx,
-            );
-            let _ = crate::workspace::hooks::fire_worktree_removed(
-                &project_hooks,
-                &global_hooks,
-                &pending.project_id,
-                &project_name,
-                &project_path,
-                &pending.branch,
-                &pending.main_repo_path,
-                folder_id.as_deref(),
-                folder_name.as_deref(),
-                monitor.as_ref(),
-                runner.as_ref(),
-            );
-        }
-
-        // Git worktree remove in the background
-        let pending_clone = pending.clone();
-        let workspace = self.workspace.clone();
-        if let Some(ref path) = project_path_for_git {
-            workspace.update(cx, |ws, _| {
-                ws.mark_worktree_removing(path);
-            });
-        }
-        cx.spawn(async move |_this, cx| {
-            if let Some(path) = project_path_for_git {
-                let main_repo = pending_clone.main_repo_path.clone();
-                let path_clone = path.clone();
-                let result = smol::unblock(move || {
-                    crate::git::remove_worktree_fast(
-                        &std::path::PathBuf::from(&path_clone),
-                        &std::path::PathBuf::from(&main_repo),
-                    )
-                }).await;
-                if let Err(e) = result {
-                    log::error!("Background worktree remove failed: {}", e);
-                }
-                cx.update(|cx| {
-                    workspace.update(cx, |ws, _| {
-                        ws.finish_worktree_removing(&path);
-                    });
-                });
-            }
-        }).detach();
-    }
-
 }
 
 impl Render for Okena {

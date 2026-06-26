@@ -446,20 +446,6 @@ impl WindowView {
         self.center_next_navigation = true;
     }
 
-    /// The window-scoped id this view inhabits. Used by the `Okena` coordinator
-    /// (which has no dispatcher of its own) to build an `ActionDispatcher`.
-    pub(crate) fn window_id_for_dispatch(&self) -> WindowId {
-        self.window_id
-    }
-
-    /// The remote connection manager, if wired. Exposed so the `Okena`
-    /// coordinator can build an `ActionDispatcher` to route mirror-mutating
-    /// actions to the daemon — e.g. the deferred worktree-close removal
-    /// completed from the PTY exit handler.
-    pub(crate) fn remote_manager_for_dispatch(&self) -> Option<Entity<RemoteConnectionManager>> {
-        self.remote_manager.clone()
-    }
-
     /// Set the remote connection manager (called after creation by Okena).
     pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
         // Observe remote manager and sync remote projects into workspace

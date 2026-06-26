@@ -735,10 +735,6 @@ fn main() {
         // NOTE: Terminal and git view settings are now served through
         // ExtensionSettingsStore (registered above) — no separate globals needed.
 
-        // Create PTY manager with session backend from settings
-        let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
-        let pty_manager = Arc::new(pty_manager);
-
         // Discover-or-spawn the local headless daemon and mint a loopback token.
         // The desktop is always a thin client of this daemon, so a failure here
         // is fatal. Blocking (up to ~10s on a cold spawn). `Okena::new` registers
@@ -860,7 +856,7 @@ fn main() {
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
-                    Okena::new(workspace_data, pty_manager.clone(), pty_events, local_daemon, window, cx)
+                    Okena::new(workspace_data, local_daemon, window, cx)
                 });
                 cx.new(|cx| Root::new(okena, window, cx))
             },
