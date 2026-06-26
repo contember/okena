@@ -302,16 +302,6 @@ impl WindowView {
                     }, cx);
                 }
             }
-            OverlayManagerEvent::WorktreeRemoveRequested { project_id, force } => {
-                // The daemon owns the worktree project: dispatch
-                // RemoveWorktreeProject and let the removal mirror back.
-                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::RemoveWorktreeProject {
-                        project_id: project_id.clone(),
-                        force: *force,
-                    }, cx);
-                }
-            }
             OverlayManagerEvent::AddDiscoveredWorktree { parent_project_id, worktree_path, branch } => {
                 // The daemon owns the project list: dispatch
                 // AddDiscoveredWorktree (resolving the connection from the

@@ -19,14 +19,6 @@ mod view;
 pub enum CloseWorktreeDialogEvent {
     /// Dialog closed (either cancelled or worktree was removed)
     Closed,
-    /// Remove the worktree project. The daemon owns the worktree project, so
-    /// the host dispatches `ActionRequest::RemoveWorktreeProject { project_id,
-    /// force }`; the removal (and its hooks) mirror back.
-    ///
-    /// NOTE: the in-process git pipeline that runs *before* this (stash / fetch
-    /// / rebase / merge / push / delete-branch) still executes locally — those
-    /// steps have no `ActionRequest` yet (see the TODO in `execute.rs`).
-    RequestRemove { project_id: String, force: bool },
 }
 
 impl EventEmitter<CloseWorktreeDialogEvent> for CloseWorktreeDialog {}
@@ -35,30 +27,30 @@ impl okena_ui::overlay::CloseEvent for CloseWorktreeDialogEvent {
     fn is_close(&self) -> bool { matches!(self, Self::Closed) }
 }
 
-/// Processing state for async operations
+/// Processing state for the close operation.
+///
+/// The per-step pipeline (stash/fetch/rebase/merge/push/delete-branch) runs
+/// daemon-side inside `Workspace::close_worktree`, so the dialog only tracks
+/// whether the single `CloseWorktree` action is in flight — it has no
+/// per-step progress to surface.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum ProcessingState {
     Idle,
-    Stashing,
-    Fetching,
-    Rebasing,
-    Merging,
-    Pushing,
-    DeletingBranch,
-    Removing,
+    Working,
 }
 
 /// Confirmation dialog shown when closing a worktree.
 /// Checks for dirty state and optionally merges the branch back.
 pub struct CloseWorktreeDialog {
-    pub(super) workspace: Entity<Workspace>,
+    pub(super) host: String,
+    pub(super) port: u16,
+    pub(super) token: String,
+    pub(super) daemon_project_id: String,
     pub(super) focus_handle: FocusHandle,
-    pub(super) project_id: String,
     pub(super) project_name: String,
     pub(super) project_path: String,
     pub(super) branch: Option<String>,
     pub(super) default_branch: Option<String>,
-    pub(super) main_repo_path: Option<String>,
     pub(super) is_dirty: bool,
     pub(super) merge_enabled: bool,
     pub(super) stash_enabled: bool,
@@ -68,7 +60,6 @@ pub struct CloseWorktreeDialog {
     pub(super) unpushed_count: usize,
     pub(super) error_message: Option<String>,
     pub(super) processing: ProcessingState,
-    pub(super) hooks_config: HooksConfig,
 }
 
 impl CloseWorktreeDialog {
@@ -83,7 +74,9 @@ impl CloseWorktreeDialog {
         _focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         worktree_config: WorktreeConfig,
-        hooks_config: HooksConfig,
+        // Hooks now fire daemon-side inside `Workspace::close_worktree`; the
+        // dialog no longer reads them (kept for call-site stability).
+        _hooks_config: HooksConfig,
         cx: &mut Context<Self>,
     ) -> Self {
         let ws = workspace.read(cx);
@@ -91,20 +84,20 @@ impl CloseWorktreeDialog {
 
         let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
-        let main_repo_path = ws.worktree_parent_path(&project_id);
 
         let (is_dirty, branch, default_branch, unpushed_count) =
-            Self::fetch_close_info(&host, port, &token, daemon_project_id);
+            Self::fetch_close_info(&host, port, &token, daemon_project_id.clone());
 
         Self {
-            workspace,
+            host,
+            port,
+            token,
+            daemon_project_id,
             focus_handle: cx.focus_handle(),
-            project_id,
             project_name,
             project_path,
             branch,
             default_branch,
-            main_repo_path,
             is_dirty,
             merge_enabled: worktree_config.default_merge,
             stash_enabled: worktree_config.default_stash,
@@ -114,7 +107,6 @@ impl CloseWorktreeDialog {
             unpushed_count,
             error_message: None,
             processing: ProcessingState::Idle,
-            hooks_config,
         }
     }
 
