@@ -151,6 +151,18 @@ pub fn execute_action(
             git::commit_graph(ws, project_id, count, branch)
         }
         ActionRequest::GitListBranches { project_id } => git::list_branches(ws, project_id),
+        ActionRequest::GitListBranchesClassified { project_id } => {
+            git::list_branches_classified(ws, project_id)
+        }
+        ActionRequest::GitCheckoutLocalBranch { project_id, branch } => {
+            git::checkout_local_branch(ws, project_id, branch)
+        }
+        ActionRequest::GitCheckoutRemoteBranch { project_id, remote_branch } => {
+            git::checkout_remote_branch(ws, project_id, remote_branch)
+        }
+        ActionRequest::GitCreateAndCheckoutBranch { project_id, new_name, start_point } => {
+            git::create_and_checkout_branch(ws, project_id, new_name, start_point)
+        }
         ActionRequest::GitStageFile { project_id, file_path } => {
             git::stage_file(ws, project_id, file_path)
         }

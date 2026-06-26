@@ -566,6 +566,22 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::GitListBranches { project_id } => ActionRequest::GitListBranches {
             project_id: s(&project_id),
         },
+        ActionRequest::GitListBranchesClassified { project_id } => ActionRequest::GitListBranchesClassified {
+            project_id: s(&project_id),
+        },
+        ActionRequest::GitCheckoutLocalBranch { project_id, branch } => ActionRequest::GitCheckoutLocalBranch {
+            project_id: s(&project_id),
+            branch,
+        },
+        ActionRequest::GitCheckoutRemoteBranch { project_id, remote_branch } => ActionRequest::GitCheckoutRemoteBranch {
+            project_id: s(&project_id),
+            remote_branch,
+        },
+        ActionRequest::GitCreateAndCheckoutBranch { project_id, new_name, start_point } => ActionRequest::GitCreateAndCheckoutBranch {
+            project_id: s(&project_id),
+            new_name,
+            start_point,
+        },
         ActionRequest::GitStageFile { project_id, file_path } => ActionRequest::GitStageFile {
             project_id: s(&project_id),
             file_path,
