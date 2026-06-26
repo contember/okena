@@ -1,4 +1,5 @@
 use crate::views::overlays::detached_terminal::DetachedTerminalView;
+use crate::terminal::terminal::TerminalTransport;
 use crate::workspace::state::Workspace;
 use gpui::*;
 #[cfg(not(target_os = "linux"))]
@@ -6,6 +7,7 @@ use gpui_component::Root;
 #[cfg(target_os = "linux")]
 use crate::simple_root::SimpleRoot as Root;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::Okena;
 
@@ -15,29 +17,63 @@ impl Okena {
         workspace: Entity<Workspace>,
         cx: &mut Context<Self>,
     ) {
-        let ws = workspace.read(cx);
-        let current_detached: HashSet<String> = ws
+        // Keep each detached terminal's owning project so we can resolve the
+        // daemon connection that carries its PTY (every terminal is remote).
+        let current: Vec<(String, String)> = workspace
+            .read(cx)
             .collect_all_detached_terminals()
             .into_iter()
-            .map(|(terminal_id, _, _)| terminal_id)
+            .map(|(terminal_id, project_id, _)| (terminal_id, project_id))
             .collect();
 
-        let new_ids: Vec<_> = current_detached
+        let current_ids: HashSet<String> =
+            current.iter().map(|(terminal_id, _)| terminal_id.clone()).collect();
+
+        let new: Vec<(String, String)> = current
             .iter()
-            .filter(|id| !self.opened_detached_windows.contains(*id))
+            .filter(|(terminal_id, _)| !self.opened_detached_windows.contains(terminal_id))
             .cloned()
             .collect();
 
-        self.opened_detached_windows = current_detached;
+        self.opened_detached_windows = current_ids;
 
-        for terminal_id in new_ids {
-            self.open_detached_window(&terminal_id, cx);
+        for (terminal_id, project_id) in new {
+            self.open_detached_window(&terminal_id, &project_id, cx);
         }
     }
 
-    fn open_detached_window(&self, terminal_id: &str, cx: &mut Context<Self>) {
+    /// Resolve the `TerminalTransport` that carries a project's terminals.
+    /// Every project is daemon-served, so its terminal bytes and input ride the
+    /// connection's `RemoteTransport`. Returns `None` if the project is unknown
+    /// or its connection isn't currently established.
+    fn transport_for_project(
+        &self,
+        project_id: &str,
+        cx: &App,
+    ) -> Option<Arc<dyn TerminalTransport>> {
+        let connection_id = self
+            .workspace
+            .read(cx)
+            .project(project_id)?
+            .connection_id
+            .clone()?;
+        let backend = self.remote_manager.read(cx).backend_for(&connection_id)?;
+        Some(backend.transport())
+    }
+
+    fn open_detached_window(&self, terminal_id: &str, project_id: &str, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
-        let transport: std::sync::Arc<dyn crate::terminal::terminal::TerminalTransport> = self.pty_manager.clone();
+        // A detached terminal reuses the live `Arc<Terminal>` already in the
+        // registry; the transport only matters on the re-create fallback. Route
+        // it over the project's daemon connection so input/recreation never
+        // touch a local PTY (the thin client owns none).
+        let Some(transport) = self.transport_for_project(project_id, cx) else {
+            log::warn!(
+                "Cannot open detached window for terminal {terminal_id}: no remote \
+                 transport for its connection (project {project_id})"
+            );
+            return;
+        };
         let terminals = self.terminals.clone();
         let terminal_id_owned = terminal_id.to_string();
 
