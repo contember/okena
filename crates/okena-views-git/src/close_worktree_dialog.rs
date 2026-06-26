@@ -5,13 +5,11 @@
 //! `execute.rs` holds the async close pipeline; `view.rs` holds the
 //! `Render` impl.
 
-use okena_git as git;
 use okena_workspace::settings::{HooksConfig, WorktreeConfig};
 use okena_workspace::state::Workspace;
 
 use gpui::prelude::*;
 use gpui::*;
-use std::path::PathBuf;
 
 mod execute;
 mod view;
@@ -75,6 +73,10 @@ pub struct CloseWorktreeDialog {
 
 impl CloseWorktreeDialog {
     pub fn new(
+        host: String,
+        port: u16,
+        token: String,
+        daemon_project_id: String,
         workspace: Entity<Workspace>,
         // The daemon owns worktree removal; the dialog no longer scrubs focus
         // state itself, so this is unused (kept for call-site stability).
@@ -91,13 +93,8 @@ impl CloseWorktreeDialog {
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
         let main_repo_path = ws.worktree_parent_path(&project_id);
 
-        let path = PathBuf::from(&project_path);
-        let is_dirty = git::has_uncommitted_changes(&path);
-        let branch = git::get_current_branch(&path);
-        let default_branch = main_repo_path
-            .as_ref()
-            .and_then(|p| git::get_default_branch(&PathBuf::from(p)));
-        let unpushed_count = git::count_unpushed_commits(&path).unwrap_or(0);
+        let (is_dirty, branch, default_branch, unpushed_count) =
+            Self::fetch_close_info(&host, port, &token, daemon_project_id);
 
         Self {
             workspace,
@@ -118,6 +115,26 @@ impl CloseWorktreeDialog {
             error_message: None,
             processing: ProcessingState::Idle,
             hooks_config,
+        }
+    }
+
+    /// Fetch the git-derived close info from the daemon. The repo lives on the
+    /// daemon, so we post a `WorktreeCloseInfo` action rather than reading local
+    /// git. Kept synchronous on purpose — the old code did blocking local git
+    /// here, so a blocking HTTP call is no worse.
+    fn fetch_close_info(host: &str, port: u16, token: &str, project_id: String)
+        -> (bool, Option<String>, Option<String>, usize)
+    {
+        let action = okena_core::api::ActionRequest::WorktreeCloseInfo { project_id };
+        match okena_transport::remote_action::post_action(host, port, token, action) {
+            Ok(Some(v)) => {
+                let is_dirty = v.get("is_dirty").and_then(|x| x.as_bool()).unwrap_or(false);
+                let branch = v.get("branch").and_then(|x| x.as_str()).map(String::from);
+                let default_branch = v.get("default_branch").and_then(|x| x.as_str()).map(String::from);
+                let unpushed_count = v.get("unpushed_count").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                (is_dirty, branch, default_branch, unpushed_count)
+            }
+            _ => (false, None, None, 0),
         }
     }
 

@@ -569,6 +569,9 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::GitListWorktrees { project_id } => ActionRequest::GitListWorktrees {
             project_id: s(&project_id),
         },
+        ActionRequest::WorktreeCloseInfo { project_id } => ActionRequest::WorktreeCloseInfo {
+            project_id: s(&project_id),
+        },
         ActionRequest::GenerateWorktreeBranchName { project_id } => ActionRequest::GenerateWorktreeBranchName {
             project_id: s(&project_id),
         },
