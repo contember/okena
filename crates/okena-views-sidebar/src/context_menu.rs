@@ -1,7 +1,6 @@
 //! Project context menu overlay.
 
 use crate::Cancel;
-use okena_git;
 use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
 use okena_ui::theme::theme;
 use okena_workspace::requests::ContextMenuRequest;
@@ -243,7 +242,10 @@ impl Render for ContextMenu {
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
         let is_worktree = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
         let is_pinned = project.map(|p| p.pinned).unwrap_or(false);
-        let is_git_repo = okena_git::is_git_repo(std::path::Path::new(&project_path));
+        let is_git_repo = ws
+            .remote_snapshot(&self.request.project_id)
+            .and_then(|s| s.git_status.as_ref())
+            .is_some();
         let project_path_for_worktree = project_path.clone();
         let project_path_for_rename_dir = project_path.clone();
         let project_name_for_rename = project_name.clone();
