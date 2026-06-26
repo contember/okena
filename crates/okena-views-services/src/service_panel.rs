@@ -542,6 +542,10 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
 
         let remote_host = self.workspace.read(cx).remote_snapshot(&self.project_id)
             .and_then(|snap| snap.host.clone());
+        // Port links must target the daemon's host, not the client's localhost
+        // (the service runs on the daemon machine). Falls back to localhost for
+        // a loopback/local daemon that reports no host.
+        let port_host = remote_host.clone().unwrap_or_else(|| "localhost".to_string());
 
         let project_id = self.project_id.clone();
         let entity = cx.entity().downgrade();
@@ -604,8 +608,8 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                 }
             },
             // on_port_click
-            |port: u16| {
-                let url = format!("http://localhost:{}", port);
+            move |port: u16| {
+                let url = format!("http://{}:{}", port_host, port);
                 open_url(&url);
             },
         )
