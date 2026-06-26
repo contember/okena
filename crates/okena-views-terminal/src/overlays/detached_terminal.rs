@@ -57,6 +57,12 @@ impl DetachedTerminalView {
         // Get or create terminal from registry
         let terminal = get_or_create_terminal(&terminal_id, &transport, &terminals, &project_path);
 
+        // Detached windows have no overlay manager observing requests, so the
+        // file-viewer overlay (pushed for remote file Ctrl+clicks) is a no-op
+        // here. A local broker keeps TerminalContent self-contained without
+        // reaching into the main window's broker.
+        let request_broker = cx.new(|_| okena_workspace::request_broker::RequestBroker::new());
+
         // Create terminal content view
         let content = create_terminal_content(
             cx,
@@ -64,6 +70,7 @@ impl DetachedTerminalView {
             project_id,
             layout_path,
             workspace.clone(),
+            request_broker,
             terminal.clone(),
         );
 

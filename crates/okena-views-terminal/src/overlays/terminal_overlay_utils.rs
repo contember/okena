@@ -10,6 +10,7 @@ use okena_terminal::input::{KeyEvent, KeyModifiers, KittyKeyboardFlags, key_to_b
 use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
 use okena_terminal::TerminalsRegistry;
 use crate::layout::terminal_pane::TerminalContent;
+use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::Workspace;
 use gpui::*;
 use std::sync::Arc;
@@ -71,12 +72,14 @@ pub fn get_or_create_terminal(
 ///
 /// This is a convenience function that creates a TerminalContent, sets its terminal,
 /// and marks it as focused.
+#[allow(clippy::too_many_arguments)]
 pub fn create_terminal_content<V: 'static>(
     cx: &mut Context<V>,
     focus_handle: FocusHandle,
     project_id: String,
     layout_path: Vec<usize>,
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
     terminal: Arc<Terminal>,
 ) -> Entity<TerminalContent> {
     cx.new(|cx| {
@@ -86,6 +89,7 @@ pub fn create_terminal_content<V: 'static>(
             project_id,
             layout_path,
             workspace,
+            request_broker,
             cx,
         );
         content.set_terminal(Some(terminal), cx);

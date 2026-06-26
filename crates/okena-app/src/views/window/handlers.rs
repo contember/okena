@@ -786,6 +786,14 @@ impl WindowView {
                             });
                         }
                     }
+                    ProjectOverlayKind::FileViewer { relative_path } => {
+                        if let Some(fs) = self.build_project_fs(&project_id, cx) {
+                            let blame = self.build_blame_provider(&project_id, cx);
+                            self.overlay_manager.update(cx, |om, cx| {
+                                om.show_file_viewer(relative_path, fs, blame, cx);
+                            });
+                        }
+                    }
                     ProjectOverlayKind::ColorPicker { position } => {
                         self.overlay_manager.update(cx, |om, cx| {
                             om.show_color_picker(

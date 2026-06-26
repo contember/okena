@@ -58,6 +58,8 @@ pub enum ProjectOverlayKind {
     FileSearch,
     ContentSearch,
     FileBrowser,
+    /// Open a specific file (project-relative path) in the file viewer.
+    FileViewer { relative_path: String },
     ColorPicker { position: gpui::Point<gpui::Pixels> },
     WorktreeList { position: gpui::Point<gpui::Pixels> },
 }

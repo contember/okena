@@ -97,6 +97,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 project_id.clone(),
                 layout_path.clone(),
                 workspace.clone(),
+                request_broker.clone(),
                 cx,
             )
         });
