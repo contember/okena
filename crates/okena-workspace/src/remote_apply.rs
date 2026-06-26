@@ -172,6 +172,11 @@ pub fn apply_remote_snapshot(
                     existing.last_activity_at = api_project.last_activity_at;
                     existing.default_shell = api_project.default_shell.clone();
                     existing.hook_terminals = remote_hook_terminals;
+                    // Per-project hooks are daemon-authoritative (it applies them on
+                    // PTY spawn). The settings panel edits a separate input buffer and
+                    // dispatches UpdateProjectHooks on close, so syncing here won't
+                    // clobber an in-progress edit.
+                    existing.hooks = HooksConfig::from_api(&api_project.hooks);
                     // Don't overwrite show_in_overview — it's client-side state
                     // (the user may have toggled visibility locally).
                 } else {
@@ -205,7 +210,7 @@ pub fn apply_remote_snapshot(
                         worktree_info,
                         worktree_ids,
                         folder_color: project_color,
-                        hooks: HooksConfig::default(),
+                        hooks: HooksConfig::from_api(&api_project.hooks),
                         is_remote: true,
                         connection_id: Some(conn_id_owned),
                         service_terminals: HashMap::new(),
@@ -420,6 +425,7 @@ mod tests {
             last_activity_at: None,
             default_shell: None,
             hook_terminals: Vec::new(),
+            hooks: Default::default(),
         }
     }
 

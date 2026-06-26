@@ -207,6 +207,11 @@ mod tests {
             services: vec![],
             worktree_info: None,
             worktree_ids: vec![],
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: Vec::new(),
+            hooks: Default::default(),
         }
     }
 
@@ -279,6 +284,11 @@ mod tests {
             services: Vec::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: Vec::new(),
+            hooks: Default::default(),
         }]);
         let sizes = collect_terminal_sizes(&state);
         assert_eq!(sizes.get("t1"), Some(&(120, 40)));

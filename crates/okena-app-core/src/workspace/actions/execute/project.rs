@@ -92,6 +92,32 @@ pub(super) fn rename_project(
     ActionResult::Ok(None)
 }
 
+pub(super) fn update_project_hooks(
+    ws: &mut Workspace,
+    project_id: String,
+    hooks: okena_core::api::ApiHooksConfig,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let new_hooks = crate::workspace::settings::HooksConfig::from_api(&hooks);
+    // Dirty-check inside the closure: clients flush hooks on every panel
+    // close/project-switch even when unchanged, so skip the notify (→ state bump
+    // → full-snapshot churn to all clients) when the hooks are identical.
+    let mut existed = false;
+    ws.with_project(&project_id, cx, |p| {
+        existed = true;
+        if p.hooks == new_hooks {
+            false
+        } else {
+            p.hooks = new_hooks;
+            true
+        }
+    });
+    if !existed {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    ActionResult::Ok(None)
+}
+
 pub(super) fn rename_project_directory(
     ws: &mut Workspace,
     project_id: String,

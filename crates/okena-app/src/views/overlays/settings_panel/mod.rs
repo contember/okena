@@ -595,6 +595,8 @@ impl SettingsPanel {
     }
 
     fn close(&self, cx: &mut Context<Self>) {
+        // Flush any pending per-project hook edits to the daemon before closing.
+        self.flush_project_hooks(cx);
         cx.emit(SettingsPanelEvent::Close);
     }
 
@@ -624,6 +626,8 @@ impl SettingsPanel {
 
     /// Switch to a different project (or "User" if None)
     pub(super) fn select_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+        // Flush the outgoing project's hook edits before switching away.
+        self.flush_project_hooks(cx);
         self.selected_project_id = project_id.clone();
         self.project_dropdown_open = false;
 
@@ -715,6 +719,51 @@ impl SettingsPanel {
         });
     }
 
+    /// Read the per-project hook input widgets and emit `ProjectHooksChanged`
+    /// so the host dispatches `UpdateProjectHooks` to the daemon. Called on panel
+    /// close and on project switch (not per keystroke — that would churn a full
+    /// snapshot per character). Reading the input widgets (not the mirror) makes
+    /// this robust against snapshots overwriting the mirror mid-edit; the daemon
+    /// dirty-checks so an unchanged flush is a no-op.
+    fn flush_project_hooks(&self, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project_id.clone() else {
+            return;
+        };
+        let on_open = opt_string(self.project_hook_project_open.read(cx).value());
+        let on_close = opt_string(self.project_hook_project_close.read(cx).value());
+        let wt_create = opt_string(self.project_hook_worktree_create.read(cx).value());
+        let wt_close = opt_string(self.project_hook_worktree_close.read(cx).value());
+        let pre_merge = opt_string(self.project_hook_pre_merge.read(cx).value());
+        let post_merge = opt_string(self.project_hook_post_merge.read(cx).value());
+        let before_remove = opt_string(self.project_hook_before_worktree_remove.read(cx).value());
+        let after_remove = opt_string(self.project_hook_worktree_removed.read(cx).value());
+        let on_rebase_conflict = opt_string(self.project_hook_on_rebase_conflict.read(cx).value());
+        let on_dirty_close = opt_string(self.project_hook_on_dirty_worktree_close.read(cx).value());
+        let term_on_create = opt_string(self.project_hook_terminal_on_create.read(cx).value());
+        let term_on_close = opt_string(self.project_hook_terminal_on_close.read(cx).value());
+        let shell_wrapper = opt_string(self.project_hook_terminal_shell_wrapper.read(cx).value());
+
+        let hooks = okena_core::api::ApiHooksConfig {
+            project: okena_core::api::ApiProjectHooks { on_open, on_close },
+            terminal: okena_core::api::ApiTerminalHooks {
+                on_create: term_on_create,
+                on_close: term_on_close,
+                shell_wrapper,
+            },
+            worktree: okena_core::api::ApiWorktreeHooks {
+                on_create: wt_create,
+                on_close: wt_close,
+                pre_merge,
+                post_merge,
+                before_remove,
+                after_remove,
+                on_rebase_conflict,
+                on_dirty_close,
+            },
+        };
+        cx.emit(SettingsPanelEvent::ProjectHooksChanged { project_id, hooks });
+    }
+
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match &self.active_category {
             SettingsCategory::General => self.render_general(cx).into_any_element(),
@@ -766,6 +815,13 @@ impl SettingsPanel {
 
 pub enum SettingsPanelEvent {
     Close,
+    /// The user edited a project's per-project hooks. Carries the (prefixed)
+    /// project id + the full hook set; the host dispatches `UpdateProjectHooks`
+    /// to the daemon, which owns the authoritative `ProjectData.hooks`.
+    ProjectHooksChanged {
+        project_id: String,
+        hooks: okena_core::api::ApiHooksConfig,
+    },
 }
 
 impl EventEmitter<SettingsPanelEvent> for SettingsPanel {}

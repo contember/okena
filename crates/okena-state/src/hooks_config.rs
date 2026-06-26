@@ -50,7 +50,7 @@ pub struct WorktreeHooks {
 
 /// Grouped hook configuration (project, terminal, worktree).
 /// Backward-compatible: deserializes both the old flat format and the new grouped format.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct HooksConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub project: ProjectHooks,
@@ -62,6 +62,58 @@ pub struct HooksConfig {
 
 fn is_default<T: Default + PartialEq>(val: &T) -> bool {
     *val == T::default()
+}
+
+impl HooksConfig {
+    /// Project onto the wire mirror in `okena-core` (see [`okena_core::api::ApiHooksConfig`]).
+    pub fn to_api(&self) -> okena_core::api::ApiHooksConfig {
+        okena_core::api::ApiHooksConfig {
+            project: okena_core::api::ApiProjectHooks {
+                on_open: self.project.on_open.clone(),
+                on_close: self.project.on_close.clone(),
+            },
+            terminal: okena_core::api::ApiTerminalHooks {
+                on_create: self.terminal.on_create.clone(),
+                on_close: self.terminal.on_close.clone(),
+                shell_wrapper: self.terminal.shell_wrapper.clone(),
+            },
+            worktree: okena_core::api::ApiWorktreeHooks {
+                on_create: self.worktree.on_create.clone(),
+                on_close: self.worktree.on_close.clone(),
+                pre_merge: self.worktree.pre_merge.clone(),
+                post_merge: self.worktree.post_merge.clone(),
+                before_remove: self.worktree.before_remove.clone(),
+                after_remove: self.worktree.after_remove.clone(),
+                on_rebase_conflict: self.worktree.on_rebase_conflict.clone(),
+                on_dirty_close: self.worktree.on_dirty_close.clone(),
+            },
+        }
+    }
+
+    /// Rebuild from the wire mirror.
+    pub fn from_api(api: &okena_core::api::ApiHooksConfig) -> Self {
+        HooksConfig {
+            project: ProjectHooks {
+                on_open: api.project.on_open.clone(),
+                on_close: api.project.on_close.clone(),
+            },
+            terminal: TerminalHooks {
+                on_create: api.terminal.on_create.clone(),
+                on_close: api.terminal.on_close.clone(),
+                shell_wrapper: api.terminal.shell_wrapper.clone(),
+            },
+            worktree: WorktreeHooks {
+                on_create: api.worktree.on_create.clone(),
+                on_close: api.worktree.on_close.clone(),
+                pre_merge: api.worktree.pre_merge.clone(),
+                post_merge: api.worktree.post_merge.clone(),
+                before_remove: api.worktree.before_remove.clone(),
+                after_remove: api.worktree.after_remove.clone(),
+                on_rebase_conflict: api.worktree.on_rebase_conflict.clone(),
+                on_dirty_close: api.worktree.on_dirty_close.clone(),
+            },
+        }
+    }
 }
 
 const FLAT_HOOK_KEYS: &[&str] = &[
@@ -267,5 +319,41 @@ mod tests {
         assert_eq!(config.project, ProjectHooks::default());
         assert_eq!(config.terminal, TerminalHooks::default());
         assert_eq!(config.worktree, WorktreeHooks::default());
+    }
+
+    #[test]
+    fn api_round_trip_preserves_every_field() {
+        // Every field set to a distinct value so a mis-wired converter (a copy
+        // paste swap between project/terminal/worktree) is caught.
+        let original = HooksConfig {
+            project: ProjectHooks {
+                on_open: Some("p-open".into()),
+                on_close: Some("p-close".into()),
+            },
+            terminal: TerminalHooks {
+                on_create: Some("t-create".into()),
+                on_close: Some("t-close".into()),
+                shell_wrapper: Some("wrap {shell}".into()),
+            },
+            worktree: WorktreeHooks {
+                on_create: Some("w-create".into()),
+                on_close: Some("w-close".into()),
+                pre_merge: Some("pre".into()),
+                post_merge: Some("post".into()),
+                before_remove: Some("before".into()),
+                after_remove: Some("after".into()),
+                on_rebase_conflict: Some("rebase".into()),
+                on_dirty_close: Some("dirty".into()),
+            },
+        };
+        let back = HooksConfig::from_api(&original.to_api());
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn api_round_trip_default_is_empty() {
+        let api = HooksConfig::default().to_api();
+        assert!(api.is_empty());
+        assert_eq!(HooksConfig::from_api(&api), HooksConfig::default());
     }
 }

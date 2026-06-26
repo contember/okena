@@ -637,6 +637,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             name,
         },
+        ActionRequest::UpdateProjectHooks { project_id, hooks } => ActionRequest::UpdateProjectHooks {
+            project_id: s(&project_id),
+            hooks,
+        },
         ActionRequest::RenameProjectDirectory { project_id, new_name } => ActionRequest::RenameProjectDirectory {
             project_id: s(&project_id),
             new_name,
