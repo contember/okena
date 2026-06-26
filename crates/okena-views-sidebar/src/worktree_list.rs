@@ -50,21 +50,52 @@ pub struct WorktreeListPopover {
 
 impl WorktreeListPopover {
     pub fn new(
+        host: String,
+        port: u16,
+        token: String,
+        daemon_project_id: String,
         workspace: Entity<Workspace>,
         project_id: String,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let project_path = workspace.read(cx).project(&project_id)
-            .map(|p| p.path.clone())
-            .unwrap_or_default();
-        let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(
-            std::path::Path::new(&project_path),
-        );
-        let norm_git_root = okena_git::repository::normalize_path(&git_root);
-        let entries = okena_git::repository::list_git_worktrees(&git_root);
+        let (norm_git_root, subdir, entries) =
+            Self::fetch_worktrees(&host, port, &token, daemon_project_id);
         let focus_handle = cx.focus_handle();
-        Self { workspace, project_id, entries, position, focus_handle, norm_git_root, subdir }
+        Self {
+            workspace,
+            project_id,
+            entries,
+            position,
+            focus_handle,
+            norm_git_root,
+            subdir,
+        }
+    }
+
+    /// Fetch the worktree listing from the daemon. The git repo lives on the
+    /// daemon, so we post a `GitListWorktrees` action rather than scanning the
+    /// local filesystem. Kept synchronous on purpose — the old code did a
+    /// blocking local git scan here, so a blocking HTTP call is no worse.
+    fn fetch_worktrees(
+        host: &str,
+        port: u16,
+        token: &str,
+        project_id: String,
+    ) -> (std::path::PathBuf, std::path::PathBuf, Vec<(String, String)>) {
+        let action = okena_core::api::ActionRequest::GitListWorktrees { project_id };
+        match okena_transport::remote_action::post_action(host, port, token, action) {
+            Ok(Some(value)) => {
+                let git_root = value.get("git_root").and_then(|v| v.as_str()).unwrap_or_default();
+                let subdir = value.get("subdir").and_then(|v| v.as_str()).unwrap_or_default();
+                let worktrees: Vec<(String, String)> = value
+                    .get("worktrees")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                (std::path::PathBuf::from(git_root), std::path::PathBuf::from(subdir), worktrees)
+            }
+            _ => (std::path::PathBuf::new(), std::path::PathBuf::new(), Vec::new()),
+        }
     }
 
     /// Find a tracked worktree project by its worktree root path.

@@ -151,6 +151,7 @@ pub fn execute_action(
             git::commit_graph(ws, project_id, count, branch)
         }
         ActionRequest::GitListBranches { project_id } => git::list_branches(ws, project_id),
+        ActionRequest::GitListWorktrees { project_id } => git::list_worktrees(ws, project_id),
         ActionRequest::GitListBranchesClassified { project_id } => {
             git::list_branches_classified(ws, project_id)
         }

@@ -6620,6 +6620,7 @@ dependencies = [
  "okena-views-services",
  "okena-views-terminal",
  "okena-workspace",
+ "serde_json",
  "smol",
 ]
 
