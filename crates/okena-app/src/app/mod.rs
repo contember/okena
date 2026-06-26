@@ -12,55 +12,14 @@ use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent}
 use crate::services::manager::ServiceManager;
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
-use okena_ext_claude::resolve_claude_dir;
 use crate::views::window::{TerminalsRegistry, WindowView};
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-
-fn is_default_claude_dir(claude_dir: &Path) -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
-    };
-    let default_dir = home.join(".claude");
-    let canonical_default = default_dir.canonicalize().unwrap_or(default_dir);
-    let canonical_dir = claude_dir
-        .canonicalize()
-        .unwrap_or_else(|_| claude_dir.to_path_buf());
-    canonical_dir == canonical_default
-}
-
-fn claude_pty_extra_env(
-    claude_dir: &Path,
-    multi_profile: bool,
-    parent_has_claude_config_dir: bool,
-) -> Vec<(String, Option<String>)> {
-    // Default `~/.claude`: actively remove CLAUDE_CONFIG_DIR from the PTY rather
-    // than just leaving it unset. This keeps Claude Code on its canonical Keychain
-    // service (an explicit CLAUDE_CONFIG_DIR=~/.claude makes it create a suffixed
-    // duplicate) *and* prevents a stale value — e.g. one exported in the shell
-    // that launched Okena and inherited by our process — from leaking into the
-    // terminal and silently pointing `claude` at the wrong account.
-    if is_default_claude_dir(claude_dir) {
-        return vec![("CLAUDE_CONFIG_DIR".to_string(), None)];
-    }
-
-    // Single-profile user who manages CLAUDE_CONFIG_DIR themselves: there's no
-    // profile boundary to enforce, so leave their exported value untouched.
-    if !multi_profile && parent_has_claude_config_dir {
-        return Vec::new();
-    }
-
-    vec![(
-        "CLAUDE_CONFIG_DIR".to_string(),
-        Some(claude_dir.to_string_lossy().into_owned()),
-    )]
-}
 
 /// Push the resolved Claude config directory into the PTY manager as
 /// CLAUDE_CONFIG_DIR so `claude` invocations inside Okena terminals read the
@@ -71,16 +30,17 @@ fn claude_pty_extra_env(
 /// `CLAUDE_CONFIG_DIR` exported in their shell rc). The default `~/.claude` is
 /// actively *unset* instead so Claude Code uses its canonical Keychain service
 /// rather than creating a suffixed duplicate for the same path.
+///
+/// The resolution + override logic is the gpui-free
+/// [`okena_workspace::claude_env`] shared with the headless daemon, fed the same
+/// `AppSettings` the gpui `ExtensionSettingsStore` getter reads for the
+/// `claude-code` namespace.
 fn sync_claude_pty_env(pty_manager: &Arc<PtyManager>, cx: &App) {
-    let multi_profile = okena_core::profiles::all_profiles()
-        .map(|p| p.len() > 1)
-        .unwrap_or(false);
-    let claude_dir = resolve_claude_dir(cx);
-    pty_manager.set_extra_env(claude_pty_extra_env(
-        &claude_dir,
-        multi_profile,
-        std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
-    ));
+    let extra_env = {
+        let state = crate::settings::settings_entity(cx).read(cx);
+        okena_workspace::claude_env::claude_pty_env_for_settings(state.get())
+    };
+    pty_manager.set_extra_env(extra_env);
 }
 
 /// Set up an observer that loads/unloads service configs when projects change.
@@ -960,42 +920,5 @@ impl Okena {
 impl Render for Okena {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().child(self.main_window.clone())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::claude_pty_extra_env;
-
-    #[test]
-    fn default_claude_dir_unsets_pty_env() {
-        let default_dir = dirs::home_dir().unwrap().join(".claude");
-
-        // The default dir must produce an explicit removal so a stale inherited
-        // CLAUDE_CONFIG_DIR can't leak in — regardless of profile count or whether
-        // the parent process happened to have the var set.
-        for &(multi, parent) in &[(false, false), (true, false), (false, true), (true, true)] {
-            let env = claude_pty_extra_env(&default_dir, multi, parent);
-            assert_eq!(env.len(), 1, "multi={multi} parent={parent}");
-            assert_eq!(env[0].0, "CLAUDE_CONFIG_DIR");
-            assert_eq!(env[0].1, None, "default dir must unset, not set");
-        }
-    }
-
-    #[test]
-    fn single_profile_keeps_parent_claude_config_dir() {
-        let custom_dir = std::env::temp_dir().join("okena-custom-claude-dir");
-
-        assert!(claude_pty_extra_env(&custom_dir, false, true).is_empty());
-    }
-
-    #[test]
-    fn custom_claude_dir_is_exported_to_pty() {
-        let custom_dir = std::env::temp_dir().join("okena-custom-claude-dir");
-        let env = claude_pty_extra_env(&custom_dir, true, true);
-
-        assert_eq!(env.len(), 1);
-        assert_eq!(env[0].0, "CLAUDE_CONFIG_DIR");
-        assert_eq!(env[0].1.as_deref(), Some(custom_dir.to_string_lossy().as_ref()));
     }
 }

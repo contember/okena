@@ -174,6 +174,13 @@ pub async fn run_pty_loop(
         // scan. (Runs whether or not there were exits.)
         if !dirty_terminal_ids.is_empty() {
             process_osc_hook_exits(&dirty_terminal_ids, &terminals, &reactor);
+            // Command-finished (OSC 133 ;D) activity: stamp `last_activity_at` on
+            // the owning project so the activity-sorted sidebar floats it up. Bump
+            // `state_version` if anything was stamped so clients resync (the bump
+            // is mirrored into StateResponse).
+            if process_command_finished_activity(&dirty_terminal_ids, &terminals, &reactor) {
+                state_version.send_modify(|v| *v += 1);
+            }
         }
 
         if !exit_events.is_empty() {
@@ -270,6 +277,59 @@ fn process_osc_hook_exits(
             ws.update_hook_terminal_status(&tid, status, &mut cx);
         }
     }
+}
+
+/// Drain the one-shot command-finished (OSC 133 ;D) edge for each terminal that
+/// produced output this batch and stamp `last_activity_at` on the owning project
+/// (drives the activity-sorted sidebar). Returns `true` if any activity was
+/// stamped, so the caller can bump `state_version` for clients to resync.
+///
+/// Mirrors the GUI's `Okena::process_command_finished_activity` +
+/// `bump_activity_for_terminals`: drain the cheap atomic edge first (almost every
+/// batch drains nothing), resolve the finished terminals to their owning projects
+/// (deduplicated), then `bump_activity` once per project. The daemon's own
+/// `Terminal`s parse OSC 133 in `process_output`, so the edge is available here.
+fn process_command_finished_activity(
+    dirty_terminal_ids: &[String],
+    terminals: &TerminalsRegistry,
+    reactor: &PtyLoopReactor,
+) -> bool {
+    // Drain edges first (cheap atomic swap); collect the terminals that actually
+    // saw a command finish. The lock is dropped before touching the workspace.
+    let finished: Vec<String> = {
+        let reg = terminals.lock();
+        dirty_terminal_ids
+            .iter()
+            .filter(|tid| {
+                reg.get(*tid)
+                    .is_some_and(|t| t.take_pending_command_finished())
+            })
+            .cloned()
+            .collect()
+    };
+    if finished.is_empty() {
+        return false;
+    }
+
+    // Resolve each finished terminal to its owning project, deduplicating so a
+    // batch touching several terminals of the same project bumps it once.
+    let project_ids: HashSet<String> = {
+        let ws = reactor.workspace.lock();
+        finished
+            .iter()
+            .filter_map(|tid| ws.find_project_for_terminal(tid).map(|p| p.id.clone()))
+            .collect()
+    };
+    if project_ids.is_empty() {
+        return false;
+    }
+
+    let mut cx = reactor.workspace_cx();
+    let mut ws = reactor.workspace.lock();
+    for pid in &project_ids {
+        ws.bump_activity(pid, &mut cx);
+    }
+    true
 }
 
 /// Handle the exits collected in one batch:
