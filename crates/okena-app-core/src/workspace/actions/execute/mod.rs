@@ -242,6 +242,9 @@ pub fn execute_action(
         ActionRequest::RemoveWorktreeProject { project_id, force } => {
             project::remove_worktree_project(ws, focus_manager, project_id, force, settings, cx)
         }
+        ActionRequest::CloseWorktree { project_id, merge, stash, fetch, push, delete_branch } => {
+            project::close_worktree(ws, focus_manager, project_id, merge, stash, fetch, push, delete_branch, settings, cx)
+        }
         ActionRequest::CreateFolder { name } => project::create_folder(ws, name, cx),
         ActionRequest::DeleteFolder { folder_id } => project::delete_folder(ws, folder_id, cx),
         ActionRequest::RenameFolder { folder_id, name } => {

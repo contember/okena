@@ -768,6 +768,19 @@ pub enum ActionRequest {
         #[serde(default)]
         force: bool,
     },
+    CloseWorktree {
+        project_id: String,
+        #[serde(default)]
+        merge: bool,
+        #[serde(default)]
+        stash: bool,
+        #[serde(default)]
+        fetch: bool,
+        #[serde(default)]
+        push: bool,
+        #[serde(default)]
+        delete_branch: bool,
+    },
     CreateFolder {
         name: String,
     },
