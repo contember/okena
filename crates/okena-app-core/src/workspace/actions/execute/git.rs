@@ -97,6 +97,65 @@ pub(super) fn list_branches(ws: &Workspace, project_id: String) -> ActionResult 
     }
 }
 
+pub(super) fn list_branches_classified(ws: &Workspace, project_id: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            let branches = okena_git::list_branches_classified(std::path::Path::new(&path));
+            ActionResult::Ok(Some(serde_json::to_value(branches).expect("BUG: BranchList must serialize")))
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+pub(super) fn checkout_local_branch(ws: &Workspace, project_id: String, branch: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            match okena_git::checkout_local_branch(std::path::Path::new(&path), &branch) {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(e.to_string()),
+            }
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+pub(super) fn checkout_remote_branch(ws: &Workspace, project_id: String, remote_branch: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            match okena_git::checkout_remote_branch(std::path::Path::new(&path), &remote_branch) {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(e.to_string()),
+            }
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+pub(super) fn create_and_checkout_branch(
+    ws: &Workspace,
+    project_id: String,
+    new_name: String,
+    start_point: Option<String>,
+) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            match okena_git::create_and_checkout_branch(
+                std::path::Path::new(&path),
+                &new_name,
+                start_point.as_deref(),
+            ) {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(e.to_string()),
+            }
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
 pub(super) fn stage_file(ws: &Workspace, project_id: String, file_path: String) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {

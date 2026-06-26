@@ -77,7 +77,7 @@ impl GitProvider for RemoteGitProvider {
     }
 
     fn supports_mutations(&self) -> bool {
-        false
+        true
     }
 
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String> {
@@ -150,6 +150,19 @@ impl GitProvider for RemoteGitProvider {
         }
     }
 
+    fn list_branches_classified(&self) -> BranchList {
+        let action = okena_core::api::ActionRequest::GitListBranchesClassified {
+            project_id: self.project_id.clone(),
+        };
+        match self.post_action(action) {
+            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
+                log::warn!("Failed to deserialize classified branch list: {}", e);
+                BranchList::default()
+            }),
+            _ => BranchList::default(),
+        }
+    }
+
     fn stage_file(&self, file_path: &str) -> Result<(), String> {
         let action = okena_core::api::ActionRequest::GitStageFile {
             project_id: self.project_id.clone(),
@@ -178,6 +191,35 @@ impl GitProvider for RemoteGitProvider {
         let action = okena_core::api::ActionRequest::DeleteFile {
             project_id: self.project_id.clone(),
             relative_path: file_path.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn checkout_local_branch(&self, branch: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::GitCheckoutLocalBranch {
+            project_id: self.project_id.clone(),
+            branch: branch.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn checkout_remote_branch(&self, remote_branch: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::GitCheckoutRemoteBranch {
+            project_id: self.project_id.clone(),
+            remote_branch: remote_branch.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn create_and_checkout_branch(
+        &self,
+        new_name: &str,
+        start_point: Option<&str>,
+    ) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::GitCreateAndCheckoutBranch {
+            project_id: self.project_id.clone(),
+            new_name: new_name.to_string(),
+            start_point: start_point.map(String::from),
         };
         self.post_action(action).map(|_| ())
     }

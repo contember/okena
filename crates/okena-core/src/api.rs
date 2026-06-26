@@ -582,6 +582,23 @@ pub enum ActionRequest {
     GitListBranches {
         project_id: String,
     },
+    GitListBranchesClassified {
+        project_id: String,
+    },
+    GitCheckoutLocalBranch {
+        project_id: String,
+        branch: String,
+    },
+    GitCheckoutRemoteBranch {
+        project_id: String,
+        remote_branch: String,
+    },
+    GitCreateAndCheckoutBranch {
+        project_id: String,
+        new_name: String,
+        #[serde(default)]
+        start_point: Option<String>,
+    },
     GitStageFile {
         project_id: String,
         file_path: String,

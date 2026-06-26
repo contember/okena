@@ -4,6 +4,8 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use okena_core::process::{command, safe_output};
 
 use super::{head_branch_short, path_str, require_success};
@@ -194,7 +196,7 @@ pub fn push_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
 
 /// Branch list classified into local and remote, with the current branch name
 /// (if HEAD points at a branch).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchList {
     /// Local branch names.
     pub local: Vec<String>,
