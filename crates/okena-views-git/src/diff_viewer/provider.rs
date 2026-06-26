@@ -1,4 +1,4 @@
-//! GitProvider trait and implementations for local and remote git operations.
+//! GitProvider trait and the remote-server (HTTP) implementation.
 
 use okena_git::{BranchList, CommitLogEntry, DiffMode, DiffResult, FileDiffSummary};
 
@@ -51,101 +51,6 @@ pub trait GitProvider: Send + Sync + 'static {
     /// Returns None when the provider can't resolve it (e.g. remote without
     /// a sensible local absolute path).
     fn absolute_file_path(&self, file_path: &str) -> Option<String>;
-}
-
-/// Local git provider — wraps existing git functions.
-pub struct LocalGitProvider {
-    path: String,
-}
-
-impl LocalGitProvider {
-    pub fn new(path: String) -> Self {
-        Self { path }
-    }
-}
-
-impl GitProvider for LocalGitProvider {
-    fn is_git_repo(&self) -> bool {
-        okena_git::is_git_repo(std::path::Path::new(&self.path))
-    }
-
-    fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String> {
-        okena_git::get_diff_with_options(std::path::Path::new(&self.path), mode, ignore_whitespace)
-            .map_err(|e| e.to_string())
-    }
-
-    fn get_file_contents(&self, file_path: &str, mode: DiffMode) -> (Option<String>, Option<String>) {
-        okena_git::get_file_contents_for_diff(std::path::Path::new(&self.path), file_path, mode)
-    }
-
-    fn get_diff_file_summary(&self) -> Vec<FileDiffSummary> {
-        okena_git::get_diff_file_summary(std::path::Path::new(&self.path))
-    }
-
-    fn get_commit_graph(&self, count: usize, branch: Option<&str>) -> Vec<CommitLogEntry> {
-        okena_git::fetch_commit_log(std::path::Path::new(&self.path), count, branch)
-    }
-
-    fn list_branches(&self) -> Vec<String> {
-        okena_git::list_branches(std::path::Path::new(&self.path))
-    }
-
-    fn list_branches_classified(&self) -> BranchList {
-        okena_git::list_branches_classified(std::path::Path::new(&self.path))
-    }
-
-    fn checkout_local_branch(&self, branch: &str) -> Result<(), String> {
-        okena_git::checkout_local_branch(std::path::Path::new(&self.path), branch)
-            .map_err(|e| e.to_string())
-    }
-
-    fn checkout_remote_branch(&self, remote_branch: &str) -> Result<(), String> {
-        okena_git::checkout_remote_branch(std::path::Path::new(&self.path), remote_branch)
-            .map_err(|e| e.to_string())
-    }
-
-    fn create_and_checkout_branch(
-        &self,
-        new_name: &str,
-        start_point: Option<&str>,
-    ) -> Result<(), String> {
-        okena_git::create_and_checkout_branch(
-            std::path::Path::new(&self.path),
-            new_name,
-            start_point,
-        )
-        .map_err(|e| e.to_string())
-    }
-
-    fn stage_file(&self, file_path: &str) -> Result<(), String> {
-        okena_git::stage_file(std::path::Path::new(&self.path), file_path)
-            .map_err(|e| e.to_string())
-    }
-
-    fn unstage_file(&self, file_path: &str) -> Result<(), String> {
-        okena_git::unstage_file(std::path::Path::new(&self.path), file_path)
-            .map_err(|e| e.to_string())
-    }
-
-    fn discard_file(&self, file_path: &str) -> Result<(), String> {
-        okena_git::discard_file_changes(std::path::Path::new(&self.path), file_path)
-            .map_err(|e| e.to_string())
-    }
-
-    fn delete_file(&self, file_path: &str) -> Result<(), String> {
-        let abs = std::path::Path::new(&self.path).join(file_path);
-        std::fs::remove_file(&abs)
-            .map_err(|e| format!("Failed to delete file: {}", e))
-    }
-
-    fn absolute_file_path(&self, file_path: &str) -> Option<String> {
-        Some(
-            std::path::Path::new(&self.path)
-                .join(file_path)
-                .to_string_lossy()
-                .to_string(),
-        )
-    }
 }
 
 /// Remote git provider — fetches git data via HTTP from a remote server.

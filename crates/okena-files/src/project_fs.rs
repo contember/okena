@@ -1,4 +1,4 @@
-//! ProjectFs trait and implementations for local and remote file operations.
+//! ProjectFs trait and the remote-server (HTTP) implementation.
 
 use crate::content_search::{ContentSearchConfig, FileSearchResult, SearchMode};
 use crate::file_scan::FileEntry;
@@ -48,92 +48,6 @@ pub trait ProjectFs: Send + Sync + 'static {
     /// operations (e.g. context-menu rename/delete). Remote projects return
     /// `None` because the root only exists on the remote machine.
     fn project_root(&self) -> Option<PathBuf>;
-}
-
-/// Local file system provider — delegates to existing functions.
-pub struct LocalProjectFs {
-    path: PathBuf,
-}
-
-impl LocalProjectFs {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-
-    /// Canonicalize `relative_path` inside the project root and reject any
-    /// path that escapes via `..` or absolute-path replacement. Mirrors the
-    /// server-side `resolve_project_file` so the trait has the same
-    /// containment guarantee on both implementations.
-    fn resolve(&self, relative_path: &str) -> Result<PathBuf, String> {
-        let joined = self.path.join(relative_path);
-        let canonical = joined
-            .canonicalize()
-            .map_err(|e| format!("Cannot read file: {}", e))?;
-        let root = self
-            .path
-            .canonicalize()
-            .map_err(|e| format!("Cannot resolve project path: {}", e))?;
-        if !canonical.starts_with(&root) {
-            return Err("path traversal not allowed".to_string());
-        }
-        Ok(canonical)
-    }
-}
-
-impl ProjectFs for LocalProjectFs {
-    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry> {
-        crate::file_scan::scan_files(&self.path, show_ignored)
-    }
-
-    fn list_directory(
-        &self,
-        relative_path: &str,
-        show_ignored: bool,
-    ) -> Result<Vec<DirEntry>, String> {
-        crate::list_directory::list_directory(&self.path, relative_path, show_ignored)
-    }
-
-    fn read_file(&self, relative_path: &str) -> Result<String, String> {
-        let full = self.resolve(relative_path)?;
-        std::fs::read_to_string(&full).map_err(|e| format!("Cannot read file: {}", e))
-    }
-
-    fn read_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>, String> {
-        let full = self.resolve(relative_path)?;
-        std::fs::read(&full).map_err(|e| format!("Cannot read file: {}", e))
-    }
-
-    fn file_size(&self, relative_path: &str) -> Result<u64, String> {
-        let full = self.resolve(relative_path)?;
-        std::fs::metadata(&full)
-            .map(|m| m.len())
-            .map_err(|e| format!("Cannot read file: {}", e))
-    }
-
-    fn search_content(
-        &self,
-        query: &str,
-        config: &ContentSearchConfig,
-        cancelled: &AtomicBool,
-        on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-    ) {
-        crate::content_search::search_content(&self.path, query, config, cancelled, on_result);
-    }
-
-    fn project_name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Project".to_string())
-    }
-
-    fn project_id(&self) -> String {
-        self.path.to_string_lossy().to_string()
-    }
-
-    fn project_root(&self) -> Option<PathBuf> {
-        Some(self.path.clone())
-    }
 }
 
 /// Remote file system provider — fetches data via HTTP from a remote server.
