@@ -8,7 +8,7 @@ mod remote_config;
 
 pub use detached_overlays::open_detached_overlay;
 
-use crate::remote_client::manager::RemoteConnectionManager;
+use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
 use crate::services::manager::ServiceManager;
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
@@ -296,6 +296,27 @@ impl Okena {
 
         // Route clicked desktop notifications back to their originating pane.
         manager.start_notification_click_loop(notification_jump_rx, cx);
+
+        // Fire OS notifications for remote (daemon-served) terminals. Their PTY
+        // output never reaches the local PTY event loop above — it arrives over
+        // the WS and is only parsed by the remote activity pump, which drains
+        // each terminal's pending bytes (populating the OSC 9/777/99 + bell
+        // queues) but doesn't fire OS bubbles. The pump emits the advanced
+        // terminal ids here so we reuse the exact same focus-suppressed,
+        // settings-gated notification path the local loop uses. Without this,
+        // notifications from real (remote) terminals would be parsed and then
+        // silently dropped in the daemon-client model.
+        cx.subscribe(
+            &remote_manager,
+            |this, _rm, event, cx| match event {
+                RemoteManagerEvent::TerminalActivity(terminal_ids) => {
+                    if !terminal_ids.is_empty() {
+                        this.process_terminal_notifications(terminal_ids, cx);
+                    }
+                }
+            },
+        )
+        .detach();
 
         // Kill orphaned terminals when projects are deleted
         cx.observe(&workspace, move |this, workspace, cx| {
