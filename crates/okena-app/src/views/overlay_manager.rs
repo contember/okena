@@ -117,6 +117,11 @@ pub enum OverlayManagerEvent {
     /// Context menu: Rename directory on disk
     RenameDirectory { project_id: String, project_path: String },
 
+    /// Rename-directory dialog confirmed: the host dispatches
+    /// `ActionRequest::RenameProjectDirectory`; the daemon performs the rename,
+    /// updates the record, and mirrors the new path+name back.
+    RenameDirectoryConfirmed { project_id: String, new_name: String },
+
     /// Context menu: Close worktree project (opens the confirm dialog)
     CloseWorktree { project_id: String },
 
@@ -761,10 +766,20 @@ impl OverlayManager {
         project_path: String,
         cx: &mut Context<Self>,
     ) {
-        let workspace = self.workspace.clone();
-        open_overlay!(self, cx, RenameDirectoryDialogEvent, |cx| {
-            RenameDirectoryDialog::new(workspace, project_id, project_path, cx)
-        });
+        let entity = cx.new(|cx| RenameDirectoryDialog::new(project_id, project_path, cx));
+        cx.subscribe(&entity, |this, _, event: &RenameDirectoryDialogEvent, cx| {
+            if let RenameDirectoryDialogEvent::Confirmed { project_id, new_name } = event {
+                cx.emit(OverlayManagerEvent::RenameDirectoryConfirmed {
+                    project_id: project_id.clone(),
+                    new_name: new_name.clone(),
+                });
+            }
+            if event.is_close() {
+                this.close_modal(cx);
+            }
+        })
+        .detach();
+        self.open_modal(entity, cx);
     }
 
     // ========================================================================

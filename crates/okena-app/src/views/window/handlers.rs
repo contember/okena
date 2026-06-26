@@ -291,6 +291,14 @@ impl WindowView {
                     }, cx);
                 }
             }
+            OverlayManagerEvent::RenameDirectoryConfirmed { project_id, new_name } => {
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::RenameProjectDirectory {
+                        project_id: project_id.clone(),
+                        new_name: new_name.clone(),
+                    }, cx);
+                }
+            }
             OverlayManagerEvent::WorktreeRemoveRequested { project_id, force } => {
                 // The daemon owns the worktree project: dispatch
                 // RemoveWorktreeProject and let the removal mirror back.
