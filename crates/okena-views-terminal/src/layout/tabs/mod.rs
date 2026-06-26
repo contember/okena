@@ -804,7 +804,10 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
         let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), cx);
 
-        let show_shell = terminal_view_settings(cx).show_shell_selector && !self.backend.is_remote();
+        // Shell switching is routed through the daemon (SwitchTerminalShell) and
+        // the current shell comes from mirrored layout state, so the selector
+        // works for remote backends too — gate only on the user setting.
+        let show_shell = terminal_view_settings(cx).show_shell_selector;
 
         if self.last_scrolled_to_tab != Some(active_tab) {
             self.tab_scroll_handle.scroll_to_item(active_tab);
