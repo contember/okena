@@ -63,6 +63,30 @@ fn main() -> anyhow::Result<()> {
         eprintln!("Warning: profile migration failed: {e}");
     }
 
+    // Snapshot the existing config BEFORE load_settings()/load_workspace() so an
+    // upgrade can be reverted to an old-format config the previous binary reads.
+    // Shares the marker + config-backups dir with the GUI (first-wins, idempotent).
+    {
+        use okena_core::profiles::SchemaVersion;
+        use okena_workspace::persistence::{SETTINGS_VERSION, WINDOW_LAYOUT_VERSION, WORKSPACE_VERSION};
+        let schema_versions = [
+            SchemaVersion { file: "workspace.json", current: WORKSPACE_VERSION },
+            SchemaVersion { file: "settings.json", current: SETTINGS_VERSION },
+            SchemaVersion { file: "window-layout.json", current: WINDOW_LAYOUT_VERSION },
+        ];
+        if let Err(e) = okena_core::profiles::snapshot_configs_before_upgrade(
+            okena_core::profiles::current(),
+            env!("CARGO_PKG_VERSION"),
+            &schema_versions,
+        ) {
+            eprintln!("Warning: config snapshot failed: {e}");
+        }
+        okena_core::profiles::record_app_version(
+            okena_core::profiles::current(),
+            env!("CARGO_PKG_VERSION"),
+        );
+    }
+
     // 1. Logging: env_logger driven by RUST_LOG (default "info"), teed to
     //    `okena-daemon.log` so the daemon's output + panics survive even though
     //    its stderr is the GUI's inherited terminal. Best-effort: if the file
