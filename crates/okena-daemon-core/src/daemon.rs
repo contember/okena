@@ -124,6 +124,11 @@ pub struct DaemonCore {
     state_version: Arc<watch::Sender<u64>>,
     /// Git-status channel the poll loop publishes into and the server broadcasts.
     git_status_tx: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Client terminal subscriptions (connection id -> subscribed terminal ids),
+    /// shared with the remote server. The git poll reads it to fan out the
+    /// expensive `gh` PR/CI lookups only for projects a client is viewing.
+    remote_subscribed_terminals:
+        Arc<std::sync::RwLock<HashMap<u64, std::collections::HashSet<String>>>>,
     /// Shared settings cell (the [`DaemonConfig`] write path; also read by the
     /// command loop's `execute_action` for hooks / worktree / default shell).
     settings: Arc<Mutex<AppSettings>>,
@@ -216,7 +221,7 @@ impl DaemonCore {
             state_version.clone(),
             params.listen_addr,
             git_status_tx.clone(),
-            remote_subscribed_terminals,
+            remote_subscribed_terminals.clone(),
             next_connection_id,
             params.tls_enabled,
         )?;
@@ -248,6 +253,7 @@ impl DaemonCore {
             pty_events,
             state_version,
             git_status_tx,
+            remote_subscribed_terminals,
             settings,
             daemon_config,
             _instance_lock: instance_lock,
@@ -273,6 +279,7 @@ impl DaemonCore {
             pty_events,
             state_version,
             git_status_tx,
+            remote_subscribed_terminals,
             settings,
             daemon_config,
             // Bound (not `..`) so the lock is held until the end of `run`, then
@@ -297,6 +304,7 @@ impl DaemonCore {
                 reactor.workspace.clone(),
                 git_status_tx.clone(),
                 reactor.state_version.clone(),
+                remote_subscribed_terminals,
             ));
 
             // Materialize PTYs for every restored project's uninitialized

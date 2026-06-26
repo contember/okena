@@ -28,9 +28,9 @@
 //!   there later). The primary output is the `git_status_tx` watch, exactly as
 //!   in the GUI.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use okena_core::api::ApiGitStatus;
@@ -90,6 +90,7 @@ pub async fn run_git_poll(
     workspace: Arc<Mutex<Workspace>>,
     git_status_tx: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
     state_version: watch::Sender<u64>,
+    remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
 ) {
     // Last-published per-project statuses, kept across cycles so we only
     // re-broadcast + bump on real change. Keyed by the richer `GitStatus`
@@ -110,17 +111,35 @@ pub async fn run_git_poll(
 
     loop {
         // ── 1. Snapshot the projects to poll under the workspace lock ────────
-        let projects: Vec<(String, String)> = {
+        // git status (gix, cheap, local-only) is polled for EVERY non-remote
+        // project: the daemon's own window visibility is synthetic and must not
+        // gate it, or a project a CLIENT views (but the daemon's window hides)
+        // would show no branch/diff/PR badge. The expensive `gh` PR/CI fan-out
+        // (network) is instead gated to `gh_ids` — projects visible in some
+        // window PLUS any with a remotely-subscribed terminal (i.e. what a
+        // client is actually looking at). Mirrors the GUI watcher's split.
+        let (projects, gh_ids): (Vec<(String, String)>, HashSet<String>) = {
             let ws = workspace.lock();
-            // Visible across main + all extra windows (the GUI's poll set), then
-            // resolve to (id, path) for non-remote projects only — git status is
-            // local-only, so we must never run gix against a remote project.
-            let visible = ws.all_visible_project_ids();
-            ws.projects()
+            let projects = ws
+                .projects()
                 .iter()
-                .filter(|p| !p.is_remote && visible.contains(&p.id))
+                .filter(|p| !p.is_remote)
                 .map(|p| (p.id.clone(), p.path.clone()))
-                .collect()
+                .collect();
+
+            let mut gh_ids = ws.all_visible_project_ids();
+            if let Ok(subscribed) = remote_subscribed_terminals.read() {
+                for terminal_ids in subscribed.values() {
+                    for tid in terminal_ids {
+                        if let Some(p) = ws.find_project_for_terminal(tid)
+                            && !p.is_remote
+                        {
+                            gh_ids.insert(p.id.clone());
+                        }
+                    }
+                }
+            }
+            (projects, gh_ids)
         };
 
         // Skip the cycle-0 `gh` fan-out: at startup the basic gix status renders
@@ -184,6 +203,10 @@ pub async fn run_git_poll(
         // None) — we never panic and never blank existing data on error.
         if check_prs {
             for (id, path) in &projects {
+                // Only fan out `gh` for projects a client is actually viewing.
+                if !gh_ids.contains(id) {
+                    continue;
+                }
                 let id = id.clone();
                 let path = path.clone();
                 let fetched = tokio::task::spawn_blocking(move || {
@@ -209,6 +232,10 @@ pub async fn run_git_poll(
 
         if check_ci {
             for (id, path) in &projects {
+                // Only fan out `gh` for projects a client is actually viewing.
+                if !gh_ids.contains(id) {
+                    continue;
+                }
                 let id = id.clone();
                 let path = path.clone();
                 // Use the freshest PR number we have (just-fetched or cached) so
@@ -315,7 +342,8 @@ mod tests {
         // check returns immediately (no 5s sleep, deterministic).
         drop(rx);
 
-        run_git_poll(workspace, git_status_tx.clone(), state_version).await;
+        let subscribed = Arc::new(RwLock::new(HashMap::new()));
+        run_git_poll(workspace, git_status_tx.clone(), state_version, subscribed).await;
 
         // No projects → nothing was published; the channel holds the initial map.
         assert!(git_status_tx.borrow().is_empty());
