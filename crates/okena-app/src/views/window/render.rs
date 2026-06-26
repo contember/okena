@@ -1043,19 +1043,26 @@ impl Render for WindowView {
                                 .map(|p| p.id.clone())
                         });
                     project_id.and_then(|pid| {
+                        let review_base = ws
+                            .remote_snapshot(&pid)
+                            .and_then(|s| s.git_status.as_ref())
+                            .and_then(|g| g.review_base.clone());
                         ws.projects()
                             .iter()
                             .find(|p| p.id == pid)
-                            .map(move |p| (pid, p.path.clone(), p.is_remote))
+                            .map(move |p| (pid, p.path.clone(), p.is_remote, review_base))
                     })
                 };
 
-                let Some((project_id, project_path, is_remote)) = target else {
+                let Some((project_id, project_path, is_remote, review_base)) = target else {
                     return;
                 };
 
                 let mode = if is_remote {
-                    None
+                    review_base.map(|base| crate::git::DiffMode::BranchCompare {
+                        base,
+                        head: "HEAD".to_string(),
+                    })
                 } else {
                     crate::git::resolve_review_base(std::path::Path::new(&project_path))
                         .map(|base| crate::git::DiffMode::BranchCompare {

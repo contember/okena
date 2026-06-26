@@ -55,6 +55,8 @@ pub struct ProjectSwitcher {
     /// Per-project open state across every window, snapshotted at construction.
     /// Drives the row's open/closed treatment and the multi-window marker.
     open_states: HashMap<String, ProjectOpenState>,
+    /// Kept so rows can read the daemon-mirrored git status (branch label).
+    workspace: Entity<Workspace>,
 }
 
 impl ProjectSwitcher {
@@ -105,6 +107,7 @@ impl ProjectSwitcher {
             focus_handle,
             state,
             open_states,
+            workspace,
         }
     }
 
@@ -156,8 +159,12 @@ impl ProjectSwitcher {
         let open = self.open_states.get(&project.id).copied().unwrap_or_default();
         let is_worktree = project.worktree_info.is_some();
         let folder_color = t.get_folder_color(project.folder_color);
-        let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
-            .and_then(|s| s.branch);
+        let branch = self
+            .workspace
+            .read(cx)
+            .remote_snapshot(&project.id)
+            .and_then(|s| s.git_status.as_ref())
+            .and_then(|g| g.branch.clone());
 
         // Variant C treatment: a project open in *this* window gets a tinted
         // background + bold name + a bright accent eye; one closed everywhere is
