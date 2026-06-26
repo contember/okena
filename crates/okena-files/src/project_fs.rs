@@ -28,6 +28,12 @@ pub trait ProjectFs: Send + Sync + 'static {
     /// Get file size in bytes.
     fn file_size(&self, relative_path: &str) -> Result<u64, String>;
 
+    /// Rename a file or folder (project-relative path) to `new_name`.
+    fn rename_file(&self, relative_path: &str, new_name: &str) -> Result<(), String>;
+
+    /// Delete a file or folder (project-relative path).
+    fn delete_file(&self, relative_path: &str) -> Result<(), String>;
+
     /// Search content across project files.
     fn search_content(
         &self,
@@ -150,6 +156,23 @@ impl ProjectFs for RemoteProjectFs {
             }
             None => Err("Empty response".to_string()),
         }
+    }
+
+    fn rename_file(&self, relative_path: &str, new_name: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::RenameFile {
+            project_id: self.project_id.clone(),
+            relative_path: relative_path.to_string(),
+            new_name: new_name.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn delete_file(&self, relative_path: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::DeleteFile {
+            project_id: self.project_id.clone(),
+            relative_path: relative_path.to_string(),
+        };
+        self.post_action(action).map(|_| ())
     }
 
     fn search_content(
