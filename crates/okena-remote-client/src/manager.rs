@@ -1,7 +1,7 @@
 use crate::connection::RemoteConnection;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::Terminal;
-use okena_workspace::toast::ToastManager;
+use okena_workspace::toast::{Toast, ToastManager};
 use okena_terminal::TerminalsRegistry;
 use okena_workspace::settings::{load_settings, update_remote_connections};
 
@@ -474,6 +474,7 @@ impl RemoteConnectionManager {
             ConnectionEvent::StateReceived { .. } => "StateReceived",
             ConnectionEvent::SubscriptionMappings { .. } => "SubscriptionMappings",
             ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
+            ConnectionEvent::Toast { .. } => "Toast",
             ConnectionEvent::ServerWarning { .. } => "ServerWarning",
             ConnectionEvent::TokenRefreshed { .. } => "TokenRefreshed",
         };
@@ -592,6 +593,16 @@ impl RemoteConnectionManager {
                         }
                     }
                 cx.notify();
+            }
+            ConnectionEvent::Toast {
+                connection_id: _,
+                toast,
+            } => {
+                // A daemon-originated toast: reconstruct the local `Toast` (fresh
+                // `created` timestamp, ttl from `ttl_ms`) and show it the same way
+                // local toasts are shown. The connection id is unused — daemon
+                // toasts already carry their full message.
+                ToastManager::post(Toast::from_api(&toast), cx);
             }
             ConnectionEvent::ServerWarning {
                 connection_id,

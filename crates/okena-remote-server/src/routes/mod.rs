@@ -17,7 +17,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use okena_core::api::ApiGitStatus;
+use okena_core::api::{ApiGitStatus, ApiToast};
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
@@ -39,6 +39,10 @@ pub struct AppState {
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
     pub start_time: Instant,
     pub git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Broadcast of daemon-originated toasts. Each WS connection subscribes a
+    /// receiver and forwards [`WsOutbound::Toast`] frames; events sent with no
+    /// receivers are simply dropped (fire-and-forget, like git status).
+    pub toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     /// Per-connection set of subscribed terminal IDs (connection_id → terminal_ids).
     /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
@@ -55,6 +59,7 @@ pub fn build_router(
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     next_connection_id: Arc<AtomicU64>,
 ) -> Router {
@@ -65,6 +70,7 @@ pub fn build_router(
         state_version,
         start_time,
         git_status,
+        toast_tx,
         remote_subscribed_terminals,
         next_connection_id,
     };

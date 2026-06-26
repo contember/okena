@@ -87,6 +87,13 @@ pub enum ConnectionEvent {
         connection_id: String,
         statuses: HashMap<String, okena_core::api::ApiGitStatus>,
     },
+    /// A daemon-originated toast to display on this client (e.g. a remote
+    /// lifecycle-hook failure). The daemon has no surface, so it forwards these
+    /// over the WebSocket and the client renders them via its `ToastManager`.
+    Toast {
+        connection_id: String,
+        toast: okena_core::api::ApiToast,
+    },
     /// Token was refreshed — save new token and update timestamp
     TokenRefreshed {
         connection_id: String,
