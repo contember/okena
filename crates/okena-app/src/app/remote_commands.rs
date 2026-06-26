@@ -354,6 +354,7 @@ pub(crate) async fn remote_command_loop(
                                 .iter()
                                 .map(|(tid, e)| e.to_api(tid.clone()))
                                 .collect(),
+                            hooks: p.hooks.to_api(),
                         }
                     };
 

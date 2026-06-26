@@ -212,6 +212,9 @@ pub fn execute_action(
         ActionRequest::RenameProject { project_id, name } => {
             project::rename_project(ws, project_id, name, cx)
         }
+        ActionRequest::UpdateProjectHooks { project_id, hooks } => {
+            project::update_project_hooks(ws, project_id, hooks, cx)
+        }
         ActionRequest::RenameProjectDirectory { project_id, new_name } => {
             project::rename_project_directory(ws, project_id, new_name, cx)
         }

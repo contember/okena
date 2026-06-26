@@ -81,6 +81,14 @@ pub enum OverlayManagerEvent {
     /// files + the authoritative workspace.
     SessionAction(okena_core::api::ActionRequest),
 
+    /// Settings panel edited a project's per-project hooks. The host strips the
+    /// remote prefix and dispatches `UpdateProjectHooks` to the daemon (which
+    /// owns the authoritative `ProjectData.hooks`).
+    ProjectHooksChanged {
+        project_id: String,
+        hooks: okena_core::api::ApiHooksConfig,
+    },
+
     /// Worktree dialog confirmed: create a worktree on the parent project.
     /// The host dispatches `ActionRequest::CreateWorktree`; the daemon creates
     /// the worktree + its terminals, which mirror back.
@@ -490,10 +498,33 @@ impl OverlayManager {
 
     /// Toggle settings panel overlay.
     pub fn toggle_settings_panel(&mut self, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        toggle_overlay!(self, cx, SettingsPanel, SettingsPanelEvent, |cx| {
-            SettingsPanel::new(workspace, cx)
-        });
+        if self.is_modal::<SettingsPanel>() {
+            self.close_modal(cx);
+        } else {
+            let workspace = self.workspace.clone();
+            let entity = cx.new(|cx| SettingsPanel::new(workspace, cx));
+            self.subscribe_settings_panel(&entity, cx);
+            self.open_modal(entity, cx);
+        }
+    }
+
+    /// Subscribe to a settings panel: close on `Close`, forward per-project hook
+    /// edits as an `OverlayManagerEvent` the host dispatches to the daemon.
+    fn subscribe_settings_panel(
+        &mut self,
+        entity: &Entity<SettingsPanel>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe(entity, |this, _, event: &SettingsPanelEvent, cx| match event {
+            SettingsPanelEvent::Close => this.close_modal(cx),
+            SettingsPanelEvent::ProjectHooksChanged { project_id, hooks } => {
+                cx.emit(OverlayManagerEvent::ProjectHooksChanged {
+                    project_id: project_id.clone(),
+                    hooks: hooks.clone(),
+                });
+            }
+        })
+        .detach();
     }
 
     /// Toggle hook log overlay.
@@ -525,9 +556,9 @@ impl OverlayManager {
     /// Show settings panel opened to Hooks category for a specific project.
     pub fn show_settings_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
-        open_overlay!(self, cx, SettingsPanelEvent, |cx| {
-            SettingsPanel::new_for_project(workspace, project_id, cx)
-        });
+        let entity = cx.new(|cx| SettingsPanel::new_for_project(workspace, project_id, cx));
+        self.subscribe_settings_panel(&entity, cx);
+        self.open_modal(entity, cx);
     }
 
     /// Toggle project switcher overlay.

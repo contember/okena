@@ -106,9 +106,10 @@ PAIRS=(
 #                               daemon (the daemon's own projects are is_remote=false).
 #   service_terminals         — daemon-internal persistence routing; the client
 #                               gets live service terminal ids via ApiServiceInfo.
-# Still-visible deferred gaps (NOT ignored): `hooks` and `hidden_terminals` need a
-# wire projection (HooksConfig lives in okena-state and would need an Api mirror).
-CAT2_IGNORE='^(version|service_panel_heights|hook_panel_heights|connection_id|is_remote|service_terminals)$'
+#   hidden_terminals          — dormant placeholder (`#[allow(dead_code)]`); actual
+#                               per-terminal visibility flows through
+#                               LayoutNode.minimized/detached, which ARE on the wire.
+CAT2_IGNORE='^(version|service_panel_heights|hook_panel_heights|connection_id|is_remote|service_terminals|hidden_terminals)$'
 
 cat2_hits=0
 for pair in "${PAIRS[@]}"; do

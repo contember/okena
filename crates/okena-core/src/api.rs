@@ -257,6 +257,11 @@ pub struct ApiProject {
     /// without a dependency cycle — see [`ApiHookTerminalEntry`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hook_terminals: Vec<ApiHookTerminalEntry>,
+    /// Per-project lifecycle-hook overrides. Carried so daemon-client clients
+    /// can display + edit the real hooks (the daemon, not the client, applies
+    /// them on PTY spawn). Empty for projects with no per-project overrides.
+    #[serde(default, skip_serializing_if = "ApiHooksConfig::is_empty")]
+    pub hooks: ApiHooksConfig,
 }
 
 /// Wire mirror of `okena_state::HookTerminalStatus` (which can't be referenced
@@ -281,6 +286,71 @@ pub struct ApiHookTerminalEntry {
     pub hook_type: String,
     pub command: String,
     pub cwd: String,
+}
+
+/// Wire mirror of `okena_state::ProjectHooks`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiProjectHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_open: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_close: Option<String>,
+}
+
+/// Wire mirror of `okena_state::TerminalHooks`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiTerminalHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_create: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_close: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_wrapper: Option<String>,
+}
+
+/// Wire mirror of `okena_state::WorktreeHooks`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiWorktreeHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_create: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_close: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_merge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_merge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_remove: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_remove: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_rebase_conflict: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_dirty_close: Option<String>,
+}
+
+/// Wire mirror of `okena_state::HooksConfig` — per-project lifecycle hook
+/// overrides. Carried so daemon-client clients show and edit the *real*
+/// per-project hooks (the daemon applies them when it spawns PTYs). Converted
+/// via `HooksConfig::{to_api,from_api}` in `okena-state`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiHooksConfig {
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub project: ApiProjectHooks,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub terminal: ApiTerminalHooks,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub worktree: ApiWorktreeHooks,
+}
+
+impl ApiHooksConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == ApiHooksConfig::default()
+    }
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -623,6 +693,13 @@ pub enum ActionRequest {
         project_id: String,
         name: String,
     },
+    /// Replace a project's per-project lifecycle-hook overrides. Sent by a
+    /// client whose settings panel edited them; the daemon owns the
+    /// authoritative `ProjectData.hooks` and applies them on PTY spawn.
+    UpdateProjectHooks {
+        project_id: String,
+        hooks: ApiHooksConfig,
+    },
     RenameProjectDirectory {
         project_id: String,
         new_name: String,
@@ -861,6 +938,17 @@ mod tests {
                     command: "echo hi".into(),
                     cwd: "/tmp".into(),
                 }],
+                hooks: ApiHooksConfig {
+                    project: ApiProjectHooks {
+                        on_open: Some("echo open".into()),
+                        on_close: None,
+                    },
+                    terminal: ApiTerminalHooks {
+                        shell_wrapper: Some("devcontainer exec -- {shell}".into()),
+                        ..Default::default()
+                    },
+                    worktree: ApiWorktreeHooks::default(),
+                },
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,
@@ -907,6 +995,16 @@ mod tests {
             parsed.projects[0].hook_terminals[0].status,
             ApiHookTerminalStatus::Failed { exit_code: 2 }
         ));
+        assert_eq!(
+            parsed.projects[0].hooks.project.on_open.as_deref(),
+            Some("echo open")
+        );
+        assert_eq!(parsed.projects[0].hooks.project.on_close, None);
+        assert_eq!(
+            parsed.projects[0].hooks.terminal.shell_wrapper.as_deref(),
+            Some("devcontainer exec -- {shell}")
+        );
+        assert_eq!(parsed.projects[0].hooks.worktree, ApiWorktreeHooks::default());
         assert!(parsed.fullscreen_terminal.is_none());
         assert_eq!(parsed.project_order, vec!["folder1", "p1"]);
         assert_eq!(parsed.folders.len(), 1);

@@ -210,6 +210,17 @@ impl WindowView {
                 // connection directly (no project to resolve a dispatcher from).
                 self.dispatch_to_local_daemon(action.clone(), cx);
             }
+            OverlayManagerEvent::ProjectHooksChanged { project_id, hooks } => {
+                // The settings panel edited a project's hooks. Route through the
+                // project's dispatcher so the remote id prefix is stripped before
+                // the daemon (the authoritative owner) applies them.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::UpdateProjectHooks {
+                        project_id: project_id.clone(),
+                        hooks: hooks.clone(),
+                    }, cx);
+                }
+            }
             OverlayManagerEvent::WorktreeCreateRequested { project_id, branch, create_branch } => {
                 // The daemon creates the worktree, its project and its terminals;
                 // they mirror back. No local mirror mutation or PTY spawn here.
