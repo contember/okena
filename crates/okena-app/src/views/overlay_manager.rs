@@ -853,7 +853,7 @@ impl OverlayManager {
                 }
                 ContextMenuEvent::ManageWorktrees { project_id, position } => {
                     this.hide_context_menu(cx);
-                    this.show_worktree_list(project_id.clone(), *position, cx);
+                    this.show_worktree_list(project_id.clone(), *position, None, cx);
                 }
                 ContextMenuEvent::ReloadServices { project_id } => {
                     this.hide_context_menu(cx);
@@ -1221,11 +1221,12 @@ impl OverlayManager {
     }
 
     /// Show worktree list popover.
-    pub fn show_worktree_list(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
+    pub fn show_worktree_list(&mut self, project_id: String, position: Point<Pixels>, params: Option<(String, u16, String, String)>, cx: &mut Context<Self>) {
         self.close_all_context_menus();
 
+        let (host, port, token, daemon_id) = params.unwrap_or_else(|| (String::new(), 0, String::new(), project_id.clone()));
         let workspace = self.workspace.clone();
-        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, project_id, position, cx));
+        let popover = cx.new(|cx| WorktreeListPopover::new(host, port, token, daemon_id, workspace, project_id, position, cx));
 
         cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
             match event {

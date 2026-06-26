@@ -97,6 +97,23 @@ pub(super) fn list_branches(ws: &Workspace, project_id: String) -> ActionResult 
     }
 }
 
+pub(super) fn list_worktrees(ws: &Workspace, project_id: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(std::path::Path::new(&path));
+            let norm_git_root = okena_git::repository::normalize_path(&git_root);
+            let worktrees = okena_git::repository::list_git_worktrees(&git_root);
+            ActionResult::Ok(Some(serde_json::json!({
+                "git_root": norm_git_root.to_string_lossy(),
+                "subdir": subdir.to_string_lossy(),
+                "worktrees": worktrees,
+            })))
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
 pub(super) fn list_branches_classified(ws: &Workspace, project_id: String) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {

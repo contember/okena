@@ -587,6 +587,9 @@ pub enum ActionRequest {
     GitListBranches {
         project_id: String,
     },
+    GitListWorktrees {
+        project_id: String,
+    },
     GitListBranchesClassified {
         project_id: String,
     },
