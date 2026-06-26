@@ -402,6 +402,17 @@ impl ConnectionManager {
                 ConnectionEvent::ServerWarning { message, .. } => {
                     log::warn!("Server warning for {}: {}", conn_id, message);
                 }
+                ConnectionEvent::Toast { toast, .. } => {
+                    // The mobile bridge has no toast surface yet; surfacing these
+                    // in the RN UI would need a dedicated FFI callback. Log for now
+                    // so daemon-originated toasts are at least observable.
+                    log::info!(
+                        "Toast for {} [{}]: {}",
+                        conn_id,
+                        toast.level,
+                        toast.message
+                    );
+                }
             }
         }
     }

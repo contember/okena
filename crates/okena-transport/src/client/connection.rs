@@ -1051,6 +1051,26 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 .await;
                                         }
                                 }
+                                "toast" => {
+                                    // `WsOutbound::Toast` is internally tagged, so
+                                    // the ApiToast fields sit at the top level of
+                                    // `value` alongside `"type":"toast"`.
+                                    match serde_json::from_value::<okena_core::api::ApiToast>(
+                                        value.clone(),
+                                    ) {
+                                        Ok(toast) => {
+                                            let _ = event_tx_clone
+                                                .send(ConnectionEvent::Toast {
+                                                    connection_id: config_id.clone(),
+                                                    toast,
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Failed to parse toast message: {}", e);
+                                        }
+                                    }
+                                }
                                 _ => {
                                     log::debug!("Unknown WS message type: {}", msg_type);
                                 }

@@ -13,7 +13,7 @@ use crate::workspace::persistence;
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
-use okena_core::api::ApiGitStatus;
+use okena_core::api::{ApiGitStatus, ApiToast};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -43,6 +43,10 @@ pub struct HeadlessApp {
     pty_broadcaster: Arc<PtyBroadcaster>,
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Broadcast of daemon-originated toasts forwarded to thin clients. Held so
+    /// the wiring matches the daemon's; the headless app has no toast producer of
+    /// its own yet (a follow-up could drain its `HookMonitor` into it).
+    toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>>,
     next_remote_connection_id: Arc<AtomicU64>,
     #[allow(dead_code)]
@@ -132,6 +136,10 @@ impl HeadlessApp {
         // Git status watcher
         let (git_status_tx, _) = tokio_watch::channel(HashMap::new());
         let git_status_tx = Arc::new(git_status_tx);
+        // Toast broadcast (capacity matches a small backlog; lagging clients just
+        // drop non-critical notifications). No producer in headless mode yet.
+        let (toast_tx, _) = tokio::sync::broadcast::channel::<ApiToast>(64);
+        let toast_tx = Arc::new(toast_tx);
         let remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>> =
             Arc::new(std::sync::RwLock::new(HashMap::new()));
         let next_remote_connection_id = Arc::new(AtomicU64::new(0));
@@ -199,6 +207,7 @@ impl HeadlessApp {
             pty_broadcaster: pty_broadcaster.clone(),
             state_version: state_version.clone(),
             git_status_tx: git_status_tx.clone(),
+            toast_tx: toast_tx.clone(),
             remote_subscribed_terminals: remote_subscribed_terminals.clone(),
             next_remote_connection_id: next_remote_connection_id.clone(),
             git_watcher,
@@ -295,6 +304,7 @@ impl HeadlessApp {
             self.state_version.clone(),
             listen_addr,
             self.git_status_tx.clone(),
+            self.toast_tx.clone(),
             self.remote_subscribed_terminals.clone(),
             self.next_remote_connection_id.clone(),
             tls_enabled,

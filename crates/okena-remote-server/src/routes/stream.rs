@@ -80,6 +80,11 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
     // Subscribe to state_version and git status changes
     let mut state_rx = state.state_version.subscribe();
     let mut git_rx = state.git_status.subscribe();
+    // Subscribe to daemon-originated toasts (fire-and-forget broadcast).
+    let mut toast_rx = state.toast_tx.subscribe();
+    // Once the toast sender is gone we disable that select arm, otherwise its
+    // `recv()` would resolve `Err(Closed)` instantly and busy-spin the loop.
+    let mut toast_open = true;
 
     // Pin the writer handle for use in select!
     tokio::pin!(writer_handle);
@@ -386,6 +391,29 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                     }).expect("BUG: WsOutbound must serialize");
                     if out_tx.send(Message::Text(resp.into())).await.is_err() {
                         break;
+                    }
+                }
+            }
+
+            // Daemon-originated toast push (fire-and-forget broadcast).
+            result = toast_rx.recv(), if toast_open => {
+                match result {
+                    Ok(api_toast) => {
+                        let resp = serde_json::to_string(&WsOutbound::Toast(api_toast))
+                            .expect("BUG: WsOutbound must serialize");
+                        if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    // A slow client missed some toasts — they are non-critical
+                    // notifications, so just keep receiving the newer ones.
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::debug!("toast broadcast lagged, dropped {n} toast(s) for a client");
+                    }
+                    // Sender gone (daemon shutting down) — stop polling this arm so
+                    // it can't busy-spin; the connection lives on until it closes.
+                    Err(broadcast::error::RecvError::Closed) => {
+                        toast_open = false;
                     }
                 }
             }

@@ -2,7 +2,7 @@ use crate::auth::AuthStore;
 use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
 use crate::routes;
-use okena_core::api::ApiGitStatus;
+use okena_core::api::{ApiGitStatus, ApiToast};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::AtomicU64;
@@ -33,6 +33,7 @@ impl RemoteServer {
         state_version: Arc<watch::Sender<u64>>,
         bind_addr: IpAddr,
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
+        toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
         next_connection_id: Arc<AtomicU64>,
         tls_enabled: bool,
@@ -125,6 +126,7 @@ impl RemoteServer {
                 state_version,
                 start_time,
                 git_status,
+                toast_tx,
                 remote_subscribed_terminals,
                 next_connection_id,
             );

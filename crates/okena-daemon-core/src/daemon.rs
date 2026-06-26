@@ -58,7 +58,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use async_channel::Receiver;
-use okena_core::api::ApiGitStatus;
+use okena_core::api::{ApiGitStatus, ApiToast};
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_terminal::backend::{LocalBackend, TerminalBackend};
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
@@ -124,6 +124,11 @@ pub struct DaemonCore {
     state_version: Arc<watch::Sender<u64>>,
     /// Git-status channel the poll loop publishes into and the server broadcasts.
     git_status_tx: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Toast broadcast: a periodic drain task (see [`run`](DaemonCore::run))
+    /// pushes the `HookMonitor`'s pending toasts here as [`ApiToast`]s and the
+    /// server fans them out to clients. The daemon has no surface of its own, so
+    /// this is how hook-failure notifications reach the GUI.
+    toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     /// Client terminal subscriptions (connection id -> subscribed terminal ids),
     /// shared with the remote server. The git poll reads it to fan out the
     /// expensive `gh` PR/CI lookups only for projects a client is viewing.
@@ -206,6 +211,10 @@ impl DaemonCore {
         // `reactor.state_version` (the same channel), so reads observe the bumps.
         let state_version = Arc::new(reactor.state_version.clone());
         let git_status_tx = Arc::new(watch::Sender::new(HashMap::new()));
+        // Toast broadcast: the periodic drain task in `run()` is the sole
+        // producer; each connected client subscribes a receiver. Capacity bounds
+        // the per-client backlog — a lagging client drops non-critical toasts.
+        let toast_tx = Arc::new(tokio::sync::broadcast::channel::<ApiToast>(64).0);
         let auth_store = Arc::new(AuthStore::new());
         let remote_subscribed_terminals = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let next_connection_id = Arc::new(AtomicU64::new(0));
@@ -221,6 +230,7 @@ impl DaemonCore {
             state_version.clone(),
             params.listen_addr,
             git_status_tx.clone(),
+            toast_tx.clone(),
             remote_subscribed_terminals.clone(),
             next_connection_id,
             params.tls_enabled,
@@ -253,6 +263,7 @@ impl DaemonCore {
             pty_events,
             state_version,
             git_status_tx,
+            toast_tx,
             remote_subscribed_terminals,
             settings,
             daemon_config,
@@ -279,6 +290,7 @@ impl DaemonCore {
             pty_events,
             state_version,
             git_status_tx,
+            toast_tx,
             remote_subscribed_terminals,
             settings,
             daemon_config,
@@ -305,6 +317,15 @@ impl DaemonCore {
                 git_status_tx.clone(),
                 reactor.state_version.clone(),
                 remote_subscribed_terminals,
+            ));
+            // Forward the daemon's HookMonitor toasts to clients. The daemon has
+            // no surface; this drains its pending toasts and broadcasts them over
+            // the same channel the remote server fans out (`WsOutbound::Toast`).
+            // `(*toast_tx).clone()` clones the inner `broadcast::Sender` (cheap,
+            // shares the channel) so the task can outlive this `Arc` handle.
+            tokio::task::spawn_local(crate::toast_poll::run_toast_poll(
+                reactor.hook_monitor.clone(),
+                (*toast_tx).clone(),
             ));
 
             // Materialize PTYs for every restored project's uninitialized

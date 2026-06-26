@@ -218,6 +218,29 @@ pub struct ApiGitStatus {
     pub review_base: Option<String>,
 }
 
+/// Wire projection of a daemon-originated toast, forwarded to thin clients so
+/// the daemon-client GUI can surface notifications that the daemon itself has no
+/// surface to show (e.g. lifecycle-hook failures from the daemon's
+/// `HookMonitor`).
+///
+/// Deliberately omits the local-only `Toast` fields: `created: Instant` and
+/// `ttl: Duration` are not serde-serializable as-is, so the TTL travels as
+/// `ttl_ms` and the client stamps a fresh `created` on receipt. `actions` are
+/// also omitted — daemon toasts are purely informational, while action toasts
+/// (e.g. the soft-close "Undo") are constructed and resolved entirely
+/// client-side, so they never need to cross the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiToast {
+    pub id: String,
+    /// One of "success" | "error" | "warning" | "info".
+    pub level: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Time-to-live in milliseconds.
+    pub ttl_ms: u64,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ApiProject {
     pub id: String,
