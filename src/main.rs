@@ -414,6 +414,26 @@ fn main() {
         eprintln!("Warning: profile migration failed: {e}");
     }
 
+    // Snapshot the existing config BEFORE anything loads/migrates it, so an
+    // upgrade can be reverted to an old-format config the previous binary reads.
+    // Must run before load_settings()/load_workspace().
+    {
+        use okena_workspace::persistence::{SETTINGS_VERSION, WINDOW_LAYOUT_VERSION, WORKSPACE_VERSION};
+        let schema_versions = [
+            profiles::SchemaVersion { file: "workspace.json", current: WORKSPACE_VERSION },
+            profiles::SchemaVersion { file: "settings.json", current: SETTINGS_VERSION },
+            profiles::SchemaVersion { file: "window-layout.json", current: WINDOW_LAYOUT_VERSION },
+        ];
+        if let Err(e) = profiles::snapshot_configs_before_upgrade(
+            profiles::current(),
+            env!("CARGO_PKG_VERSION"),
+            &schema_versions,
+        ) {
+            eprintln!("Warning: config snapshot failed: {e}");
+        }
+        profiles::record_app_version(profiles::current(), env!("CARGO_PKG_VERSION"));
+    }
+
     // Handle CLI subcommands after profile is initialized so that helpers like
     // discover_server() read the right profile's remote.json.
     if let Some(exit_code) = okena_cli::try_handle_cli() {

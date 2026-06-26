@@ -31,6 +31,10 @@ impl ProfilePaths {
     pub fn remote_secret(&self)    -> PathBuf { self.root.join("remote_secret") }
     pub fn remote_tokens(&self)    -> PathBuf { self.root.join("remote_tokens.json") }
     pub fn pair_code(&self)        -> PathBuf { self.root.join("pair_code") }
+    /// Pristine pre-upgrade copies of config, one dir per outgoing version.
+    pub fn config_backups_dir(&self) -> PathBuf { self.root.join("config-backups") }
+    /// Plain-text marker holding the last app version that ran on this profile.
+    pub fn app_version_marker(&self) -> PathBuf { self.root.join(".app-version") }
 }
 
 /// Initialize the process-wide active profile. Must be called exactly once before
@@ -409,6 +413,252 @@ pub fn migrate_legacy_layout_if_needed(paths: &ProfilePaths) -> Result<()> {
     Ok(())
 }
 
+// ─── Config snapshots (upgrade safety-net) ──────────────────────────────────────
+
+/// A config file's in-code schema version, used to detect a pending migration
+/// (on-disk version older than what this build produces).
+pub struct SchemaVersion {
+    /// File name relative to the profile root, e.g. `"workspace.json"`.
+    pub file: &'static str,
+    /// The schema version this build expects/produces.
+    pub current: u32,
+}
+
+/// Config files copied verbatim into every snapshot.
+const SNAPSHOT_FILES: &[&str] = &[
+    "workspace.json",
+    "workspace.json.bak",
+    "settings.json",
+    "keybindings.json",
+    "window-layout.json",
+];
+
+/// Config directories copied recursively into every snapshot.
+const SNAPSHOT_DIRS: &[&str] = &["themes", "sessions"];
+
+/// Maximum number of config snapshots to retain per profile.
+const MAX_SNAPSHOTS: usize = 3;
+
+/// Snapshot the profile's config into `config-backups/<key>/` when an app
+/// upgrade or a pending schema migration is detected, so a downgrade can restore
+/// the old-format config the previous binary can read.
+///
+/// Idempotent and first-wins: an existing snapshot for the chosen key is left
+/// untouched (it is already the pristine pre-upgrade state). Must run at startup
+/// BEFORE any config is loaded/migrated. Returns the snapshot key if one was
+/// created.
+///
+/// Trigger:
+/// - app version increased vs the `.app-version` marker (key = old version), or
+/// - no marker yet but config exists (key = `pre-<current>`), or
+/// - any `schema_versions` entry is behind on disk (dev churn without a version
+///   bump; key = `pre-<current>`).
+pub fn snapshot_configs_before_upgrade(
+    paths: &ProfilePaths,
+    current_app_version: &str,
+    schema_versions: &[SchemaVersion],
+) -> Result<Option<String>> {
+    // Only meaningful if there is existing config to protect.
+    if !paths.workspace_json().exists() && !paths.settings_json().exists() {
+        return Ok(None);
+    }
+
+    let marker = read_app_version_marker(paths);
+
+    let upgrade = match &marker {
+        Some(last) => is_upgrade(current_app_version, last),
+        // First run with this feature on a pre-existing config: protect it once.
+        None => true,
+    };
+    let schema_pending = schema_versions
+        .iter()
+        .any(|sv| schema_is_behind(&paths.root.join(sv.file), sv.current));
+
+    if !upgrade && !schema_pending {
+        return Ok(None);
+    }
+
+    // Key = the version we're leaving (a clean revert target) when we have a real
+    // upgrade with a recorded previous version; otherwise `pre-<current>` (the
+    // config as it was before any `current` build touched it).
+    let key = match &marker {
+        Some(last) if is_upgrade(current_app_version, last) => sanitize_key(last),
+        _ => format!("pre-{}", sanitize_key(current_app_version)),
+    };
+
+    let backups_dir = paths.config_backups_dir();
+    let target = backups_dir.join(&key);
+    // First-wins: never overwrite an existing pristine snapshot for this key.
+    if target.exists() {
+        return Ok(None);
+    }
+
+    std::fs::create_dir_all(&backups_dir)?;
+    // Per-process tmp name: the GUI and its daemon may snapshot the same profile
+    // concurrently, so they must not share a staging dir.
+    let tmp = backups_dir.join(format!("{key}.{}.tmp", std::process::id()));
+    // Clear a leftover partial from a previous crash before publishing.
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+
+    for name in SNAPSHOT_FILES {
+        let from = paths.root.join(name);
+        if from.exists() {
+            let _ = std::fs::copy(&from, tmp.join(name));
+        }
+    }
+    for name in SNAPSHOT_DIRS {
+        let from = paths.root.join(name);
+        if from.is_dir() {
+            let _ = copy_dir_recursive(&from, &tmp.join(name));
+        }
+    }
+
+    // Describe the snapshot for humans and a future revert command.
+    let schema_meta: serde_json::Map<String, serde_json::Value> = schema_versions
+        .iter()
+        .map(|sv| {
+            let on_disk = read_schema_version(&paths.root.join(sv.file));
+            (
+                sv.file.to_string(),
+                serde_json::json!({ "on_disk": on_disk, "code": sv.current }),
+            )
+        })
+        .collect();
+    let meta = serde_json::json!({
+        "from_app_version": marker,
+        "to_app_version": current_app_version,
+        "created_at": now_iso8601(),
+        "schema_versions": schema_meta,
+    });
+    let _ = std::fs::write(
+        tmp.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap_or_default(),
+    );
+
+    // Atomically publish: a half-written `.tmp` never looks like a real snapshot.
+    if target.exists() {
+        // Lost a race with a concurrent snapshot — the other copy is pristine too.
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Ok(None);
+    }
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e.into());
+    }
+    prune_snapshots(&backups_dir, MAX_SNAPSHOTS);
+
+    log::info!("Config snapshot saved before upgrade: {}", target.display());
+    Ok(Some(key))
+}
+
+/// Record the current app version into the profile's `.app-version` marker.
+/// Call once at startup after the snapshot check. Best-effort.
+pub fn record_app_version(paths: &ProfilePaths, current_app_version: &str) {
+    let path = paths.app_version_marker();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, current_app_version);
+}
+
+fn read_app_version_marker(paths: &ProfilePaths) -> Option<String> {
+    let content = std::fs::read_to_string(paths.app_version_marker()).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Read the root `"version"` field from a JSON config file.
+fn read_schema_version(path: &Path) -> Option<u32> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value.get("version").and_then(|v| v.as_u64()).map(|n| n as u32)
+}
+
+/// Whether an existing config file is behind the build's schema version (and so
+/// would be migrated on load). A present file with a missing/invalid version is
+/// treated as legacy (behind) — erring toward taking a backup is safe.
+fn schema_is_behind(path: &Path, current: u32) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    match read_schema_version(path) {
+        Some(v) => v < current,
+        None => true,
+    }
+}
+
+/// True if `current` is a newer version than `last`. Falls back to string
+/// inequality (conservative: take a snapshot) when either side is unparseable.
+fn is_upgrade(current: &str, last: &str) -> bool {
+    match (parse_version(current), parse_version(last)) {
+        (Some(c), Some(l)) => c > l,
+        _ => current.trim() != last.trim(),
+    }
+}
+
+/// Parse a `major.minor.patch` version, ignoring any `-pre`/`+build` suffix.
+fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
+    let core = v.trim().split(['-', '+']).next().unwrap_or("");
+    let mut it = core.split('.');
+    let major = it.next()?.trim().parse().ok()?;
+    let minor = it.next().unwrap_or("0").trim().parse().ok()?;
+    let patch = it.next().unwrap_or("0").trim().parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Make a version string safe to use as a directory name.
+fn sanitize_key(s: &str) -> String {
+    s.trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .collect()
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst = to.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst)?;
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), &dst)?;
+        }
+        // Symlinks intentionally skipped — config dirs shouldn't contain them.
+    }
+    Ok(())
+}
+
+/// Keep the `keep` most recently created snapshots, removing older ones.
+fn prune_snapshots(backups_dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(backups_dir) else {
+        return;
+    };
+    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+        .filter_map(|e| {
+            let mtime = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((mtime, e.path()))
+        })
+        .collect();
+    if dirs.len() <= keep {
+        return;
+    }
+    dirs.sort_by_key(|(t, _)| *t); // oldest first
+    let remove_count = dirs.len() - keep;
+    for (_, path) in dirs.into_iter().take(remove_count) {
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn bootstrap_default_profile(config_root: &Path) -> Result<ProfileIndex> {
@@ -631,6 +881,158 @@ mod tests {
         let ts = now_iso8601();
         assert_eq!(ts.len(), 20); // "YYYY-MM-DDTHH:MM:SSZ"
         assert!(ts.ends_with('Z'));
+    }
+
+    // ─── Config snapshot tests ──────────────────────────────────────────────
+
+    fn snap_paths(dir: &TempDir) -> ProfilePaths {
+        let root = dir.path().join("profiles").join("default");
+        fs::create_dir_all(&root).unwrap();
+        ProfilePaths {
+            id: "default".to_string(),
+            root,
+            config_root: dir.path().to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_on_app_version_upgrade() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        fs::write(paths.workspace_json(), r#"{"version":2,"hello":"world"}"#).unwrap();
+        record_app_version(&paths, "0.27.0");
+
+        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
+        assert_eq!(key.as_deref(), Some("0.27.0"));
+
+        let snap_dir = paths.config_backups_dir().join("0.27.0");
+        let content = fs::read_to_string(snap_dir.join("workspace.json")).unwrap();
+        assert!(content.contains("\"hello\":\"world\""));
+        assert!(snap_dir.join("meta.json").exists());
+    }
+
+    #[test]
+    fn test_snapshot_when_schema_behind_no_marker() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        fs::write(paths.workspace_json(), r#"{"version":1}"#).unwrap();
+        // No .app-version marker — first run of the feature on an existing config.
+        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
+        assert_eq!(key.as_deref(), Some("pre-0.28.0"));
+        assert!(paths.config_backups_dir().join("pre-0.28.0").join("workspace.json").exists());
+    }
+
+    #[test]
+    fn test_no_snapshot_when_up_to_date() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        fs::write(paths.workspace_json(), r#"{"version":2}"#).unwrap();
+        record_app_version(&paths, "0.28.0");
+        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
+        assert_eq!(key, None);
+        assert!(!paths.config_backups_dir().exists());
+    }
+
+    #[test]
+    fn test_no_snapshot_on_fresh_install() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        // No config files at all.
+        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
+        assert_eq!(key, None);
+    }
+
+    #[test]
+    fn test_snapshot_on_schema_churn_same_version() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        fs::write(paths.workspace_json(), r#"{"version":2}"#).unwrap();
+        record_app_version(&paths, "0.28.0");
+        // Code schema bumped without an app-version bump (dev churn on a branch).
+        let sv = [SchemaVersion { file: "workspace.json", current: 3 }];
+        let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
+        assert_eq!(key.as_deref(), Some("pre-0.28.0"));
+    }
+
+    #[test]
+    fn test_snapshot_idempotent_first_wins() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        fs::write(paths.workspace_json(), r#"{"version":2,"n":1}"#).unwrap();
+        record_app_version(&paths, "0.27.0");
+        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+
+        let k1 = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
+        assert_eq!(k1.as_deref(), Some("0.27.0"));
+
+        // Mutate the live config, then snapshot again with the same key.
+        fs::write(paths.workspace_json(), r#"{"version":2,"n":2}"#).unwrap();
+        let k2 = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
+        assert_eq!(k2, None, "must not re-snapshot an existing key");
+
+        let snap =
+            fs::read_to_string(paths.config_backups_dir().join("0.27.0").join("workspace.json"))
+                .unwrap();
+        assert!(snap.contains("\"n\":1"), "first snapshot must stay pristine");
+    }
+
+    #[test]
+    fn test_snapshot_copies_dirs() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        fs::write(paths.workspace_json(), r#"{"version":2}"#).unwrap();
+        fs::create_dir_all(paths.themes_dir()).unwrap();
+        fs::write(paths.themes_dir().join("custom.json"), "{}").unwrap();
+        record_app_version(&paths, "0.27.0");
+
+        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
+        assert!(paths
+            .config_backups_dir()
+            .join("0.27.0")
+            .join("themes")
+            .join("custom.json")
+            .exists());
+    }
+
+    #[test]
+    fn test_prune_keeps_recent() {
+        let dir = temp_root();
+        let backups = dir.path().join("config-backups");
+        fs::create_dir_all(&backups).unwrap();
+        for name in ["a", "b", "c", "d", "e"] {
+            fs::create_dir_all(backups.join(name)).unwrap();
+        }
+        // A leftover staging dir must never be counted or removed as a snapshot.
+        fs::create_dir_all(backups.join("f.123.tmp")).unwrap();
+
+        prune_snapshots(&backups, 3);
+
+        let snapshot_dirs = fs::read_dir(&backups)
+            .unwrap()
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(snapshot_dirs, 3);
+        assert!(backups.join("f.123.tmp").exists());
+    }
+
+    #[test]
+    fn test_version_compare() {
+        assert!(is_upgrade("0.28.0", "0.27.0"));
+        assert!(is_upgrade("1.0.0", "0.99.99"));
+        assert!(is_upgrade("0.28.1", "0.28.0"));
+        assert!(!is_upgrade("0.27.0", "0.28.0"));
+        assert!(!is_upgrade("0.28.0", "0.28.0"));
+        // Pre-release / build suffix ignored on the core triple.
+        assert!(!is_upgrade("0.28.0-beta", "0.28.0"));
+        // Unparseable on either side → conservative: snapshot iff strings differ.
+        assert!(is_upgrade("weird", "other"));
+        assert!(!is_upgrade("weird", "weird"));
     }
 
     fn make_test_index_with_two(dir: &TempDir) -> ProfileIndex {
