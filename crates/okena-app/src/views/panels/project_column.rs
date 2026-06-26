@@ -405,6 +405,39 @@ impl ProjectColumn {
             .into_any_element()
     }
 
+    /// Resolve the project's git status: prefer the local watcher, fall back to
+    /// the remote snapshot (daemon-client mode, where `git_watcher` is `None`).
+    /// Both the header badge and the CI-checks popover MUST go through this so
+    /// they agree on the source — otherwise the badge renders from the snapshot
+    /// while the popover reads an empty watcher and shows nothing (a pill you
+    /// can't open).
+    fn resolve_git_status(&self, cx: &Context<Self>) -> Option<git::GitStatus> {
+        self.git_watcher
+            .as_ref()
+            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
+            .or_else(|| {
+                self.workspace
+                    .read(cx)
+                    .remote_snapshot(&self.project_id)
+                    .and_then(|snap| snap.git_status.as_ref())
+                    .map(|g| git::GitStatus {
+                        branch: g.branch.clone(),
+                        lines_added: g.lines_added,
+                        lines_removed: g.lines_removed,
+                        pr_info: g.pr_info.clone(),
+                        ci_checks: g.ci_checks.clone(),
+                        ahead: g.ahead,
+                        behind: g.behind,
+                        unpushed: g.unpushed,
+                        // Carried over the wire (ApiGitStatus.review_base) so the
+                        // "Review changes" branch-vs-base chip renders for
+                        // daemon-backed projects too.
+                        review_base: g.review_base.clone(),
+                        default_branch: None,
+                    })
+            })
+    }
+
     fn render_header(&self, project: &ProjectData, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.clone();
@@ -424,28 +457,10 @@ impl ProjectColumn {
         let is_comfortable =
             density == crate::workspace::settings::HeaderDensity::Comfortable && !is_rows;
 
-        // Fetch git status once for both header badge and git status area
-        let git_status = self.git_watcher.as_ref()
-            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-            .or_else(|| {
-                self.workspace.read(cx).remote_snapshot(&self.project_id)
-                    .and_then(|snap| snap.git_status.as_ref())
-                    .map(|g| git::GitStatus {
-                        branch: g.branch.clone(),
-                        lines_added: g.lines_added,
-                        lines_removed: g.lines_removed,
-                        pr_info: g.pr_info.clone(),
-                        ci_checks: g.ci_checks.clone(),
-                        ahead: g.ahead,
-                        behind: g.behind,
-                        unpushed: g.unpushed,
-                        // Carried over the wire (ApiGitStatus.review_base) so the
-                        // "Review changes" branch-vs-base chip renders for
-                        // daemon-backed projects too.
-                        review_base: g.review_base.clone(),
-                        default_branch: None,
-                    })
-            });
+        // Fetch git status once for both header badge and git status area.
+        // Goes through resolve_git_status so the CI popover (below) sees the
+        // same source — watcher locally, remote snapshot in daemon-client mode.
+        let git_status = self.resolve_git_status(cx);
 
         // Worktree indicator: filled dot for normal project, ring for worktree.
         let worktree_dot = if project.worktree_info.is_some() {
@@ -964,10 +979,10 @@ impl Render for ProjectColumn {
                     self.render_empty_state(cx).into_any_element()
                 };
 
-                // Get current branch for commit log popover and update git header
-                let current_branch = self.git_watcher.as_ref()
-                    .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-                    .and_then(|s| s.branch);
+                // Get current branch for commit log popover and update git header.
+                // Same source as the badge (resolve_git_status) so the branch is
+                // present in daemon-client mode too, where git_watcher is None.
+                let current_branch = self.resolve_git_status(cx).and_then(|s| s.branch);
                 self.git_header.update(cx, |gh, _cx| {
                     gh.set_current_branch(current_branch.clone());
                 });
@@ -1012,10 +1027,13 @@ impl Render for ProjectColumn {
                             gh.render_branch_picker(window, &t, cx)
                         })
                     })
-                    // CI checks popover (delegated to GitHeader entity)
+                    // CI checks popover (delegated to GitHeader entity).
+                    // Resolve via the same path as the badge: in daemon-client
+                    // mode git_watcher is None, so the watcher-only fetch left
+                    // ci_checks empty and the popover rendered nothing (the pill
+                    // toggled but never opened). Fall back to the remote snapshot.
                     .child({
-                        let git_status = self.git_watcher.as_ref()
-                            .and_then(|w| w.read(cx).get(&self.project_id).cloned());
+                        let git_status = self.resolve_git_status(cx);
                         let ci_checks = git_status.as_ref().and_then(|g| g.ci_checks.clone());
                         let pr_info = git_status.and_then(|g| g.pr_info);
                         self.git_header.update(cx, |gh, cx| {
