@@ -125,11 +125,6 @@ pub enum OverlayManagerEvent {
     /// Context menu: Close worktree project (opens the confirm dialog)
     CloseWorktree { project_id: String },
 
-    /// Close-worktree dialog confirmed: remove the worktree project. The host
-    /// dispatches `ActionRequest::RemoveWorktreeProject`; the removal mirrors
-    /// back. (The dialog's in-process git pipeline already ran before this.)
-    WorktreeRemoveRequested { project_id: String, force: bool },
-
     /// Worktree list: track an already-on-disk worktree. The host dispatches
     /// `ActionRequest::AddDiscoveredWorktree`; the new project mirrors back.
     AddDiscoveredWorktree {
@@ -744,12 +739,6 @@ impl OverlayManager {
             match event {
                 CloseWorktreeDialogEvent::Closed => {
                     this.close_modal(cx);
-                }
-                CloseWorktreeDialogEvent::RequestRemove { project_id, force } => {
-                    cx.emit(OverlayManagerEvent::WorktreeRemoveRequested {
-                        project_id: project_id.clone(),
-                        force: *force,
-                    });
                 }
             }
         })

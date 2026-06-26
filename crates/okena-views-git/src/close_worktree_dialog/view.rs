@@ -26,13 +26,7 @@ impl Render for CloseWorktreeDialog {
         let is_processing = self.processing != ProcessingState::Idle;
 
         let status_text = match &self.processing {
-            ProcessingState::Stashing => Some("Stashing changes..."),
-            ProcessingState::Fetching => Some("Fetching remote..."),
-            ProcessingState::Rebasing => Some("Rebasing..."),
-            ProcessingState::Merging => Some("Merging..."),
-            ProcessingState::Pushing => Some("Pushing branch..."),
-            ProcessingState::DeletingBranch => Some("Deleting branch..."),
-            ProcessingState::Removing => Some("Removing worktree..."),
+            ProcessingState::Working => Some("Closing worktree..."),
             ProcessingState::Idle => None,
         };
 
