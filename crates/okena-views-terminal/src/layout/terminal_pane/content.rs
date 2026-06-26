@@ -9,6 +9,7 @@ use okena_terminal::terminal::Terminal;
 use okena_files::theme::theme;
 use okena_ui::color_utils::tint_color;
 use crate::layout::navigation::register_pane_bounds;
+use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{WindowId, Workspace};
 use gpui::*;
 use std::sync::Arc;
@@ -44,6 +45,7 @@ pub struct TerminalContent {
     layout_path: Vec<usize>,
     window_id: Option<WindowId>,
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
     scroll_accumulator: f32,
     mouse_down_cell: Option<(usize, i32)>,
     forwarded_button: Option<(u8, u8)>,
@@ -60,6 +62,7 @@ impl TerminalContent {
         project_id: String,
         layout_path: Vec<usize>,
         workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
         cx: &mut Context<Self>,
     ) -> Self {
         let scrollbar = cx.new(Scrollbar::new);
@@ -81,6 +84,7 @@ impl TerminalContent {
             layout_path,
             window_id,
             workspace,
+            request_broker,
             scroll_accumulator: 0.0,
             mouse_down_cell: None,
             forwarded_button: None,
@@ -289,6 +293,22 @@ impl TerminalContent {
         }
     }
 
+    /// Best-effort project-relative path for opening a clicked terminal path in
+    /// the file viewer. Strips any trailing :line:col, then makes it relative to
+    /// the project root (the daemon-side project path). Returns None for absolute
+    /// paths outside the project or `~`-prefixed paths we can't resolve.
+    fn project_relative_path(&self, raw: &str, cx: &App) -> Option<String> {
+        let clean = super::url_detector::strip_line_col_suffix(raw);
+        let project_path = self.workspace.read(cx).project(&self.project_id)?.path.clone();
+        if let Some(stripped) = clean.strip_prefix(&project_path) {
+            Some(stripped.trim_start_matches('/').to_string())
+        } else if clean.starts_with('/') || clean.starts_with('~') {
+            None // absolute path outside the project (or unresolved ~) — can't open via this project's daemon fs
+        } else {
+            Some(clean.to_string()) // already relative — best effort, treated as project-root-relative
+        }
+    }
+
     fn handle_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -314,8 +334,22 @@ impl TerminalContent {
                         UrlDetector::open_url(&url_match.url);
                     }
                     LinkKind::FilePath { line, col } => {
-                        let file_opener = terminal_view_settings(cx).file_opener.clone();
-                        UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
+                        if self.workspace.read(cx).is_local_daemon_project(&self.project_id) {
+                            let file_opener = terminal_view_settings(cx).file_opener.clone();
+                            UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
+                        } else if let Some(relative_path) = self.project_relative_path(&url_match.url, cx) {
+                            self.request_broker.update(cx, |broker, cx| {
+                                broker.push_overlay_request(
+                                    okena_workspace::requests::OverlayRequest::Project(
+                                        okena_workspace::requests::ProjectOverlay {
+                                            project_id: self.project_id.clone(),
+                                            kind: okena_workspace::requests::ProjectOverlayKind::FileViewer { relative_path },
+                                        },
+                                    ),
+                                    cx,
+                                );
+                            });
+                        }
                     }
                 }
                 self.mouse_down_cell = None;

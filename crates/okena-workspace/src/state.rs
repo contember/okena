@@ -757,6 +757,17 @@ impl Workspace {
         self.data.projects.iter().find(|p| p.id == id)
     }
 
+    /// True when the project is served by the co-located local daemon (shared
+    /// filesystem) — i.e. local paths are openable on this machine. A project
+    /// mirrored from a user-added remote connection returns false. A project
+    /// with no connection is treated as local (legacy / non-headless).
+    pub fn is_local_daemon_project(&self, project_id: &str) -> bool {
+        match self.project(project_id).and_then(|p| p.connection_id.as_deref()) {
+            Some(id) => id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+            None => true,
+        }
+    }
+
     /// Get the parent project's path for a worktree project (i.e. the main repo path).
     pub fn worktree_parent_path(&self, project_id: &str) -> Option<String> {
         self.project(project_id)
