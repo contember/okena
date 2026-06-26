@@ -7,7 +7,6 @@ use okena_ui::modal::{modal_backdrop, modal_content};
 use okena_ui::simple_input::{SimpleInput, SimpleInputState};
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_xl, ui_text};
-use okena_workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -18,19 +17,19 @@ use std::path::Path;
 pub enum RenameDirectoryDialogEvent {
     /// Dialog closed (cancelled or renamed)
     Close,
-    /// Directory was successfully renamed
-    Renamed,
+    /// Rename was confirmed: the daemon performs the rename, updates the
+    /// record, and mirrors the new path+name back.
+    Confirmed { project_id: String, new_name: String },
 }
 
 impl okena_ui::overlay::CloseEvent for RenameDirectoryDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close | Self::Renamed) }
+    fn is_close(&self) -> bool { matches!(self, Self::Close | Self::Confirmed { .. }) }
 }
 
 impl EventEmitter<RenameDirectoryDialogEvent> for RenameDirectoryDialog {}
 
 /// Dialog for renaming a project's directory on disk.
 pub struct RenameDirectoryDialog {
-    workspace: Entity<Workspace>,
     project_id: String,
     project_path: String,
     name_input: Entity<SimpleInputState>,
@@ -41,7 +40,6 @@ pub struct RenameDirectoryDialog {
 
 impl RenameDirectoryDialog {
     pub fn new(
-        workspace: Entity<Workspace>,
         project_id: String,
         project_path: String,
         cx: &mut Context<Self>,
@@ -60,7 +58,6 @@ impl RenameDirectoryDialog {
         });
 
         Self {
-            workspace,
             project_id,
             project_path,
             name_input,
@@ -89,8 +86,7 @@ impl RenameDirectoryDialog {
             return;
         }
 
-        let old_path = Path::new(&self.project_path);
-        let current_name = old_path
+        let current_name = Path::new(&self.project_path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
@@ -101,35 +97,10 @@ impl RenameDirectoryDialog {
             return;
         }
 
-        let new_path = match old_path.parent() {
-            Some(parent) => parent.join(&new_name),
-            None => {
-                self.error_message = Some("Cannot determine parent directory".to_string());
-                cx.notify();
-                return;
-            }
-        };
-
-        if new_path.exists() {
-            self.error_message = Some(format!("'{}' already exists", new_name));
-            cx.notify();
-            return;
-        }
-
-        if let Err(e) = std::fs::rename(&self.project_path, &new_path) {
-            self.error_message = Some(format!("Failed to rename: {}", e));
-            cx.notify();
-            return;
-        }
-
-        let new_path_str = new_path.to_string_lossy().to_string();
-        let project_id = self.project_id.clone();
-        let new_name_clone = new_name.clone();
-        self.workspace.update(cx, |ws, cx| {
-            ws.rename_project_directory(&project_id, new_path_str, new_name_clone, cx);
+        cx.emit(RenameDirectoryDialogEvent::Confirmed {
+            project_id: self.project_id.clone(),
+            new_name,
         });
-
-        cx.emit(RenameDirectoryDialogEvent::Renamed);
     }
 }
 
