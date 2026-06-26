@@ -529,7 +529,10 @@ impl WindowView {
             // observer above.
             let sidebar_for_activity = self.sidebar.clone();
             cx.subscribe(&manager, move |_this, _rm, event, cx| match event {
-                RemoteManagerEvent::TerminalActivity => {
+                // The payload (advanced terminal ids) is for `Okena`'s
+                // notification drain; the sidebar re-reads every terminal's
+                // bell/idle flags, so it just repaints.
+                RemoteManagerEvent::TerminalActivity(_) => {
                     sidebar_for_activity.update(cx, |_, cx| cx.notify());
                 }
             }).detach();

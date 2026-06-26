@@ -27,7 +27,16 @@ use std::sync::Arc;
 pub enum RemoteManagerEvent {
     /// A remote terminal produced output / changed derived state (bell, idle).
     /// Subscribers should repaint indicators but must not re-sync project state.
-    TerminalActivity,
+    ///
+    /// Carries the ids of the remote terminals whose `content_generation`
+    /// advanced this wake. The sidebar ignores the payload (it re-reads every
+    /// terminal's flags), but `Okena` uses it to drain OSC 9/777/99 + bell
+    /// notifications for exactly those terminals — the daemon-client equivalent
+    /// of the local PTY loop's `process_terminal_notifications` pass. Remote
+    /// PTY output never goes through that loop (it arrives over the WS and is
+    /// only buffered via `enqueue_output`), so without this the per-terminal
+    /// notification queues would be parsed here but never fire an OS bubble.
+    TerminalActivity(Vec<String>),
 }
 
 /// GPUI Entity managing all remote connections.
@@ -148,12 +157,23 @@ impl RemoteConnectionManager {
                     };
 
                     let mut next_generations = HashMap::with_capacity(terminals.len());
+                    // Terminals whose generation advanced this wake — i.e. ones
+                    // that actually parsed new output. `Okena` drains their
+                    // notification/bell queues; an OSC alert or bell always
+                    // bumps the generation (via `drain_pending_output`), so this
+                    // set is a superset of the terminals that have something to
+                    // fire.
+                    let mut advanced: Vec<String> = Vec::new();
                     for (id, terminal) in &terminals {
                         // Parse on the GPUI thread so bell/idle flags are
                         // current even for terminals with no mounted pane.
                         // No-op when the pending buffer is empty.
                         terminal.process_pending_output();
-                        next_generations.insert(id.clone(), terminal.content_generation());
+                        let generation = terminal.content_generation();
+                        if last_generations.get(id) != Some(&generation) {
+                            advanced.push(id.clone());
+                        }
+                        next_generations.insert(id.clone(), generation);
                     }
                     let changed = activity_changed(&last_generations, &next_generations);
                     last_generations = next_generations;
@@ -161,8 +181,9 @@ impl RemoteConnectionManager {
                     if changed {
                         // Emit (not notify): repaint the sidebar's bell/idle
                         // indicators without dragging in the heavy project-sync
-                        // observer that fires on `cx.notify()`.
-                        cx.emit(RemoteManagerEvent::TerminalActivity);
+                        // observer that fires on `cx.notify()`, and let `Okena`
+                        // fire OS notifications for the advanced terminals.
+                        cx.emit(RemoteManagerEvent::TerminalActivity(advanced));
                     }
                 });
                 if result.is_err() {
