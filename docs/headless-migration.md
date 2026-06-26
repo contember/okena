@@ -245,6 +245,50 @@ genuinely needs a running app to get right:
   (`HookMonitor`/`HookRunner`). That, plus the autosave/`state_version`/git/services
   observers, is the entire content of the GPUI-free extraction (Phase E).
 
+## 3d. GUI PTY loop retired; terminal lifecycle ported to the daemon (2026-06-26)
+
+This closes §3c follow-up #1: the GUI's in-process `pty_manager` +
+`start_pty_event_loop` are **deleted**. The desktop client now owns **no** local
+PTY machinery. The dead loop turned out to be the *sole* home of several
+terminal-lifecycle behaviors (it never ran in daemon-client mode — nothing fed
+the GUI's `pty_manager` — so they were silently inert). Each was ported to its
+correct owner **first**, then the loop was removed.
+
+| Behavior | Owner (data vs presentation) | Where it landed |
+|---|---|---|
+| OSC 52 clipboard *reads* | **client** (the clipboard is on the client machine) | wired into the remote activity pump (`RemoteManagerEvent::TerminalActivity` → `process_clipboard_reads`); the reply rides the terminal's `RemoteTransport` back to the daemon PTY |
+| hook-terminal exits (status + pending worktree close) | **daemon** | `daemon-core/pty_loop.rs` `handle_hook_terminal_exits` via `DaemonWorkspaceCx` |
+| `terminal.on_close` hooks | **daemon** | `fire_terminal_on_close_with_services` (new gpui-free split of `fire_terminal_on_close`) |
+| OSC `__okena_hook_exit:<code>` title detection | **daemon** | `daemon-core/pty_loop.rs` data path |
+| command-finished activity (OSC 133 ;D → `last_activity_at`) | **daemon** | `bump_activity` on the dirty terminals' owning projects |
+| `CLAUDE_CONFIG_DIR` per-PTY env | **daemon** | shared gpui-free `okena-workspace::claude_env`; the daemon `set_extra_env`s its own `PtyManager` |
+| worktree removal on hook-close (`git worktree remove` + hooks) | **daemon** | converged on the canonical `remove_worktree_project` (same path as `RemoveWorktreeProject`) |
+
+Also done this session: deleted the dead `Local{Git,Blame}Provider` /
+`LocalProjectFs` (no instantiation sites remained — every project rides the
+`Remote*` providers), and pointed detached-terminal windows at the project's
+`RemoteTransport` instead of the GUI's empty `pty_manager`.
+
+**Residual daemon-side gaps (flagged, *not* regressions — all were already inert
+in the dead GUI loop):**
+1. **Soft-close-on-quit flush.** `DaemonCore` has no shutdown/`Drop` hook, so
+   `drain_pending_closes` / `drain_pending_terminal_kills` are not flushed on
+   daemon exit. A soft-closed terminal's persistent (dtach/tmux) session could
+   outlive the daemon. Needs a daemon shutdown hook.
+2. **`pending_terminal_kills` is never drained on the daemon.** Pre-existing —
+   affects the existing `execute_action(DeleteProject)` path too, not just the
+   ported code. A kill-queue drain observer in the daemon would close it.
+3. **`worktree_removed` hook + background removal.** The daemon removes the
+   worktree synchronously and does **not** fire `worktree_removed` (matches the
+   normal `RemoveWorktreeProject` action). If wanted, add both to
+   `remove_worktree_project` so both entry points share them.
+4. **claude env is resolved once at daemon startup** (no live re-push on a
+   `claude-code.config_dir` settings change). Hook a `set_extra_env` re-call into
+   the daemon's settings-update path if live re-sync is desired.
+
+These need a running app to validate end-to-end (the GPUI client + daemon can't
+be exercised headless).
+
 ---
 
 ## 4. The key sequencing insight (a refinement of the original phase order)
