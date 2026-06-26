@@ -174,6 +174,15 @@ impl DaemonCore {
         // ── 2. PTY manager + broadcaster + registry + backend ────────────────
         let (pty_manager, pty_events) = PtyManager::new(params.session_backend);
         let pty_manager = Arc::new(pty_manager);
+        // Per-profile Claude account isolation: push CLAUDE_CONFIG_DIR (or its
+        // active removal for the default ~/.claude) into the PTYs the daemon
+        // spawns, so `claude` invocations inside daemon-served terminals read the
+        // right account — the same override the GUI's `sync_claude_pty_env`
+        // applies, computed by the gpui-free `okena_workspace::claude_env` from
+        // the daemon's own settings (the GUI's `ExtensionSettingsStore` is gpui).
+        pty_manager.set_extra_env(
+            okena_workspace::claude_env::claude_pty_env_for_settings(&params.settings),
+        );
         let broadcaster = Arc::new(PtyBroadcaster::new());
         pty_manager.set_output_sink(broadcaster.clone());
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
