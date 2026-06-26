@@ -4,6 +4,7 @@ pub mod health;
 pub mod pair;
 pub mod paste_image;
 pub mod refresh;
+pub mod restart;
 pub mod state;
 pub mod stream;
 pub mod tokens;
@@ -97,13 +98,17 @@ pub fn build_router(
     // `/v1/auth/reload` is loopback-gated in its handler: the CLI register
     // flow calls it before the new token is visible in-memory, so bearer auth
     // would deadlock, but exposed listeners must not accept network callers.
+    // `/v1/restart` is loopback-gated in the same way: a same-host UI restarts
+    // the daemon; it is bearer-free so the restart works even if the caller's
+    // token is in an awkward state, and off-host callers are refused.
     let public = Router::new()
         .route("/health", axum::routing::get(health::get_health))
         .route("/v1/pair", axum::routing::post(pair::post_pair))
         .route(
             "/v1/auth/reload",
             axum::routing::post(auth_reload::post_reload),
-        );
+        )
+        .route("/v1/restart", axum::routing::post(restart::post_restart));
 
     public
         .merge(protected)

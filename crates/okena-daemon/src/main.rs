@@ -88,6 +88,29 @@ fn main() -> anyhow::Result<()> {
         default_hook(info);
     }));
 
+    // 1b. Self-restart handoff: a daemon restarting itself spawns this process
+    //     with `--await-pid <old_pid>` (see okena_remote_server::routes::restart).
+    //     Wait for the outgoing daemon to exit BEFORE constructing DaemonCore,
+    //     which acquires the instance lock (fail-fast against a live PID) and
+    //     binds a port (the old one may linger in TIME_WAIT). Bounded so a wedged
+    //     predecessor doesn't hang the new daemon forever; on timeout we proceed
+    //     anyway and let the lock acquisition surface the real error.
+    if let Some(old_pid) =
+        okena_remote_server::local::parse_await_pid(std::env::args())
+    {
+        log::info!("restart: waiting for outgoing daemon (pid {old_pid}) to exit");
+        let exited = okena_remote_server::local::wait_for_pid_exit(
+            old_pid,
+            std::time::Duration::from_secs(10),
+        );
+        if !exited {
+            log::warn!(
+                "restart: outgoing daemon (pid {old_pid}) still alive after 10s; \
+                 proceeding (lock acquisition will fail if it truly holds the lock)"
+            );
+        }
+    }
+
     // 2. Optional `--listen <ip>` override. Parsing is intentionally minimal and
     //    dependency-free; the error messages mirror the GUI's `src/main.rs`.
     let listen_override: Option<IpAddr> = parse_listen_override();

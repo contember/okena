@@ -30,6 +30,16 @@ pub const UNDO_PREFIX: &str = "soft_close_undo";
 /// Prefix for the "close now" toast action id; payload is `:<project_id>:<terminal_id>`.
 pub const KILL_PREFIX: &str = "soft_close_kill";
 
+/// Stable id for the "Restart the daemon?" confirmation toast (so it can be
+/// dismissed by id once the user picks an action). Not a soft-close toast, but
+/// the confirm-toast action-id constants live here alongside the other toast
+/// action ids for one place to look.
+pub const RESTART_DAEMON_TOAST_ID: &str = "restart-daemon-confirm";
+/// Action id for the "Restart" button on the restart-daemon confirm toast.
+pub const RESTART_DAEMON_CONFIRM_PREFIX: &str = "restart_daemon_confirm";
+/// Action id for the "Cancel" button on the restart-daemon confirm toast.
+pub const RESTART_DAEMON_CANCEL_PREFIX: &str = "restart_daemon_cancel";
+
 /// Decode a toast action id of the form `<prefix>:<project_id>:<terminal_id>`.
 /// Returns `(project_id, terminal_id)` when the prefix matches.
 pub fn decode_action(id: &str, prefix: &str) -> Option<(String, String)> {

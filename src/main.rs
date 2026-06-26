@@ -497,6 +497,22 @@ fn main() {
             eprintln!("Headless mode requires --listen <addr>, e.g. --headless --listen 0.0.0.0");
             std::process::exit(1);
         };
+        // Self-restart handoff (transitional `okena --headless` daemon): a
+        // daemon restarting itself spawns this process with `--await-pid <old>`
+        // (see okena_remote_server::routes::restart). Wait for the outgoing
+        // daemon to exit before acquiring the lock (fail-fast against a live PID)
+        // and binding a port. Bounded; on timeout we proceed and let the lock
+        // surface the real error.
+        if let Some(old_pid) =
+            okena_remote_server::local::parse_await_pid(std::env::args())
+        {
+            log::info!("restart: waiting for outgoing daemon (pid {old_pid}) to exit");
+            let _ = okena_remote_server::local::wait_for_pid_exit(
+                old_pid,
+                std::time::Duration::from_secs(10),
+            );
+        }
+
         // The headless path IS the daemon — the single writer (§5). It owns the
         // instance lock + workspace.json. (The GUI path below never locks: it is
         // always a thin daemon-client and the daemon it spawns/attaches holds
