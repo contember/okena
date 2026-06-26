@@ -447,12 +447,21 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
 
 /// Schema version for the client-owned window-layout file.
 ///
-/// v2: one-time visibility reset. v1 files accumulated a compounded
-/// `hidden_project_ids` set (the daemon's single-window `show_in_overview` was
-/// re-applied on every reconnect via `apply_initial_remote_project_visibility`),
-/// which eventually hid every project and left the main window empty on restart.
-/// On migration from v1 we clear the per-window hidden sets + folder filters so
-/// all projects reappear; the user re-curates and the bug no longer compounds.
+/// This file is a pure PRESENTATION cache (which windows are open, their OS
+/// bounds, per-window visibility). It must NEVER be migrated destructively:
+/// dropping an unknown field degrades to a sensible default, but wiping user
+/// state (e.g. per-window `hidden_project_ids`) on upgrade is unacceptable.
+/// Schema evolution is handled by `#[serde(default)]` on the fields;
+/// [`migrate_window_layout`] only performs forward-compatible, non-destructive
+/// transforms and stamps the version.
+///
+/// History: v2 once reset per-window visibility to "recover" a supposed
+/// compounded hidden-set bug. That recovery was wrong — most users legitimately
+/// hide most projects per window, so it just discarded their curation on
+/// upgrade — and has been removed. The actual fix lives in
+/// `apply_initial_remote_project_visibility` (the daemon's single-window
+/// `show_in_overview` no longer drives client visibility). The version is kept
+/// only as a forward-compat marker for genuine future schema changes.
 pub const WINDOW_LAYOUT_VERSION: u32 = 2;
 
 /// Process-level mutex serializing window-layout saves (mirrors WORKSPACE_LOCK
@@ -503,22 +512,13 @@ pub fn load_window_layout() -> Option<ClientWindowLayout> {
 
 /// Migrate a loaded window layout to the current schema version.
 ///
-/// v1 → v2: clear the compounded per-window hidden sets + folder filters (see
-/// [`WINDOW_LAYOUT_VERSION`]) so all projects reappear after the visibility bug.
+/// NON-DESTRUCTIVE by contract: this file is a presentation cache, so migration
+/// may only add or forward-transform state — never clear user choices like
+/// per-window `hidden_project_ids` or `folder_filter`. There is no field
+/// transform to apply today, so this just stamps the current version. (See
+/// [`WINDOW_LAYOUT_VERSION`] for why the old v1 → v2 visibility wipe was a
+/// regression and is gone.)
 fn migrate_window_layout(layout: &mut ClientWindowLayout) {
-    if layout.version < 2 {
-        layout.main_window.hidden_project_ids.clear();
-        layout.main_window.folder_filter = None;
-        for w in &mut layout.extra_windows {
-            w.hidden_project_ids.clear();
-            w.folder_filter = None;
-        }
-        log::info!(
-            "Migrated window-layout.json v{} → v2: reset per-window visibility \
-             (compounded hidden-set recovery).",
-            layout.version
-        );
-    }
     layout.version = WINDOW_LAYOUT_VERSION;
 }
 
@@ -797,7 +797,11 @@ mod tests {
     }
 
     #[test]
-    fn migrate_window_layout_v1_resets_visibility() {
+    fn migrate_window_layout_preserves_visibility() {
+        // Migration is NON-DESTRUCTIVE: an old (v1) layout keeps its per-window
+        // hidden sets + folder filters and is merely stamped to the current
+        // version. Wiping them on upgrade was the regression this guards against
+        // (most users legitimately hide most projects per window).
         let mut main = WindowState::default();
         main.hidden_project_ids.insert("remote:local-daemon:p1".to_string());
         main.folder_filter = Some("f1".to_string());
@@ -811,13 +815,12 @@ mod tests {
 
         migrate_window_layout(&mut layout);
 
-        // v1 → v2 clears the compounded hidden sets + folder filters everywhere.
         assert_eq!(layout.version, WINDOW_LAYOUT_VERSION);
-        assert!(layout.main_window.hidden_project_ids.is_empty());
-        assert!(layout.main_window.folder_filter.is_none());
-        assert!(layout.extra_windows[0].hidden_project_ids.is_empty());
+        assert!(layout.main_window.hidden_project_ids.contains("remote:local-daemon:p1"));
+        assert_eq!(layout.main_window.folder_filter.as_deref(), Some("f1"));
+        assert!(layout.extra_windows[0].hidden_project_ids.contains("remote:local-daemon:p2"));
 
-        // A current-version layout is left untouched.
+        // A current-version layout is likewise left untouched.
         let mut keep = WindowState::default();
         keep.hidden_project_ids.insert("remote:local-daemon:p3".to_string());
         let mut current = ClientWindowLayout {
