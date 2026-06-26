@@ -312,6 +312,14 @@ impl Okena {
                 RemoteManagerEvent::TerminalActivity(terminal_ids) => {
                     if !terminal_ids.is_empty() {
                         this.process_terminal_notifications(terminal_ids, cx);
+                        // Answer (or, when disabled, drop) OSC 52 clipboard *read*
+                        // requests for remote terminals. The clipboard physically
+                        // lives on this client machine, so the reply must be
+                        // produced here and written back over the terminal's
+                        // RemoteTransport to the daemon PTY. Without this the dead
+                        // local PTY loop's clipboard-read handling no longer runs,
+                        // leaving remote OSC 52 reads unanswered.
+                        this.process_clipboard_reads(terminal_ids, cx);
                     }
                 }
             },
