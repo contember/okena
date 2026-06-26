@@ -1,6 +1,6 @@
 use okena_extensions::ThemeColors;
 use okena_usage::{
-    effective_time_pct, read_working_days, render_usage_row, usage_body_container, usage_divider,
+    effective_time_pct, read_breaks, read_working_days, render_usage_row, usage_body_container, usage_divider,
     usage_kv_row, usage_popover_container, usage_popover_header, usage_trigger_items, SegmentUnit,
     UsageRow,
 };
@@ -686,6 +686,7 @@ impl Render for CodexUsage {
         let t = theme(cx);
 
         let working = read_working_days(cx);
+        let breaks = read_breaks(cx);
         let data = self.data.read(cx).data.lock();
         let mut items: Vec<(SharedString, f64, Option<f64>)> = Vec::new();
         match data.as_ref() {
@@ -699,6 +700,7 @@ impl Render for CodexUsage {
                         w.window_seconds as f64,
                         segment_unit_for_window(w.window_seconds),
                         working,
+                        &breaks,
                         w.time_elapsed_pct,
                     );
                     items.push((

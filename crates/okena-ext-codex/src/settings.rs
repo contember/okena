@@ -1,7 +1,7 @@
 use gpui::*;
 use okena_extensions::ThemeColors;
 use okena_ui::settings::section_header;
-use okena_usage::WorkingDaysSetting;
+use okena_usage::{BreaksSetting, WorkingDaysSetting};
 
 fn theme(cx: &App) -> ThemeColors {
     okena_extensions::theme(cx)
@@ -9,12 +9,14 @@ fn theme(cx: &App) -> ThemeColors {
 
 pub struct CodexSettingsView {
     working_days: Entity<WorkingDaysSetting>,
+    breaks: Entity<BreaksSetting>,
 }
 
 impl CodexSettingsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             working_days: cx.new(WorkingDaysSetting::new),
+            breaks: cx.new(BreaksSetting::new),
         }
     }
 }
@@ -29,5 +31,6 @@ impl Render for CodexSettingsView {
             .gap(px(8.0))
             .child(section_header("Codex", &t, cx))
             .child(self.working_days.clone())
+            .child(self.breaks.clone())
     }
 }

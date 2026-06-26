@@ -127,23 +127,173 @@ impl WorkingDays {
         }
     }
 
-    pub fn to_value(&self) -> serde_json::Value {
-        let idx: Vec<u64> = (0..7).filter(|&i| self.days[i]).map(|i| i as u64).collect();
-        serde_json::json!({ "working_days": idx })
+    /// The selected day indices (`0 = Monday`), ascending.
+    pub fn to_indices(&self) -> Vec<u64> {
+        (0..7).filter(|&i| self.days[i]).map(|i| i as u64).collect()
     }
+
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({ "working_days": self.to_indices() })
+    }
+}
+
+/// Recurring daily break periods, each `[start, end)` in **minutes past local
+/// midnight** (`0..=1440`). Break time is excluded from the pace marker on hour
+/// windows: the budget is paced over worked time, so the marker runs a steady
+/// bit faster than the clock. Empty = no exclusion. Shared across Claude and Codex.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Breaks {
+    /// Ordered, non-overlapping is not enforced; overlap is handled by clamping
+    /// when computing coverage. Each is `(start_min, end_min)` with `end > start`.
+    pub ranges: Vec<(u16, u16)>,
+}
+
+impl Breaks {
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// Parse from the persisted `{"breaks": [[start,end], ..]}` blob. Ranges
+    /// shorter than the 15-minute editing step (or otherwise malformed) are
+    /// dropped, so the persisted set always satisfies the invariant the stepper
+    /// UI relies on (`end >= start + 15`, both within the day).
+    pub fn from_value(v: Option<&serde_json::Value>) -> Self {
+        let mut ranges = Vec::new();
+        if let Some(arr) = v.and_then(|v| v.get("breaks")).and_then(|a| a.as_array()) {
+            for pair in arr {
+                if let Some(p) = pair.as_array()
+                    && p.len() == 2
+                    && let (Some(s), Some(e)) = (p[0].as_u64(), p[1].as_u64())
+                {
+                    let s = s.min(1440) as u16;
+                    let e = e.min(1440) as u16;
+                    if e >= s + 15 {
+                        ranges.push((s, e));
+                    }
+                }
+            }
+        }
+        Self { ranges }
+    }
+
+    /// Ranges sorted and coalesced into disjoint intervals, so overlapping or
+    /// duplicate breaks (e.g. two `+ Add break` clicks) count their shared time
+    /// once rather than several times.
+    fn merged_ranges(&self) -> Vec<(u16, u16)> {
+        let mut v = self.ranges.clone();
+        v.sort_by_key(|&(s, _)| s);
+        let mut out: Vec<(u16, u16)> = Vec::new();
+        for (s, e) in v {
+            match out.last_mut() {
+                Some(last) if s <= last.1 => last.1 = last.1.max(e),
+                _ => out.push((s, e)),
+            }
+        }
+        out
+    }
+
+    pub fn to_value(&self) -> serde_json::Value {
+        let arr: Vec<serde_json::Value> = self
+            .ranges
+            .iter()
+            .map(|(s, e)| serde_json::json!([s, e]))
+            .collect();
+        serde_json::Value::Array(arr)
+    }
+
+    /// Seconds of break time overlapping the wall-clock interval `[a, b]`.
+    /// Daily breaks recur, so every day the interval touches contributes its
+    /// instance of each break (windows here are at most ~1 day, so this spans
+    /// only one or two dates).
+    pub fn overlap_secs(&self, a: f64, b: f64) -> f64 {
+        if self.ranges.is_empty() || b <= a {
+            return 0.0;
+        }
+        self.overlap_secs_inner(a, b).unwrap_or(0.0)
+    }
+
+    fn overlap_secs_inner(&self, a: f64, b: f64) -> Option<f64> {
+        let tz = jiff::tz::TimeZone::system();
+        let start_date = epoch_to_local(a)?.date();
+        let end_date = epoch_to_local(b)?.date();
+        let ranges = self.merged_ranges();
+        let mut total = 0.0;
+        let mut d = start_date;
+        for _ in 0..3 {
+            for &(bs, be) in &ranges {
+                // Build each edge from the wall-clock time-of-day on this date
+                // via calendar arithmetic, so a break stays at e.g. 12:00 local
+                // even on the 23h/25h DST-transition days (a fixed
+                // seconds-from-midnight offset would drift by an hour).
+                let bstart = epoch_of(&minute_of_day_zoned(d, bs, &tz)?);
+                let bend = epoch_of(&minute_of_day_zoned(d, be, &tz)?);
+                let ov = bend.min(b) - bstart.max(a);
+                if ov > 0.0 {
+                    total += ov;
+                }
+            }
+            if d == end_date {
+                break;
+            }
+            d = d.tomorrow().ok()?;
+        }
+        Some(total)
+    }
+}
+
+/// The local instant for `minute` minutes past midnight on `date`. `1440`
+/// (end-of-day) maps to the next day's midnight; other values use calendar
+/// `HH:MM` construction so they land on the true wall-clock time across DST.
+fn minute_of_day_zoned(
+    date: jiff::civil::Date,
+    minute: u16,
+    tz: &jiff::tz::TimeZone,
+) -> Option<jiff::Zoned> {
+    if minute >= 1440 {
+        date.tomorrow().ok()?.to_zoned(tz.clone()).ok()
+    } else {
+        date.at((minute / 60) as i8, (minute % 60) as i8, 0, 0)
+            .to_zoned(tz.clone())
+            .ok()
+    }
+}
+
+/// The raw shared `usage` blob, if present.
+fn usage_blob(cx: &App) -> Option<serde_json::Value> {
+    cx.try_global::<ExtensionSettingsStore>()
+        .and_then(|store| store.get(USAGE_SETTINGS_KEY, cx))
 }
 
 /// Read the shared working-days preference (defaults to all days).
 pub fn read_working_days(cx: &App) -> WorkingDays {
-    let value = cx
-        .try_global::<ExtensionSettingsStore>()
-        .and_then(|store| store.get(USAGE_SETTINGS_KEY, cx));
-    WorkingDays::from_value(value.as_ref())
+    WorkingDays::from_value(usage_blob(cx).as_ref())
 }
 
-/// Persist the shared working-days preference.
+/// Read the shared break periods (defaults to none).
+pub fn read_breaks(cx: &App) -> Breaks {
+    Breaks::from_value(usage_blob(cx).as_ref())
+}
+
+/// Persist one field of the shared `usage` blob without disturbing the other —
+/// working-days and breaks live in the same blob, so a naive overwrite would
+/// wipe whichever field wasn't being written.
+fn update_usage_field(field: &'static str, value: serde_json::Value, cx: &mut App) {
+    let mut blob = match usage_blob(cx) {
+        Some(serde_json::Value::Object(m)) => serde_json::Value::Object(m),
+        _ => serde_json::json!({}),
+    };
+    blob[field] = value;
+    ExtensionSettingsStore::update(USAGE_SETTINGS_KEY, blob, cx);
+}
+
+/// Persist the shared working-days preference (preserving any breaks).
 pub fn write_working_days(days: WorkingDays, cx: &mut App) {
-    ExtensionSettingsStore::update(USAGE_SETTINGS_KEY, days.to_value(), cx);
+    update_usage_field("working_days", serde_json::json!(days.to_indices()), cx);
+}
+
+/// Persist the shared break periods (preserving the working-days selection).
+pub fn write_breaks(breaks: &Breaks, cx: &mut App) {
+    update_usage_field("breaks", breaks.to_value(), cx);
 }
 
 // ============================================================================
@@ -363,18 +513,55 @@ fn working_day_reshape(
     })
 }
 
-/// The time-elapsed fraction a row will actually use: the working-day-reshaped
-/// value when reshaping applies, otherwise the caller's linear value. Lets the
-/// status-bar trigger compute the same pace color the popover row shows.
+/// Fraction (0–100) of an hour window the pace marker should sit at, pacing the
+/// budget over the window's **worked** time (`elapsed / (window − total_break)`)
+/// rather than wall-clock time. Returns `None` when no breaks are configured
+/// (caller keeps its linear value).
+///
+/// Because the denominator excludes the daily breaks inside the window, the
+/// marker runs at a steady *faster* rate than the clock from the start — it
+/// "knows" a pause is coming, so it shows more usage is allowed while you work
+/// — and reaches 100% once your worked hours are spent (i.e. before the reset,
+/// by the break amount). It never pauses.
+pub fn break_adjusted_time_pct(start_epoch: f64, reset_epoch: f64, breaks: &Breaks) -> Option<f64> {
+    break_adjusted_time_pct_at(start_epoch, reset_epoch, breaks, now_secs()?)
+}
+
+/// [`break_adjusted_time_pct`] with an explicit `now` (for testing).
+fn break_adjusted_time_pct_at(
+    start_epoch: f64,
+    reset_epoch: f64,
+    breaks: &Breaks,
+    now: f64,
+) -> Option<f64> {
+    if breaks.is_empty() || reset_epoch <= start_epoch {
+        return None;
+    }
+    let now = now.clamp(start_epoch, reset_epoch);
+    let total_break = breaks.overlap_secs(start_epoch, reset_epoch);
+    // Floor avoids a divide-by-zero if a break somehow covers the whole window;
+    // the marker then just pins to 100%.
+    let worked_total = ((reset_epoch - start_epoch) - total_break).max(1.0);
+    Some(((now - start_epoch) / worked_total * 100.0).clamp(0.0, 100.0))
+}
+
+/// The time-elapsed fraction a row will actually use, so the popover row and the
+/// status-bar trigger always agree on pace (and therefore color):
+/// the working-day-reshaped value on day windows, the break-adjusted value on
+/// hour windows, otherwise the caller's linear value.
 pub fn effective_time_pct(
     reset_epoch: Option<f64>,
     period_secs: f64,
     unit: Option<SegmentUnit>,
     working: WorkingDays,
+    breaks: &Breaks,
     linear: Option<f64>,
 ) -> Option<f64> {
     match (unit, reset_epoch) {
-        (Some(u), Some(r)) => reset_aligned_segments(r, period_secs, u, working)
+        (Some(SegmentUnit::Hour), Some(r)) => {
+            break_adjusted_time_pct(r - period_secs, r, breaks).or(linear)
+        }
+        (Some(SegmentUnit::Day), Some(r)) => reset_aligned_segments(r, period_secs, SegmentUnit::Day, working)
             .time_pct
             .or(linear),
         _ => linear,
@@ -568,8 +755,16 @@ pub fn render_usage_row(
         }
         _ => Segments::default(),
     };
-    // Working-day reshaping overrides the linear pace value when active.
-    let effective_time = seg.time_pct.or(row.time_pct);
+    // Pace overrides over the linear API value: working-day reshaping on day
+    // windows (via `seg.time_pct`), break exclusion on hour windows. Hour-window
+    // breaks don't reshape the grid, only the marker, so they're applied here.
+    let effective_time = match (row.unit, row.reset_epoch) {
+        (Some(SegmentUnit::Hour), Some(reset)) => {
+            break_adjusted_time_pct(reset - row.period_secs, reset, &read_breaks(cx))
+                .or(row.time_pct)
+        }
+        _ => seg.time_pct.or(row.time_pct),
+    };
 
     let pct = row.pct;
     let pace = pace_severity(pct, effective_time);
@@ -978,6 +1173,170 @@ impl Render for WorkingDaysSetting {
 }
 
 // ============================================================================
+// Breaks settings control
+// ============================================================================
+
+/// Format minutes-past-midnight as `HH:MM`.
+fn fmt_minutes(m: u16) -> String {
+    format!("{:02}:{:02}", m / 60, m % 60)
+}
+
+/// A self-contained settings control for the shared daily-breaks preference.
+/// Both the Claude and Codex settings panels embed one of these. Break time is
+/// excluded from the pace marker on the hour (5h) windows: the budget is paced
+/// over worked time, so the marker runs a steady bit faster than the clock.
+pub struct BreaksSetting;
+
+impl BreaksSetting {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<ExtensionSettingsStore>(|_, cx| cx.notify())
+            .detach();
+        Self
+    }
+
+    fn add(&mut self, cx: &mut Context<Self>) {
+        let mut breaks = read_breaks(cx);
+        breaks.ranges.push((720, 780)); // 12:00–13:00 default
+        write_breaks(&breaks, cx);
+        cx.notify();
+    }
+
+    fn remove(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let mut breaks = read_breaks(cx);
+        if idx < breaks.ranges.len() {
+            breaks.ranges.remove(idx);
+            write_breaks(&breaks, cx);
+            cx.notify();
+        }
+    }
+
+    /// Nudge one edge of a break by `delta` minutes, keeping a ≥15-minute span
+    /// inside the day. `end` selects the end edge, otherwise the start edge.
+    fn adjust(&mut self, idx: usize, end: bool, delta: i32, cx: &mut Context<Self>) {
+        let mut breaks = read_breaks(cx);
+        if let Some((s, e)) = breaks.ranges.get_mut(idx) {
+            // Order the clamp bounds defensively: `i32::clamp` panics if
+            // `min > max`, which a sub-15-minute or near-midnight range loaded
+            // from disk could otherwise trigger.
+            if end {
+                *e = (*e as i32 + delta).clamp((*s as i32 + 15).min(1440), 1440) as u16;
+            } else {
+                *s = (*s as i32 + delta).clamp(0, (*e as i32 - 15).max(0)) as u16;
+            }
+            write_breaks(&breaks, cx);
+            cx.notify();
+        }
+    }
+}
+
+impl Render for BreaksSetting {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = okena_extensions::theme(cx);
+        let breaks = read_breaks(cx);
+        const STEP: i32 = 15;
+
+        // A "− HH:MM +" stepper for one edge of one break.
+        let stepper = |idx: usize, end: bool, value: u16, cx: &mut Context<Self>| {
+            let btn = |slot: &str, symbol: &'static str, delta: i32, cx: &mut Context<Self>| {
+                div()
+                    .id(SharedString::from(format!("brk-{idx}-{slot}")))
+                    .cursor_pointer()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(t.bg_secondary))
+                    .text_color(rgb(t.text_secondary))
+                    .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
+                    .child(symbol)
+                    .on_click(cx.listener(move |this, _, _, cx| this.adjust(idx, end, delta, cx)))
+            };
+            let (dec, inc) = if end {
+                ("end-dec", "end-inc")
+            } else {
+                ("start-dec", "start-inc")
+            };
+            h_flex()
+                .gap(px(4.0))
+                .items_center()
+                .child(btn(dec, "−", -STEP, cx))
+                .child(
+                    h_flex().min_w(px(42.0)).justify_center().child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(fmt_minutes(value)),
+                    ),
+                )
+                .child(btn(inc, "+", STEP, cx))
+        };
+
+        let mut rows = v_flex().gap(px(6.0));
+        for (i, &(s, e)) in breaks.ranges.iter().enumerate() {
+            rows = rows.child(
+                h_flex()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(stepper(i, false, s, cx))
+                    .child(div().text_color(rgb(t.text_muted)).child("–"))
+                    .child(stepper(i, true, e, cx))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("brk-{i}-remove")))
+                            .cursor_pointer()
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(4.0))
+                            .text_color(rgb(t.text_muted))
+                            .hover(|s| s.text_color(rgb(t.metric_critical)))
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove(i, cx))),
+                    ),
+            );
+        }
+
+        let add_btn = div()
+            .id("brk-add")
+            .cursor_pointer()
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(t.border))
+            .text_size(ui_text_sm(cx))
+            .text_color(rgb(t.text_secondary))
+            .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
+            .child("+ Add break")
+            .on_click(cx.listener(|this, _, _, cx| this.add(cx)));
+
+        v_flex()
+            .gap(px(8.0))
+            .child(section_header("Breaks", &t, cx))
+            .child(
+                section_container(&t).child(
+                    v_flex()
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(ui_text_sm(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(
+                                    "Exclude recurring daily breaks from the 5-hour usage \
+                                     bars — the pace marker spreads your budget over the \
+                                     hours you actually work, so it runs a little ahead and \
+                                     leaves more headroom while you work. Shared across \
+                                     Claude and Codex.",
+                                ),
+                        )
+                        .child(rows)
+                        .child(add_btn),
+                ),
+            )
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1087,6 +1446,113 @@ mod tests {
         let seg = working_day_reshape(start, reset, mon_fri, now).expect("reshape");
         assert!(seg.current.is_none(), "off-day → no highlight");
         assert_eq!(seg.time_pct, Some(100.0), "all 5 working days elapsed");
+    }
+
+    fn local_epoch(y: i16, m: i8, d: i8, h: i8, min: i8) -> f64 {
+        jiff::civil::date(y, m, d)
+            .at(h, min, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::system())
+            .unwrap()
+            .timestamp()
+            .as_millisecond() as f64
+            / 1_000.0
+    }
+
+    #[test]
+    fn breaks_overlap_within_window() {
+        let breaks = Breaks {
+            ranges: vec![(720, 750)],
+        }; // 12:00–12:30
+        let nine = local_epoch(2026, 6, 18, 9, 0);
+        let fourteen = local_epoch(2026, 6, 18, 14, 0);
+        assert_eq!(breaks.overlap_secs(nine, fourteen), 1800.0, "full break");
+        let quarter = local_epoch(2026, 6, 18, 12, 15);
+        assert_eq!(breaks.overlap_secs(nine, quarter), 900.0, "half elapsed");
+        let eleven = local_epoch(2026, 6, 18, 11, 0);
+        assert_eq!(breaks.overlap_secs(nine, eleven), 0.0, "before the break");
+    }
+
+    #[test]
+    fn break_marker_runs_at_constant_faster_rate() {
+        // 5h window 09:00–14:00, one 30-min break (12:00–12:30) → worked = 4.5h.
+        // Marker = elapsed / 4.5h: a steady ~1.11x clock rate, never pausing,
+        // capping at 100% once the 4.5 worked hours are spent (13:30).
+        let breaks = Breaks {
+            ranges: vec![(720, 750)],
+        };
+        let start = local_epoch(2026, 6, 18, 9, 0);
+        let reset = local_epoch(2026, 6, 18, 14, 0);
+        let at = |h, m| {
+            break_adjusted_time_pct_at(start, reset, &breaks, local_epoch(2026, 6, 18, h, m)).unwrap()
+        };
+        // Ahead of the clock from the start (1h/4.5h = 22.2% vs 20% clock).
+        assert!((at(10, 0) - 22.222).abs() < 0.1, "10:00 ≈ 22.2%");
+        assert!((at(11, 0) - 44.444).abs() < 0.1, "11:00 ≈ 44.4%");
+        // Keeps moving *through* the break — no pause.
+        assert!(at(12, 15) > at(12, 0), "marker advances through the break");
+        // Caps at 100% when the 4.5 worked hours are spent (13:30), before reset.
+        assert!((at(13, 0) - 88.889).abs() < 0.1, "13:00 ≈ 88.9%");
+        assert_eq!(at(13, 30), 100.0, "full once worked hours spent");
+        assert_eq!(at(14, 0), 100.0, "stays full to reset");
+    }
+
+    #[test]
+    fn breaks_empty_means_no_adjustment() {
+        assert!(Breaks::default().is_empty());
+        assert_eq!(Breaks::default().overlap_secs(0.0, 1.0e9), 0.0);
+        assert!(break_adjusted_time_pct(1_000.0, 2_000.0, &Breaks::default()).is_none());
+    }
+
+    #[test]
+    fn breaks_round_trip_and_validation() {
+        let b = Breaks {
+            ranges: vec![(720, 750), (900, 960)],
+        };
+        let parsed = Breaks::from_value(Some(&serde_json::json!({ "breaks": b.to_value() })));
+        assert_eq!(parsed, b);
+        // Reversed/zero-length, sub-15-minute and malformed pairs are dropped;
+        // a sub-15-minute or near-midnight range would otherwise panic the
+        // editing steppers' clamp.
+        let v = serde_json::json!({ "breaks": [[750, 720], [60, 120], [1, 2, 3], [0, 10], [1435, 1440]] });
+        assert_eq!(Breaks::from_value(Some(&v)).ranges, vec![(60, 120)]);
+    }
+
+    #[test]
+    fn breaks_overlap_merges_overlapping_ranges() {
+        let nine = local_epoch(2026, 6, 18, 9, 0);
+        let fifteen = local_epoch(2026, 6, 18, 15, 0);
+        // Duplicate breaks must count once, not twice.
+        let dup = Breaks {
+            ranges: vec![(720, 780), (720, 780)],
+        };
+        assert_eq!(dup.overlap_secs(nine, fifteen), 3600.0);
+        // Overlapping breaks collapse to their union: 12:00–13:00 ∪ 12:30–13:30
+        // = 12:00–13:30 = 90 min.
+        let overlapping = Breaks {
+            ranges: vec![(720, 780), (750, 810)],
+        };
+        assert_eq!(overlapping.overlap_secs(nine, fifteen), 5400.0);
+    }
+
+    #[test]
+    fn breaks_overlap_correct_across_dst() {
+        // 12:00–12:30 break, fully inside the window. With calendar-arithmetic
+        // edges the overlap is exactly 30 min on any date — including the two
+        // DST-transition days, which a fixed seconds-from-midnight offset would
+        // get wrong by an hour. (Meaningful only under a DST zone, e.g.
+        // `TZ=America/New_York`; correct and passing under every zone.)
+        let breaks = Breaks {
+            ranges: vec![(720, 750)],
+        };
+        for (m, d) in [(3, 9), (11, 2), (6, 18)] {
+            let a = local_epoch(2025, m, d, 9, 0);
+            let b = local_epoch(2025, m, d, 15, 0);
+            assert_eq!(
+                breaks.overlap_secs(a, b),
+                1800.0,
+                "12:00–12:30 break should be 30 min on 2025-{m:02}-{d:02}"
+            );
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ use okena_extensions::{ExtensionSettingsStore, ThemeColors};
 use okena_ui::settings::{section_container, section_header, settings_row_with_desc};
 use okena_ui::simple_input::{InputChangedEvent, SimpleInput, SimpleInputState};
 use okena_ui::tokens::ui_text_md;
-use okena_usage::WorkingDaysSetting;
+use okena_usage::{BreaksSetting, WorkingDaysSetting};
 
 fn theme(cx: &App) -> ThemeColors {
     okena_extensions::theme(cx)
@@ -12,6 +12,7 @@ fn theme(cx: &App) -> ThemeColors {
 pub struct ClaudeSettingsView {
     config_dir_input: Entity<SimpleInputState>,
     working_days: Entity<WorkingDaysSetting>,
+    breaks: Entity<BreaksSetting>,
 }
 
 impl ClaudeSettingsView {
@@ -29,6 +30,7 @@ impl ClaudeSettingsView {
         });
 
         let working_days = cx.new(WorkingDaysSetting::new);
+        let breaks = cx.new(BreaksSetting::new);
 
         cx.observe_global::<ExtensionSettingsStore>(move |this, cx| {
             let next_value = cx
@@ -62,6 +64,7 @@ impl ClaudeSettingsView {
         Self {
             config_dir_input,
             working_days,
+            breaks,
         }
     }
 }
@@ -97,5 +100,6 @@ impl Render for ClaudeSettingsView {
                 ),
             )
             .child(self.working_days.clone())
+            .child(self.breaks.clone())
     }
 }
