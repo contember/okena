@@ -223,6 +223,27 @@ pub(super) fn remove_worktree_project(
     }
 }
 
+pub(super) fn close_worktree(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    project_id: String,
+    merge: bool,
+    stash: bool,
+    fetch: bool,
+    push: bool,
+    delete_branch: bool,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    match ws.close_worktree(focus_manager, &project_id, merge, stash, fetch, push, delete_branch, &settings.hooks, cx) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(e) => ActionResult::Err(e),
+    }
+}
+
 pub(super) fn create_folder(ws: &mut Workspace, name: String, cx: &mut impl WorkspaceCx) -> ActionResult {
     let id = ws.create_folder(name, cx);
     ActionResult::Ok(Some(serde_json::json!({ "folder_id": id })))
