@@ -12,6 +12,7 @@ use super::{
     ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
     StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide,
     ZoomIn, ZoomOut, EqualizeLayout, ToggleProjectLayout, ShowBranchSwitcher, ShowProfileManager,
+    RestartDaemon,
 };
 
 /// Get human-readable descriptions for all actions
@@ -593,6 +594,16 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Open an additional window onto the workspace",
             category: "Window",
             factory: || Box::new(NewWindow),
+        },
+    );
+
+    map.insert(
+        "RestartDaemon",
+        ActionDescription {
+            name: "Restart Daemon",
+            description: "Restart the local daemon (ends all terminal sessions) and reconnect",
+            category: "Global",
+            factory: || Box::new(RestartDaemon),
         },
     );
 

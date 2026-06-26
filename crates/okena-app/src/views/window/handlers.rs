@@ -169,8 +169,24 @@ impl WindowView {
         event: &crate::views::panels::toast::ToastActionEvent,
         cx: &mut Context<Self>,
     ) {
-        use crate::soft_close::{decode_action, KILL_PREFIX, UNDO_PREFIX};
+        use crate::soft_close::{
+            decode_action, KILL_PREFIX, RESTART_DAEMON_CANCEL_PREFIX,
+            RESTART_DAEMON_CONFIRM_PREFIX, UNDO_PREFIX,
+        };
         use crate::workspace::toast::ToastManager;
+
+        // Restart-daemon confirmation toast: dismiss either way, and run the
+        // restart only on confirm. Checked first since these action ids carry no
+        // `:project:terminal` payload (so the soft-close decoders skip them).
+        if event.action_id == RESTART_DAEMON_CONFIRM_PREFIX {
+            ToastManager::dismiss(&event.toast_id, cx);
+            self.perform_restart_daemon(cx);
+            return;
+        }
+        if event.action_id == RESTART_DAEMON_CANCEL_PREFIX {
+            ToastManager::dismiss(&event.toast_id, cx);
+            return;
+        }
 
         if let Some((_project_id, terminal_id)) = decode_action(&event.action_id, UNDO_PREFIX) {
             // The PTY is only restorable if it's still in the registry — if the
@@ -537,6 +553,113 @@ impl WindowView {
                 rm.send_action(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID, action, cx);
             });
         }
+    }
+
+    /// Show a confirmation toast before restarting the local daemon. Restarting
+    /// the daemon ends EVERY terminal session (the daemon owns all PTYs), so this
+    /// is gated behind an explicit, unmissable confirm rather than firing
+    /// immediately. The actual restart runs in [`Self::perform_restart_daemon`]
+    /// when the user clicks "Restart" (routed via [`Self::handle_toast_action`]).
+    pub(super) fn request_restart_daemon(&self, cx: &mut Context<Self>) {
+        use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastManager};
+
+        let actions = vec![
+            ToastAction::new(
+                crate::soft_close::RESTART_DAEMON_CONFIRM_PREFIX,
+                "Restart",
+                ToastActionStyle::Danger,
+            ),
+            ToastAction::new(
+                crate::soft_close::RESTART_DAEMON_CANCEL_PREFIX,
+                "Cancel",
+                ToastActionStyle::Default,
+            ),
+        ];
+        let toast = Toast::warning("Restart the daemon?")
+            .with_id(crate::soft_close::RESTART_DAEMON_TOAST_ID)
+            .with_detail("This ends all terminal sessions in every window.")
+            .with_ttl(std::time::Duration::from_secs(30))
+            .with_actions(actions);
+        ToastManager::post(toast, cx);
+    }
+
+    /// Restart the local daemon and reconnect to it (possibly on a new port).
+    ///
+    /// 1. POST `/v1/restart` to the current local-daemon endpoint (blocking
+    ///    reqwest, off the GPUI thread). The daemon spawns a replacement (which
+    ///    waits for this one to exit) and exits itself.
+    /// 2. Wait for the OLD daemon's pid to die, then poll `remote.json` until a
+    ///    LIVE daemon advertises — this is the replacement, which may have bound
+    ///    a DIFFERENT port (the old one can linger in TIME_WAIT).
+    /// 3. Back on the GPUI thread, re-point the local connection at the new port
+    ///    (keeping the existing token — the daemon reloads `remote_tokens.json`
+    ///    at startup) and reconnect.
+    ///
+    /// Failure at any step toasts an error and leaves the connection alone (its
+    /// own reconnect/backoff still applies), so the GUI is never left wedged.
+    pub(super) fn perform_restart_daemon(&self, cx: &mut Context<Self>) {
+        use crate::workspace::toast::ToastManager;
+        use okena_transport::client::LOCAL_DAEMON_CONNECTION_ID;
+
+        let Some(rm) = self.remote_manager.clone() else {
+            ToastManager::error("No local daemon connection to restart", cx);
+            return;
+        };
+
+        // Resolve the current local-daemon endpoint (host, port, token) so the
+        // background task can POST the restart and keep the token for reconnect.
+        let endpoint = {
+            let manager = rm.read(cx);
+            manager
+                .connections()
+                .into_iter()
+                .find(|(c, _, _)| c.id == LOCAL_DAEMON_CONNECTION_ID)
+                .map(|(c, _, _)| (c.host.clone(), c.port, c.saved_token.clone()))
+        };
+        let Some((host, old_port, token)) = endpoint else {
+            ToastManager::error("Local daemon connection not found", cx);
+            return;
+        };
+
+        ToastManager::info("Restarting daemon…", cx);
+
+        let rm = rm.downgrade();
+        cx.spawn(async move |_this, cx| {
+            // The restart POST and the pid/discovery polling are blocking I/O,
+            // so run them on the blocking pool.
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    okena_remote_server::local::restart_local_daemon(&host, old_port)
+                })
+                .await;
+
+            match outcome {
+                Ok(daemon) => {
+                    let _ = rm.update(cx, |rm, cx| {
+                        rm.redirect_and_reconnect(
+                            LOCAL_DAEMON_CONNECTION_ID,
+                            daemon.port,
+                            token,
+                            cx,
+                        );
+                        crate::workspace::toast::ToastManager::success(
+                            "Daemon restarted; reconnecting…",
+                            cx,
+                        );
+                    });
+                }
+                Err(msg) => {
+                    let _ = rm.update(cx, |_rm, cx| {
+                        crate::workspace::toast::ToastManager::error(
+                            format!("Daemon restart failed: {msg}"),
+                            cx,
+                        );
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     /// Flush pending saves, spawn a new Okena process for `id`, then quit.

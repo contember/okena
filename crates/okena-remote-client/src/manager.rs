@@ -238,6 +238,35 @@ impl RemoteConnectionManager {
         }
     }
 
+    /// Re-point an existing connection at a (possibly new) port + token, then
+    /// reconnect. Used after a local-daemon restart: the replacement daemon may
+    /// bind a DIFFERENT port (the old one can linger in TIME_WAIT), so a plain
+    /// `reconnect` — which reuses the old config — could dial a dead port. The
+    /// caller re-reads `remote.json` for the new port and passes it here.
+    ///
+    /// `connect()` clones the config at call time, so mutating it first and then
+    /// reconnecting picks up the new endpoint. The token usually survives a
+    /// restart (the daemon reloads `remote_tokens.json` at startup), so `token`
+    /// is normally the existing one; it is refreshed here for completeness. Does
+    /// nothing if the connection id is unknown.
+    pub fn redirect_and_reconnect(
+        &mut self,
+        connection_id: &str,
+        port: u16,
+        token: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.get_mut(connection_id) {
+            conn.config_mut().port = port;
+            if let Some(token) = token {
+                conn.config_mut().saved_token = Some(token);
+            }
+            conn.disconnect();
+            conn.connect();
+            cx.notify();
+        }
+    }
+
     /// Remove a connection (disconnects first).
     pub fn remove_connection(&mut self, connection_id: &str, cx: &mut Context<Self>) {
         if let Some(mut conn) = self.connections.remove(connection_id) {

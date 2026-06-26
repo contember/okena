@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ReviewChanges, ShowHookLog, ShowLogConsole, NewProject, NewWindow, CloseWindow, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout, ToggleProjectLayout, ShowBranchSwitcher, ShowProfileManager};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ReviewChanges, ShowHookLog, ShowLogConsole, NewProject, NewWindow, CloseWindow, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout, ToggleProjectLayout, ShowBranchSwitcher, ShowProfileManager, RestartDaemon};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
@@ -838,6 +838,12 @@ impl Render for WindowView {
                 move |_this, _: &ShowProfileManager, _window, cx| {
                     overlay_manager.update(cx, |om, cx| om.toggle_profile_manager(cx));
                 }
+            }))
+            // Handle restart-daemon action (command palette only; destructive, so
+            // no default chord). Shows a confirmation toast before restarting —
+            // restarting the daemon ends every terminal session.
+            .on_action(cx.listener(|this, _: &RestartDaemon, _window, cx| {
+                this.request_restart_daemon(cx);
             }))
             // Handle show pairing dialog action
             .on_action(cx.listener({

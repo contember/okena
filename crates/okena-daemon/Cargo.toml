@@ -16,6 +16,10 @@ okena-core = { path = "../okena-core" }
 # Pulled gpui-free: okena-workspace defaults to the `gpui` feature, so we must
 # opt out of default features to keep this binary 100% GPUI-free.
 okena-workspace = { path = "../okena-workspace", default-features = false }
+# gpui-free local-daemon helpers: the self-restart handoff waits for the
+# outgoing daemon (`--await-pid`) before this one locks/binds. default-features
+# off keeps the daemon binary 100% GPUI-free (the `gpui` feature is opt-in).
+okena-remote-server = { path = "../okena-remote-server", default-features = false }
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"

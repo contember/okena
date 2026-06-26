@@ -253,6 +253,135 @@ pub fn notify_auth_reload(port: u16) {
         .send();
 }
 
+/// Ask the local daemon at `host:port` to restart itself (`POST /v1/restart`),
+/// then block until the replacement daemon advertises a live endpoint.
+///
+/// Pure blocking I/O — call it off any UI/async reactor thread. Returns the
+/// discovered [`LocalDaemon`] (with its possibly-NEW port: the old one can linger
+/// in TIME_WAIT, so the replacement may bind a different one) or an error string.
+///
+/// Sequence:
+/// 1. Snapshot the outgoing daemon's pid from `remote.json` (so we can wait for
+///    its exit — that's what frees the lock + port for the replacement).
+/// 2. POST `/v1/restart`. A non-success status is a hard error; a transport
+///    error is treated as "it's already going down" (it acks then exits, so the
+///    connection can drop mid-response) and we proceed.
+/// 3. Wait for the old pid to die (bounded), then poll `remote.json` until a LIVE
+///    daemon advertises — [`wait_until_ready`] rejects a stale file whose pid is
+///    dead, so it returns only once the replacement has written its own pid+port.
+pub fn restart_local_daemon(host: &str, port: u16) -> Result<LocalDaemon, String> {
+    let old_pid = running_daemon().map(|d| d.pid).unwrap_or(0);
+
+    let url = format!("http://{host}:{port}/v1/restart");
+    match reqwest::blocking::Client::new()
+        .post(&url)
+        .timeout(Duration::from_secs(10))
+        .send()
+    {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => return Err(format!("restart endpoint returned {}", resp.status())),
+        // Transport error: the daemon may already be tearing down. The discovery
+        // poll below is the real readiness signal, so log and keep going.
+        Err(e) => log::warn!("restart POST error (daemon likely exiting): {e}"),
+    }
+
+    if old_pid != 0 {
+        let _ = wait_for_pid_exit(old_pid, Duration::from_secs(10));
+    }
+
+    wait_until_ready(Duration::from_secs(15))
+        .ok_or_else(|| "daemon did not come back in time".to_string())
+}
+
+/// CLI flag the restart relauncher passes to the replacement daemon so it waits
+/// for the outgoing daemon's process to exit (releasing its port + instance lock)
+/// before it tries to bind / acquire the lock. See [`spawn_replacement_daemon`]
+/// and [`wait_for_pid_exit`].
+pub const AWAIT_PID_FLAG: &str = "--await-pid";
+
+/// Block until the process `pid` is no longer alive, or `timeout` elapses. Polls
+/// every 50ms. A `pid` of 0 (unknown) returns immediately.
+///
+/// Used by the replacement daemon spawned during a self-restart: the outgoing
+/// daemon spawns it and then exits, so the replacement must wait for that exit
+/// before [`acquire_instance_lock`](okena_workspace::persistence::acquire_instance_lock)
+/// (which fails fast against a live PID) and before its port scan (the old port
+/// may linger in TIME_WAIT, but binding succeeds once the old socket is gone).
+pub fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    if pid == 0 {
+        return true;
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !is_process_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Parse the `--await-pid <pid>` flag the restart relauncher injects into the
+/// replacement daemon's args. Returns `None` when the flag is absent or its
+/// value is missing/unparseable (the caller then just boots normally).
+pub fn parse_await_pid<I, S>(args: I) -> Option<u32>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg.as_ref() == AWAIT_PID_FLAG {
+            return iter.next().and_then(|v| v.as_ref().parse::<u32>().ok());
+        }
+    }
+    None
+}
+
+/// Spawn a fresh daemon process to *replace* the current one, then leave it to
+/// the caller to exit the current process.
+///
+/// Re-launches the current executable with the same args (so a daemon launched
+/// as `okena-daemon --listen 127.0.0.1` or the transitional `okena --headless
+/// --listen 127.0.0.1` re-launches identically), with `OKENA_PROFILE` inherited
+/// from the environment so the replacement lands in the same config dir. Appends
+/// `--await-pid <current_pid>` so the replacement waits for THIS process to exit
+/// — releasing its port + instance lock — before binding / locking. Any existing
+/// `--await-pid` pair is stripped first so it isn't passed twice.
+///
+/// Mirrors the updater's restart pattern (`installer::restart_app`): spawn the
+/// successor, then quit. The child is detached (its handle is dropped); on Unix
+/// it survives as an orphan, on Windows as an independent process.
+pub fn spawn_replacement_daemon() -> std::io::Result<std::process::Child> {
+    let exe = std::env::current_exe()?;
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    strip_await_pid_args(&mut args);
+    let my_pid = std::process::id();
+    std::process::Command::new(exe)
+        .args(&args)
+        .arg(AWAIT_PID_FLAG)
+        .arg(my_pid.to_string())
+        .spawn()
+}
+
+/// Remove any `--await-pid <pid>` pair from `args` so a chain of restarts never
+/// accumulates duplicate flags (the latest restart re-appends the current pid).
+fn strip_await_pid_args(args: &mut Vec<String>) {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == AWAIT_PID_FLAG {
+            args.remove(i);
+            if i < args.len() {
+                args.remove(i);
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// Ensure a local daemon is reachable from an explicit config dir (testable
 /// core), returning a token to authenticate against it.
 ///
@@ -426,6 +555,45 @@ mod tests {
     #[test]
     fn current_process_is_alive() {
         assert!(is_process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn parse_await_pid_reads_flag_value() {
+        let args = ["--listen", "127.0.0.1", AWAIT_PID_FLAG, "4242"];
+        assert_eq!(parse_await_pid(args), Some(4242));
+    }
+
+    #[test]
+    fn parse_await_pid_none_when_absent_or_malformed() {
+        assert_eq!(parse_await_pid(["--listen", "127.0.0.1"]), None);
+        assert_eq!(parse_await_pid([AWAIT_PID_FLAG]), None, "flag without value");
+        assert_eq!(parse_await_pid([AWAIT_PID_FLAG, "notanum"]), None);
+    }
+
+    #[test]
+    fn strip_await_pid_removes_flag_and_value() {
+        let mut args = vec![
+            "--listen".to_string(),
+            "127.0.0.1".to_string(),
+            AWAIT_PID_FLAG.to_string(),
+            "99".to_string(),
+        ];
+        strip_await_pid_args(&mut args);
+        assert_eq!(args, vec!["--listen".to_string(), "127.0.0.1".to_string()]);
+    }
+
+    #[test]
+    fn wait_for_pid_exit_zero_returns_immediately() {
+        // pid 0 is "unknown"; treat as already gone so the caller doesn't block.
+        assert!(wait_for_pid_exit(0, Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn wait_for_pid_exit_times_out_on_live_pid() {
+        let start = Instant::now();
+        // This very process is alive, so the wait must run to the deadline.
+        assert!(!wait_for_pid_exit(std::process::id(), Duration::from_millis(120)));
+        assert!(start.elapsed() < Duration::from_secs(2), "should give up near the timeout");
     }
 
     #[test]
