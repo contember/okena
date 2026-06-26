@@ -336,17 +336,18 @@ fn process_command_finished_activity(
 /// 1. Let the service manager claim its service terminals (restart /
 ///    keep-crash-output) — yields the `service_tids` set.
 /// 2. Resolve hook-terminal exits: notify the monitor, set hook status, and
-///    resolve any pending worktree close (delete the project DIRECTLY in the
-///    daemon workspace on success; finish-closing on failure) — yields the
-///    `hook_tids` set.
+///    resolve any pending worktree close (run the canonical worktree removal
+///    DIRECTLY in the daemon workspace on success; finish-closing on failure) —
+///    yields the `hook_tids` set.
 /// 3. Fire `terminal.on_close` for plain user terminals (non-service, non-hook).
 /// 4. Kill + remove the UI Terminal for every non-service, non-hook terminal.
 /// 5. Drop stale soft-close records for any exited terminal.
 ///
 /// Mirrors the GUI's PTY-exit handling, adapted: the GUI is a thin client and
-/// dispatched a remote `DeleteProject`; the daemon owns the workspace and
-/// deletes directly. The GUI-only window/pane notify + toast dismissal have no
-/// daemon surface and are dropped (the soft-close *state* cleanup still runs).
+/// dispatched a remote action + ran the worktree removal locally; the daemon owns
+/// the workspace and runs the canonical removal directly. The GUI-only
+/// window/pane notify + toast dismissal have no daemon surface and are dropped
+/// (the soft-close *state* cleanup still runs).
 fn handle_exits(
     exit_events: &[(String, Option<u32>)],
     terminals: &TerminalsRegistry,
@@ -448,17 +449,26 @@ fn handle_exits(
 /// Returns the set of terminal ids that were hook terminals (so the caller skips
 /// them in the `terminal.on_close` / kill+remove passes, mirroring the GUI).
 ///
-/// ## Worktree-close adaptation (direct delete, not remote dispatch)
+/// ## Worktree-close adaptation (direct removal, not remote dispatch)
 ///
 /// The GUI is a thin client whose `Workspace` mirror is read-only, so on a
-/// successful close it dispatched a remote `ActionRequest::DeleteProject` to the
-/// daemon. The daemon OWNS the workspace, so it deletes the worktree project
-/// DIRECTLY via the workspace action layer (`delete_project`) — the same path
-/// `execute_action(DeleteProject)` takes — instead of round-tripping an action.
+/// successful close it dispatched a remote action to the daemon and then ran the
+/// git worktree removal + `on_worktree_close` / `worktree_removed` hooks locally
+/// in `handle_pending_close_result`. The daemon OWNS the workspace, so it runs
+/// the canonical worktree removal DIRECTLY via
+/// [`Workspace::remove_worktree_project`] — the SAME path
+/// `execute_action(RemoveWorktreeProject)` takes: fire `on_worktree_close`, then
+/// `git worktree remove`, then `delete_project` (which fires `on_project_close`).
 ///
-/// (The GUI additionally fired `on_worktree_close` / `worktree_removed` hooks and
-/// did the `git worktree remove` in `handle_pending_close_result`; those steps
-/// are the still-pending daemon-side worktree work — they are out of scope here.)
+/// The exited hook terminal that drives this is the `before_worktree_remove`
+/// hook (registered alongside the pending close in the close-worktree dialog),
+/// NOT `on_worktree_close`, so converging on `remove_worktree_project` does not
+/// double-fire any hook.
+///
+/// Residual difference vs. the GUI: the daemon does the removal synchronously via
+/// `remove_worktree` (`git worktree remove`) rather than the GUI's background
+/// `remove_worktree_fast` + `worktree_removed` hook. This matches the normal
+/// daemon `RemoveWorktreeProject` action exactly.
 fn handle_hook_terminal_exits(
     exit_events: &[(String, Option<u32>)],
     service_tids: &HashSet<String>,
@@ -509,11 +519,35 @@ fn handle_hook_terminal_exits(
 
         if let Some(pending) = ws.take_pending_worktree_close(&tid) {
             if success {
-                // Drop the hook terminal record, then delete the worktree
-                // project directly (mirrors the GUI's remove_hook_terminal +
-                // dispatched DeleteProject).
+                // Drop the hook terminal record, then run the canonical
+                // worktree removal — the SAME path the normal
+                // `ActionRequest::RemoveWorktreeProject` action takes:
+                // fire `on_worktree_close`, `git worktree remove`, then
+                // `delete_project` (which fires `on_project_close`).
+                //
+                // The exited hook terminal is the `before_worktree_remove`
+                // hook (the one registered with this pending close), NOT
+                // `on_worktree_close`, so this does not double-fire any hook.
+                //
+                // `force = true`: this close was already gated by the user
+                // confirming AND the `before_worktree_remove` hook succeeding,
+                // so it must not be blocked by a dirty/locked working tree —
+                // matching the GUI's hook-close path, which removed the
+                // worktree unconditionally (`remove_worktree_fast`).
                 ws.remove_hook_terminal(&tid, &mut cx);
-                ws.delete_project(&mut focus_manager, &pending.project_id, &global_hooks, &mut cx);
+                if let Err(e) = ws.remove_worktree_project(
+                    &mut focus_manager,
+                    &pending.project_id,
+                    true,
+                    &global_hooks,
+                    &mut cx,
+                ) {
+                    log::error!(
+                        "worktree-close hook succeeded but remove_worktree_project failed for {}: {}",
+                        pending.project_id,
+                        e
+                    );
+                }
             } else {
                 // Hook failed → abort the close: unmark the project as closing.
                 ws.finish_closing_project(&pending.project_id);
