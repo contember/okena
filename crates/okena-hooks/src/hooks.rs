@@ -945,10 +945,14 @@ pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str, env_vars: &HashMa
     ShellType::for_command(script)
 }
 
-/// Fire the `terminal.on_close` hook after a terminal PTY exits.
-/// Runs headlessly (no PTY runner) since the terminal just exited.
-#[cfg(feature = "gpui")]
-pub fn fire_terminal_on_close(
+/// Fire the `terminal.on_close` hook after a terminal PTY exits, taking the
+/// `HookMonitor` explicitly (GPUI-free). Runs headlessly (no PTY runner) since
+/// the terminal just exited.
+///
+/// This is the core; the GPUI [`fire_terminal_on_close`] wrapper just reads the
+/// monitor global from `&App` and delegates here. The daemon (no GPUI globals)
+/// calls this directly with the monitor it owns.
+pub fn fire_terminal_on_close_with_services(
     project_hooks: &HooksConfig,
     parent_hooks: Option<&HooksConfig>,
     project_id: &str,
@@ -961,7 +965,7 @@ pub fn fire_terminal_on_close(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
     global_hooks: &HooksConfig,
-    cx: &App,
+    monitor: Option<&HookMonitor>,
 ) {
     if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_close) {
         let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
@@ -982,9 +986,46 @@ pub fn fire_terminal_on_close(
             }
         }
         log::info!("Running terminal.on_close hook for terminal '{}'", terminal_id);
-        let monitor = try_monitor(cx);
-        run_hook(cmd, env, monitor.as_ref(), "terminal.on_close", project_name, None, project_id, true);
+        run_hook(cmd, env, monitor, "terminal.on_close", project_name, None, project_id, true);
     }
+}
+
+/// GPUI wrapper around [`fire_terminal_on_close_with_services`]: reads the
+/// `HookMonitor` global from `&App` and delegates. Kept so existing `&App`
+/// callers (e.g. okena-app's PTY exit loop) compile unchanged.
+#[cfg(feature = "gpui")]
+#[allow(clippy::too_many_arguments)]
+pub fn fire_terminal_on_close(
+    project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    terminal_id: &str,
+    terminal_name: Option<&str>,
+    is_worktree: bool,
+    exit_code: Option<u32>,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    global_hooks: &HooksConfig,
+    cx: &App,
+) {
+    let monitor = try_monitor(cx);
+    fire_terminal_on_close_with_services(
+        project_hooks,
+        parent_hooks,
+        project_id,
+        project_name,
+        project_path,
+        terminal_id,
+        terminal_name,
+        is_worktree,
+        exit_code,
+        folder_id,
+        folder_name,
+        global_hooks,
+        monitor.as_ref(),
+    );
 }
 
 /// Resolve the shell_wrapper for terminal creation.

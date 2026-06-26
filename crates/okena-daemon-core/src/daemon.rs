@@ -310,6 +310,16 @@ impl DaemonCore {
                 reactor.service_manager.clone(),
                 handle.clone(),
                 reactor.service_tick.clone(),
+                // Daemon-owned workspace + hooks: the PTY loop runs the full
+                // terminal-exit lifecycle (hook-terminal exits, terminal.on_close,
+                // OSC hook-exit, soft-close reap) directly against this state.
+                crate::pty_loop::PtyLoopReactor {
+                    workspace: reactor.workspace.clone(),
+                    hook_runner: reactor.hook_runner.clone(),
+                    hook_monitor: reactor.hook_monitor.clone(),
+                    workspace_tick: reactor.workspace_tick.clone(),
+                    settings: settings.clone(),
+                },
                 reactor.state_version.clone(),
             ));
             tokio::task::spawn_local(crate::git_poll::run_git_poll(
