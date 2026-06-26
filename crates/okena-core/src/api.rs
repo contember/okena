@@ -585,6 +585,9 @@ pub enum ActionRequest {
     GitListWorktrees {
         project_id: String,
     },
+    WorktreeCloseInfo {
+        project_id: String,
+    },
     GenerateWorktreeBranchName {
         project_id: String,
     },

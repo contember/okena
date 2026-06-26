@@ -277,8 +277,11 @@ impl WindowView {
                 });
             }
             OverlayManagerEvent::CloseWorktree { project_id } => {
+                let params = self.workspace.read(cx).project(project_id)
+                    .and_then(|p| p.connection_id.clone())
+                    .and_then(|cid| self.remote_params(project_id, &cid, cx));
                 self.overlay_manager.update(cx, |om, cx| {
-                    om.show_close_worktree_dialog(project_id.clone(), cx);
+                    om.show_close_worktree_dialog(project_id.clone(), params, cx);
                 });
             }
             OverlayManagerEvent::DeleteProject { project_id } => {

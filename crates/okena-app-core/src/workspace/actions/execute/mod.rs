@@ -152,6 +152,7 @@ pub fn execute_action(
         }
         ActionRequest::GitListBranches { project_id } => git::list_branches(ws, project_id),
         ActionRequest::GitListWorktrees { project_id } => git::list_worktrees(ws, project_id),
+        ActionRequest::WorktreeCloseInfo { project_id } => git::worktree_close_info(ws, project_id),
         ActionRequest::GenerateWorktreeBranchName { project_id } => git::generate_worktree_branch_name(ws, project_id),
         ActionRequest::GitListBranchesClassified { project_id } => {
             git::list_branches_classified(ws, project_id)

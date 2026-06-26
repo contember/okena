@@ -114,6 +114,29 @@ pub(super) fn list_worktrees(ws: &Workspace, project_id: String) -> ActionResult
     }
 }
 
+pub(super) fn worktree_close_info(ws: &Workspace, project_id: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let project_path = p.path.clone();
+            let main_repo_path = ws.worktree_parent_path(&project_id);
+            let path = std::path::Path::new(&project_path);
+            let is_dirty = okena_git::has_uncommitted_changes(path);
+            let branch = okena_git::get_current_branch(path);
+            let default_branch = main_repo_path
+                .as_ref()
+                .and_then(|p| okena_git::get_default_branch(std::path::Path::new(p)));
+            let unpushed_count = okena_git::count_unpushed_commits(path).unwrap_or(0);
+            ActionResult::Ok(Some(serde_json::json!({
+                "is_dirty": is_dirty,
+                "branch": branch,
+                "default_branch": default_branch,
+                "unpushed_count": unpushed_count,
+            })))
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
 pub(super) fn generate_worktree_branch_name(ws: &Workspace, project_id: String) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {
