@@ -6177,6 +6177,7 @@ dependencies = [
  "log",
  "okena-core",
  "okena-daemon-core",
+ "okena-remote-server",
  "okena-workspace",
 ]
 
