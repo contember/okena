@@ -7,6 +7,7 @@ pub mod profiles;
 pub mod selection;
 pub mod send_payload;
 pub mod shell;
+pub mod soft_close;
 pub mod theme;
 pub mod timing;
 pub mod types;

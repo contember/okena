@@ -25,10 +25,13 @@ use gpui::*;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Prefix for the "undo" toast action id; payload is `:<project_id>:<terminal_id>`.
-pub const UNDO_PREFIX: &str = "soft_close_undo";
-/// Prefix for the "close now" toast action id; payload is `:<project_id>:<terminal_id>`.
-pub const KILL_PREFIX: &str = "soft_close_kill";
+// Soft-close toast-action id prefixes + decoder live in `okena-core` so the
+// daemon (which now builds these toasts) and this GUI client share one source
+// of truth. Re-exported under the historical local names so existing callers
+// (`crate::soft_close::{UNDO_PREFIX, KILL_PREFIX, decode_action}`) keep working.
+pub use okena_core::soft_close::{
+    SOFT_CLOSE_KILL_PREFIX as KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX as UNDO_PREFIX,
+};
 
 /// Stable id for the "Restart the daemon?" confirmation toast (so it can be
 /// dismissed by id once the user picks an action). Not a soft-close toast, but
@@ -40,13 +43,7 @@ pub const RESTART_DAEMON_CONFIRM_PREFIX: &str = "restart_daemon_confirm";
 /// Action id for the "Cancel" button on the restart-daemon confirm toast.
 pub const RESTART_DAEMON_CANCEL_PREFIX: &str = "restart_daemon_cancel";
 
-/// Decode a toast action id of the form `<prefix>:<project_id>:<terminal_id>`.
-/// Returns `(project_id, terminal_id)` when the prefix matches.
-pub fn decode_action(id: &str, prefix: &str) -> Option<(String, String)> {
-    let rest = id.strip_prefix(prefix)?.strip_prefix(':')?;
-    let (project_id, terminal_id) = rest.split_once(':')?;
-    Some((project_id.to_string(), terminal_id.to_string()))
-}
+pub use okena_core::soft_close::decode_action;
 
 /// Cap a terminal label so the toast stays tidy (TOAST_WIDTH is ~320px). OSC
 /// titles can be arbitrarily long; truncate on a char boundary with an ellipsis.
