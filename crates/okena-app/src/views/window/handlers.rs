@@ -53,7 +53,7 @@ impl WindowView {
         let project = ws.project(project_id)?;
         let conn_id = project.connection_id.as_ref()?;
         let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-        Some(std::sync::Arc::new(RemoteGitProvider::new(host, port, token, actual_id)))
+        Some(std::sync::Arc::new(RemoteGitProvider::new(host, port, token, actual_id, project.path.clone())))
     }
 
     /// Resolve the focused terminal_id from this window's focus_manager and the
@@ -114,7 +114,7 @@ impl WindowView {
         let conn_id = project.connection_id.as_ref()?;
         let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
         Some(std::sync::Arc::new(okena_files::project_fs::RemoteProjectFs::new(
-            host, port, token, actual_id, project.name.clone(),
+            host, port, token, actual_id, project.name.clone(), project.path.clone(),
         )))
     }
 
