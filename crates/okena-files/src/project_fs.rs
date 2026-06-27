@@ -54,6 +54,11 @@ pub trait ProjectFs: Send + Sync + 'static {
     /// operations (e.g. context-menu rename/delete). Remote projects return
     /// `None` because the root only exists on the remote machine.
     fn project_root(&self) -> Option<PathBuf>;
+
+    /// Daemon-side absolute path for a project-relative path, for display/copy
+    /// (e.g. the "Copy Absolute Path" context-menu action). The path lives on
+    /// the daemon's filesystem. Returns `None` when the daemon root is unknown.
+    fn absolute_path(&self, relative_path: &str) -> Option<String>;
 }
 
 /// Remote file system provider — fetches data via HTTP from a remote server.
@@ -63,11 +68,12 @@ pub struct RemoteProjectFs {
     token: String,
     project_id: String,
     project_name: String,
+    root: String,
 }
 
 impl RemoteProjectFs {
-    pub fn new(host: String, port: u16, token: String, project_id: String, project_name: String) -> Self {
-        Self { host, port, token, project_id, project_name }
+    pub fn new(host: String, port: u16, token: String, project_id: String, project_name: String, root: String) -> Self {
+        Self { host, port, token, project_id, project_name, root }
     }
 
     fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
@@ -220,5 +226,13 @@ impl ProjectFs for RemoteProjectFs {
 
     fn project_root(&self) -> Option<PathBuf> {
         None
+    }
+
+    fn absolute_path(&self, relative_path: &str) -> Option<String> {
+        if self.root.is_empty() {
+            return None;
+        }
+        let base = self.root.trim_end_matches(['/', '\\']);
+        Some(format!("{}/{}", base, relative_path))
     }
 }

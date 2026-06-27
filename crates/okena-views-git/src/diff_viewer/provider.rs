@@ -59,11 +59,12 @@ pub struct RemoteGitProvider {
     port: u16,
     token: String,
     project_id: String,
+    root: String,
 }
 
 impl RemoteGitProvider {
-    pub fn new(host: String, port: u16, token: String, project_id: String) -> Self {
-        Self { host, port, token, project_id }
+    pub fn new(host: String, port: u16, token: String, project_id: String, root: String) -> Self {
+        Self { host, port, token, project_id, root }
     }
 
     fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
@@ -224,7 +225,11 @@ impl GitProvider for RemoteGitProvider {
         self.post_action(action).map(|_| ())
     }
 
-    fn absolute_file_path(&self, _file_path: &str) -> Option<String> {
-        None
+    fn absolute_file_path(&self, file_path: &str) -> Option<String> {
+        if self.root.is_empty() {
+            return None;
+        }
+        let base = self.root.trim_end_matches(['/', '\\']);
+        Some(format!("{}/{}", base, file_path))
     }
 }

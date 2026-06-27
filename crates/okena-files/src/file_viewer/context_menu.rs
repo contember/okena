@@ -429,6 +429,8 @@ impl FileViewer {
             .to_string_lossy()
             .to_string();
 
+        let abs_to_copy = self.project_fs.absolute_path(&rel_path).unwrap_or_else(|| abs_path.clone());
+
         let send_path = if is_folder { None } else { Some(abs_path_buf.clone()) };
 
         Some(
@@ -496,7 +498,7 @@ impl FileViewer {
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
-                                        abs_path.clone(),
+                                        abs_to_copy.clone(),
                                     ));
                                     this.close_context_menu(cx);
                                 })),
