@@ -744,8 +744,7 @@ fn run_main_workspace_action(
     .into_command_result()
 }
 
-/// Build the two-line Undo / Close-now toast for a busy soft-close. GPUI-free
-/// port of the GUI's `okena_app::soft_close::build_soft_close_toast`:
+/// Build the two-line Undo / Close-now toast for a busy soft-close (GPUI-free):
 ///
 ///   title:  Closed "make"             — what's closing
 ///   detail: okena · ~/projects/okena  — project · working directory (muted)
