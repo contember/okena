@@ -28,6 +28,25 @@ pub enum ToastActionStyle {
     Danger,
 }
 
+impl ToastActionStyle {
+    /// Stable lowercase wire token.
+    fn as_wire_str(self) -> &'static str {
+        match self {
+            ToastActionStyle::Default => "default",
+            ToastActionStyle::Primary => "primary",
+            ToastActionStyle::Danger => "danger",
+        }
+    }
+    /// Parse a wire token; unknown tokens default to `Default`.
+    fn from_wire_str(s: &str) -> Self {
+        match s {
+            "primary" => ToastActionStyle::Primary,
+            "danger" => ToastActionStyle::Danger,
+            _ => ToastActionStyle::Default,
+        }
+    }
+}
+
 /// A clickable button rendered inside a toast.
 ///
 /// `id` is opaque to this crate — the view layer that posted the toast is
@@ -138,8 +157,8 @@ impl Toast {
 
     /// Project onto the serde-serializable wire type for forwarding over the
     /// remote protocol. Drops the local-only `created` (the receiver stamps its
-    /// own) and the `actions` (informational toasts only — see [`ApiToast`]);
-    /// the `ttl` travels as milliseconds.
+    /// own); the `ttl` travels as milliseconds and the `actions` travel as
+    /// [`okena_core::api::ApiToastAction`] buttons.
     pub fn to_api(&self) -> ApiToast {
         ApiToast {
             id: self.id.clone(),
@@ -149,12 +168,21 @@ impl Toast {
             // Saturate rather than wrap on the (practically impossible) overflow
             // of a multi-billion-year TTL; avoids a lossy `as` cast.
             ttl_ms: u64::try_from(self.ttl.as_millis()).unwrap_or(u64::MAX),
+            actions: self
+                .actions
+                .iter()
+                .map(|a| okena_core::api::ApiToastAction {
+                    id: a.id.clone(),
+                    label: a.label.clone(),
+                    style: a.style.as_wire_str().to_string(),
+                })
+                .collect(),
         }
     }
 
     /// Reconstruct a local toast from a wire `ApiToast`. Stamps a fresh
     /// `created` (the wire type carries no timestamp), rebuilds the `ttl` from
-    /// `ttl_ms`, and leaves `actions` empty (never carried over the wire). An
+    /// `ttl_ms`, and rebuilds the `actions` from the wire buttons. An
     /// unrecognized `level` string falls back to [`ToastLevel::Info`].
     pub fn from_api(api: &ApiToast) -> Self {
         Self {
@@ -164,7 +192,15 @@ impl Toast {
             detail: api.detail.clone(),
             created: Instant::now(),
             ttl: Duration::from_millis(api.ttl_ms),
-            actions: Vec::new(),
+            actions: api
+                .actions
+                .iter()
+                .map(|a| ToastAction {
+                    id: a.id.clone(),
+                    label: a.label.clone(),
+                    style: ToastActionStyle::from_wire_str(&a.style),
+                })
+                .collect(),
         }
     }
 }
@@ -234,8 +270,9 @@ mod tests {
     }
 
     /// `to_api` → `from_api` preserves the serializable fields (id / level /
-    /// message / detail / ttl). `created` is freshly stamped and `actions` are
-    /// dropped by design, so they are intentionally not part of the round-trip.
+    /// message / detail / ttl). `created` is freshly stamped, so it is
+    /// intentionally not part of the round-trip; the toast under test carries no
+    /// actions, so `restored.actions` stays empty.
     #[test]
     fn api_round_trip_preserves_serializable_fields() {
         let original = Toast::warning("careful")
@@ -252,6 +289,22 @@ mod tests {
     }
 
     #[test]
+    fn api_round_trip_preserves_actions() {
+        let original = Toast::info("closed")
+            .with_id("sc-1")
+            .with_actions(vec![
+                ToastAction::new("soft_close_undo:p:t", "Undo", ToastActionStyle::Primary),
+                ToastAction::new("soft_close_kill:p:t", "Close now", ToastActionStyle::Danger),
+            ]);
+        let restored = Toast::from_api(&original.to_api());
+        assert_eq!(restored.actions.len(), 2);
+        assert_eq!(restored.actions[0].id, "soft_close_undo:p:t");
+        assert_eq!(restored.actions[0].label, "Undo");
+        assert_eq!(restored.actions[0].style, ToastActionStyle::Primary);
+        assert_eq!(restored.actions[1].style, ToastActionStyle::Danger);
+    }
+
+    #[test]
     fn from_api_with_no_detail() {
         let api = ApiToast {
             id: "x".into(),
@@ -259,6 +312,7 @@ mod tests {
             message: "hi".into(),
             detail: None,
             ttl_ms: 1000,
+            actions: Vec::new(),
         };
         let toast = Toast::from_api(&api);
         assert_eq!(toast.level, ToastLevel::Info);
