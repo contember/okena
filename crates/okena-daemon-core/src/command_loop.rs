@@ -38,6 +38,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use okena_app_core::workspace::actions::execute::{
     ensure_terminal, execute_action, spawn_uninitialized_terminals,
@@ -46,6 +47,8 @@ use okena_core::api::{
     ActionRequest, ApiFolder, ApiFullscreen, ApiGitStatus, ApiProject, ApiServiceInfo, ApiWindow,
     ApiWorktreeMetadata, CommandResult, StateResponse,
 };
+use okena_core::soft_close::{encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX};
+use okena_state::{Toast, ToastAction, ToastActionStyle};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
 use okena_services::manager::{ServiceKind, ServiceManager, ServiceStatus};
 use okena_terminal::backend::TerminalBackend;
@@ -58,6 +61,7 @@ use tokio::sync::watch;
 
 use crate::daemon_config::{get_settings_schema, DaemonConfig};
 use crate::service_cx::ServiceReactorRef;
+use crate::soft_close::SoftCloseDeadlines;
 use crate::workspace_cx::DaemonWorkspaceCx;
 
 /// Parse a wire-format window id into a [`WindowId`].
@@ -107,6 +111,7 @@ pub async fn daemon_command_loop(
     runtime: tokio::runtime::Handle,
     settings: Arc<Mutex<AppSettings>>,
     daemon_config: DaemonConfig,
+    deadlines: SoftCloseDeadlines,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
     // owns the FM directly instead of resolving a per-window entity like the
@@ -203,6 +208,136 @@ pub async fn daemon_command_loop(
                     CommandResult::Err("command palette unavailable in daemon mode".to_string())
                 }
 
+                // ── Close terminal: grace-aware soft close ───────────────────
+                // Faithful daemon-side port of the GUI's optimistic close. A
+                // busy terminal is ejected from the layout (mirrors to clients)
+                // but its PTY is kept alive for the grace period; the finalizer
+                // loop ([`crate::soft_close::run_soft_close_poll`]) kills it on
+                // expiry. Idle terminals and `grace == 0` keep the immediate
+                // close. The Undo / Close-now toast buttons are built here but
+                // are inert until the client wires their actions.
+                ActionRequest::CloseTerminal { project_id, terminal_id } => {
+                    let grace = settings.lock().terminal_close_grace_secs;
+
+                    if grace == 0 {
+                        // Feature off → immediate close (unchanged behavior).
+                        // Snapshot settings BEFORE locking the workspace.
+                        let app_settings = settings.lock().clone();
+                        let mut ws = workspace.lock();
+                        run_main_workspace_action(
+                            ActionRequest::CloseTerminal { project_id, terminal_id },
+                            &mut ws,
+                            &mut focus_manager,
+                            &backend,
+                            &terminals,
+                            &app_settings,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                        )
+                    } else {
+                        // Probe busy-ness OFF the loop thread (forks
+                        // tmux/lsof/pgrep). Hold NO locks across the await. Also
+                        // grab the foreground command for the toast label.
+                        let probe = {
+                            let backend = backend.clone();
+                            let tid = terminal_id.clone();
+                            runtime.spawn_blocking(move || {
+                                let fg = backend.get_foreground_shell_pid(&tid);
+                                let busy = fg
+                                    .map(okena_terminal::terminal::has_child_processes)
+                                    .unwrap_or(false);
+                                let command =
+                                    fg.and_then(okena_terminal::terminal::foreground_command);
+                                (busy, command)
+                            })
+                        };
+                        let (busy, command) = probe.await.unwrap_or((false, None));
+
+                        if !busy {
+                            // Idle → immediate close.
+                            let app_settings = settings.lock().clone();
+                            let mut ws = workspace.lock();
+                            run_main_workspace_action(
+                                ActionRequest::CloseTerminal { project_id, terminal_id },
+                                &mut ws,
+                                &mut focus_manager,
+                                &backend,
+                                &terminals,
+                                &app_settings,
+                                &workspace_tick,
+                                &hook_runner,
+                                &hook_monitor,
+                            )
+                        } else {
+                            // Soft close: eject the pane (mirrors back), keep the
+                            // PTY, surface an Undo/Close-now toast, and arm the
+                            // grace deadline for the finalizer loop.
+                            let mut cx = DaemonWorkspaceCx::new(
+                                &workspace_tick,
+                                &hook_runner,
+                                &hook_monitor,
+                            );
+                            let mut ws = workspace.lock();
+                            let path = ws
+                                .project(&project_id)
+                                .and_then(|p| p.layout.as_ref())
+                                .and_then(|l| l.find_terminal_path(&terminal_id));
+                            match path {
+                                None => {
+                                    // Not in the layout — immediate close.
+                                    drop(ws);
+                                    let app_settings = settings.lock().clone();
+                                    let mut ws = workspace.lock();
+                                    run_main_workspace_action(
+                                        ActionRequest::CloseTerminal {
+                                            project_id,
+                                            terminal_id,
+                                        },
+                                        &mut ws,
+                                        &mut focus_manager,
+                                        &backend,
+                                        &terminals,
+                                        &app_settings,
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                    )
+                                }
+                                Some(path) => {
+                                    let toast_id = format!("soft-close:{terminal_id}");
+                                    let toast = build_soft_close_toast(
+                                        &ws,
+                                        &terminals,
+                                        &project_id,
+                                        &terminal_id,
+                                        command,
+                                        &toast_id,
+                                        grace,
+                                    );
+                                    ws.begin_soft_close(
+                                        &mut focus_manager,
+                                        &project_id,
+                                        &path,
+                                        &terminal_id,
+                                        &toast_id,
+                                        &mut cx,
+                                    );
+                                    drop(ws);
+                                    deadlines.lock().insert(
+                                        terminal_id.clone(),
+                                        Instant::now() + Duration::from_secs(grace as u64),
+                                    );
+                                    if let Some(hm) = &hook_monitor {
+                                        hm.push_toast(toast);
+                                    }
+                                    CommandResult::Ok(None)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── Default: workspace-scoped action ─────────────────────────
                 action => {
                     // Resolve the action's explicit target window (if any)
@@ -226,27 +361,22 @@ pub async fn daemon_command_loop(
                             // Snapshot app settings to thread into the gpui-free
                             // `execute_action` (hooks / worktree template /
                             // default shell). Read before locking the workspace.
+                            // The daemon always targets `WindowId::Main`; the
+                            // mutators notify via `cx` themselves, so there is no
+                            // separate `cx.notify()` like the GUI's view-refresh.
                             let app_settings = settings.lock().clone();
-                            let mut cx = DaemonWorkspaceCx::new(
+                            let mut ws = workspace.lock();
+                            run_main_workspace_action(
+                                action,
+                                &mut ws,
+                                &mut focus_manager,
+                                &backend,
+                                &terminals,
+                                &app_settings,
                                 &workspace_tick,
                                 &hook_runner,
                                 &hook_monitor,
-                            );
-                            let mut ws = workspace.lock();
-                            // The daemon always targets `WindowId::Main`. The
-                            // mutators notify via `cx` themselves, so there is no
-                            // separate `cx.notify()` like the GUI's view-refresh.
-                            execute_action(
-                                action,
-                                &mut ws,
-                                WindowId::Main,
-                                &mut focus_manager,
-                                &*backend,
-                                &terminals,
-                                &app_settings,
-                                &mut cx,
                             )
-                            .into_command_result()
                         }
                         Ok(Some(WindowId::Extra(uuid))) => {
                             // The daemon has only the synthetic main window.
@@ -553,6 +683,143 @@ pub fn materialize_uninitialized_terminals(
     }
 }
 
+/// Run a workspace-scoped action against the synthetic main window.
+///
+/// Shared by the generic default arm and the `CloseTerminal` immediate-close
+/// fallbacks. The caller snapshots `app_settings` and locks the workspace
+/// (passed as `&mut Workspace`) BEFORE invoking this, so no lock is held across
+/// an `.await`. Mirrors the inline body the default arm uses for
+/// `WindowId::Main`.
+#[allow(clippy::too_many_arguments)]
+fn run_main_workspace_action(
+    action: ActionRequest,
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    app_settings: &AppSettings,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+) -> CommandResult {
+    let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+    execute_action(
+        action,
+        ws,
+        WindowId::Main,
+        focus_manager,
+        &**backend,
+        terminals,
+        app_settings,
+        &mut cx,
+    )
+    .into_command_result()
+}
+
+/// Build the two-line Undo / Close-now toast for a busy soft-close. GPUI-free
+/// port of the GUI's `okena_app::soft_close::build_soft_close_toast`:
+///
+///   title:  Closed "make"             — what's closing
+///   detail: okena · ~/projects/okena  — project · working directory (muted)
+///
+/// `command` is the live foreground command (probed off-thread by the caller),
+/// used as the title fallback when the terminal has no meaningful display name.
+fn build_soft_close_toast(
+    ws: &Workspace,
+    terminals: &TerminalsRegistry,
+    project_id: &str,
+    terminal_id: &str,
+    command: Option<String>,
+    toast_id: &str,
+    grace: u32,
+) -> Toast {
+    // Read the live OSC title + cwd under a single registry lock.
+    let (osc_title, cwd) = {
+        let reg = terminals.lock();
+        let term = reg.get(terminal_id);
+        (term.and_then(|t| t.title()), term.map(|t| t.current_cwd()))
+    };
+
+    let (title, detail) = ws
+        .project(project_id)
+        .map(|p| {
+            // Title label precedence: a meaningful display name (user-set custom
+            // name or non-prompt OSC title) wins; else the live foreground
+            // command; else a generic "Terminal closed".
+            let display = p.terminal_display_name(terminal_id, osc_title);
+            let label = if display == p.directory_name() { command } else { Some(display) };
+            let title = match label {
+                Some(l) => format!("Closed \u{201c}{}\u{201d}", truncate_label(&l)),
+                None => "Terminal closed".to_string(),
+            };
+            // Detail line: project name, plus the cwd when we have one.
+            let mut detail = p.name.clone();
+            if let Some(cwd) = &cwd {
+                detail.push_str(" \u{00b7} ");
+                detail.push_str(&shorten_cwd(cwd));
+            }
+            (title, detail)
+        })
+        .unwrap_or_else(|| ("Terminal closed".to_string(), String::new()));
+
+    let actions = vec![
+        ToastAction::new(
+            encode_action(SOFT_CLOSE_UNDO_PREFIX, project_id, terminal_id),
+            "Undo",
+            ToastActionStyle::Primary,
+        ),
+        ToastAction::new(
+            encode_action(SOFT_CLOSE_KILL_PREFIX, project_id, terminal_id),
+            "Close now",
+            ToastActionStyle::Danger,
+        ),
+    ];
+    let base = Toast::info(title)
+        .with_id(toast_id)
+        .with_ttl(Duration::from_secs(grace as u64))
+        .with_actions(actions);
+    if detail.is_empty() { base } else { base.with_detail(detail) }
+}
+
+/// Cap a terminal label so the toast stays tidy. OSC titles can be arbitrarily
+/// long; truncate on a char boundary with an ellipsis. Pure port of the GUI
+/// helper.
+fn truncate_label(label: &str) -> String {
+    const MAX_CHARS: usize = 42;
+    if label.chars().count() <= MAX_CHARS {
+        return label.to_string();
+    }
+    let mut out: String = label.chars().take(MAX_CHARS - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// Home-relative, tail-preserving working directory for the toast detail line.
+/// `~`-collapses the home dir and keeps the *end* of long paths. Pure port of
+/// the GUI helper.
+fn shorten_cwd(path: &str) -> String {
+    let shown = match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path == home => return "~".to_string(),
+        Ok(home) if !home.is_empty() && path.starts_with(&format!("{home}/")) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path.to_string(),
+    };
+    const MAX_CHARS: usize = 30;
+    if shown.chars().count() <= MAX_CHARS {
+        return shown;
+    }
+    let tail: String = shown
+        .chars()
+        .rev()
+        .take(MAX_CHARS - 1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("\u{2026}{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +1005,7 @@ mod tests {
                     tokio::runtime::Handle::current(),
                     h.settings,
                     h.daemon_config,
+                    Arc::new(Mutex::new(HashMap::new())),
                 ));
 
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -792,6 +1060,7 @@ mod tests {
                     tokio::runtime::Handle::current(),
                     h.settings,
                     h.daemon_config,
+                    Arc::new(Mutex::new(HashMap::new())),
                 ));
 
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -845,6 +1114,7 @@ mod tests {
                     tokio::runtime::Handle::current(),
                     h.settings,
                     h.daemon_config,
+                    Arc::new(Mutex::new(HashMap::new())),
                 ));
 
                 let (reply_tx, reply_rx) = oneshot::channel();

@@ -37,6 +37,7 @@ pub mod observers;
 pub mod pty_loop;
 pub mod reactor;
 pub mod service_cx;
+pub mod soft_close;
 pub mod toast_poll;
 pub mod workspace_cx;
 

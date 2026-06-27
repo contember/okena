@@ -367,6 +367,22 @@ impl DaemonCore {
                 &settings,
             );
 
+            // Shared soft-close deadline map: the command loop arms a deadline
+            // when it ejects a busy terminal; the finalizer loop kills the PTY
+            // once it elapses. Spawn the finalizer BEFORE `backend`/`settings`
+            // are consumed by the command loop, cloning what both tasks need.
+            let soft_close_deadlines: crate::soft_close::SoftCloseDeadlines =
+                Arc::new(Mutex::new(HashMap::new()));
+            tokio::task::spawn_local(crate::soft_close::run_soft_close_poll(
+                reactor.workspace.clone(),
+                backend.clone(),
+                terminals.clone(),
+                reactor.workspace_tick.clone(),
+                reactor.hook_runner.clone(),
+                reactor.hook_monitor.clone(),
+                soft_close_deadlines.clone(),
+            ));
+
             // The command loop is the "main" task; it runs until the bridge
             // closes. Race it against ctrl-c so the daemon can shut down cleanly.
             let cmd = crate::command_loop::daemon_command_loop(
@@ -384,6 +400,7 @@ impl DaemonCore {
                 handle.clone(),
                 settings,
                 daemon_config,
+                soft_close_deadlines,
             );
             tokio::select! {
                 _ = cmd => log::info!("daemon command loop ended (remote server gone)"),
