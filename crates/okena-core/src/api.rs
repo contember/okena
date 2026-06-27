@@ -225,10 +225,7 @@ pub struct ApiGitStatus {
 ///
 /// Deliberately omits the local-only `Toast` fields: `created: Instant` and
 /// `ttl: Duration` are not serde-serializable as-is, so the TTL travels as
-/// `ttl_ms` and the client stamps a fresh `created` on receipt. `actions` are
-/// also omitted — daemon toasts are purely informational, while action toasts
-/// (e.g. the soft-close "Undo") are constructed and resolved entirely
-/// client-side, so they never need to cross the wire.
+/// `ttl_ms` and the client stamps a fresh `created` on receipt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiToast {
     pub id: String,
@@ -239,6 +236,19 @@ pub struct ApiToast {
     pub detail: Option<String>,
     /// Time-to-live in milliseconds.
     pub ttl_ms: u64,
+    /// Clickable actions (buttons). Empty for ordinary informational toasts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ApiToastAction>,
+}
+
+/// A clickable button on a wire toast. `id` is opaque (the client decodes it,
+/// e.g. `soft_close_undo:<project>:<terminal>`); `style` is one of
+/// "default" | "primary" | "danger".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiToastAction {
+    pub id: String,
+    pub label: String,
+    pub style: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

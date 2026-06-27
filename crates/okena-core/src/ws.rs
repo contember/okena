@@ -194,6 +194,7 @@ mod tests {
                 message: "Hook `pre_merge` failed".into(),
                 detail: Some("exit code 1".into()),
                 ttl_ms: 5000,
+                actions: Vec::new(),
             }),
             WsOutbound::TerminalResized {
                 terminal_id: "t1".into(),
