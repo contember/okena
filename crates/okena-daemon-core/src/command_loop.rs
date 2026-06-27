@@ -208,6 +208,34 @@ pub async fn daemon_command_loop(
                     CommandResult::Err("command palette unavailable in daemon mode".to_string())
                 }
 
+                // ── Soft-close: undo (restore the ejected pane) ──────────────
+                ActionRequest::UndoSoftClose { terminal_id } => {
+                    deadlines.lock().remove(&terminal_id);
+                    // The PTY is restorable only if still in the registry; the
+                    // daemon owns it, so the alive-check happens here.
+                    let alive = terminals.lock().contains_key(&terminal_id);
+                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                    let mut ws = workspace.lock();
+                    ws.undo_soft_close(&mut focus_manager, &terminal_id, alive, &mut cx);
+                    CommandResult::Ok(None)
+                }
+
+                // ── Soft-close: finalize now ("Close now") ───────────────────
+                ActionRequest::CloseTerminalNow { terminal_id } => {
+                    deadlines.lock().remove(&terminal_id);
+                    let kills = {
+                        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                        let mut ws = workspace.lock();
+                        ws.finalize_soft_close(&terminal_id, &mut cx);
+                        ws.drain_pending_terminal_kills()
+                    };
+                    for id in kills {
+                        backend.kill(&id);
+                        terminals.lock().remove(&id);
+                    }
+                    CommandResult::Ok(None)
+                }
+
                 // ── Close terminal: grace-aware soft close ───────────────────
                 // Faithful daemon-side port of the GUI's optimistic close. A
                 // busy terminal is ejected from the layout (mirrors to clients)

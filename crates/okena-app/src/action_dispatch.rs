@@ -371,6 +371,12 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::ReadContent { terminal_id } => ActionRequest::ReadContent {
             terminal_id: s(&terminal_id),
         },
+        ActionRequest::UndoSoftClose { terminal_id } => ActionRequest::UndoSoftClose {
+            terminal_id: s(&terminal_id),
+        },
+        ActionRequest::CloseTerminalNow { terminal_id } => ActionRequest::CloseTerminalNow {
+            terminal_id: s(&terminal_id),
+        },
         ActionRequest::ExportBuffer { terminal_id } => ActionRequest::ExportBuffer {
             terminal_id: s(&terminal_id),
         },

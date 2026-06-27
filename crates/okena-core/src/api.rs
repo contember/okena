@@ -482,6 +482,16 @@ pub enum ActionRequest {
         project_id: String,
         terminal_ids: Vec<String>,
     },
+    /// Undo an in-flight soft-close: restore the terminal to the layout (the
+    /// daemon checks whether its PTY is still alive). Terminal-only.
+    UndoSoftClose {
+        terminal_id: String,
+    },
+    /// Finalize an in-flight soft-close immediately ("Close now"): kill the
+    /// kept-alive PTY without waiting out the grace period. Terminal-only.
+    CloseTerminalNow {
+        terminal_id: String,
+    },
     FocusTerminal {
         project_id: String,
         terminal_id: String,

@@ -6,8 +6,11 @@ use okena_terminal::TerminalsRegistry;
 use okena_workspace::settings::{load_settings, update_remote_connections};
 
 use okena_core::api::{ActionRequest, StateResponse};
+use okena_core::soft_close::{
+    decode_action, encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX,
+};
 use okena_transport::client::{
-    ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
+    make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
 };
 use okena_transport::client::connection::try_refresh_token;
 
@@ -645,13 +648,28 @@ impl RemoteConnectionManager {
                 cx.notify();
             }
             ConnectionEvent::Toast {
-                connection_id: _,
-                toast,
+                connection_id,
+                mut toast,
             } => {
                 // A daemon-originated toast: reconstruct the local `Toast` (fresh
                 // `created` timestamp, ttl from `ttl_ms`) and show it the same way
-                // local toasts are shown. The connection id is unused — daemon
-                // toasts already carry their full message.
+                // local toasts are shown.
+                //
+                // Daemon toasts carry daemon-side project/terminal ids in their
+                // soft-close action ids; prefix them with this connection so the
+                // GUI's dispatcher routing + prefix-strip-on-dispatch line up.
+                for action in &mut toast.actions {
+                    for prefix in [SOFT_CLOSE_UNDO_PREFIX, SOFT_CLOSE_KILL_PREFIX] {
+                        if let Some((p, t)) = decode_action(&action.id, prefix) {
+                            action.id = encode_action(
+                                prefix,
+                                &make_prefixed_id(&connection_id, &p),
+                                &make_prefixed_id(&connection_id, &t),
+                            );
+                            break;
+                        }
+                    }
+                }
                 ToastManager::post(Toast::from_api(&toast), cx);
             }
             ConnectionEvent::ServerWarning {

@@ -273,6 +273,13 @@ pub fn execute_action(
         }
         ActionRequest::ExportWorkspace { path } => session::export_workspace_action(ws, path),
 
+        // Soft-close undo / finalize are handled by the daemon command loop
+        // directly (it owns the grace deadlines + kept-alive PTYs).
+        ActionRequest::UndoSoftClose { .. }
+        | ActionRequest::CloseTerminalNow { .. } => {
+            ActionResult::Err("soft-close undo/finalize must be handled by the daemon command loop".to_string())
+        }
+
         // Service actions are handled by the remote command loop directly
         ActionRequest::StartService { .. }
         | ActionRequest::StopService { .. }
