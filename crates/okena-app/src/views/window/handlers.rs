@@ -188,27 +188,22 @@ impl WindowView {
             return;
         }
 
-        if let Some((_project_id, terminal_id)) = decode_action(&event.action_id, UNDO_PREFIX) {
-            // The PTY is only restorable if it's still in the registry — if the
-            // shell exited on its own during the grace window there's nothing to
-            // bring back, and `undo_soft_close` just drops the pending record.
-            let alive = self.terminals.lock().contains_key(terminal_id.as_str());
-            let ws = self.workspace.clone();
-            let fm = self.focus_manager.clone();
-            fm.update(cx, |fm, cx| {
-                ws.update(cx, |ws, cx| {
-                    ws.undo_soft_close(fm, &terminal_id, alive, cx);
-                });
-                cx.notify();
-            });
+        // The daemon owns the grace deadlines + kept-alive PTYs, so dispatch the
+        // undo/finalize to it (the project_id from `decode_action` is the
+        // connection-prefixed id, so `dispatcher_for_project` resolves it; the
+        // daemon does the alive-check + kill). The GUI mirror must not mutate
+        // these directly.
+        if let Some((project_id, terminal_id)) = decode_action(&event.action_id, UNDO_PREFIX) {
+            if let Some(dispatcher) = self.dispatcher_for_project(&project_id, cx) {
+                dispatcher.dispatch(ActionRequest::UndoSoftClose { terminal_id }, cx);
+            }
             ToastManager::dismiss(&event.toast_id, cx);
-        } else if let Some((_project_id, terminal_id)) =
+        } else if let Some((project_id, terminal_id)) =
             decode_action(&event.action_id, KILL_PREFIX)
         {
-            let ws = self.workspace.clone();
-            ws.update(cx, |ws, cx| {
-                ws.finalize_soft_close(&terminal_id, cx);
-            });
+            if let Some(dispatcher) = self.dispatcher_for_project(&project_id, cx) {
+                dispatcher.dispatch(ActionRequest::CloseTerminalNow { terminal_id }, cx);
+            }
             ToastManager::dismiss(&event.toast_id, cx);
         }
     }
