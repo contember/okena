@@ -62,6 +62,15 @@ pub trait ActionDispatch: Clone + 'static {
     ) {
         let _ = (terminal_id, mime, bytes, cx);
     }
+
+    /// Export a terminal's scrollback buffer to a client-side temp file and
+    /// return its path (the caller copies it to the clipboard). The capture
+    /// runs on the server; remote dispatchers fetch the content over HTTP and
+    /// write the local file. Default: `None`.
+    fn export_buffer(&self, terminal_id: &str, cx: &mut gpui::App) -> Option<std::path::PathBuf> {
+        let _ = (terminal_id, cx);
+        None
+    }
 }
 
 /// Settings namespace used in ExtensionSettingsStore.

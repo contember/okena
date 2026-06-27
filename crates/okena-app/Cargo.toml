@@ -7,7 +7,7 @@ license = "MIT"
 [dependencies]
 # Shared core types + lower-level crates the UI/app layer builds on.
 okena-core = { path = "../okena-core" }
-okena-transport = { path = "../okena-transport", features = ["client"] }
+okena-transport = { path = "../okena-transport", features = ["client", "blocking-http"] }
 okena-app-core = { path = "../okena-app-core" }
 okena-remote-server = { path = "../okena-remote-server" }
 okena-remote-client = { path = "../okena-remote-client" }
