@@ -76,7 +76,6 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let id_suffix = format!("tabs-{:?}", ctx.layout_path);
 
         let supports_buffer_capture = self.backend.supports_buffer_capture();
-        let backend_for_export = self.backend.clone();
         let terminal_id_for_export = terminal_id.clone();
         let terminal_id_for_close = terminal_id.clone();
         let terminal_id_for_fullscreen = terminal_id.clone();
@@ -85,6 +84,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let ctx_split_h = ctx.clone();
         let ctx_add_tab = ctx.clone();
         let ctx_minimize = ctx.clone();
+        let ctx_export = ctx.clone();
         let ctx_fullscreen = ctx.clone();
         let ctx_detach = ctx.clone();
         let ctx_close = ctx.clone();
@@ -154,9 +154,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                         .on_click(move |_, _window, cx| {
                             if let Some(ref tid) = terminal_id_for_export
-                                && let Some(path) = backend_for_export.capture_buffer(tid) {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
-                                    log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
+                                && let Some(ref dispatcher) = ctx_export.action_dispatcher {
+                                    if let Some(path) = dispatcher.export_buffer(tid, cx) {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+                                        log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
+                                    } else {
+                                        log::warn!("Buffer export unavailable for terminal {} (server needs a tmux session backend)", tid);
+                                    }
                                 }
                         }),
                 )

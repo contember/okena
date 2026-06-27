@@ -482,6 +482,13 @@ pub enum ActionRequest {
     ReadContent {
         terminal_id: String,
     },
+    /// Capture a terminal's full scrollback buffer (tmux `capture-pane`). The
+    /// daemon writes it to a temp file, reads it back, and returns the content
+    /// as `{"content": <string>}`; the client writes its own local copy.
+    /// Terminal-only, mirroring `ReadContent`.
+    ExportBuffer {
+        terminal_id: String,
+    },
     Resize {
         terminal_id: String,
         cols: u16,

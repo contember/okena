@@ -288,6 +288,33 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
     ) {
         self.upload_remote_paste_image(terminal_id, mime, bytes, cx);
     }
+
+    fn export_buffer(&self, terminal_id: &str, cx: &mut gpui::App) -> Option<std::path::PathBuf> {
+        let Self::Remote { connection_id, manager, .. } = self;
+        let remote_terminal_id = strip_prefix(terminal_id, connection_id);
+        // Resolve the connection's HTTP params, then drop the borrow before the
+        // blocking request.
+        let (host, port, token) = {
+            let rm = manager.read(cx);
+            let (config, _, _) = rm
+                .connections()
+                .into_iter()
+                .find(|(c, _, _)| &c.id == connection_id)?;
+            (config.host.clone(), config.port, config.saved_token.clone()?)
+        };
+        let action = okena_core::api::ActionRequest::ExportBuffer {
+            terminal_id: remote_terminal_id,
+        };
+        let value = okena_transport::remote_action::post_action(&host, port, &token, action)
+            .ok()??;
+        let content = value.get("content").and_then(|v| v.as_str())?;
+        // Write the client-side copy (same naming as the in-process capture).
+        let short: String = terminal_id.chars().take(8).collect();
+        let mut path = std::env::temp_dir();
+        path.push(format!("terminal-{}.txt", short));
+        std::fs::write(&path, content).ok()?;
+        Some(path)
+    }
 }
 
 /// Strip the `remote:{connection_id}:` prefix from terminal and project IDs before sending to server.
@@ -342,6 +369,9 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             window,
         },
         ActionRequest::ReadContent { terminal_id } => ActionRequest::ReadContent {
+            terminal_id: s(&terminal_id),
+        },
+        ActionRequest::ExportBuffer { terminal_id } => ActionRequest::ExportBuffer {
             terminal_id: s(&terminal_id),
         },
         ActionRequest::Resize {

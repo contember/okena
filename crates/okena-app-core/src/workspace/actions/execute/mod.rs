@@ -119,6 +119,9 @@ pub fn execute_action(
         ActionRequest::ReadContent { terminal_id } => {
             terminal::read_content(ws, terminal_id, backend, terminals)
         }
+        ActionRequest::ExportBuffer { terminal_id } => {
+            terminal::export_buffer(terminal_id, backend)
+        }
 
         // ── Tab / pane-move ops ──────────────────────────────────────
         ActionRequest::AddTab { project_id, path, in_group } => {
