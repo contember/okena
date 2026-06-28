@@ -171,6 +171,10 @@ jobs:
           mkdir -p dist/icons
           cp target/${{ matrix.target }}/release/okena dist/
           chmod +x dist/okena
+          # Ship the GPUI-free daemon sibling so the app runs the real daemon
+          # binary instead of falling back to `okena --headless`.
+          cp target/${{ matrix.target }}/release/okena-daemon dist/
+          chmod +x dist/okena-daemon
           # Bundle icons for Linux installation
           cp assets/app-icon-16.png assets/app-icon-32.png assets/app-icon-48.png \
              assets/app-icon-64.png assets/app-icon-128.png assets/app-icon-256.png \
@@ -188,6 +192,8 @@ jobs:
         run: |
           mkdir dist
           copy target\${{ matrix.target }}\release\okena.exe dist\
+          rem Ship the GPUI-free daemon sibling (see Linux step).
+          copy target\${{ matrix.target }}\release\okena-daemon.exe dist\
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

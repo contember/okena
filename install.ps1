@@ -54,6 +54,12 @@ if (Test-Path $InstallDir) {
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 Copy-Item -Path $ExePath.FullName -Destination $InstallDir
 
+# GPUI-free daemon sibling — the app prefers it over `okena --headless`.
+$DaemonExe = Get-ChildItem -Path $TempDir -Recurse -Filter "okena-daemon.exe" | Select-Object -First 1
+if ($DaemonExe) {
+    Copy-Item -Path $DaemonExe.FullName -Destination $InstallDir
+}
+
 # Add to PATH (user scope)
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($UserPath -notlike "*$InstallDir*") {
