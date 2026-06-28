@@ -174,11 +174,14 @@ pub async fn run_pty_loop(
         // scan. (Runs whether or not there were exits.)
         if !dirty_terminal_ids.is_empty() {
             process_osc_hook_exits(&dirty_terminal_ids, &terminals, &reactor);
-            // Command-finished (OSC 133 ;D) activity: stamp `last_activity_at` on
-            // the owning project so the activity-sorted sidebar floats it up. Bump
-            // `state_version` if anything was stamped so clients resync (the bump
-            // is mirrored into StateResponse).
-            if process_command_finished_activity(&dirty_terminal_ids, &terminals, &reactor) {
+            // Activity edges — OSC 133 ;D command-finish, bell, and OSC 9/777
+            // notification — stamp `last_activity_at` on the owning project so the
+            // activity-sorted sidebar floats it up. Bump `state_version` if
+            // anything was stamped so clients resync (the bump is mirrored into
+            // StateResponse). Stamping on the daemon — not the client mirror,
+            // which the next sync overwrites — is what makes bell/notification
+            // recency persist and reach every client.
+            if process_activity_edges(&dirty_terminal_ids, &terminals, &reactor) {
                 state_version.send_modify(|v| *v += 1);
             }
         }
@@ -279,43 +282,53 @@ fn process_osc_hook_exits(
     }
 }
 
-/// Drain the one-shot command-finished (OSC 133 ;D) edge for each terminal that
-/// produced output this batch and stamp `last_activity_at` on the owning project
-/// (drives the activity-sorted sidebar). Returns `true` if any activity was
-/// stamped, so the caller can bump `state_version` for clients to resync.
+/// Drain the one-shot activity edges — command-finished (OSC 133 ;D), bell, and
+/// desktop-notification (OSC 9/777) — for each terminal that produced output this
+/// batch and stamp `last_activity_at` on the owning project (drives the
+/// activity-sorted sidebar). Returns `true` if any activity was stamped, so the
+/// caller can bump `state_version` for clients to resync.
 ///
-/// Mirrors the GUI's `Okena::process_command_finished_activity` +
-/// `bump_activity_for_terminals`: drain the cheap atomic edge first (almost every
-/// batch drains nothing), resolve the finished terminals to their owning projects
-/// (deduplicated), then `bump_activity` once per project. The daemon's own
-/// `Terminal`s parse OSC 133 in `process_output`, so the edge is available here.
-fn process_command_finished_activity(
+/// Mirrors the GUI's activity bump: drain the cheap atomic edges first (almost
+/// every batch drains nothing), resolve the active terminals to their owning
+/// projects (deduplicated), then `bump_activity` once per project. The daemon's
+/// own `Terminal`s parse all three signals in `process_output`, so the edges are
+/// available here — the client's bell/notification bump was on its read-only
+/// mirror and lost on the next sync.
+fn process_activity_edges(
     dirty_terminal_ids: &[String],
     terminals: &TerminalsRegistry,
     reactor: &PtyLoopReactor,
 ) -> bool {
-    // Drain edges first (cheap atomic swap); collect the terminals that actually
-    // saw a command finish. The lock is dropped before touching the workspace.
-    let finished: Vec<String> = {
+    // Drain edges first (cheap atomic swaps); collect the terminals that saw any
+    // meaningful activity. The lock is dropped before touching the workspace.
+    //
+    // Drain ALL THREE edges with `|=` (never `||`): each is a one-shot that must
+    // be consumed to clear it, so short-circuiting would leak the notification
+    // queue (and miss a bell that follows a command-finish in the same batch).
+    let active: Vec<String> = {
         let reg = terminals.lock();
         dirty_terminal_ids
             .iter()
             .filter(|tid| {
-                reg.get(*tid)
-                    .is_some_and(|t| t.take_pending_command_finished())
+                reg.get(*tid).is_some_and(|t| {
+                    let mut a = t.take_pending_command_finished();
+                    a |= t.take_pending_bell();
+                    a |= !t.take_pending_notifications().is_empty();
+                    a
+                })
             })
             .cloned()
             .collect()
     };
-    if finished.is_empty() {
+    if active.is_empty() {
         return false;
     }
 
-    // Resolve each finished terminal to its owning project, deduplicating so a
+    // Resolve each active terminal to its owning project, deduplicating so a
     // batch touching several terminals of the same project bumps it once.
     let project_ids: HashSet<String> = {
         let ws = reactor.workspace.lock();
-        finished
+        active
             .iter()
             .filter_map(|tid| ws.find_project_for_terminal(tid).map(|p| p.id.clone()))
             .collect()
