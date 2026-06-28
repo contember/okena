@@ -774,7 +774,9 @@ pub enum ActionRequest {
     /// authoritative `ProjectData.hooks` and applies them on PTY spawn.
     UpdateProjectHooks {
         project_id: String,
-        hooks: ApiHooksConfig,
+        // Boxed: this is by far the largest `ActionRequest` variant, and an
+        // unboxed `ApiHooksConfig` here trips `clippy::large_enum_variant`.
+        hooks: Box<ApiHooksConfig>,
     },
     RenameProjectDirectory {
         project_id: String,

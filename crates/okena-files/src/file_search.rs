@@ -16,7 +16,7 @@ use okena_ui::file_icon::file_icon;
 use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::selectable_list::selectable_list_item;
 use okena_ui::simple_input::{InputChangedEvent, SimpleInputState};
-use std::path::PathBuf;
+use std::path::Path;
 
 /// The flat file entry produced by the gpui-free scanner. Re-exported so the
 /// dialog and existing `okena_files::file_search::FileEntry` imports keep
@@ -154,7 +154,7 @@ impl FileSearchDialog {
     /// Thin delegate to the gpui-free [`crate::file_scan::scan_files`] so the
     /// dialog's behavior is unchanged while the scanning logic stays usable
     /// from headless (gpui-free) builds.
-    pub fn scan_files(project_path: &PathBuf, show_ignored: bool) -> Vec<FileEntry> {
+    pub fn scan_files(project_path: &Path, show_ignored: bool) -> Vec<FileEntry> {
         scan_files(project_path, show_ignored)
     }
 

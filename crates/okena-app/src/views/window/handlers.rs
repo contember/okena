@@ -248,7 +248,7 @@ impl WindowView {
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
                     dispatcher.dispatch(ActionRequest::UpdateProjectHooks {
                         project_id: project_id.clone(),
-                        hooks: hooks.clone(),
+                        hooks: Box::new(hooks.clone()),
                     }, cx);
                 }
             }
