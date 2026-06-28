@@ -67,6 +67,7 @@ if [ "$OS" = "darwin" ]; then
 
   step "Clearing quarantine"
   chmod +x "/Applications/Okena.app/Contents/MacOS/okena"
+  chmod +x "/Applications/Okena.app/Contents/MacOS/okena-daemon" 2>/dev/null || true
   xattr -cr "/Applications/Okena.app" 2>/dev/null || true
 
   done_msg "Installed to /Applications/Okena.app"
@@ -88,6 +89,11 @@ else
   step "Installing binary to $INSTALL_DIR"
   mv "$TMP_DIR/okena" "$INSTALL_DIR/"
   chmod +x "$INSTALL_DIR/okena"
+  # GPUI-free daemon sibling — the app prefers it over `okena --headless`.
+  if [ -f "$TMP_DIR/okena-daemon" ]; then
+    mv "$TMP_DIR/okena-daemon" "$INSTALL_DIR/"
+    chmod +x "$INSTALL_DIR/okena-daemon"
+  fi
 
   step "Installing icons and desktop entry"
 

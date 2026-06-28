@@ -76,6 +76,16 @@ if [[ ! -f "$BINARY_PATH" ]]; then
     echo "    Using default release binary"
 fi
 
+# The GPUI-free daemon binary is built as a sibling of `okena`. Bundle it next
+# to `okena` so the app finds it (sibling lookup) instead of falling back to
+# `okena --headless`.
+DAEMON_BINARY_PATH="$(dirname "$BINARY_PATH")/okena-daemon"
+if [[ ! -f "$DAEMON_BINARY_PATH" ]]; then
+    echo "Error: Daemon binary not found at $DAEMON_BINARY_PATH"
+    echo "Run without --skip-build or build first with: cargo build --release"
+    exit 1
+fi
+
 # Setup paths
 DIST_DIR="$PROJECT_ROOT/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
@@ -89,10 +99,12 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
 
-# Copy binary
-echo "==> Copying binary..."
+# Copy binaries
+echo "==> Copying binaries..."
 cp "$BINARY_PATH" "$MACOS_DIR/okena"
 chmod +x "$MACOS_DIR/okena"
+cp "$DAEMON_BINARY_PATH" "$MACOS_DIR/okena-daemon"
+chmod +x "$MACOS_DIR/okena-daemon"
 
 # Create Info.plist with version
 echo "==> Creating Info.plist..."
@@ -130,6 +142,7 @@ rm -rf "$ICONSET_DIR"
 echo "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
 echo "==> Ad-hoc code signing..."
+codesign --force --sign - "$MACOS_DIR/okena-daemon"
 codesign --force --sign - "$MACOS_DIR/okena"
 codesign --force --sign - "$APP_BUNDLE"
 
