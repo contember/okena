@@ -124,11 +124,11 @@ impl Okena {
             return;
         }
 
-        // A bell or OSC alert is "activity" for the owning project regardless
-        // of the notification settings below — stamp it before any settings
-        // bail so the activity-sorted sidebar surfaces the project even when
-        // desktop notifications are disabled.
-        self.bump_activity_for_terminals(drained.iter().map(|(tid, _, _)| tid.as_str()), cx);
+        // Activity stamping for bell/OSC alerts now happens on the DAEMON
+        // (`pty_loop::process_activity_edges`), which owns the authoritative
+        // `last_activity_at` and persists it. Bumping the client mirror here would
+        // only be overwritten on the next state sync, so we don't — we keep
+        // draining the edges above purely to fire OS notification bubbles below.
 
         // Read the (small) notification settings; bail if the feature is off.
         // Draining above already cleared the queues, so nothing accumulates
@@ -260,30 +260,6 @@ impl Okena {
                 }
             }
         }
-    }
-
-    /// Resolve each terminal id to its owning project and bump that project's
-    /// activity timestamp once. Deduplicates projects so a batch touching
-    /// several terminals of the same project only notifies/persists once.
-    fn bump_activity_for_terminals<'a>(
-        &mut self,
-        terminal_ids: impl Iterator<Item = &'a str>,
-        cx: &mut Context<Self>,
-    ) {
-        let project_ids: std::collections::HashSet<String> = {
-            let ws = self.workspace.read(cx);
-            terminal_ids
-                .filter_map(|tid| ws.find_project_for_terminal(tid).map(|p| p.id.clone()))
-                .collect()
-        };
-        if project_ids.is_empty() {
-            return;
-        }
-        self.workspace.update(cx, |ws, cx| {
-            for pid in project_ids {
-                ws.bump_activity(&pid, cx);
-            }
-        });
     }
 
     /// True when `(project_id, path)` is the focused pane in a window that
