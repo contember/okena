@@ -15,27 +15,6 @@ use crate::drag::{ProjectDrag, ProjectDragView, FolderDrag, FolderDragView};
 use okena_workspace::state::FolderData;
 
 impl Sidebar {
-    /// Send a reorder action to the remote server when a project is reordered
-    /// within a remote folder on the client.
-    fn send_remote_reorder(this: &mut Self, conn_id: &str, prefixed_project_id: &str, new_index: usize, cx: &mut App) {
-        let server_project_id = okena_transport::client::strip_prefix(prefixed_project_id, conn_id);
-
-        // Look up the server's folder structure from the cached state
-        let server_folder_id = if let Some(ref get_folder) = this.get_remote_folder {
-            (get_folder)(conn_id, prefixed_project_id, cx)
-        } else {
-            None
-        };
-
-        if let Some(folder_id) = server_folder_id
-            && let Some(ref send_action) = this.send_remote_action {
-                (send_action)(conn_id, okena_core::api::ActionRequest::ReorderProjectInFolder {
-                    folder_id,
-                    project_id: server_project_id,
-                    new_index,
-                }, cx);
-            }
-    }
 
     /// Renders only the folder header row (expand arrow, icon, name, badges)
     // GPUI render helper: params are render inputs (indent, indices, state flags).
@@ -87,9 +66,10 @@ impl Sidebar {
                 let folder_id = folder_id.clone();
                 move |this, drag: &FolderDrag, _window, cx| {
                     if drag.folder_id != folder_id {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.move_item_in_order(&drag.folder_id, index, cx);
-                        });
+                        this.dispatch_action_for_folder(&drag.folder_id, okena_core::api::ActionRequest::MoveItemInOrder {
+                            item_id: drag.folder_id.clone(),
+                            new_index: index,
+                        }, cx);
                     }
                 }
             }))
@@ -100,9 +80,11 @@ impl Sidebar {
             .on_drop(cx.listener({
                 let folder_id = folder_id.clone();
                 move |this, drag: &ProjectDrag, _window, cx| {
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.move_project_to_folder(&drag.project_id, &folder_id, None, cx);
-                    });
+                    this.dispatch_action_for_project(&drag.project_id, okena_core::api::ActionRequest::MoveProjectToFolder {
+                        project_id: drag.project_id.clone(),
+                        folder_id: folder_id.clone(),
+                        position: None,
+                    }, cx);
                 }
             }))
             // Right-click context menu
@@ -226,9 +208,9 @@ impl Sidebar {
                             let folder_id = folder_id.clone();
                             move |this, _, _window, cx| {
                                 cx.stop_propagation();
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.delete_folder(&folder_id, cx);
-                                });
+                                this.dispatch_action_for_folder(&folder_id, okena_core::api::ActionRequest::DeleteFolder {
+                                    folder_id: folder_id.clone(),
+                                }, cx);
                             }
                         }))
                         .tooltip(|_window, cx| Tooltip::new("Delete folder (keeps projects)").build(_window, cx))
@@ -294,17 +276,15 @@ impl Sidebar {
                         let pos = this.workspace.read(cx).folder(&folder_id)
                             .and_then(|f| f.project_ids.iter().position(|id| id == &project_id));
                         if let Some(pos) = pos {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx);
-                            });
-                            // Send reorder to server for remote folders
-                            if folder_id.starts_with("remote:") {
-                                // Folder ID is "remote:{conn_id}:{folder_id}" — extract conn_id
-                                if let Some(rest) = folder_id.strip_prefix("remote:")
-                                    && let Some(conn_id) = rest.split(':').next() {
-                                        Self::send_remote_reorder(this, conn_id, &drag.project_id, pos, cx);
-                                    }
-                            }
+                            // Daemon-owned: a single MoveProjectToFolder carries the
+                            // reorder; the daemon persists + mirrors it back. (Was a
+                            // mirror write plus a separate ReorderProjectInFolder
+                            // side-send — both now collapsed into one dispatch.)
+                            this.dispatch_action_for_project(&drag.project_id, okena_core::api::ActionRequest::MoveProjectToFolder {
+                                project_id: drag.project_id.clone(),
+                                folder_id: folder_id.clone(),
+                                position: Some(pos),
+                            }, cx);
                         }
                     }
                 }
@@ -314,9 +294,10 @@ impl Sidebar {
                 style.border_t_2().border_color(rgb(t.border_active))
             })
             .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
-                this.workspace.update(cx, |ws, cx| {
-                    ws.move_item_in_order(&drag.folder_id, 0, cx);
-                });
+                this.dispatch_action_for_folder(&drag.folder_id, okena_core::api::ActionRequest::MoveItemInOrder {
+                    item_id: drag.folder_id.clone(),
+                    new_index: 0,
+                }, cx);
             }))
             .on_mouse_down(MouseButton::Right, cx.listener({
                 let project_id = project_id.clone();

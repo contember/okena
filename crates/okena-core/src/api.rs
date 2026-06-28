@@ -828,6 +828,34 @@ pub enum ActionRequest {
         project_id: String,
         top_level_index: usize,
     },
+    /// Reorder a top-level item (project or folder id) within `project_order`.
+    /// Backs the sidebar drag of a project/folder onto a top-level slot.
+    MoveProject {
+        project_id: String,
+        new_index: usize,
+    },
+    /// Reorder an existing top-level item (folder or already-top-level project)
+    /// within `project_order` by its id.
+    MoveItemInOrder {
+        item_id: String,
+        new_index: usize,
+    },
+    /// Toggle a project's pinned flag.
+    ToggleProjectPinned {
+        project_id: String,
+    },
+    /// Reorder a worktree within its parent project's `worktree_ids`.
+    ReorderWorktree {
+        parent_id: String,
+        worktree_id: String,
+        new_index: usize,
+    },
+    /// Set or clear a worktree project's color override.
+    SetWorktreeColorOverride {
+        project_id: String,
+        #[serde(default)]
+        color: Option<FolderColor>,
+    },
 
     // ── Sessions (workspace-global; the daemon owns session files + state) ──
     /// Load a saved session by name: the daemon reads its own session file
@@ -1424,6 +1452,26 @@ mod tests {
             ActionRequest::MoveProjectOutOfFolder {
                 project_id: "p1".into(),
                 top_level_index: 0,
+            },
+            ActionRequest::MoveProject {
+                project_id: "p1".into(),
+                new_index: 1,
+            },
+            ActionRequest::MoveItemInOrder {
+                item_id: "f1".into(),
+                new_index: 0,
+            },
+            ActionRequest::ToggleProjectPinned {
+                project_id: "p1".into(),
+            },
+            ActionRequest::ReorderWorktree {
+                parent_id: "p1".into(),
+                worktree_id: "w1".into(),
+                new_index: 0,
+            },
+            ActionRequest::SetWorktreeColorOverride {
+                project_id: "p1".into(),
+                color: Some(FolderColor::Blue),
             },
             ActionRequest::LoadSession { name: "work".into() },
             ActionRequest::SaveSession { name: "work".into() },

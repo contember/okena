@@ -559,6 +559,10 @@ impl WindowView {
         let focus_manager = self.focus_manager.clone();
         let remote_manager = self.remote_manager.clone();
         let window_id = self.window_id;
+        // Separate clones for the connection-targeted dispatch closure below.
+        let workspace_conn = self.workspace.clone();
+        let focus_manager_conn = self.focus_manager.clone();
+        let remote_manager_conn = self.remote_manager.clone();
         self.sidebar.update(cx, |s, _cx| {
             s.set_dispatch_action(Box::new(move |project_id, action, cx| {
                 if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
@@ -568,6 +572,20 @@ impl WindowView {
                     &focus_manager,
                     &remote_manager,
                     cx,
+                ) {
+                    dispatcher.dispatch(action, cx);
+                }
+            }));
+            // Folder-scoped / workspace-global dispatch (no project to resolve a
+            // connection from). The sidebar resolves the connection id from the
+            // folder prefix (or uses the local daemon) and calls this.
+            s.set_dispatch_for_connection(Box::new(move |conn_id, action, cx| {
+                if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_connection(
+                    conn_id,
+                    window_id,
+                    &workspace_conn,
+                    &focus_manager_conn,
+                    &remote_manager_conn,
                 ) {
                     dispatcher.dispatch(action, cx);
                 }

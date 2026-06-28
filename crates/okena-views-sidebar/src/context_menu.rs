@@ -74,6 +74,7 @@ pub enum ContextMenuEvent {
     ShowDiff { project_id: String },
     FocusProject { project_id: String },
     HideProject { project_id: String },
+    ToggleProjectPinned { project_id: String },
 }
 
 impl okena_ui::overlay::CloseEvent for ContextMenuEvent {
@@ -152,14 +153,14 @@ impl ContextMenu {
         });
     }
 
-    /// Toggle the project's pinned state directly on the workspace, then close.
-    /// Self-contained (no event round-trip) since pinning is a single persisted
-    /// bool flip — see [`okena_workspace::state::Workspace::toggle_project_pinned`].
+    /// Toggle the project's pinned state. The daemon owns the authoritative
+    /// `ProjectData.pinned` flag, so emit an event that routes up to
+    /// `WindowView`, which dispatches `ActionRequest::ToggleProjectPinned`; the
+    /// new pinned state mirrors back. The GUI must not mutate its read-only
+    /// mirror directly.
     fn toggle_pinned(&self, cx: &mut Context<Self>) {
         let project_id = self.request.project_id.clone();
-        self.workspace.update(cx, |ws, cx| {
-            ws.toggle_project_pinned(&project_id, cx);
-        });
+        cx.emit(ContextMenuEvent::ToggleProjectPinned { project_id });
         self.close(cx);
     }
 

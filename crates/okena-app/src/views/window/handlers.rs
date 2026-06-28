@@ -26,6 +26,26 @@ impl WindowView {
         )
     }
 
+    /// Build an ActionDispatcher for a folder. Folders carry no project to
+    /// resolve a connection from, so extract the connection id from the folder
+    /// id (`remote:<conn>:<id>` → `<conn>`, falling back to the local daemon for
+    /// an unprefixed id) and target that connection directly. The dispatcher's
+    /// `dispatch` strips the prefixed folder id automatically. Returns `None` if
+    /// the remote manager is unavailable.
+    pub(super) fn dispatcher_for_folder(&self, folder_id: &str, _cx: &Context<Self>) -> Option<ActionDispatcher> {
+        let conn_id = folder_id
+            .strip_prefix("remote:")
+            .and_then(|r| r.split(':').next())
+            .unwrap_or(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID);
+        crate::action_dispatch::dispatcher_for_connection(
+            conn_id,
+            self.window_id,
+            &self.workspace,
+            &self.focus_manager,
+            &self.remote_manager,
+        )
+    }
+
     /// Resolve remote connection parameters for a remote project.
     /// Returns (host, port, token, actual_project_id) or None if unavailable.
     fn remote_params(
@@ -289,6 +309,25 @@ impl WindowView {
                     }, cx);
                 }
             }
+            OverlayManagerEvent::ToggleProjectPinned { project_id } => {
+                // The daemon owns the authoritative `pinned` flag: dispatch and
+                // let the new state mirror back.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::ToggleProjectPinned {
+                        project_id: project_id.clone(),
+                    }, cx);
+                }
+            }
+            OverlayManagerEvent::DeleteFolder { folder_id } => {
+                // Folders are owned by the daemon; resolve the connection from
+                // the folder id and dispatch DeleteFolder. The removal mirrors
+                // back.
+                if let Some(dispatcher) = self.dispatcher_for_folder(folder_id, cx) {
+                    dispatcher.dispatch(ActionRequest::DeleteFolder {
+                        folder_id: folder_id.clone(),
+                    }, cx);
+                }
+            }
             OverlayManagerEvent::RenameDirectoryConfirmed { project_id, new_name } => {
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
                     dispatcher.dispatch(ActionRequest::RenameProjectDirectory {
@@ -332,6 +371,26 @@ impl WindowView {
                 self.sidebar.update(cx, |sidebar, cx| {
                     sidebar.sync_remote_color(project_id, *color, cx);
                 });
+            }
+            OverlayManagerEvent::WorktreeColorReset { project_id } => {
+                // The daemon owns the worktree color override: dispatch a clear
+                // and let the reset mirror back.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::SetWorktreeColorOverride {
+                        project_id: project_id.clone(),
+                        color: None,
+                    }, cx);
+                }
+            }
+            OverlayManagerEvent::FolderColorChanged { folder_id, color } => {
+                // The daemon owns the folder color: resolve the connection from
+                // the folder id and dispatch SetFolderColor.
+                if let Some(dispatcher) = self.dispatcher_for_folder(folder_id, cx) {
+                    dispatcher.dispatch(ActionRequest::SetFolderColor {
+                        folder_id: folder_id.clone(),
+                        color: *color,
+                    }, cx);
+                }
             }
             OverlayManagerEvent::FocusParent { project_id } => {
                 let parent_id = self.workspace.read(cx)
