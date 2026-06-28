@@ -16,6 +16,8 @@ use crate::auth::{self, PersistedToken};
 use base64::Engine as _;
 use okena_workspace::persistence::config_dir;
 use rand::Rng as _;
+use serde::Deserialize;
+use std::net::IpAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -192,19 +194,29 @@ fn daemon_binary_path() -> Option<std::path::PathBuf> {
 /// lifecycle the desktop kills it when the last window closes; mint the token
 /// *before* spawning so the fresh daemon loads it at startup (no reload needed).
 pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
+    let listen_host = configured_local_daemon_listen_host();
     match daemon_binary_path() {
         Some(daemon) => std::process::Command::new(daemon)
             .arg("--listen")
-            .arg(LOCAL_HOST)
+            .arg(&listen_host)
             .spawn(),
         None => {
             let exe = std::env::current_exe()?;
             std::process::Command::new(exe)
                 .arg("--headless")
                 .arg("--listen")
-                .arg(LOCAL_HOST)
+                .arg(&listen_host)
                 .spawn()
         }
+    }
+}
+
+fn configured_local_daemon_listen_host() -> String {
+    let settings = okena_workspace::settings::load_settings();
+    let configured = settings.remote_listen_address.trim();
+    match configured.parse::<IpAddr>() {
+        Ok(addr) => addr.to_string(),
+        Err(_) => LOCAL_HOST.to_string(),
     }
 }
 
@@ -425,6 +437,51 @@ pub fn ensure_local_daemon_in(
 /// token to authenticate against it.
 pub fn ensure_local_daemon() -> Result<EnsuredDaemon, String> {
     ensure_local_daemon_in(&config_dir(), Duration::from_secs(10))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPairCode {
+    pub code: String,
+    pub expires_in: u64,
+}
+
+#[derive(Deserialize)]
+struct PairCodeResponse {
+    code: String,
+    expires_in: u64,
+}
+
+pub fn request_pair_code(host: &str, port: u16, token: &str) -> Result<LocalPairCode, String> {
+    let url = format!("http://{host}:{port}/v1/pair-code");
+    let resp = reqwest::blocking::Client::new()
+        .post(&url)
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .map_err(|e| format!("Failed to request pairing code: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("Pairing code request returned {status}: {body}"));
+    }
+
+    let body = resp
+        .json::<PairCodeResponse>()
+        .map_err(|e| format!("Failed to parse pairing code response: {e}"))?;
+    Ok(LocalPairCode {
+        code: body.code,
+        expires_in: body.expires_in,
+    })
+}
+
+pub fn invalidate_pair_code(host: &str, port: u16, token: &str) {
+    let url = format!("http://{host}:{port}/v1/pair-code");
+    let _ = reqwest::blocking::Client::new()
+        .delete(&url)
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(5))
+        .send();
 }
 
 #[cfg(test)]

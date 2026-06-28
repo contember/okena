@@ -89,6 +89,10 @@ pub fn build_router(
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
         .route("/v1/tokens/{id}", axum::routing::delete(tokens::revoke_token))
+        .route(
+            "/v1/pair-code",
+            axum::routing::post(pair::post_pair_code).delete(pair::delete_pair_code),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
