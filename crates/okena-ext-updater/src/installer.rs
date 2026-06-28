@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 
 /// Extract the archive and replace the current binary.
 pub fn install_update(archive_path: &Path) -> Result<PathBuf> {
-    let current_exe = std::env::current_exe()
-        .context("failed to get current exe path")?;
+    let current_exe = std::env::current_exe().context("failed to get current exe path")?;
 
     let extract_dir = archive_path
         .parent()
@@ -12,12 +11,18 @@ pub fn install_update(archive_path: &Path) -> Result<PathBuf> {
         .join("extracted");
 
     let _ = std::fs::remove_dir_all(&extract_dir);
-    std::fs::create_dir_all(&extract_dir)
-        .context("failed to create extraction dir")?;
+    std::fs::create_dir_all(&extract_dir).context("failed to create extraction dir")?;
 
     extract_archive(archive_path, &extract_dir)?;
 
-    let new_binary = find_binary(&extract_dir)?;
+    install_sibling_if_present(&current_exe, &extract_dir, main_binary_name())?;
+    install_sibling_if_present(&current_exe, &extract_dir, daemon_binary_name())?;
+
+    let current_name = current_exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("current executable has no file name")?;
+    let new_binary = find_binary_named(&extract_dir, current_name)?;
 
     replace_binary(&current_exe, &new_binary)?;
 
@@ -29,11 +34,48 @@ pub fn install_update(archive_path: &Path) -> Result<PathBuf> {
     Ok(current_exe)
 }
 
+fn install_sibling_if_present(
+    current_exe: &Path,
+    extract_dir: &Path,
+    binary_name: &str,
+) -> Result<()> {
+    let Some(current_name) = current_exe.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    if current_name == binary_name {
+        return Ok(());
+    }
+
+    let Some(parent) = current_exe.parent() else {
+        return Ok(());
+    };
+    let target = parent.join(binary_name);
+    if !target.exists() {
+        return Ok(());
+    }
+
+    match find_binary_named(extract_dir, binary_name) {
+        Ok(new_binary) => {
+            replace_binary(&target, &new_binary)?;
+            validate_binary(&target)?;
+        }
+        Err(e) => {
+            log::warn!("Update archive does not contain sibling binary {binary_name}: {e}");
+        }
+    }
+
+    Ok(())
+}
+
 /// Restart the application by spawning a new process and quitting.
+#[cfg(feature = "gpui-ui")]
 pub fn restart_app(cx: &mut gpui::App) {
     if let Ok(exe) = std::env::current_exe() {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        match crate::process::command(&exe.to_string_lossy()).args(&args).spawn() {
+        match crate::process::command(&exe.to_string_lossy())
+            .args(&args)
+            .spawn()
+        {
             Ok(_) => {
                 log::info!("Restarting okena...");
                 cx.quit();
@@ -71,7 +113,10 @@ fn validate_binary(binary: &Path) -> Result<()> {
     let start = std::time::Instant::now();
 
     let status = loop {
-        match child.try_wait().context("failed to wait on validation process")? {
+        match child
+            .try_wait()
+            .context("failed to wait on validation process")?
+        {
             Some(status) => break status,
             None => {
                 if start.elapsed() > timeout {
@@ -99,14 +144,16 @@ fn validate_binary(binary: &Path) -> Result<()> {
 }
 
 fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
-    let name = archive
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let name = archive.file_name().unwrap_or_default().to_string_lossy();
 
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         let status = crate::process::command("tar")
-            .args(["xzf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()])
+            .args([
+                "xzf",
+                &archive.to_string_lossy(),
+                "-C",
+                &dest.to_string_lossy(),
+            ])
             .status()
             .context("failed to run tar")?;
         if !status.success() {
@@ -116,7 +163,12 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
         #[cfg(unix)]
         {
             let status = crate::process::command("unzip")
-                .args(["-o", &archive.to_string_lossy(), "-d", &dest.to_string_lossy()])
+                .args([
+                    "-o",
+                    &archive.to_string_lossy(),
+                    "-d",
+                    &dest.to_string_lossy(),
+                ])
                 .status()
                 .context("failed to run unzip")?;
             if !status.success() {
@@ -126,7 +178,12 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
         #[cfg(windows)]
         {
             let status = crate::process::command("tar")
-                .args(["-xf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()])
+                .args([
+                    "-xf",
+                    &archive.to_string_lossy(),
+                    "-C",
+                    &dest.to_string_lossy(),
+                ])
                 .status()
                 .context("failed to run tar on Windows")?;
             if !status.success() {
@@ -140,12 +197,19 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn find_binary(dir: &Path) -> Result<PathBuf> {
-    #[cfg(unix)]
-    let binary_name = "okena";
-    #[cfg(windows)]
-    let binary_name = "okena.exe";
+fn main_binary_name() -> &'static str {
+    if cfg!(windows) { "okena.exe" } else { "okena" }
+}
 
+fn daemon_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "okena-daemon.exe"
+    } else {
+        "okena-daemon"
+    }
+}
+
+fn find_binary_named(dir: &Path, binary_name: &str) -> Result<PathBuf> {
     find_binary_recursive(dir, binary_name, 3)
         .with_context(|| format!("could not find '{}' in extracted archive", binary_name))
 }
@@ -164,9 +228,10 @@ fn find_binary_recursive(dir: &Path, name: &str, depth: u32) -> Result<PathBuf> 
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir()
-                && let Ok(found) = find_binary_recursive(&path, name, depth - 1) {
-                    return Ok(found);
-                }
+                && let Ok(found) = find_binary_recursive(&path, name, depth - 1)
+            {
+                return Ok(found);
+            }
         }
     }
 
@@ -203,8 +268,7 @@ fn replace_binary(current: &Path, new_binary: &Path) -> Result<()> {
     }
 
     #[cfg(not(windows))]
-    std::fs::rename(&target, &old_path)
-        .context("failed to rename current binary")?;
+    std::fs::rename(&target, &old_path).context("failed to rename current binary")?;
 
     if let Err(e) = std::fs::copy(new_binary, &target) {
         log::error!("Failed to copy new binary, rolling back: {}", e);

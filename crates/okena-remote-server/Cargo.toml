@@ -1,6 +1,6 @@
 [package]
 name = "okena-remote-server"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 license = "MIT"
 
@@ -16,6 +16,7 @@ okena-core = { path = "../okena-core" }
 okena-transport = { path = "../okena-transport", features = ["client"] }
 okena-terminal = { path = "../okena-terminal" }
 okena-workspace = { path = "../okena-workspace", default-features = false }
+okena-ext-updater = { path = "../okena-ext-updater", default-features = false }
 
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
 

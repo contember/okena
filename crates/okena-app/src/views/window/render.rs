@@ -925,25 +925,16 @@ impl Render for WindowView {
             .on_action(cx.listener(|_this, _: &CheckForUpdates, _window, cx| {
                 if let Some(update_info) = cx.try_global::<okena_ext_updater::GlobalUpdateInfo>() {
                     let info = update_info.0.clone();
-
-                    // Prevent concurrent manual checks
-                    if !info.try_start_manual() {
-                        return;
-                    }
-
                     info.set_status(okena_ext_updater::UpdateStatus::Checking);
-                    let token = info.current_token();
                     cx.notify();
                     cx.spawn(async move |this, cx| {
-                        okena_ext_updater::orchestrator::run_manual_check(
-                            info,
-                            token,
-                            cx,
-                            move |cx| {
-                                let _ = this.update(cx, |_, cx| cx.notify());
-                            },
-                        )
-                        .await;
+                        match smol::unblock(okena_ext_updater::daemon_client::request_check).await {
+                            Ok(snapshot) => info.apply_snapshot(snapshot),
+                            Err(e) => info.set_status(okena_ext_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            }),
+                        }
+                        let _ = this.update(cx, |_, cx| cx.notify());
                     })
                     .detach();
                 }
@@ -952,24 +943,15 @@ impl Render for WindowView {
             .on_action(cx.listener(|_this, _: &InstallUpdate, _window, cx| {
                 if let Some(update_info) = cx.try_global::<okena_ext_updater::GlobalUpdateInfo>() {
                     let info = update_info.0.clone();
-                    if let okena_ext_updater::UpdateStatus::Ready { version, path } = info.status() {
-                        info.set_status(okena_ext_updater::UpdateStatus::Installing {
-                            version: version.clone(),
-                        });
-                        cx.notify();
-                        cx.spawn(async move |this, cx| {
-                            okena_ext_updater::orchestrator::run_install(
-                                info,
-                                version,
-                                path,
-                                cx,
-                                move |cx| {
-                                    let _ = this.update(cx, |_, cx| cx.notify());
-                                },
-                            )
-                            .await;
-                        }).detach();
-                    }
+                    cx.spawn(async move |this, cx| {
+                        match smol::unblock(okena_ext_updater::daemon_client::request_install).await {
+                            Ok(snapshot) => info.apply_snapshot(snapshot),
+                            Err(e) => info.set_status(okena_ext_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            }),
+                        }
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    }).detach();
                 }
             }))
             // Handle toggle pane switcher action
