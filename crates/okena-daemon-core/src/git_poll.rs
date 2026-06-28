@@ -76,7 +76,7 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
 ///    (visible, non-remote — see module docs), then DROP the lock.
 /// 2. Run [`git::refresh_git_status`] for each on a blocking pool
 ///    ([`tokio::task::spawn_blocking`], under [`Lane::Poll`]) so the gix dir-walk
-///    + diff never stalls the reactor thread. Merge in any cached PR/CI so the
+///    and diff never stall the reactor thread. Merge in any cached PR/CI so the
 ///    badges don't blank mid-cycle, then build + `send_replace` the slimmed
 ///    `HashMap<String, ApiGitStatus>` on change — BEFORE the slow `gh` calls.
 /// 3. On the PR/CI cadence (skip cycle 0; first check at cycle 1), fan out the

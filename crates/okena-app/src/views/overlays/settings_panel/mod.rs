@@ -761,7 +761,10 @@ impl SettingsPanel {
                 on_dirty_close,
             },
         };
-        cx.emit(SettingsPanelEvent::ProjectHooksChanged { project_id, hooks });
+        cx.emit(SettingsPanelEvent::ProjectHooksChanged {
+            project_id,
+            hooks: Box::new(hooks),
+        });
     }
 
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -820,7 +823,9 @@ pub enum SettingsPanelEvent {
     /// to the daemon, which owns the authoritative `ProjectData.hooks`.
     ProjectHooksChanged {
         project_id: String,
-        hooks: okena_core::api::ApiHooksConfig,
+        // Boxed: the full hook set dwarfs the other variants and trips
+        // `clippy::large_enum_variant` otherwise.
+        hooks: Box<okena_core::api::ApiHooksConfig>,
     },
 }
 

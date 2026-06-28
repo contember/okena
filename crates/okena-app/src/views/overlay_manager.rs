@@ -532,7 +532,7 @@ impl OverlayManager {
             SettingsPanelEvent::ProjectHooksChanged { project_id, hooks } => {
                 cx.emit(OverlayManagerEvent::ProjectHooksChanged {
                     project_id: project_id.clone(),
-                    hooks: hooks.clone(),
+                    hooks: (**hooks).clone(),
                 });
             }
         })
@@ -614,7 +614,7 @@ impl OverlayManager {
         if self.is_modal::<SessionManager>() {
             self.close_modal(cx);
         } else {
-            let manager = cx.new(|cx| SessionManager::new(cx));
+            let manager = cx.new(SessionManager::new);
             cx.subscribe(&manager, |this, _, event: &SessionManagerEvent, cx| {
                 match event {
                     SessionManagerEvent::Close => {

@@ -49,6 +49,7 @@ pub struct WorktreeListPopover {
 }
 
 impl WorktreeListPopover {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: String,
         port: u16,

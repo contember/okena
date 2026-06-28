@@ -522,9 +522,10 @@ fn migrate_window_layout(layout: &mut ClientWindowLayout) {
     layout.version = WINDOW_LAYOUT_VERSION;
 }
 
-/// Save the client window layout (main + extra windows) atomically (tmp + fsync
-/// + rename). Extracts only the presentation state from `data`; never touches
-/// workspace.json. Best-effort — a failure just means stale window restore.
+/// Save the client window layout (main + extra windows) atomically
+/// (tmp + fsync + rename). Extracts only the presentation state from `data`;
+/// never touches workspace.json. Best-effort — a failure just means stale
+/// window restore.
 pub fn save_window_layout(data: &WorkspaceData) -> Result<()> {
     let _guard = WINDOW_LAYOUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let layout = ClientWindowLayout {

@@ -63,6 +63,7 @@ pub struct CloseWorktreeDialog {
 }
 
 impl CloseWorktreeDialog {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: String,
         port: u16,

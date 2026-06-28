@@ -480,42 +480,37 @@ async fn drain_or_forward_post_snapshot(
     let mut batch: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut resize_msgs: Vec<WsOutbound> = Vec::new();
 
-    loop {
-        match pty_rx.try_recv() {
-            Ok(event) => match event {
-                PtyBroadcastEvent::Output { terminal_id, data } => {
-                    // Forward only for subscribed terminals that were NOT already
-                    // covered by a snapshot (i.e. just spawned this subscribe).
-                    if !pre_existing.contains(&terminal_id)
-                        && let Some(&stream_id) = subscribed_ids.get(&terminal_id)
-                    {
-                        batch.entry(stream_id).or_default().extend_from_slice(&data);
-                    }
+    while let Ok(event) = pty_rx.try_recv() {
+        match event {
+            PtyBroadcastEvent::Output { terminal_id, data } => {
+                // Forward only for subscribed terminals that were NOT already
+                // covered by a snapshot (i.e. just spawned this subscribe).
+                if !pre_existing.contains(&terminal_id)
+                    && let Some(&stream_id) = subscribed_ids.get(&terminal_id)
+                {
+                    batch.entry(stream_id).or_default().extend_from_slice(&data);
                 }
-                PtyBroadcastEvent::Resized {
-                    terminal_id,
-                    cols,
-                    rows,
-                    server_owns,
-                } => {
-                    if !pre_existing.contains(&terminal_id)
-                        && subscribed_ids.contains_key(&terminal_id)
-                    {
-                        resize_msgs.retain(|m| {
-                            !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if *id == terminal_id)
-                        });
-                        resize_msgs.push(WsOutbound::TerminalResized {
-                            terminal_id,
-                            cols,
-                            rows,
-                            server_owns,
-                        });
-                    }
+            }
+            PtyBroadcastEvent::Resized {
+                terminal_id,
+                cols,
+                rows,
+                server_owns,
+            } => {
+                if !pre_existing.contains(&terminal_id)
+                    && subscribed_ids.contains_key(&terminal_id)
+                {
+                    resize_msgs.retain(|m| {
+                        !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if *id == terminal_id)
+                    });
+                    resize_msgs.push(WsOutbound::TerminalResized {
+                        terminal_id,
+                        cols,
+                        rows,
+                        server_owns,
+                    });
                 }
-            },
-            Err(broadcast::error::TryRecvError::Empty)
-            | Err(broadcast::error::TryRecvError::Lagged(_))
-            | Err(broadcast::error::TryRecvError::Closed) => break,
+            }
         }
     }
 
