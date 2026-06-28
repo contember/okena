@@ -317,41 +317,43 @@ impl Render for StatusBar {
                     }
                 }
 
-                // Show remote server status if active
-                if let Some(remote_info) = cx.try_global::<crate::remote::GlobalRemoteInfo>()
-                    && let Some(port) = remote_info.0.port() {
-                        right = right.child(
-                            div()
-                                .id("remote-info")
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .text_color(rgb(t.term_cyan))
-                                        .child(format!("REMOTE :{}", port))
-                                )
-                                .child(
-                                    div()
-                                        .id("pair-btn")
-                                        .cursor_pointer()
-                                        .px(px(6.0))
-                                        .py(px(1.0))
-                                        .rounded(px(3.0))
-                                        .text_color(rgb(t.term_yellow))
-                                        .text_size(ui_text_sm(cx))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .child("Pair")
-                                        .on_click(|_, window, cx| {
-                                            window.dispatch_action(
-                                                Box::new(crate::keybindings::ShowPairingDialog),
-                                                cx,
-                                            );
-                                        })
-                                )
-                        );
-                    }
+                // Show daemon remote endpoint when active. In thin-client mode
+                // the server lives in the daemon process, so the GUI no longer
+                // has an in-process GlobalRemoteInfo/AuthStore to inspect.
+                if let Some(daemon) = crate::remote::local::running_daemon() {
+                    let port = daemon.port;
+                    right = right.child(
+                        div()
+                            .id("remote-info")
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_color(rgb(t.term_cyan))
+                                    .child(format!("REMOTE :{}", port))
+                            )
+                            .child(
+                                div()
+                                    .id("pair-btn")
+                                    .cursor_pointer()
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(3.0))
+                                    .text_color(rgb(t.term_yellow))
+                                    .text_size(ui_text_sm(cx))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .child("Pair")
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(crate::keybindings::ShowPairingDialog),
+                                            cx,
+                                        );
+                                    })
+                            )
+                    );
+                }
 
                 // Focused project indicator
                 let focused_project = {

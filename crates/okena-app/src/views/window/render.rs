@@ -3,6 +3,7 @@ use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
+use crate::views::overlays::pairing_dialog::PairingEndpoint;
 use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 use crate::ui::tokens::{ui_text_md, ui_text_xl};
 use gpui::*;
@@ -888,8 +889,24 @@ impl Render for WindowView {
             // Handle show pairing dialog action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
-                move |_this, _: &ShowPairingDialog, _window, cx| {
-                    overlay_manager.update(cx, |om, cx| om.toggle_pairing_dialog(cx));
+                move |this, _: &ShowPairingDialog, _window, cx| {
+                    let endpoint = this.remote_manager.as_ref().and_then(|rm| {
+                        let manager = rm.read(cx);
+                        manager
+                            .connections()
+                            .into_iter()
+                            .find(|(config, _, _)| {
+                                config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID
+                            })
+                            .and_then(|(config, _, _)| {
+                                config.saved_token.clone().map(|token| PairingEndpoint {
+                                    host: config.host.clone(),
+                                    port: config.port,
+                                    token,
+                                })
+                            })
+                    });
+                    overlay_manager.update(cx, |om, cx| om.toggle_pairing_dialog(endpoint, cx));
                 }
             }))
             // Handle new project action
