@@ -731,7 +731,7 @@ fn run_main_workspace_action(
     hook_monitor: &Option<okena_hooks::HookMonitor>,
 ) -> CommandResult {
     let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
-    execute_action(
+    let result = execute_action(
         action,
         ws,
         WindowId::Main,
@@ -741,7 +741,21 @@ fn run_main_workspace_action(
         app_settings,
         &mut cx,
     )
-    .into_command_result()
+    .into_command_result();
+
+    // Drain any terminal kills the action queued (delete_project,
+    // remove_worktree_project, the grace==0 immediate close, …) and tear down
+    // their PTYs + persistent session backends. The GUI client does this via a
+    // `Workspace` observer; the daemon has no equivalent observer, so without
+    // this a delete removes the project's state but leaks its PTY / dtach / tmux
+    // processes. Mirrors the soft-close finalize paths (`CloseTerminalNow`, the
+    // grace-expiry poll), which drain + kill the same way.
+    for id in ws.drain_pending_terminal_kills() {
+        backend.kill(&id);
+        terminals.lock().remove(&id);
+    }
+
+    result
 }
 
 /// Build the two-line Undo / Close-now toast for a busy soft-close (GPUI-free):
@@ -1310,6 +1324,128 @@ mod tests {
             workspace.lock().data_version(),
             version_before,
             "data_version untouched on empty workspace"
+        );
+    }
+
+    /// `TerminalBackend` that records every `kill`ed id so a test can assert a
+    /// deleted project's PTYs are torn down.
+    struct RecordingBackend {
+        killed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TerminalBackend for RecordingBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+        fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
+            anyhow::bail!("recording backend: create_terminal not supported")
+        }
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("recording backend: reconnect_terminal not supported")
+        }
+        fn kill(&self, terminal_id: &str) {
+            self.killed.lock().push(terminal_id.to_string());
+        }
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    /// A single-terminal project whose terminal already has a real id.
+    fn workspace_with_initialized_terminal(terminal_id: &str) -> WorkspaceData {
+        use okena_state::{LayoutNode, ProjectData};
+        let project = ProjectData {
+            id: "p1".to_string(),
+            name: "Project p1".to_string(),
+            path: "/tmp".to_string(),
+            layout: Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal_id.to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            }),
+            terminal_names: Default::default(),
+            hidden_terminals: Default::default(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: Default::default(),
+            default_shell: None,
+            hook_terminals: Default::default(),
+            pinned: false,
+            last_activity_at: None,
+        };
+        WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["p1".to_string()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
+    /// Deleting a project through the generic daemon action path must tear down
+    /// its terminals' PTYs. `run_main_workspace_action` drains the kill queue
+    /// `delete_project` fills — the GUI does this via a `Workspace` observer, but
+    /// the daemon has none, so without the drain the PTY/session would leak.
+    #[test]
+    fn delete_project_drains_and_kills_queued_terminals() {
+        let killed = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> =
+            Arc::new(RecordingBackend { killed: killed.clone() });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let mut workspace = Workspace::new(workspace_with_initialized_terminal("t1"));
+        let mut focus_manager = FocusManager::new();
+        let settings = default_settings();
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+
+        let result = run_main_workspace_action(
+            ActionRequest::DeleteProject {
+                project_id: "p1".to_string(),
+            },
+            &mut workspace,
+            &mut focus_manager,
+            &backend,
+            &terminals,
+            &settings,
+            &workspace_tick,
+            &None,
+            &None,
+        );
+
+        assert!(
+            matches!(result, CommandResult::Ok(_)),
+            "delete should succeed: {result:?}"
+        );
+        assert!(workspace.project("p1").is_none(), "project removed from state");
+        assert_eq!(
+            &*killed.lock(),
+            &vec!["t1".to_string()],
+            "the deleted project's terminal PTY was killed, not leaked"
         );
     }
 }
