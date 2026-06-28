@@ -250,9 +250,10 @@ impl Sidebar {
                 let project_id = project_id.clone();
                 move |this, drag: &ProjectDrag, _window, cx| {
                     if drag.project_id != project_id {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.move_project(&drag.project_id, index, cx);
-                        });
+                        this.dispatch_action_for_project(&drag.project_id, ActionRequest::MoveProject {
+                            project_id: drag.project_id.clone(),
+                            new_index: index,
+                        }, cx);
                     }
                 }
             }))
@@ -260,9 +261,10 @@ impl Sidebar {
                 style.border_t_2().border_color(rgb(t.border_active))
             })
             .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
-                this.workspace.update(cx, |ws, cx| {
-                    ws.move_item_in_order(&drag.folder_id, index, cx);
-                });
+                this.dispatch_action_for_folder(&drag.folder_id, ActionRequest::MoveItemInOrder {
+                    item_id: drag.folder_id.clone(),
+                    new_index: index,
+                }, cx);
             }))
             .on_mouse_down(MouseButton::Right, cx.listener({
                 let project_id = project_id.clone();
@@ -332,9 +334,11 @@ impl Sidebar {
                 let parent_id = parent_id.clone();
                 move |this, drag: &WorktreeDrag, _window, cx| {
                     if drag.worktree_id != project_id && drag.parent_id == parent_id {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.reorder_worktree(&parent_id, &drag.worktree_id, worktree_index, cx);
-                        });
+                        this.dispatch_action_for_project(&parent_id, ActionRequest::ReorderWorktree {
+                            parent_id: parent_id.clone(),
+                            worktree_id: drag.worktree_id.clone(),
+                            new_index: worktree_index,
+                        }, cx);
                     }
                 }
             }))
@@ -666,7 +670,7 @@ impl Sidebar {
                         let project_id = project_id.clone();
                         move |this, drag: &ProjectDrag, _window, cx| {
                             if drag.project_id != project_id {
-                                this.workspace.update(cx, |ws, cx| { ws.move_project(&drag.project_id, index, cx); });
+                                this.dispatch_action_for_project(&drag.project_id, ActionRequest::MoveProject { project_id: drag.project_id.clone(), new_index: index }, cx);
                             }
                         }
                     }))
@@ -674,7 +678,7 @@ impl Sidebar {
                         style.border_t_2().border_color(rgb(t.border_active))
                     })
                     .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
-                        this.workspace.update(cx, |ws, cx| { ws.move_item_in_order(&drag.folder_id, index, cx); });
+                        this.dispatch_action_for_folder(&drag.folder_id, ActionRequest::MoveItemInOrder { item_id: drag.folder_id.clone(), new_index: index }, cx);
                     }))
             }
             GroupHeaderDragConfig::InFolder { folder_id } => {
@@ -687,7 +691,7 @@ impl Sidebar {
                                 let pos = this.workspace.read(cx).folder(&folder_id)
                                     .and_then(|f| f.project_ids.iter().position(|id| id == &project_id));
                                 if let Some(pos) = pos {
-                                    this.workspace.update(cx, |ws, cx| { ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx); });
+                                    this.dispatch_action_for_project(&drag.project_id, ActionRequest::MoveProjectToFolder { project_id: drag.project_id.clone(), folder_id: folder_id.clone(), position: Some(pos) }, cx);
                                 }
                             }
                         }

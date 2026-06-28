@@ -286,6 +286,70 @@ pub(super) fn move_out_of_folder(
     ActionResult::Ok(None)
 }
 
+pub(super) fn move_project(
+    ws: &mut Workspace,
+    project_id: String,
+    new_index: usize,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    ws.move_project(&project_id, new_index, cx);
+    ActionResult::Ok(None)
+}
+
+pub(super) fn move_item_in_order(
+    ws: &mut Workspace,
+    item_id: String,
+    new_index: usize,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    // `item_id` may be a folder id or a top-level project id; the workspace
+    // method is a no-op when the id isn't in `project_order`.
+    ws.move_item_in_order(&item_id, new_index, cx);
+    ActionResult::Ok(None)
+}
+
+pub(super) fn toggle_project_pinned(
+    ws: &mut Workspace,
+    project_id: String,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    ws.toggle_project_pinned(&project_id, cx);
+    ActionResult::Ok(None)
+}
+
+pub(super) fn reorder_worktree(
+    ws: &mut Workspace,
+    parent_id: String,
+    worktree_id: String,
+    new_index: usize,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&parent_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", parent_id));
+    }
+    ws.reorder_worktree(&parent_id, &worktree_id, new_index, cx);
+    ActionResult::Ok(None)
+}
+
+pub(super) fn set_worktree_color_override(
+    ws: &mut Workspace,
+    project_id: String,
+    color: Option<FolderColor>,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    ws.set_worktree_color_override(&project_id, color, cx);
+    ActionResult::Ok(None)
+}
+
 pub(super) fn create_worktree(
     ws: &mut Workspace,
     window_id: WindowId,

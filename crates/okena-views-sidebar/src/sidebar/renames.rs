@@ -70,9 +70,12 @@ impl Sidebar {
 
     pub fn finish_project_rename(&mut self, cx: &mut Context<Self>) {
         if let Some((project_id, new_name)) = finish_rename(&mut self.project_rename, cx) {
-            self.workspace.update(cx, |ws, cx| {
-                ws.rename_project(&project_id, new_name, cx);
-            });
+            // Daemon-owned: dispatch, don't mutate the mirror (which the next
+            // state sync would overwrite). The rename mirrors back on sync.
+            self.dispatch_action_for_project(&project_id, ActionRequest::RenameProject {
+                project_id: project_id.clone(),
+                name: new_name,
+            }, cx);
         }
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
@@ -145,9 +148,11 @@ impl Sidebar {
 
     pub fn finish_folder_rename(&mut self, cx: &mut Context<Self>) {
         if let Some((folder_id, new_name)) = finish_rename(&mut self.folder_rename, cx) {
-            self.workspace.update(cx, |ws, cx| {
-                ws.rename_folder(&folder_id, new_name, cx);
-            });
+            // Daemon-owned folder mutation — dispatch to the folder's connection.
+            self.dispatch_action_for_folder(&folder_id, ActionRequest::RenameFolder {
+                folder_id: folder_id.clone(),
+                name: new_name,
+            }, cx);
         }
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
@@ -167,11 +172,13 @@ impl Sidebar {
         cx.notify();
     }
 
-    pub(super) fn create_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let folder_id = self.workspace.update(cx, |ws, cx| {
-            ws.create_folder("New Folder".to_string(), cx)
-        });
-        // Immediately start renaming the new folder
-        self.start_folder_rename(folder_id, "New Folder".to_string(), window, cx);
+    pub(super) fn create_folder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // The daemon owns folder creation and assigns the folder id, mirroring
+        // it back on the next snapshot. Because the id isn't known synchronously,
+        // we can't drop straight into rename like the in-process path did; the
+        // folder appears as "New Folder" and is renamed via its context menu.
+        self.dispatch_daemon_action(ActionRequest::CreateFolder {
+            name: "New Folder".to_string(),
+        }, cx);
     }
 }

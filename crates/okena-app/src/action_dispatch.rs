@@ -45,6 +45,32 @@ pub fn dispatcher_for_project(
     })
 }
 
+/// Build an ActionDispatcher targeting a specific connection by id.
+///
+/// Unlike [`dispatcher_for_project`], this needs no project — it's for
+/// folder-scoped and workspace-global actions, which carry no project to
+/// resolve a connection from. The caller supplies the connection id (e.g.
+/// extracted from a `remote:<conn>:<id>` folder id, or
+/// `LOCAL_DAEMON_CONNECTION_ID` for a brand-new folder). The returned
+/// dispatcher's `dispatch` still runs id-stripping against this connection id.
+/// Returns `None` if the remote manager is unavailable.
+pub fn dispatcher_for_connection(
+    connection_id: &str,
+    window_id: WindowId,
+    workspace: &Entity<Workspace>,
+    focus_manager: &Entity<FocusManager>,
+    remote_manager: &Option<Entity<RemoteConnectionManager>>,
+) -> Option<ActionDispatcher> {
+    let manager = remote_manager.as_ref()?;
+    Some(ActionDispatcher::Remote {
+        connection_id: connection_id.to_string(),
+        manager: manager.clone(),
+        workspace: workspace.clone(),
+        focus_manager: focus_manager.clone(),
+        window_id,
+    })
+}
+
 /// Routes terminal and service actions to either local execution or remote HTTP.
 ///
 /// Passed through the view hierarchy (ProjectColumn → LayoutContainer → TerminalPane)
@@ -183,6 +209,40 @@ impl ActionDispatcher {
         }
 
         let action = strip_remote_ids(action, connection_id);
+        let cid = connection_id.clone();
+        manager.update(cx, |rm, cx| {
+            rm.send_action(&cid, action, cx);
+        });
+    }
+
+    /// Persist the final split sizes to the daemon after an interactive drag.
+    ///
+    /// During a drag, `dispatch(UpdateSplitSizes)` only updates the local mirror
+    /// (`update_split_sizes_ui_only`) to avoid per-frame server round-trips. On
+    /// mouse-up this sends the final ratios to the daemon so they're persisted to
+    /// `workspace.json` and survive reconnect / restart and reach other clients.
+    /// The mirror already holds these sizes; the daemon's state sync preserves
+    /// them on this client via `LayoutNode::merge_visual_state`.
+    pub fn commit_split_sizes(
+        &self,
+        project_id: &str,
+        layout_path: &[usize],
+        sizes: Vec<f32>,
+        cx: &mut impl AppContext,
+    ) {
+        let Self::Remote {
+            connection_id,
+            manager,
+            ..
+        } = self;
+        let action = strip_remote_ids(
+            ActionRequest::UpdateSplitSizes {
+                project_id: project_id.to_string(),
+                path: layout_path.to_vec(),
+                sizes,
+            },
+            connection_id,
+        );
         let cid = connection_id.clone();
         manager.update(cx, |rm, cx| {
             rm.send_action(&cid, action, cx);
@@ -727,16 +787,38 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             delete_branch,
         },
         ActionRequest::CreateFolder { name } => ActionRequest::CreateFolder { name },
-        ActionRequest::DeleteFolder { folder_id } => ActionRequest::DeleteFolder { folder_id },
-        ActionRequest::RenameFolder { folder_id, name } => ActionRequest::RenameFolder { folder_id, name },
+        ActionRequest::DeleteFolder { folder_id } => ActionRequest::DeleteFolder { folder_id: s(&folder_id) },
+        ActionRequest::RenameFolder { folder_id, name } => ActionRequest::RenameFolder { folder_id: s(&folder_id), name },
         ActionRequest::MoveProjectToFolder { project_id, folder_id, position } => ActionRequest::MoveProjectToFolder {
             project_id: s(&project_id),
-            folder_id,
+            folder_id: s(&folder_id),
             position,
         },
         ActionRequest::MoveProjectOutOfFolder { project_id, top_level_index } => ActionRequest::MoveProjectOutOfFolder {
             project_id: s(&project_id),
             top_level_index,
+        },
+        ActionRequest::MoveProject { project_id, new_index } => ActionRequest::MoveProject {
+            project_id: s(&project_id),
+            new_index,
+        },
+        ActionRequest::MoveItemInOrder { item_id, new_index } => ActionRequest::MoveItemInOrder {
+            // `item_id` is a folder or top-level project id; strip_prefix is a
+            // no-op on an already-local id.
+            item_id: s(&item_id),
+            new_index,
+        },
+        ActionRequest::ToggleProjectPinned { project_id } => ActionRequest::ToggleProjectPinned {
+            project_id: s(&project_id),
+        },
+        ActionRequest::ReorderWorktree { parent_id, worktree_id, new_index } => ActionRequest::ReorderWorktree {
+            parent_id: s(&parent_id),
+            worktree_id: s(&worktree_id),
+            new_index,
+        },
+        ActionRequest::SetWorktreeColorOverride { project_id, color } => ActionRequest::SetWorktreeColorOverride {
+            project_id: s(&project_id),
+            color,
         },
         // Session + app-scoped actions carry no project/terminal ids to remap.
         a @ (ActionRequest::LoadSession { .. }

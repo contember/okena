@@ -58,6 +58,22 @@ CAT1_PATTERNS=(
   '\.backend\.kill\('
   'ServiceManager::new\('
   'okena_git::get_git_status\('   # local git read — returns None in client mode
+  # Sidebar folder/project/order/pin/color data mutations — all daemon-owned;
+  # the GUI must dispatch the matching ActionRequest, not write its mirror.
+  # (`toggle_worktree_visibility` is deliberately absent: it's per-window
+  # presentation state — `toggle_hidden(window_id, ...)` — that stays client-local.)
+  '\bws\.create_folder\('
+  '\bws\.delete_folder\('
+  '\bws\.rename_folder\('
+  '\bws\.rename_project\('
+  '\bws\.move_project\('
+  '\bws\.move_project_to_folder\('
+  '\bws\.move_item_in_order\('
+  '\bws\.toggle_project_pinned\('
+  '\bws\.reorder_worktree\('
+  '\bws\.set_folder_color\('
+  '\bws\.set_folder_item_color\('
+  '\bws\.set_worktree_color_override\('
 )
 
 cat1_hits=0
@@ -97,7 +113,7 @@ PAIRS=(
   "GitStatus|crates/okena-git/src/lib.rs|ApiGitStatus|crates/okena-core/src/api.rs"
   "ProjectData|crates/okena-state/src/workspace_data.rs|ApiProject|crates/okena-core/src/api.rs"
   "FolderData|crates/okena-state/src/workspace_data.rs|ApiFolder|crates/okena-core/src/api.rs"
-  "WindowState|crates/okena-state/src/workspace_data.rs|ApiWindow|crates/okena-core/src/api.rs"
+  "WindowState|crates/okena-state/src/window_state.rs|ApiWindow|crates/okena-core/src/api.rs"
 )
 
 # Domain fields that are intentionally NOT on the wire (client-local presentation

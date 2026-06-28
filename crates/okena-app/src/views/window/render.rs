@@ -618,16 +618,26 @@ impl Render for WindowView {
                     let active_drag = active_drag.clone();
                     let terminals = self.terminals.clone();
                     let workspace = workspace.clone();
+                    let window_id = self.window_id;
+                    let focus_manager = self.focus_manager.clone();
+                    let remote_manager = self.remote_manager.clone();
                     move |_bounds, _prepaint, window, _cx| {
                         let active_drag = active_drag.clone();
                         let terminals = terminals.clone();
                         let workspace = workspace.clone();
+                        let focus_manager = focus_manager.clone();
+                        let remote_manager = remote_manager.clone();
                         window.on_mouse_event(move |e: &MouseUpEvent, phase, _window, cx| {
                             if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
-                                let was_split_drag = matches!(
-                                    *active_drag.borrow(),
-                                    Some(DragState::Split { .. })
-                                );
+                                // Snapshot the dragged split's coordinates before
+                                // clearing the drag, so we can commit its final
+                                // sizes to the daemon below.
+                                let split_drag = match &*active_drag.borrow() {
+                                    Some(DragState::Split { project_id, layout_path, .. }) => {
+                                        Some((project_id.clone(), layout_path.clone()))
+                                    }
+                                    _ => None,
+                                };
                                 let was_dragging = active_drag.borrow().is_some();
                                 *active_drag.borrow_mut() = None;
 
@@ -638,11 +648,41 @@ impl Render for WindowView {
                                     }
                                 }
 
-                                // Persist final split sizes (drag used ui_only notify)
-                                if was_split_drag {
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.notify_data(cx);
-                                    });
+                                // Commit the final split sizes to the daemon. The
+                                // drag only updated the local mirror (ui_only
+                                // notify); without this the dragged ratios persist
+                                // nowhere and revert on reconnect / restart /
+                                // second client.
+                                if let Some((project_id, layout_path)) = split_drag {
+                                    let final_sizes = workspace
+                                        .read(cx)
+                                        .project(&project_id)
+                                        .and_then(|p| p.layout.as_ref())
+                                        .and_then(|layout| layout.get_at_path(&layout_path))
+                                        .and_then(|node| match node {
+                                            okena_workspace::state::LayoutNode::Split { sizes, .. } => {
+                                                Some(sizes.clone())
+                                            }
+                                            _ => None,
+                                        });
+                                    if let Some(sizes) = final_sizes
+                                        && let Some(dispatcher) =
+                                            crate::action_dispatch::dispatcher_for_project(
+                                                &project_id,
+                                                window_id,
+                                                &workspace,
+                                                &focus_manager,
+                                                &remote_manager,
+                                                cx,
+                                            )
+                                    {
+                                        dispatcher.commit_split_sizes(
+                                            &project_id,
+                                            &layout_path,
+                                            sizes,
+                                            cx,
+                                        );
+                                    }
                                 }
                             }
                         });

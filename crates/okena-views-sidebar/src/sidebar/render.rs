@@ -821,17 +821,19 @@ impl Render for Sidebar {
                     style.h(px(8.0)).border_b_2().border_color(rgb(t.border_active))
                 })
                 .on_drop(cx.listener(move |this, drag: &ProjectDrag, _window, cx| {
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.move_project(&drag.project_id, 0, cx);
-                    });
+                    this.dispatch_action_for_project(&drag.project_id, okena_core::api::ActionRequest::MoveProject {
+                        project_id: drag.project_id.clone(),
+                        new_index: 0,
+                    }, cx);
                 }))
                 .drag_over::<FolderDrag>(move |style, _, _, _| {
                     style.h(px(8.0)).border_b_2().border_color(rgb(t.border_active))
                 })
                 .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.move_item_in_order(&drag.folder_id, 0, cx);
-                    });
+                    this.dispatch_action_for_folder(&drag.folder_id, okena_core::api::ActionRequest::MoveItemInOrder {
+                        item_id: drag.folder_id.clone(),
+                        new_index: 0,
+                    }, cx);
                 }))
                 .into_any_element()
         );
@@ -1030,17 +1032,19 @@ impl Render for Sidebar {
                     style.border_t_2().border_color(rgb(t.border_active))
                 })
                 .on_drop(cx.listener(move |this, drag: &ProjectDrag, _window, cx| {
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.move_project(&drag.project_id, end_index, cx);
-                    });
+                    this.dispatch_action_for_project(&drag.project_id, okena_core::api::ActionRequest::MoveProject {
+                        project_id: drag.project_id.clone(),
+                        new_index: end_index,
+                    }, cx);
                 }))
                 .drag_over::<FolderDrag>(move |style, _, _, _| {
                     style.border_t_2().border_color(rgb(t.border_active))
                 })
                 .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.move_item_in_order(&drag.folder_id, end_index, cx);
-                    });
+                    this.dispatch_action_for_folder(&drag.folder_id, okena_core::api::ActionRequest::MoveItemInOrder {
+                        item_id: drag.folder_id.clone(),
+                        new_index: end_index,
+                    }, cx);
                 }))
                 .into_any_element()
         );

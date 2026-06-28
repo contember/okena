@@ -259,6 +259,21 @@ pub fn execute_action(
         ActionRequest::MoveProjectOutOfFolder { project_id, top_level_index } => {
             project::move_out_of_folder(ws, project_id, top_level_index, cx)
         }
+        ActionRequest::MoveProject { project_id, new_index } => {
+            project::move_project(ws, project_id, new_index, cx)
+        }
+        ActionRequest::MoveItemInOrder { item_id, new_index } => {
+            project::move_item_in_order(ws, item_id, new_index, cx)
+        }
+        ActionRequest::ToggleProjectPinned { project_id } => {
+            project::toggle_project_pinned(ws, project_id, cx)
+        }
+        ActionRequest::ReorderWorktree { parent_id, worktree_id, new_index } => {
+            project::reorder_worktree(ws, parent_id, worktree_id, new_index, cx)
+        }
+        ActionRequest::SetWorktreeColorOverride { project_id, color } => {
+            project::set_worktree_color_override(ws, project_id, color, cx)
+        }
         ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
             project::create_worktree(ws, window_id, project_id, branch, create_branch, backend, terminals, settings, cx)
         }

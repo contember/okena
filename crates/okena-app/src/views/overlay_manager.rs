@@ -136,6 +136,12 @@ pub enum OverlayManagerEvent {
     /// Context menu: Delete project
     DeleteProject { project_id: String },
 
+    /// Context menu: Toggle a project's pinned flag
+    ToggleProjectPinned { project_id: String },
+
+    /// Folder context menu: Delete folder
+    DeleteFolder { folder_id: String },
+
     /// Context menu: Configure hooks for a project
     ConfigureHooks { project_id: String },
 
@@ -144,6 +150,12 @@ pub enum OverlayManagerEvent {
 
     /// Color picker: project color was changed (for remote sync)
     ProjectColorChanged { project_id: String, color: okena_core::theme::FolderColor },
+
+    /// Color picker: a worktree project's color override was reset to its parent
+    WorktreeColorReset { project_id: String },
+
+    /// Color picker: folder color was changed
+    FolderColorChanged { folder_id: String, color: okena_core::theme::FolderColor },
 
     /// Context menu: Reload services (okena.yaml) for a project
     ReloadServices { project_id: String },
@@ -830,6 +842,12 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
+                ContextMenuEvent::ToggleProjectPinned { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::ToggleProjectPinned {
+                        project_id: project_id.clone(),
+                    });
+                }
                 ContextMenuEvent::ConfigureHooks { project_id } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::ConfigureHooks {
@@ -939,8 +957,8 @@ impl OverlayManager {
                 }
                 FolderContextMenuEvent::DeleteFolder { folder_id } => {
                     this.hide_folder_context_menu(cx);
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.delete_folder(folder_id, cx);
+                    cx.emit(OverlayManagerEvent::DeleteFolder {
+                        folder_id: folder_id.clone(),
                     });
                 }
                 FolderContextMenuEvent::FilterToFolder { folder_id } => {
@@ -1285,6 +1303,17 @@ impl OverlayManager {
                     // Emit for sidebar to handle remote sync
                     cx.emit(OverlayManagerEvent::ProjectColorChanged {
                         project_id: project_id.clone(),
+                        color: *color,
+                    });
+                }
+                ColorPickerPopoverEvent::WorktreeColorReset { project_id } => {
+                    cx.emit(OverlayManagerEvent::WorktreeColorReset {
+                        project_id: project_id.clone(),
+                    });
+                }
+                ColorPickerPopoverEvent::FolderColorChanged { folder_id, color } => {
+                    cx.emit(OverlayManagerEvent::FolderColorChanged {
+                        folder_id: folder_id.clone(),
                         color: *color,
                     });
                 }

@@ -25,6 +25,10 @@ pub enum ColorPickerPopoverEvent {
     Close,
     /// Color was set on a project — sidebar should handle remote sync.
     ProjectColorChanged { project_id: String, color: FolderColor },
+    /// A worktree project's color override was reset to its parent.
+    WorktreeColorReset { project_id: String },
+    /// Color was set on a folder.
+    FolderColorChanged { folder_id: String, color: FolderColor },
 }
 
 impl CloseEvent for ColorPickerPopoverEvent {
@@ -131,9 +135,6 @@ impl Render for ColorPickerPopover {
                     .child({
                         let pid = project_id_owned.clone();
                         color_swatch_grid("color", current_color, &t, cx, move |this, color, _window, cx| {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.set_folder_color(&pid, color, cx);
-                            });
                             cx.emit(ColorPickerPopoverEvent::ProjectColorChanged {
                                 project_id: pid.clone(),
                                 color,
@@ -164,8 +165,8 @@ impl Render for ColorPickerPopover {
                                         .hover(|s| s.text_color(rgb(t.text_primary)).bg(rgb(t.bg_hover)))
                                         .child("Reset to parent")
                                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
-                                            this.workspace.update(cx, |ws, cx| {
-                                                ws.set_worktree_color_override(&project_id_clone, None, cx);
+                                            cx.emit(ColorPickerPopoverEvent::WorktreeColorReset {
+                                                project_id: project_id_clone.clone(),
                                             });
                                             this.close(cx);
                                         }))
@@ -186,8 +187,9 @@ impl Render for ColorPickerPopover {
                     .child({
                         let fid = folder_id_owned.clone();
                         color_swatch_grid("folder-color", current_color, &t, cx, move |this, color, _window, cx| {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.set_folder_item_color(&fid, color, cx);
+                            cx.emit(ColorPickerPopoverEvent::FolderColorChanged {
+                                folder_id: fid.clone(),
+                                color,
                             });
                             this.close(cx);
                         })
