@@ -308,6 +308,7 @@ impl HeadlessApp {
             self.remote_subscribed_terminals.clone(),
             self.next_remote_connection_id.clone(),
             tls_enabled,
+            env!("CARGO_PKG_VERSION"),
         ) {
             Ok(server) => {
                 let port = server.port();

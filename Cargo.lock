@@ -6072,7 +6072,7 @@ dependencies = [
 
 [[package]]
 name = "okena-app"
-version = "0.1.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6170,7 +6170,7 @@ dependencies = [
 
 [[package]]
 name = "okena-daemon"
-version = "0.1.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -6183,7 +6183,7 @@ dependencies = [
 
 [[package]]
 name = "okena-daemon-core"
-version = "0.1.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -6276,6 +6276,7 @@ dependencies = [
  "okena-ui",
  "parking_lot",
  "semver",
+ "serde",
  "serde_json",
  "sha2",
  "smol",
@@ -6409,7 +6410,7 @@ dependencies = [
 
 [[package]]
 name = "okena-remote-server"
-version = "0.1.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -6423,6 +6424,7 @@ dependencies = [
  "libc",
  "log",
  "okena-core",
+ "okena-ext-updater",
  "okena-terminal",
  "okena-transport",
  "okena-workspace",

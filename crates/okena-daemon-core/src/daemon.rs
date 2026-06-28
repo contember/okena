@@ -60,15 +60,15 @@ use std::sync::atomic::AtomicU64;
 use async_channel::Receiver;
 use okena_core::api::{ApiGitStatus, ApiToast};
 use okena_hooks::{HookMonitor, HookRunner};
-use okena_terminal::backend::{LocalBackend, TerminalBackend};
-use okena_terminal::pty_manager::{PtyEvent, PtyManager};
-use okena_terminal::session_backend::SessionBackend;
-use okena_terminal::TerminalsRegistry;
 use okena_remote_server::auth::AuthStore;
 use okena_remote_server::bridge::{self, BridgeReceiver};
 use okena_remote_server::pty_broadcaster::PtyBroadcaster;
 use okena_remote_server::server::RemoteServer;
-use okena_workspace::persistence::{acquire_instance_lock, AppSettings, LockGuard};
+use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::{LocalBackend, TerminalBackend};
+use okena_terminal::pty_manager::{PtyEvent, PtyManager};
+use okena_terminal::session_backend::SessionBackend;
+use okena_workspace::persistence::{AppSettings, LockGuard, acquire_instance_lock};
 use okena_workspace::state::{Workspace, WorkspaceData};
 use parking_lot::Mutex;
 use tokio::sync::watch;
@@ -180,9 +180,9 @@ impl DaemonCore {
         // right account — the same override the GUI's `sync_claude_pty_env`
         // applies, computed by the gpui-free `okena_workspace::claude_env` from
         // the daemon's own settings (the GUI's `ExtensionSettingsStore` is gpui).
-        pty_manager.set_extra_env(
-            okena_workspace::claude_env::claude_pty_env_for_settings(&params.settings),
-        );
+        pty_manager.set_extra_env(okena_workspace::claude_env::claude_pty_env_for_settings(
+            &params.settings,
+        ));
         let broadcaster = Arc::new(PtyBroadcaster::new());
         pty_manager.set_output_sink(broadcaster.clone());
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
@@ -243,6 +243,7 @@ impl DaemonCore {
             remote_subscribed_terminals.clone(),
             next_connection_id,
             params.tls_enabled,
+            env!("CARGO_PKG_VERSION"),
         )?;
 
         // ── 7. Print pairing info to stdout (mirror headless.rs) ──────────────

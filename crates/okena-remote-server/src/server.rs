@@ -37,6 +37,7 @@ impl RemoteServer {
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
         next_connection_id: Arc<AtomicU64>,
         tls_enabled: bool,
+        app_version: &'static str,
     ) -> anyhow::Result<Self> {
         let _slow = okena_core::timing::SlowGuard::new("RemoteServer::start");
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -105,7 +106,8 @@ impl RemoteServer {
                  I/O (including passwords, SSH keys, and any typed secrets) are sent in cleartext\n\
                  and visible to anyone on the network. Enable TLS in settings, only use this on a\n\
                  trusted network, or tunnel it over SSH/WireGuard.",
-                bind_addr, port
+                bind_addr,
+                port
             );
         }
 
@@ -115,10 +117,13 @@ impl RemoteServer {
         }
 
         let start_time = std::time::Instant::now();
+        okena_ext_updater::installer::cleanup_old_binary();
+        let update_info = okena_ext_updater::UpdateInfo::new(app_version.to_string());
 
         // Spawn the server task
         let shutdown_rx_clone = shutdown_rx.clone();
         runtime.spawn(async move {
+            routes::update::spawn_background_checker(update_info.clone());
             let app = routes::build_router(
                 bridge_tx,
                 auth_store,
@@ -129,6 +134,7 @@ impl RemoteServer {
                 toast_tx,
                 remote_subscribed_terminals,
                 next_connection_id,
+                update_info,
             );
             let serve_result = if let Some(material) = tls_material {
                 // TLS enabled → dual-stack: accept BOTH http and TLS on this one
@@ -274,8 +280,9 @@ fn cleanup_stale_remote_json() {
     };
 
     if let Some(pid) = json.get("pid").and_then(|v| v.as_u64())
-        && !crate::local::is_process_alive(pid as u32) {
-            log::info!("Removing stale remote.json (pid {} is dead)", pid);
-            let _ = std::fs::remove_file(&path);
-        }
+        && !crate::local::is_process_alive(pid as u32)
+    {
+        log::info!("Removing stale remote.json (pid {} is dead)", pid);
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -40,6 +40,11 @@ impl Write for TeeWriter {
 }
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|a| a == "--version") {
+        println!("okena-daemon {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     // 0. Resolve the active profile (env-only: the spawning desktop propagates
     //    OKENA_PROFILE; a standalone daemon reads the default / last-used). This
     //    makes get_config_dir() resolve the SAME profile dir the desktop uses, so
@@ -68,11 +73,22 @@ fn main() -> anyhow::Result<()> {
     // Shares the marker + config-backups dir with the GUI (first-wins, idempotent).
     {
         use okena_core::profiles::SchemaVersion;
-        use okena_workspace::persistence::{SETTINGS_VERSION, WINDOW_LAYOUT_VERSION, WORKSPACE_VERSION};
+        use okena_workspace::persistence::{
+            SETTINGS_VERSION, WINDOW_LAYOUT_VERSION, WORKSPACE_VERSION,
+        };
         let schema_versions = [
-            SchemaVersion { file: "workspace.json", current: WORKSPACE_VERSION },
-            SchemaVersion { file: "settings.json", current: SETTINGS_VERSION },
-            SchemaVersion { file: "window-layout.json", current: WINDOW_LAYOUT_VERSION },
+            SchemaVersion {
+                file: "workspace.json",
+                current: WORKSPACE_VERSION,
+            },
+            SchemaVersion {
+                file: "settings.json",
+                current: SETTINGS_VERSION,
+            },
+            SchemaVersion {
+                file: "window-layout.json",
+                current: WINDOW_LAYOUT_VERSION,
+            },
         ];
         if let Err(e) = okena_core::profiles::snapshot_configs_before_upgrade(
             okena_core::profiles::current(),
@@ -119,9 +135,7 @@ fn main() -> anyhow::Result<()> {
     //     binds a port (the old one may linger in TIME_WAIT). Bounded so a wedged
     //     predecessor doesn't hang the new daemon forever; on timeout we proceed
     //     anyway and let the lock acquisition surface the real error.
-    if let Some(old_pid) =
-        okena_remote_server::local::parse_await_pid(std::env::args())
-    {
+    if let Some(old_pid) = okena_remote_server::local::parse_await_pid(std::env::args()) {
         log::info!("restart: waiting for outgoing daemon (pid {old_pid}) to exit");
         let exited = okena_remote_server::local::wait_for_pid_exit(
             old_pid,

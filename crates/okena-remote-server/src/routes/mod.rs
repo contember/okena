@@ -8,12 +8,13 @@ pub mod restart;
 pub mod state;
 pub mod stream;
 pub mod tokens;
+pub mod update;
 
 use crate::auth::AuthStore;
 use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
-use axum::extract::DefaultBodyLimit;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
@@ -48,6 +49,7 @@ pub struct AppState {
     /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     pub next_connection_id: Arc<AtomicU64>,
+    pub update_info: okena_ext_updater::UpdateInfo,
 }
 
 /// Build the complete axum router.
@@ -63,6 +65,7 @@ pub fn build_router(
     toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     next_connection_id: Arc<AtomicU64>,
+    update_info: okena_ext_updater::UpdateInfo,
 ) -> Router {
     let state = AppState {
         bridge_tx,
@@ -74,6 +77,7 @@ pub fn build_router(
         toast_tx,
         remote_subscribed_terminals,
         next_connection_id,
+        update_info,
     };
 
     // Routes that require auth
@@ -88,7 +92,10 @@ pub fn build_router(
         .route("/v1/stream", axum::routing::get(stream::ws_handler))
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
-        .route("/v1/tokens/{id}", axum::routing::delete(tokens::revoke_token))
+        .route(
+            "/v1/tokens/{id}",
+            axum::routing::delete(tokens::revoke_token),
+        )
         .route(
             "/v1/pair-code",
             axum::routing::post(pair::post_pair_code).delete(pair::delete_pair_code),
@@ -112,7 +119,17 @@ pub fn build_router(
             "/v1/auth/reload",
             axum::routing::post(auth_reload::post_reload),
         )
-        .route("/v1/restart", axum::routing::post(restart::post_restart));
+        .route("/v1/restart", axum::routing::post(restart::post_restart))
+        .route("/v1/update/status", axum::routing::get(update::get_status))
+        .route("/v1/update/check", axum::routing::post(update::post_check))
+        .route(
+            "/v1/update/install",
+            axum::routing::post(update::post_install),
+        )
+        .route(
+            "/v1/update/dismiss",
+            axum::routing::post(update::post_dismiss),
+        );
 
     public
         .merge(protected)

@@ -1,14 +1,19 @@
-use okena_extensions::ThemeColors;
-use okena_ui::tokens::ui_text_sm;
-use gpui::*;
-use gpui_component::h_flex;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+#[cfg(feature = "gpui-ui")]
+use gpui::*;
+#[cfg(feature = "gpui-ui")]
+use gpui_component::h_flex;
+#[cfg(feature = "gpui-ui")]
+use okena_extensions::ThemeColors;
+#[cfg(feature = "gpui-ui")]
+use okena_ui::tokens::ui_text_sm;
 
 /// Status of the update process.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum UpdateStatus {
     Idle,
     Checking,
@@ -38,6 +43,15 @@ pub enum UpdateStatus {
     Failed {
         error: String,
     },
+}
+
+/// Serializable view of the daemon-owned update state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateStatusSnapshot {
+    pub app_version: String,
+    pub status: UpdateStatus,
+    pub dismissed: bool,
+    pub is_homebrew: bool,
 }
 
 struct UpdateInfoInner {
@@ -77,6 +91,23 @@ impl UpdateInfo {
 
     pub fn status(&self) -> UpdateStatus {
         self.inner.lock().status.clone()
+    }
+
+    pub fn snapshot(&self) -> UpdateStatusSnapshot {
+        let inner = self.inner.lock();
+        UpdateStatusSnapshot {
+            app_version: self.app_version(),
+            status: inner.status.clone(),
+            dismissed: inner.dismissed,
+            is_homebrew: inner.is_homebrew,
+        }
+    }
+
+    pub fn apply_snapshot(&self, snapshot: UpdateStatusSnapshot) {
+        let mut inner = self.inner.lock();
+        inner.status = snapshot.status;
+        inner.dismissed = snapshot.dismissed;
+        inner.is_homebrew = snapshot.is_homebrew;
     }
 
     pub fn set_status(&self, status: UpdateStatus) {
@@ -183,33 +214,39 @@ pub fn is_homebrew_install() -> bool {
 #[derive(Clone)]
 pub struct GlobalUpdateInfo(pub UpdateInfo);
 
+#[cfg(feature = "gpui-ui")]
 impl Global for GlobalUpdateInfo {}
 
+#[cfg(feature = "gpui-ui")]
 fn theme(cx: &App) -> ThemeColors {
     okena_extensions::theme(cx)
 }
 
+#[cfg(feature = "gpui-ui")]
 fn open_url(url: &str) {
     okena_core::process::open_url(url);
 }
 
 /// Status bar widget that shows update status.
+#[cfg(feature = "gpui-ui")]
 pub struct UpdateStatusWidget {
     _subscription: Option<()>,
 }
 
+#[cfg(feature = "gpui-ui")]
 impl UpdateStatusWidget {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // Start the background checker when the widget is created
+        // Mirror daemon-owned update state into this GPUI process.
         if let Some(gui) = cx.try_global::<GlobalUpdateInfo>() {
             let info = gui.0.clone();
-            crate::update_checker::start_update_checker(info, cx);
+            crate::update_checker::start_update_status_poll(info, cx);
         }
 
         Self { _subscription: None }
     }
 }
 
+#[cfg(feature = "gpui-ui")]
 impl Render for UpdateStatusWidget {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(update_info) = cx.try_global::<GlobalUpdateInfo>() else {
@@ -242,24 +279,15 @@ impl Render for UpdateStatusWidget {
                             .on_click(cx.listener(|_this, _, _window, cx| {
                                 if let Some(gui) = cx.try_global::<GlobalUpdateInfo>() {
                                     let info = gui.0.clone();
-                                    if let UpdateStatus::Ready { version, path } = info.status() {
-                                        info.set_status(UpdateStatus::Installing {
-                                            version: version.clone(),
-                                        });
-                                        cx.notify();
-                                        cx.spawn(async move |this, cx| {
-                                            crate::orchestrator::run_install(
-                                                info,
-                                                version,
-                                                path,
-                                                cx,
-                                                move |cx| {
-                                                    let _ = this.update(cx, |_, cx| cx.notify());
-                                                },
-                                            )
-                                            .await;
-                                        }).detach();
-                                    }
+                                    cx.spawn(async move |this, cx| {
+                                        match smol::unblock(crate::daemon_client::request_install).await {
+                                            Ok(snapshot) => info.apply_snapshot(snapshot),
+                                            Err(e) => info.set_status(UpdateStatus::Failed {
+                                                error: e.to_string(),
+                                            }),
+                                        }
+                                        let _ = this.update(cx, |_, cx| cx.notify());
+                                    }).detach();
                                 }
                             }))
                     )
@@ -341,6 +369,7 @@ impl Render for UpdateStatusWidget {
                             .child("x")
                             .on_click(move |_, _, _cx| {
                                 info_dismiss.dismiss();
+                                let _ = crate::daemon_client::request_dismiss();
                             })
                     )
                     .into_any_element()
@@ -367,6 +396,7 @@ impl Render for UpdateStatusWidget {
                             .child("x")
                             .on_click(move |_, _, _cx| {
                                 info_dismiss.dismiss();
+                                let _ = crate::daemon_client::request_dismiss();
                             })
                     )
                     .into_any_element()

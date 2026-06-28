@@ -7,7 +7,7 @@ pub async fn get_health(State(state): State<AppState>) -> Json<HealthResponse> {
     let uptime = state.start_time.elapsed().as_secs();
     Json(HealthResponse {
         status: "ok".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: state.update_info.app_version(),
         uptime_secs: uptime,
     })
 }
