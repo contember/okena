@@ -1,5 +1,5 @@
 use okena_core::api::StateResponse;
-use crate::client::config::RemoteConnectionConfig;
+use crate::client::config::{LocalEndpoint, RemoteConnectionConfig};
 use crate::client::id::make_prefixed_id;
 use crate::client::state::{collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states};
 use crate::client::types::{
@@ -7,8 +7,99 @@ use crate::client::types::{
 };
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use futures::{Sink, Stream};
 use tokio_tungstenite::tungstenite;
+
+type TcpWsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+enum AnyWsStream {
+    Tcp(TcpWsStream),
+    #[cfg(unix)]
+    Unix(tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>),
+}
+
+impl Stream for AnyWsStream {
+    type Item = Result<tungstenite::Message, tungstenite::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream).poll_next(cx),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream).poll_next(cx),
+        }
+    }
+}
+
+impl Sink<tungstenite::Message> for AnyWsStream {
+    type Error = tungstenite::Error;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream).poll_ready(cx),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream).poll_ready(cx),
+        }
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: tungstenite::Message) -> Result<(), Self::Error> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream).start_send(item),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream).start_send(item),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream).poll_close(cx),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream).poll_close(cx),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unix_http_client(path: &str) -> reqwest::Client {
+    reqwest::Client::builder()
+        .unix_socket(path)
+        .build()
+        .unwrap_or_else(|e| {
+            log::error!("Failed to build Unix socket HTTP client for {path}: {e}");
+            reqwest::Client::new()
+        })
+}
+
+#[cfg(not(unix))]
+fn unix_http_client(_path: &str) -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+fn local_unix_path(config: &RemoteConnectionConfig) -> Option<&str> {
+    #[cfg(unix)]
+    {
+        match &config.local_endpoint {
+            Some(LocalEndpoint::UnixSocket { path }) => Some(path.as_str()),
+            _ => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        None
+    }
+}
 
 /// Platform-specific operations that the generic client delegates to.
 ///
@@ -174,16 +265,27 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             // tries TLS (never downgrade). A legacy plain connection prefers TLS
             // (auto-upgrade) but falls back to plain http so it keeps working
             // against a server that hasn't enabled TLS.
-            let schemes: &[bool] = if config.tls { &[true] } else { &[true, false] };
+            let local_unix = local_unix_path(&config).map(str::to_string);
+            let schemes: &[bool] = if local_unix.is_some() {
+                &[false]
+            } else if config.tls {
+                &[true]
+            } else {
+                &[true, false]
+            };
             let mut chosen: Option<(bool, reqwest::Client, String)> = None;
             for &tls in schemes {
-                let client = crate::client::tls::build_reqwest_client(
-                    tls,
-                    config.pinned_cert_sha256.clone(),
-                    observed.clone(),
-                );
-                let scheme = if tls { "https" } else { "http" };
-                let base_url = format!("{}://{}:{}", scheme, config.host, config.port);
+                let (client, base_url) = if let Some(path) = local_unix.as_deref() {
+                    (unix_http_client(path), config.http_origin())
+                } else {
+                    let client = crate::client::tls::build_reqwest_client(
+                        tls,
+                        config.pinned_cert_sha256.clone(),
+                        observed.clone(),
+                    );
+                    let scheme = if tls { "https" } else { "http" };
+                    (client, format!("{}://{}:{}", scheme, config.host, config.port))
+                };
                 let ok = matches!(
                     client
                         .get(format!("{}/health", base_url))
@@ -213,9 +315,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 }
             };
             log::info!(
-                "Remote server {}:{} is healthy ({})",
-                config.host,
-                config.port,
+                "Remote server {} is healthy ({})",
+                config.display_endpoint(),
                 if detected_tls { "TLS" } else { "plain http" }
             );
 
@@ -223,7 +324,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             // over TLS adopts TLS and pins the cert (TOFU), and asks the manager
             // to persist the upgrade so the sidebar reflects it and the pin is
             // enforced next time.
-            if detected_tls && !config.tls {
+            if local_unix.is_none() && detected_tls && !config.tls {
                 config.tls = true;
                 let fp = observed.lock().ok().and_then(|g| g.clone());
                 config.pinned_cert_sha256 = fp.clone();
@@ -331,13 +432,18 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.status = ConnectionStatus::Connecting;
 
         let task = self.runtime.spawn(async move {
-            let base_url = config.base_url();
+            let local_unix = local_unix_path(&config).map(str::to_string);
+            let base_url = config.http_origin();
             let observed = crate::client::tls::new_observed();
-            let client = crate::client::tls::build_reqwest_client(
-                config.tls,
-                config.pinned_cert_sha256.clone(),
-                observed.clone(),
-            );
+            let client = if let Some(path) = local_unix.as_deref() {
+                unix_http_client(path)
+            } else {
+                crate::client::tls::build_reqwest_client(
+                    config.tls,
+                    config.pinned_cert_sha256.clone(),
+                    observed.clone(),
+                )
+            };
 
             // POST /v1/pair with the code
             let pair_body = serde_json::json!({ "code": code });
@@ -570,19 +676,42 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
         // Connect WebSocket. With TLS we go through connect_async_tls_with_config
         // using the pinned rustls connector; otherwise the plain ws:// path.
-        let (ws_stream, _response) = if config.tls {
+        let (ws_stream, _response) = if let Some(path) = local_unix_path(config) {
+            #[cfg(unix)]
+            {
+                let stream = tokio::net::UnixStream::connect(path)
+                    .await
+                    .map_err(|e| SessionError::Transient(format!("Unix socket connect failed: {}", e)))?;
+                let (ws, response) = tokio_tungstenite::client_async(
+                    "ws://okena.local/v1/stream",
+                    stream,
+                )
+                .await
+                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
+                (AnyWsStream::Unix(ws), response)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                return Err(SessionError::Transient(
+                    "Unix socket transport is not supported on this platform".to_string(),
+                ));
+            }
+        } else if config.tls {
             let connector = crate::client::tls::ws_connector(
                 true,
                 config.pinned_cert_sha256.clone(),
                 observed.clone(),
             );
-            tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
+            let (ws, response) = tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
                 .await
-                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?
+                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
+            (AnyWsStream::Tcp(ws), response)
         } else {
-            tokio_tungstenite::connect_async(&ws_url)
+            let (ws, response) = tokio_tungstenite::connect_async(&ws_url)
                 .await
-                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?
+                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
+            (AnyWsStream::Tcp(ws), response)
         };
 
         let (mut ws_write, mut ws_read) = futures::StreamExt::split(ws_stream);
@@ -642,12 +771,16 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         }
 
         // Step 3: Fetch state via HTTP
-        let base_url = config.base_url();
-        let client = crate::client::tls::build_reqwest_client(
-            config.tls,
-            config.pinned_cert_sha256.clone(),
-            observed.clone(),
-        );
+        let base_url = config.http_origin();
+        let client = if let Some(path) = local_unix_path(config) {
+            unix_http_client(path)
+        } else {
+            crate::client::tls::build_reqwest_client(
+                config.tls,
+                config.pinned_cert_sha256.clone(),
+                observed.clone(),
+            )
+        };
         let state_resp = client
             .get(format!("{}/v1/state", base_url))
             .header("Authorization", format!("Bearer {}", token))
@@ -1144,12 +1277,17 @@ pub async fn try_refresh_token(
     }
     // If token_obtained_at is None, attempt refresh (legacy token without timestamp)
 
-    let base_url = config.base_url();
-    let client = crate::client::tls::build_reqwest_client(
-        config.tls,
-        config.pinned_cert_sha256.clone(),
-        crate::client::tls::new_observed(),
-    );
+    let local_unix = local_unix_path(config);
+    let base_url = config.http_origin();
+    let client = if let Some(path) = local_unix {
+        unix_http_client(path)
+    } else {
+        crate::client::tls::build_reqwest_client(
+            config.tls,
+            config.pinned_cert_sha256.clone(),
+            crate::client::tls::new_observed(),
+        )
+    };
 
     match client
         .post(format!("{}/v1/refresh", base_url))
@@ -1167,7 +1305,7 @@ pub async fn try_refresh_token(
             }
             match resp.json::<RefreshResp>().await {
                 Ok(refresh_resp) => {
-                    log::info!("Token refreshed for {}:{}", config.host, config.port);
+                    log::info!("Token refreshed for {}", config.display_endpoint());
                     let _ = event_tx
                         .send(ConnectionEvent::TokenRefreshed {
                             connection_id: config.id.clone(),

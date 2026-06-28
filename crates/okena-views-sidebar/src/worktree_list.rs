@@ -54,6 +54,7 @@ impl WorktreeListPopover {
         host: String,
         port: u16,
         token: String,
+        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
         daemon_project_id: String,
         workspace: Entity<Workspace>,
         project_id: String,
@@ -61,7 +62,7 @@ impl WorktreeListPopover {
         cx: &mut Context<Self>,
     ) -> Self {
         let (norm_git_root, subdir, entries) =
-            Self::fetch_worktrees(&host, port, &token, daemon_project_id);
+            Self::fetch_worktrees(&host, port, &token, local_endpoint.as_ref(), daemon_project_id);
         let focus_handle = cx.focus_handle();
         Self {
             workspace,
@@ -82,10 +83,17 @@ impl WorktreeListPopover {
         host: &str,
         port: u16,
         token: &str,
+        local_endpoint: Option<&okena_transport::client::LocalEndpoint>,
         project_id: String,
     ) -> (std::path::PathBuf, std::path::PathBuf, Vec<(String, String)>) {
         let action = okena_core::api::ActionRequest::GitListWorktrees { project_id };
-        match okena_transport::remote_action::post_action(host, port, token, action) {
+        match okena_transport::remote_action::post_action_with_endpoint(
+            host,
+            port,
+            token,
+            local_endpoint,
+            action,
+        ) {
             Ok(Some(value)) => {
                 let git_root = value.get("git_root").and_then(|v| v.as_str()).unwrap_or_default();
                 let subdir = value.get("subdir").and_then(|v| v.as_str()).unwrap_or_default();

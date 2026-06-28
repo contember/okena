@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 /// registration site (`Okena::new`) and the sidebar filter agree on the marker.
 pub const LOCAL_DAEMON_CONNECTION_ID: &str = "local-daemon";
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LocalEndpoint {
+    UnixSocket { path: String },
+    NamedPipe { name: String },
+}
+
 /// Configuration for a single remote server connection.
 /// Persisted in settings.json as part of `remote_connections`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -35,6 +42,10 @@ pub struct RemoteConnectionConfig {
     /// first successful TLS handshake captures it.
     #[serde(default)]
     pub pinned_cert_sha256: Option<String>,
+    /// Same-host transport endpoint for the implicit local daemon connection.
+    /// Remote user-managed connections leave this empty and use TCP host/port.
+    #[serde(default)]
+    pub local_endpoint: Option<LocalEndpoint>,
 }
 
 impl RemoteConnectionConfig {
@@ -48,5 +59,24 @@ impl RemoteConnectionConfig {
     pub fn ws_url(&self) -> String {
         let scheme = if self.tls { "wss" } else { "ws" };
         format!("{}://{}:{}/v1/stream", scheme, self.host, self.port)
+    }
+
+    pub fn http_origin(&self) -> String {
+        match &self.local_endpoint {
+            Some(LocalEndpoint::UnixSocket { .. }) => "http://okena.local".to_string(),
+            _ => self.base_url(),
+        }
+    }
+
+    pub fn http_url(&self, path: &str) -> String {
+        format!("{}{}", self.http_origin(), path)
+    }
+
+    pub fn display_endpoint(&self) -> String {
+        match &self.local_endpoint {
+            Some(LocalEndpoint::UnixSocket { path }) => format!("unix:{path}"),
+            Some(LocalEndpoint::NamedPipe { name }) => format!("pipe:{name}"),
+            None => format!("{}:{}", self.host, self.port),
+        }
     }
 }

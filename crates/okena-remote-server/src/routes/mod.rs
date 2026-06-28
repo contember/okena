@@ -22,6 +22,7 @@ use axum::response::Response;
 use okena_core::api::{ApiGitStatus, ApiToast};
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -50,6 +51,29 @@ pub struct AppState {
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     pub next_connection_id: Arc<AtomicU64>,
     pub update_info: okena_ext_updater::UpdateInfo,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PeerInfo {
+    Tcp(SocketAddr),
+    Local,
+}
+
+impl PeerInfo {
+    pub fn is_local_trusted(self) -> bool {
+        match self {
+            Self::Local => true,
+            Self::Tcp(addr) => match addr.ip() {
+                IpAddr::V4(v4) => v4.is_loopback(),
+                // Dual-stack binds can surface an IPv4 loopback peer as the
+                // mapped form `::ffff:127.0.0.1`.
+                IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                    Some(v4) => v4.is_loopback(),
+                    None => v6.is_loopback(),
+                },
+            },
+        }
+    }
 }
 
 /// Build the complete axum router.

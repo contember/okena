@@ -12,6 +12,7 @@ pub struct PairingEndpoint {
     pub host: String,
     pub port: u16,
     pub token: String,
+    pub local_endpoint: Option<okena_transport::client::LocalEndpoint>,
 }
 
 pub struct PairingDialog {
@@ -90,6 +91,7 @@ impl PairingDialog {
                         &endpoint.host,
                         endpoint.port,
                         &endpoint.token,
+                        endpoint.local_endpoint.as_ref(),
                     )
                 })
                 .await;
@@ -128,6 +130,7 @@ impl PairingDialog {
                         &endpoint.host,
                         endpoint.port,
                         &endpoint.token,
+                        endpoint.local_endpoint.as_ref(),
                     );
                 })
                 .await;

@@ -16,12 +16,19 @@ pub struct RemoteBlameProvider {
     host: String,
     port: u16,
     token: String,
+    local_endpoint: Option<okena_transport::client::LocalEndpoint>,
     project_id: String,
 }
 
 impl RemoteBlameProvider {
-    pub fn new(host: String, port: u16, token: String, project_id: String) -> Self {
-        Self { host, port, token, project_id }
+    pub fn new(
+        host: String,
+        port: u16,
+        token: String,
+        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+        project_id: String,
+    ) -> Self {
+        Self { host, port, token, local_endpoint, project_id }
     }
 }
 
@@ -38,10 +45,11 @@ impl BlameProvider for RemoteBlameProvider {
             project_id: self.project_id.clone(),
             relative_path: relative_path.to_string(),
         };
-        let value = okena_transport::remote_action::post_action(
+        let value = okena_transport::remote_action::post_action_with_endpoint(
             &self.host,
             self.port,
             &self.token,
+            self.local_endpoint.as_ref(),
             action,
         )
         .map_err(BlameError::Backend)?;

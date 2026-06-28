@@ -9,6 +9,7 @@ use okena_core::api::{ActionRequest, StateResponse};
 use okena_core::soft_close::{
     decode_action, encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX,
 };
+use okena_transport::client::LocalEndpoint;
 use okena_transport::client::{
     make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
 };
@@ -17,6 +18,22 @@ use okena_transport::client::connection::try_refresh_token;
 use gpui::*;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+fn http_client_and_url(config: &RemoteConnectionConfig, path: &str) -> (reqwest::Client, String) {
+    #[cfg(unix)]
+    if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = &config.local_endpoint {
+        let client = reqwest::Client::builder()
+            .unix_socket(socket_path.as_str())
+            .build()
+            .unwrap_or_else(|e| {
+                log::error!("Failed to build Unix socket HTTP client for {socket_path}: {e}");
+                reqwest::Client::new()
+            });
+        return (client, config.http_url(path));
+    }
+
+    (reqwest::Client::new(), config.http_url(path))
+}
 
 /// Lightweight events emitted by [`RemoteConnectionManager`] that must NOT go
 /// through `cx.notify()`.
@@ -394,14 +411,11 @@ impl RemoteConnectionManager {
             }
         };
 
-        let host = config.host.clone();
-        let port = config.port;
         let name = config.name.clone();
         let event_tx = self.event_tx.clone();
 
         self.runtime.spawn(async move {
-            let url = format!("http://{}:{}/v1/actions", host, port);
-            let client = reqwest::Client::new();
+            let (client, url) = http_client_and_url(&config, "/v1/actions");
             let result = client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", token))
@@ -469,19 +483,16 @@ impl RemoteConnectionManager {
             }
         };
 
-        let host = config.host.clone();
-        let port = config.port;
         let name = config.name.clone();
         let event_tx = self.event_tx.clone();
         let terminal_id = terminal_id.to_string();
         let mime = mime.to_string();
 
         self.runtime.spawn(async move {
-            let url = format!(
-                "http://{}:{}/v1/terminals/{}/paste-image",
-                host, port, terminal_id
+            let (client, url) = http_client_and_url(
+                &config,
+                &format!("/v1/terminals/{terminal_id}/paste-image"),
             );
-            let client = reqwest::Client::new();
             let result = client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", token))
@@ -827,6 +838,7 @@ mod tests {
             token_obtained_at: None,
             tls: false,
             pinned_cert_sha256: None,
+            local_endpoint: None,
         }
     }
 
