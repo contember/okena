@@ -18,6 +18,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+/// Best-effort kill a process by pid — SIGKILL on Unix, `TerminateProcess` on
+/// Windows, matching `std::process::Child::kill`. Used by the UI-owned daemon
+/// lifecycle to reap a daemon we own but hold no `Child` for: a restart spawns a
+/// *detached* successor, known to us only by the pid it advertises in
+/// `remote.json`. A pid of 0 (unknown) or an already-dead process is a no-op.
+fn kill_process_by_pid(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let spid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[spid]), true);
+    if let Some(proc) = sys.process(spid) {
+        proc.kill();
+    }
+}
+
 /// Set up an observer that loads/unloads service configs when projects change.
 /// Handles deferred worktrees by skipping projects whose directory doesn't exist yet.
 ///
@@ -278,10 +296,23 @@ impl Okena {
         // UI-owned daemon lifecycle: kill the daemon WE spawned in
         // `--daemon-client` mode when the app quits. A daemon we merely attached
         // to (`spawned_daemon == None`) is left running for any other UIs.
+        //
+        // A UI-triggered restart (`perform_restart_daemon`) replaces our daemon
+        // with a *detached* successor we hold no `Child` for — killing only the
+        // original `Child` would orphan it. So when we own the lifecycle, also
+        // reap the CURRENT daemon discovered from `remote.json`, whose pid
+        // reflects any restarts. No-op when no restart happened (the discovered
+        // process is the child we just killed, now dead) or when we attached.
         cx.on_app_quit(move |this: &mut Self, _cx| {
+            let owned = this.spawned_daemon.is_some();
             if let Some(mut child) = this.spawned_daemon.take() {
                 let _ = child.kill();
                 let _ = child.wait();
+            }
+            if owned
+                && let Some(daemon) = okena_remote_server::local::running_daemon()
+            {
+                kill_process_by_pid(daemon.pid);
             }
             async {}
         })
