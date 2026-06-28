@@ -3,6 +3,7 @@ use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
 use crate::routes;
 use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_transport::client::LocalEndpoint;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::AtomicU64;
@@ -111,8 +112,25 @@ impl RemoteServer {
             );
         }
 
+        let mut local_endpoint = crate::local::default_local_endpoint();
+        #[cfg(unix)]
+        let local_listener = match &local_endpoint {
+            Some(LocalEndpoint::UnixSocket { path }) => {
+                let path_buf = std::path::PathBuf::from(path);
+                match crate::serve::bind_unix_socket(&path_buf) {
+                    Ok(listener) => Some((path_buf, listener)),
+                    Err(e) => {
+                        log::warn!("Failed to bind local daemon socket at {path}: {e}");
+                        local_endpoint = None;
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
         // Write remote.json
-        if let Err(e) = write_remote_json(port, tls_enabled) {
+        if let Err(e) = write_remote_json(port, tls_enabled, local_endpoint.as_ref()) {
             log::warn!("Failed to write remote.json: {}", e);
         }
 
@@ -136,6 +154,18 @@ impl RemoteServer {
                 next_connection_id,
                 update_info,
             );
+            #[cfg(unix)]
+            let local_server = if let Some((path, listener)) = local_listener {
+                Some(tokio::spawn(crate::serve::serve_unix_listener(
+                    path,
+                    listener,
+                    app.clone(),
+                    shutdown_signal(shutdown_rx.clone()),
+                )))
+            } else {
+                None
+            };
+
             let serve_result = if let Some(material) = tls_material {
                 // TLS enabled → dual-stack: accept BOTH http and TLS on this one
                 // port so already-paired plain-http clients keep working while
@@ -157,16 +187,17 @@ impl RemoteServer {
                 }
             } else {
                 // TLS disabled → plain http only.
-                let make_service =
-                    app.into_make_service_with_connect_info::<std::net::SocketAddr>();
-                axum::serve(listener, make_service)
-                    .with_graceful_shutdown(shutdown_signal(shutdown_rx_clone))
-                    .await
+                crate::serve::serve_plain(listener, app, shutdown_signal(shutdown_rx_clone)).await
             };
 
             match serve_result {
                 Ok(()) => log::info!("Remote control server shut down"),
                 Err(e) => log::error!("Remote control server exited with error: {e}"),
+            }
+
+            #[cfg(unix)]
+            if let Some(handle) = local_server {
+                handle.abort();
             }
         });
 
@@ -228,17 +259,24 @@ fn remote_json_path() -> std::path::PathBuf {
 }
 
 /// Write remote.json atomically (temp file + rename).
-fn write_remote_json(port: u16, tls_enabled: bool) -> anyhow::Result<()> {
+fn write_remote_json(
+    port: u16,
+    tls_enabled: bool,
+    local_endpoint: Option<&LocalEndpoint>,
+) -> anyhow::Result<()> {
     let path = remote_json_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let content = serde_json::json!({
+    let mut content = serde_json::json!({
         "port": port,
         "pid": std::process::id(),
         "tls": tls_enabled,
     });
+    if let Some(local_endpoint) = local_endpoint {
+        content["local_endpoint"] = serde_json::to_value(local_endpoint)?;
+    }
 
     let tmp_path = path.with_extension("tmp");
     std::fs::write(&tmp_path, serde_json::to_string_pretty(&content)?)?;

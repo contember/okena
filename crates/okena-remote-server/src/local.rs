@@ -14,11 +14,13 @@
 
 use crate::auth::{self, PersistedToken};
 use base64::Engine as _;
+use okena_transport::client::LocalEndpoint;
 use okena_workspace::persistence::config_dir;
 use rand::Rng as _;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Loopback host every local client connects on. `remote.json` records only the
@@ -33,6 +35,7 @@ pub struct LocalDaemon {
     pub pid: u32,
     /// Whether the daemon negotiates TLS (dual-stack) on its port.
     pub tls: bool,
+    pub local_endpoint: Option<LocalEndpoint>,
 }
 
 impl LocalDaemon {
@@ -50,7 +53,45 @@ pub fn discover_in(dir: &Path) -> Option<LocalDaemon> {
     let port = u16::try_from(v.get("port")?.as_u64()?).ok()?;
     let pid = v.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
     let tls = v.get("tls").and_then(|t| t.as_bool()).unwrap_or(false);
-    Some(LocalDaemon { port, pid, tls })
+    let local_endpoint = v
+        .get("local_endpoint")
+        .and_then(|value| serde_json::from_value::<LocalEndpoint>(value.clone()).ok());
+    Some(LocalDaemon { port, pid, tls, local_endpoint })
+}
+
+pub fn default_local_endpoint() -> Option<LocalEndpoint> {
+    #[cfg(unix)]
+    {
+        Some(LocalEndpoint::UnixSocket {
+            path: default_unix_socket_path(&config_dir()).to_string_lossy().into_owned(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+pub fn default_unix_socket_path(dir: &Path) -> PathBuf {
+    let key = profile_key(dir);
+    runtime_dir().join("okena").join(format!("{key}.sock"))
+}
+
+#[cfg(unix)]
+fn profile_key(dir: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(dir.to_string_lossy().as_bytes());
+    let hash = hasher.finalize();
+    hash.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(unix)]
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 /// Parse `remote.json` from the user's config dir.
@@ -451,9 +492,14 @@ struct PairCodeResponse {
     expires_in: u64,
 }
 
-pub fn request_pair_code(host: &str, port: u16, token: &str) -> Result<LocalPairCode, String> {
-    let url = format!("http://{host}:{port}/v1/pair-code");
-    let resp = reqwest::blocking::Client::new()
+pub fn request_pair_code(
+    host: &str,
+    port: u16,
+    token: &str,
+    local_endpoint: Option<&LocalEndpoint>,
+) -> Result<LocalPairCode, String> {
+    let (client, url) = blocking_client_and_url(host, port, "/v1/pair-code", local_endpoint);
+    let resp = client
         .post(&url)
         .bearer_auth(token)
         .timeout(Duration::from_secs(5))
@@ -475,13 +521,39 @@ pub fn request_pair_code(host: &str, port: u16, token: &str) -> Result<LocalPair
     })
 }
 
-pub fn invalidate_pair_code(host: &str, port: u16, token: &str) {
-    let url = format!("http://{host}:{port}/v1/pair-code");
-    let _ = reqwest::blocking::Client::new()
+pub fn invalidate_pair_code(
+    host: &str,
+    port: u16,
+    token: &str,
+    local_endpoint: Option<&LocalEndpoint>,
+) {
+    let (client, url) = blocking_client_and_url(host, port, "/v1/pair-code", local_endpoint);
+    let _ = client
         .delete(&url)
         .bearer_auth(token)
         .timeout(Duration::from_secs(5))
         .send();
+}
+
+fn blocking_client_and_url(
+    host: &str,
+    port: u16,
+    path: &str,
+    local_endpoint: Option<&LocalEndpoint>,
+) -> (reqwest::blocking::Client, String) {
+    #[cfg(unix)]
+    if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = local_endpoint {
+        let client = reqwest::blocking::Client::builder()
+            .unix_socket(socket_path.as_str())
+            .build()
+            .unwrap_or_else(|e| {
+                log::error!("Failed to build Unix socket HTTP client for {socket_path}: {e}");
+                reqwest::blocking::Client::new()
+            });
+        return (client, format!("http://okena.local{path}"));
+    }
+
+    (reqwest::blocking::Client::new(), format!("http://{host}:{port}{path}"))
 }
 
 #[cfg(test)]
@@ -510,7 +582,15 @@ mod tests {
         )
         .unwrap();
         let d = discover_in(&dir).expect("should parse");
-        assert_eq!(d, LocalDaemon { port: 19123, pid: 4242, tls: true });
+        assert_eq!(
+            d,
+            LocalDaemon {
+                port: 19123,
+                pid: 4242,
+                tls: true,
+                local_endpoint: None,
+            }
+        );
         assert_eq!(d.host(), "127.0.0.1");
     }
 
@@ -519,7 +599,32 @@ mod tests {
         let dir = temp_dir();
         std::fs::write(dir.join("remote.json"), r#"{"port": 19100}"#).unwrap();
         let d = discover_in(&dir).expect("should parse");
-        assert_eq!(d, LocalDaemon { port: 19100, pid: 0, tls: false });
+        assert_eq!(
+            d,
+            LocalDaemon {
+                port: 19100,
+                pid: 0,
+                tls: false,
+                local_endpoint: None,
+            }
+        );
+    }
+
+    #[test]
+    fn discover_parses_local_endpoint() {
+        let dir = temp_dir();
+        std::fs::write(
+            dir.join("remote.json"),
+            r#"{"port": 19123, "pid": 4242, "tls": false, "local_endpoint": {"kind": "unix_socket", "path": "/tmp/okena.sock"}}"#,
+        )
+        .unwrap();
+        let d = discover_in(&dir).expect("should parse");
+        assert_eq!(
+            d.local_endpoint,
+            Some(LocalEndpoint::UnixSocket {
+                path: "/tmp/okena.sock".to_string(),
+            })
+        );
     }
 
     #[test]

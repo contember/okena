@@ -66,18 +66,33 @@ pub struct RemoteProjectFs {
     host: String,
     port: u16,
     token: String,
+    local_endpoint: Option<okena_transport::client::LocalEndpoint>,
     project_id: String,
     project_name: String,
     root: String,
 }
 
 impl RemoteProjectFs {
-    pub fn new(host: String, port: u16, token: String, project_id: String, project_name: String, root: String) -> Self {
-        Self { host, port, token, project_id, project_name, root }
+    pub fn new(
+        host: String,
+        port: u16,
+        token: String,
+        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+        project_id: String,
+        project_name: String,
+        root: String,
+    ) -> Self {
+        Self { host, port, token, local_endpoint, project_id, project_name, root }
     }
 
     fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
-        okena_transport::remote_action::post_action(&self.host, self.port, &self.token, action)
+        okena_transport::remote_action::post_action_with_endpoint(
+            &self.host,
+            self.port,
+            &self.token,
+            self.local_endpoint.as_ref(),
+            action,
+        )
     }
 }
 

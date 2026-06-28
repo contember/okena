@@ -735,15 +735,15 @@ impl OverlayManager {
     pub fn show_close_worktree_dialog(
         &mut self,
         project_id: String,
-        params: Option<(String, u16, String, String)>,
+        params: Option<(String, u16, String, Option<okena_transport::client::LocalEndpoint>, String)>,
         cx: &mut Context<Self>,
     ) {
-        let (host, port, token, daemon_id) = params.unwrap_or_else(|| (String::new(), 0, String::new(), project_id.clone()));
+        let (host, port, token, local_endpoint, daemon_id) = params.unwrap_or_else(|| (String::new(), 0, String::new(), None, project_id.clone()));
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
         let app_settings = crate::settings::settings(cx);
         let entity = cx.new(|cx| {
-            CloseWorktreeDialog::new(host, port, token, daemon_id, workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
+            CloseWorktreeDialog::new(host, port, token, local_endpoint, daemon_id, workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
         });
         cx.subscribe(&entity, |this, _, event: &CloseWorktreeDialogEvent, cx| {
             match event {
@@ -1228,12 +1228,12 @@ impl OverlayManager {
     }
 
     /// Show worktree list popover.
-    pub fn show_worktree_list(&mut self, project_id: String, position: Point<Pixels>, params: Option<(String, u16, String, String)>, cx: &mut Context<Self>) {
+    pub fn show_worktree_list(&mut self, project_id: String, position: Point<Pixels>, params: Option<(String, u16, String, Option<okena_transport::client::LocalEndpoint>, String)>, cx: &mut Context<Self>) {
         self.close_all_context_menus();
 
-        let (host, port, token, daemon_id) = params.unwrap_or_else(|| (String::new(), 0, String::new(), project_id.clone()));
+        let (host, port, token, local_endpoint, daemon_id) = params.unwrap_or_else(|| (String::new(), 0, String::new(), None, project_id.clone()));
         let workspace = self.workspace.clone();
-        let popover = cx.new(|cx| WorktreeListPopover::new(host, port, token, daemon_id, workspace, project_id, position, cx));
+        let popover = cx.new(|cx| WorktreeListPopover::new(host, port, token, local_endpoint, daemon_id, workspace, project_id, position, cx));
 
         cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
             match event {

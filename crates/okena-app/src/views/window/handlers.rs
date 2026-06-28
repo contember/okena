@@ -53,13 +53,19 @@ impl WindowView {
         project_id: &str,
         connection_id: &str,
         cx: &Context<Self>,
-    ) -> Option<(String, u16, String, String)> {
+    ) -> Option<(
+        String,
+        u16,
+        String,
+        Option<okena_transport::client::LocalEndpoint>,
+        String,
+    )> {
         let rm = self.remote_manager.as_ref()?.read(cx);
         let connections = rm.connections();
         let (config, _, _) = connections.iter().find(|(c, _, _)| c.id == connection_id)?;
         let token = config.saved_token.as_ref()?.clone();
         let actual_id = okena_transport::client::strip_prefix(project_id, connection_id);
-        Some((config.host.clone(), config.port, token, actual_id))
+        Some((config.host.clone(), config.port, token, config.local_endpoint.clone(), actual_id))
     }
 
     /// Build a GitProvider for the given project (served by the local daemon).
@@ -72,8 +78,8 @@ impl WindowView {
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
         let conn_id = project.connection_id.as_ref()?;
-        let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-        Some(std::sync::Arc::new(RemoteGitProvider::new(host, port, token, actual_id, project.path.clone())))
+        let (host, port, token, local_endpoint, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        Some(std::sync::Arc::new(RemoteGitProvider::new(host, port, token, local_endpoint, actual_id, project.path.clone())))
     }
 
     /// Resolve the focused terminal_id from this window's focus_manager and the
@@ -132,9 +138,9 @@ impl WindowView {
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
         let conn_id = project.connection_id.as_ref()?;
-        let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        let (host, port, token, local_endpoint, actual_id) = self.remote_params(project_id, conn_id, cx)?;
         Some(std::sync::Arc::new(okena_files::project_fs::RemoteProjectFs::new(
-            host, port, token, actual_id, project.name.clone(), project.path.clone(),
+            host, port, token, local_endpoint, actual_id, project.name.clone(), project.path.clone(),
         )))
     }
 
@@ -173,9 +179,9 @@ impl WindowView {
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
         let conn_id = project.connection_id.as_ref()?;
-        let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        let (host, port, token, local_endpoint, actual_id) = self.remote_params(project_id, conn_id, cx)?;
         Some(std::sync::Arc::new(okena_views_git::blame::RemoteBlameProvider::new(
-            host, port, token, actual_id,
+            host, port, token, local_endpoint, actual_id,
         )))
     }
 }

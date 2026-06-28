@@ -903,6 +903,7 @@ impl Render for WindowView {
                                     host: config.host.clone(),
                                     port: config.port,
                                     token,
+                                    local_endpoint: config.local_endpoint.clone(),
                                 })
                             })
                     });

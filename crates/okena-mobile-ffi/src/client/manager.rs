@@ -130,6 +130,7 @@ impl ConnectionManager {
             token_obtained_at: None,
             tls,
             pinned_cert_sha256: None,
+            local_endpoint: None,
         };
         let conn_id = config.id.clone();
 

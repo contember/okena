@@ -200,6 +200,7 @@ impl Okena {
                 token_obtained_at: None,
                 tls: false,
                 pinned_cert_sha256: None,
+                local_endpoint: ensured.daemon.local_endpoint.clone(),
             };
             if let Err(e) = remote_manager.update(cx, |rm, cx| rm.add_connection(cfg, cx)) {
                 log::error!("Failed to register local-daemon loopback connection: {e}");

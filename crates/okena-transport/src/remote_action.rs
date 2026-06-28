@@ -1,6 +1,7 @@
 //! Shared blocking HTTP helper for posting ActionRequests to a remote server.
 
 use okena_core::api::ActionRequest;
+use crate::client::config::{LocalEndpoint, RemoteConnectionConfig};
 
 /// Total request timeout for "fast" actions (terminal control, listings,
 /// metadata). 10 s is generous for these; longer would mask real failures.
@@ -64,6 +65,23 @@ fn client_for(action: &ActionRequest) -> Result<&'static reqwest::blocking::Clie
     }
 }
 
+fn timeout_for(action: &ActionRequest) -> u64 {
+    match action {
+        ActionRequest::ReadFileBytes { .. } => BYTES_TIMEOUT_SECS,
+        _ => FAST_TIMEOUT_SECS,
+    }
+}
+
+#[cfg(unix)]
+fn unix_client(path: &str, timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .unix_socket(path)
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Cannot initialise Unix socket HTTP client: {}", e))
+}
+
 /// Post an action request to a remote server and return the JSON response body.
 pub fn post_action(
     host: &str,
@@ -73,8 +91,51 @@ pub fn post_action(
 ) -> Result<Option<serde_json::Value>, String> {
     let url = format!("http://{}:{}/v1/actions", host, port);
     let client = client_for(&action)?;
+    post_action_inner(client, &url, token, action)
+}
+
+/// Post an action using the full connection config. Local daemon configs can use
+/// their same-host transport endpoint while normal remotes keep host/port TCP.
+pub fn post_action_with_config(
+    config: &RemoteConnectionConfig,
+    token: &str,
+    action: ActionRequest,
+) -> Result<Option<serde_json::Value>, String> {
+    post_action_with_endpoint(
+        &config.host,
+        config.port,
+        token,
+        config.local_endpoint.as_ref(),
+        action,
+    )
+}
+
+/// Post an action with an optional same-host endpoint. This keeps older view
+/// models that store host/port/token from needing the whole connection config.
+pub fn post_action_with_endpoint(
+    host: &str,
+    port: u16,
+    token: &str,
+    local_endpoint: Option<&LocalEndpoint>,
+    action: ActionRequest,
+) -> Result<Option<serde_json::Value>, String> {
+    #[cfg(unix)]
+    if let Some(LocalEndpoint::UnixSocket { path }) = local_endpoint {
+        let client = unix_client(path, timeout_for(&action))?;
+        return post_action_inner(&client, "http://okena.local/v1/actions", token, action);
+    }
+
+    post_action(host, port, token, action)
+}
+
+fn post_action_inner(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+    action: ActionRequest,
+) -> Result<Option<serde_json::Value>, String> {
     let resp = client
-        .post(&url)
+        .post(url)
         .bearer_auth(token)
         .json(&action)
         .send()

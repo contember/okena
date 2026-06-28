@@ -1,11 +1,11 @@
 use crate::auth::{PairError, TOKEN_TTL_SECS};
-use crate::routes::AppState;
+use crate::routes::{AppState, PeerInfo};
 use crate::types::{PairRequest, PairResponse};
 use axum::Json;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 pub async fn post_pair(
     State(state): State<AppState>,
@@ -47,10 +47,10 @@ pub async fn post_pair(
 }
 
 pub async fn post_pair_code(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(peer): Extension<PeerInfo>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    if !is_trusted_pair_code_peer(addr) {
+    if !peer.is_local_trusted() {
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -63,25 +63,13 @@ pub async fn post_pair_code(
 }
 
 pub async fn delete_pair_code(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(peer): Extension<PeerInfo>,
     State(state): State<AppState>,
 ) -> StatusCode {
-    if !is_trusted_pair_code_peer(addr) {
+    if !peer.is_local_trusted() {
         return StatusCode::FORBIDDEN;
     }
 
     state.auth_store.invalidate_code();
     StatusCode::NO_CONTENT
-}
-
-fn is_trusted_pair_code_peer(addr: SocketAddr) -> bool {
-    match addr.ip() {
-        IpAddr::V4(v4) => v4.is_loopback(),
-        // Dual-stack binds can surface an IPv4 loopback peer as the mapped
-        // form `::ffff:127.0.0.1`.
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => v4.is_loopback(),
-            None => v6.is_loopback(),
-        },
-    }
 }
