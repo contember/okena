@@ -1938,6 +1938,16 @@ pub fn cli_command_list(json_mode: bool) -> i32 {
     }
     let v: serde_json::Value = serde_json::from_str(&resp).unwrap_or(serde_json::Value::Null);
     if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
+        if arr.is_empty() {
+            // The headless daemon (okena-daemon) has no GUI action registry, so
+            // it returns an empty list. Explain it on stderr (stdout stays empty
+            // for clean parsing) so an empty result isn't mistaken for an error
+            // or a parse failure — mirrors `command run`'s explicit rejection.
+            eprintln!(
+                "No actions available — the command palette requires a running GUI window and is unavailable when connected to a headless daemon."
+            );
+            return 0;
+        }
         for a in arr {
             let g = |k: &str| a.get(k).and_then(|x| x.as_str()).unwrap_or("");
             // category \t name \t description
