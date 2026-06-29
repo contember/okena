@@ -1,26 +1,25 @@
-use crate::routes::AppState;
+use crate::routes::{AppState, PeerInfo};
 use axum::Json;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use okena_ext_updater::UpdateStatus;
-use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 pub async fn get_status(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(peer): Extension<PeerInfo>,
     State(state): State<AppState>,
 ) -> Result<Json<okena_ext_updater::UpdateStatusSnapshot>, StatusCode> {
-    if !is_loopback_peer(addr) {
+    if !peer.is_local_trusted() {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(Json(state.update_info.snapshot()))
 }
 
 pub async fn post_check(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(peer): Extension<PeerInfo>,
     State(state): State<AppState>,
 ) -> Result<Json<okena_ext_updater::UpdateStatusSnapshot>, StatusCode> {
-    if !is_loopback_peer(addr) {
+    if !peer.is_local_trusted() {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -36,10 +35,10 @@ pub async fn post_check(
 }
 
 pub async fn post_install(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(peer): Extension<PeerInfo>,
     State(state): State<AppState>,
 ) -> Result<Json<okena_ext_updater::UpdateStatusSnapshot>, StatusCode> {
-    if !is_loopback_peer(addr) {
+    if !peer.is_local_trusted() {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -54,10 +53,10 @@ pub async fn post_install(
 }
 
 pub async fn post_dismiss(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(peer): Extension<PeerInfo>,
     State(state): State<AppState>,
 ) -> Result<Json<okena_ext_updater::UpdateStatusSnapshot>, StatusCode> {
-    if !is_loopback_peer(addr) {
+    if !peer.is_local_trusted() {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -92,14 +91,4 @@ pub fn spawn_background_checker(update_info: okena_ext_updater::UpdateInfo) {
             tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
         }
     });
-}
-
-fn is_loopback_peer(addr: SocketAddr) -> bool {
-    match addr.ip() {
-        IpAddr::V4(v4) => v4.is_loopback(),
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => v4.is_loopback(),
-            None => v6.is_loopback(),
-        },
-    }
 }

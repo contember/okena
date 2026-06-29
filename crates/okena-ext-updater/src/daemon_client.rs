@@ -2,7 +2,12 @@ use crate::UpdateStatusSnapshot;
 use anyhow::{Context, Result};
 use std::time::Duration;
 
-fn local_update_url(path: &str) -> Result<String> {
+struct LocalUpdateEndpoint {
+    client: reqwest::blocking::Client,
+    url: String,
+}
+
+fn local_update_endpoint(path: &str) -> Result<LocalUpdateEndpoint> {
     let remote_path = okena_core::profiles::try_current()
         .map(|p| p.remote_json())
         .unwrap_or_else(|| {
@@ -20,17 +25,46 @@ fn local_update_url(path: &str) -> Result<String> {
         .and_then(serde_json::Value::as_u64)
         .context("remote.json is missing port")?;
     let port = u16::try_from(port_value).context("remote.json port is out of range")?;
-    Ok(format!("http://127.0.0.1:{port}{path}"))
+    #[cfg(unix)]
+    if let Some(socket_path) = value
+        .get("local_endpoint")
+        .and_then(|endpoint| {
+            if endpoint.get("kind").and_then(serde_json::Value::as_str) == Some("unix_socket") {
+                endpoint.get("path").and_then(serde_json::Value::as_str)
+            } else {
+                None
+            }
+        })
+    {
+        let client = reqwest::blocking::Client::builder()
+            .unix_socket(socket_path)
+            .build()
+            .with_context(|| format!("failed to build Unix socket client for {socket_path}"))?;
+        return Ok(LocalUpdateEndpoint {
+            client,
+            url: format!("http://okena.local{path}"),
+        });
+    }
+
+    let host = value
+        .get("local_host")
+        .and_then(serde_json::Value::as_str)
+        .filter(|host| !host.is_empty())
+        .unwrap_or("127.0.0.1");
+    Ok(LocalUpdateEndpoint {
+        client: reqwest::blocking::Client::new(),
+        url: format!("http://{host}:{port}{path}"),
+    })
 }
 
 pub fn fetch_status() -> Result<UpdateStatusSnapshot> {
-    let url = local_update_url("/v1/update/status")?;
-    let response = okena_transport::http::send(
-        okena_transport::http::HttpRequest::get(url)
-            .timeout(Duration::from_secs(5))
-            .label("updater.daemon_status"),
-    )
-    .context("failed to fetch update status")?
+    let endpoint = local_update_endpoint("/v1/update/status")?;
+    let response = endpoint
+        .client
+        .get(&endpoint.url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .context("failed to fetch update status")?
     .error_for_status()
     .context("update status request failed")?;
     response.json().context("failed to decode update status")
@@ -49,13 +83,14 @@ pub fn request_dismiss() -> Result<UpdateStatusSnapshot> {
 }
 
 fn post_snapshot(path: &str, label: &'static str) -> Result<UpdateStatusSnapshot> {
-    let url = local_update_url(path)?;
-    let response = okena_transport::http::send(
-        okena_transport::http::HttpRequest::post(url)
-            .timeout(Duration::from_secs(10))
-            .label(label),
-    )
-    .with_context(|| format!("failed to POST {path}"))?
+    let endpoint = local_update_endpoint(path)?;
+    let _ = label;
+    let response = endpoint
+        .client
+        .post(&endpoint.url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .with_context(|| format!("failed to POST {path}"))?
     .error_for_status()
     .with_context(|| format!("daemon rejected {path}"))?;
     response.json().context("failed to decode update status")
