@@ -15,11 +15,13 @@ use tokio_tungstenite::tungstenite;
 
 type TcpWsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+#[cfg(unix)]
+type UnixWsStream = tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>;
 
 enum AnyWsStream {
-    Tcp(TcpWsStream),
+    Tcp(Box<TcpWsStream>),
     #[cfg(unix)]
-    Unix(tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>),
+    Unix(Box<UnixWsStream>),
 }
 
 impl Stream for AnyWsStream {
@@ -27,9 +29,9 @@ impl Stream for AnyWsStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut *self {
-            AnyWsStream::Tcp(stream) => Pin::new(stream).poll_next(cx),
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).poll_next(cx),
             #[cfg(unix)]
-            AnyWsStream::Unix(stream) => Pin::new(stream).poll_next(cx),
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).poll_next(cx),
         }
     }
 }
@@ -39,33 +41,33 @@ impl Sink<tungstenite::Message> for AnyWsStream {
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match &mut *self {
-            AnyWsStream::Tcp(stream) => Pin::new(stream).poll_ready(cx),
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).poll_ready(cx),
             #[cfg(unix)]
-            AnyWsStream::Unix(stream) => Pin::new(stream).poll_ready(cx),
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).poll_ready(cx),
         }
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: tungstenite::Message) -> Result<(), Self::Error> {
         match &mut *self {
-            AnyWsStream::Tcp(stream) => Pin::new(stream).start_send(item),
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).start_send(item),
             #[cfg(unix)]
-            AnyWsStream::Unix(stream) => Pin::new(stream).start_send(item),
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).start_send(item),
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match &mut *self {
-            AnyWsStream::Tcp(stream) => Pin::new(stream).poll_flush(cx),
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
             #[cfg(unix)]
-            AnyWsStream::Unix(stream) => Pin::new(stream).poll_flush(cx),
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
         }
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match &mut *self {
-            AnyWsStream::Tcp(stream) => Pin::new(stream).poll_close(cx),
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).poll_close(cx),
             #[cfg(unix)]
-            AnyWsStream::Unix(stream) => Pin::new(stream).poll_close(cx),
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).poll_close(cx),
         }
     }
 }
@@ -688,7 +690,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 )
                 .await
                 .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
-                (AnyWsStream::Unix(ws), response)
+                (AnyWsStream::Unix(Box::new(ws)), response)
             }
             #[cfg(not(unix))]
             {
@@ -706,12 +708,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             let (ws, response) = tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
                 .await
                 .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
-            (AnyWsStream::Tcp(ws), response)
+            (AnyWsStream::Tcp(Box::new(ws)), response)
         } else {
             let (ws, response) = tokio_tungstenite::connect_async(&ws_url)
                 .await
                 .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
-            (AnyWsStream::Tcp(ws), response)
+            (AnyWsStream::Tcp(Box::new(ws)), response)
         };
 
         let (mut ws_write, mut ws_read) = futures::StreamExt::split(ws_stream);
