@@ -8,6 +8,7 @@ import { TerminalArea } from "./TerminalArea";
 import { TerminalPane } from "./TerminalPane";
 import { StatusBar } from "./StatusBar";
 import { GitPanel } from "./GitPanel";
+import { FilesPanel } from "./FilesPanel";
 
 export function WorkspaceLayout() {
   const isMobile = useIsMobile();
@@ -28,27 +29,30 @@ function DesktopLayout() {
         </aside>
         <main className="flex flex-1 min-w-0 flex-col">
           {project && <GitPanel project={project} />}
-          <div className="flex-1 min-h-0">
-            {project?.layout ? (
-              <TerminalArea layout={project.layout} project={project} />
-            ) : (
-              <div className="flex items-center justify-center h-full text-zinc-500">
-                {state.workspace ? (
-                  project ? (
-                    <button
-                      className="px-4 py-2 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 transition-colors"
-                      onClick={() => postAction({ action: "create_terminal", project_id: project.id })}
-                    >
-                      New Terminal
-                    </button>
+          <div className="flex flex-1 min-h-0">
+            <div className="min-w-0 flex-1">
+              {project?.layout ? (
+                <TerminalArea layout={project.layout} project={project} />
+              ) : (
+                <div className="flex items-center justify-center h-full text-zinc-500">
+                  {state.workspace ? (
+                    project ? (
+                      <button
+                        className="px-4 py-2 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 transition-colors"
+                        onClick={() => postAction({ action: "create_terminal", project_id: project.id })}
+                      >
+                        New Terminal
+                      </button>
+                    ) : (
+                      "Select a project"
+                    )
                   ) : (
-                    "Select a project"
-                  )
-                ) : (
-                  "Loading..."
-                )}
-              </div>
-            )}
+                    "Loading..."
+                  )}
+                </div>
+              )}
+            </div>
+            {project && <FilesPanel project={project} />}
           </div>
         </main>
       </div>
