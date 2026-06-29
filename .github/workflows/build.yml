@@ -163,7 +163,7 @@ jobs:
         run: cd web && bun install --frozen-lockfile && bun run build
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} -p okena -p okena-daemon
 
       - name: Prepare artifact (Linux)
         if: runner.os == 'Linux'

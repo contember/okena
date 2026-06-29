@@ -86,8 +86,9 @@ pub struct DaemonParams {
     /// The session backend (tmux / dtach / screen / none) the PTY manager uses
     /// to spawn terminals.
     pub session_backend: SessionBackend,
-    /// The address the remote server binds to (loopback for local-only).
-    pub listen_addr: IpAddr,
+    /// TCP addresses the remote server binds to. The UI-owned daemon always
+    /// includes loopback for same-host clients; remote mode may add a LAN bind.
+    pub listen_addrs: Vec<IpAddr>,
     /// Whether the remote server should serve TLS (dual-stack http+https).
     pub tls_enabled: bool,
 }
@@ -237,7 +238,7 @@ impl DaemonCore {
             auth_store.clone(),
             broadcaster.clone(),
             state_version.clone(),
-            params.listen_addr,
+            params.listen_addrs,
             git_status_tx.clone(),
             toast_tx.clone(),
             remote_subscribed_terminals.clone(),

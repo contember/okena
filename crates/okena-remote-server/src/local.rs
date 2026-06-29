@@ -19,7 +19,6 @@ use okena_workspace::persistence::config_dir;
 use rand::Rng as _;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -221,43 +220,27 @@ fn daemon_binary_path() -> Option<std::path::PathBuf> {
     path.exists().then_some(path)
 }
 
-/// Spawn a local daemon that binds a loopback port (preferring 19100–19200, else
-/// OS-assigned) and writes `remote.json`.
+/// Spawn a local daemon and writes `remote.json`.
 ///
 /// Prefers the dedicated, GPUI-free `okena-daemon` binary (a sibling of the
-/// current exe — cargo and shipped installs place it alongside `okena`). Falls
-/// back to `current_exe --headless --listen 127.0.0.1` when that binary isn't
-/// present, so the UI-owned lifecycle still works during the transition. Either
-/// way the child inherits `OKENA_PROFILE` from this process, so it uses the same
-/// config dir.
+/// current exe — cargo and shipped installs place it alongside `okena`). The
+/// dedicated daemon reads settings itself: same-host access is always local
+/// (Unix socket + loopback), and remote bind addresses are added only when the
+/// remote server setting is enabled. Falls back to
+/// `current_exe --headless` when that binary isn't present, so the UI-owned
+/// lifecycle still works during development. Either way the child inherits
+/// `OKENA_PROFILE` from this process, so it uses the same config dir.
 ///
 /// The caller owns the returned [`std::process::Child`]. In the UI-owned
 /// lifecycle the desktop kills it when the last window closes; mint the token
 /// *before* spawning so the fresh daemon loads it at startup (no reload needed).
 pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
-    let listen_host = configured_local_daemon_listen_host();
     match daemon_binary_path() {
-        Some(daemon) => std::process::Command::new(daemon)
-            .arg("--listen")
-            .arg(&listen_host)
-            .spawn(),
+        Some(daemon) => std::process::Command::new(daemon).spawn(),
         None => {
             let exe = std::env::current_exe()?;
-            std::process::Command::new(exe)
-                .arg("--headless")
-                .arg("--listen")
-                .arg(&listen_host)
-                .spawn()
+            std::process::Command::new(exe).arg("--headless").spawn()
         }
-    }
-}
-
-fn configured_local_daemon_listen_host() -> String {
-    let settings = okena_workspace::settings::load_settings();
-    let configured = settings.remote_listen_address.trim();
-    match configured.parse::<IpAddr>() {
-        Ok(addr) => addr.to_string(),
-        Err(_) => LOCAL_HOST.to_string(),
     }
 }
 

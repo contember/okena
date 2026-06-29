@@ -166,39 +166,28 @@ fn main() -> anyhow::Result<()> {
         persistence::default_workspace()
     });
 
-    // 4. Resolve the listen address: the `--listen` override wins; otherwise the
-    //    settings value parsed as an `IpAddr`; otherwise loopback.
-    let listen_addr: IpAddr = listen_override.unwrap_or_else(|| {
-        let configured = settings.remote_listen_address.trim();
-        match configured.parse::<IpAddr>() {
-            Ok(addr) => addr,
-            Err(_) => {
-                if !configured.is_empty() {
-                    log::warn!(
-                        "Invalid remote_listen_address in settings ({configured:?}); falling back to 127.0.0.1"
-                    );
-                }
-                IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-            }
-        }
-    });
+    // 4. Resolve TCP bind addresses. Same-host access is always available via
+    // loopback (and Unix socket on Unix). When the user enables remote server
+    // mode, also bind the configured interface so off-host clients can connect.
+    // An explicit `--listen` is standalone/headless intent and is honored even
+    // when the settings toggle is off.
+    let listen_addrs = resolve_listen_addrs(listen_override, &settings);
 
     // 5. Build params (read TLS out before moving `settings`) and run. `run`
     //    blocks until the bridge closes or ctrl-c arrives — that is expected,
     //    the daemon is UI-owned.
     //
-    // TLS policy by deployment mode (architecture §1): a LOCAL loopback daemon
-    // (spawned by the desktop on 127.0.0.1) serves plain http — loopback is
-    // trusted, TLS there is pure overhead and adds handshake fragility (the
-    // client connects plain and would otherwise TOFU-upgrade). Only a STANDALONE
-    // server bound to a non-loopback address honors `remote_tls_enabled` for
-    // off-host clients.
-    let tls_enabled = !listen_addr.is_loopback() && settings.remote_tls_enabled;
+    // TLS policy by deployment mode (architecture §1): a purely local daemon
+    // serves plain http; once any non-loopback listener is active, honor the
+    // user's TLS preference for off-host clients. The server remains dual-stack,
+    // so same-host plain clients continue to work on the local endpoint.
+    let tls_enabled =
+        listen_addrs.iter().any(|addr| !addr.is_loopback()) && settings.remote_tls_enabled;
     let params = DaemonParams {
         workspace_data,
         settings,
         session_backend,
-        listen_addr,
+        listen_addrs,
         tls_enabled,
     };
 
@@ -227,5 +216,43 @@ fn parse_listen_override() -> Option<IpAddr> {
             eprintln!("--listen requires an address argument, e.g. --listen 0.0.0.0");
             std::process::exit(1);
         }
+    }
+}
+
+fn resolve_listen_addrs(
+    listen_override: Option<IpAddr>,
+    settings: &okena_workspace::persistence::AppSettings,
+) -> Vec<IpAddr> {
+    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+    if let Some(addr) = listen_override {
+        return bind_addrs_with_loopback(addr);
+    }
+
+    if !settings.remote_server_enabled {
+        return vec![loopback];
+    }
+
+    let configured = settings.remote_listen_address.trim();
+    match configured.parse::<IpAddr>() {
+        Ok(addr) => bind_addrs_with_loopback(addr),
+        Err(_) => {
+            if !configured.is_empty() {
+                log::warn!(
+                    "Invalid remote_listen_address in settings ({configured:?}); falling back to 127.0.0.1"
+                );
+            }
+            vec![loopback]
+        }
+    }
+}
+
+fn bind_addrs_with_loopback(addr: IpAddr) -> Vec<IpAddr> {
+    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+    if addr == loopback || addr.is_unspecified() {
+        vec![addr]
+    } else {
+        vec![loopback, addr]
     }
 }

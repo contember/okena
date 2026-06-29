@@ -32,7 +32,7 @@ impl RemoteServer {
         auth_store: Arc<AuthStore>,
         broadcaster: Arc<PtyBroadcaster>,
         state_version: Arc<watch::Sender<u64>>,
-        bind_addr: IpAddr,
+        bind_addrs: Vec<IpAddr>,
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
         toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
@@ -52,21 +52,14 @@ impl RemoteServer {
         // Clean up stale remote.json from a previous crash
         cleanup_stale_remote_json();
 
-        // Try to bind to a port
-        let listener = runtime.block_on(async {
-            // Try preferred range first
-            for port in 19100..=19200 {
-                let addr = SocketAddr::new(bind_addr, port);
-                if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
-                    return Ok(listener);
-                }
-            }
-            // Fall back to OS-assigned port
-            let addr = SocketAddr::new(bind_addr, 0);
-            tokio::net::TcpListener::bind(addr).await
-        })?;
-
-        let port = listener.local_addr()?.port();
+        let bind_addrs = normalize_bind_addrs(bind_addrs);
+        let listeners = runtime.block_on(bind_listeners(&bind_addrs))?;
+        let port = listeners
+            .first()
+            .expect("bind_listeners returns at least one listener")
+            .1
+            .local_addr()?
+            .port();
 
         // Load (or generate) the persisted self-signed cert when TLS is enabled.
         // If cert setup fails we deliberately do NOT silently fall back to plain
@@ -79,6 +72,10 @@ impl RemoteServer {
             None
         };
         let cert_fingerprint = tls_material.as_ref().map(|m| m.fingerprint.clone());
+        let tls_server_config = match tls_material.as_ref() {
+            Some(material) => Some(crate::tls::server_config(material)?),
+            None => None,
+        };
 
         let scheme = if tls_enabled {
             "http+https dual-stack"
@@ -87,7 +84,11 @@ impl RemoteServer {
         };
         log::info!(
             "Remote control server listening on {}:{} ({})",
-            bind_addr,
+            bind_addrs
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
             port,
             scheme
         );
@@ -100,14 +101,18 @@ impl RemoteServer {
 
         // Warn loudly when bound to a non-loopback address WITHOUT TLS: the
         // pairing token and all terminal I/O would travel the network in cleartext.
-        if !bind_addr.is_loopback() && !tls_enabled {
+        if bind_addrs.iter().any(|addr| !addr.is_loopback()) && !tls_enabled {
             log::warn!(
                 "Remote control server is bound to a NON-LOOPBACK address ({}:{}) WITHOUT TLS.\n\
                  The connection is UNENCRYPTED (http/ws): the pairing token and all terminal\n\
                  I/O (including passwords, SSH keys, and any typed secrets) are sent in cleartext\n\
                  and visible to anyone on the network. Enable TLS in settings, only use this on a\n\
                  trusted network, or tunnel it over SSH/WireGuard.",
-                bind_addr,
+                bind_addrs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
                 port
             );
         }
@@ -139,7 +144,7 @@ impl RemoteServer {
         let update_info = okena_ext_updater::UpdateInfo::new(app_version.to_string());
 
         // Spawn the server task
-        let shutdown_rx_clone = shutdown_rx.clone();
+        let mut shutdown_rx_clone = shutdown_rx.clone();
         runtime.spawn(async move {
             routes::update::spawn_background_checker(update_info.clone());
             let app = routes::build_router(
@@ -166,33 +171,38 @@ impl RemoteServer {
                 None
             };
 
-            let serve_result = if let Some(material) = tls_material {
-                // TLS enabled → dual-stack: accept BOTH http and TLS on this one
-                // port so already-paired plain-http clients keep working while
-                // new/auto clients negotiate TLS.
-                match crate::tls::server_config(&material) {
-                    Ok(tls_config) => {
+            let mut tcp_servers = Vec::new();
+            for (addr, listener) in listeners {
+                let app = app.clone();
+                let shutdown_rx = shutdown_rx_clone.clone();
+                let tls_config = tls_server_config.clone();
+                tcp_servers.push(tokio::spawn(async move {
+                    let result = if let Some(tls_config) = tls_config {
+                        // TLS enabled → dual-stack: accept BOTH http and TLS on this one
+                        // port so already-paired plain-http clients keep working while
+                        // new/auto clients negotiate TLS.
                         crate::serve::serve_dual_stack(
                             listener,
                             app,
                             tls_config,
-                            shutdown_signal(shutdown_rx_clone),
+                            shutdown_signal(shutdown_rx),
                         )
                         .await
+                    } else {
+                        // TLS disabled → plain http only.
+                        crate::serve::serve_plain(listener, app, shutdown_signal(shutdown_rx)).await
+                    };
+                    match result {
+                        Ok(()) => log::info!("Remote control server on {addr} shut down"),
+                        Err(e) => {
+                            log::error!("Remote control server on {addr} exited with error: {e}")
+                        }
                     }
-                    Err(e) => {
-                        log::error!("Failed to build TLS server config: {e:#}");
-                        Err(std::io::Error::other(e.to_string()))
-                    }
-                }
-            } else {
-                // TLS disabled → plain http only.
-                crate::serve::serve_plain(listener, app, shutdown_signal(shutdown_rx_clone)).await
-            };
-
-            match serve_result {
-                Ok(()) => log::info!("Remote control server shut down"),
-                Err(e) => log::error!("Remote control server exited with error: {e}"),
+                }));
+            }
+            let _ = shutdown_rx_clone.changed().await;
+            for handle in tcp_servers {
+                let _ = handle.await;
             }
 
             #[cfg(unix)]
@@ -234,6 +244,55 @@ impl RemoteServer {
 
         log::info!("Remote control server stopped");
     }
+}
+
+fn normalize_bind_addrs(addrs: Vec<IpAddr>) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    for addr in addrs {
+        if out.contains(&addr) {
+            continue;
+        }
+        out.push(addr);
+    }
+    if out.is_empty() {
+        out.push(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    }
+    out
+}
+
+async fn bind_listeners(
+    bind_addrs: &[IpAddr],
+) -> anyhow::Result<Vec<(IpAddr, tokio::net::TcpListener)>> {
+    let primary = *bind_addrs
+        .first()
+        .unwrap_or(&IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
+    for port in 19100..=19200 {
+        if let Ok(listeners) = bind_all_on_port(bind_addrs, port).await {
+            return Ok(listeners);
+        }
+    }
+
+    let first = tokio::net::TcpListener::bind(SocketAddr::new(primary, 0)).await?;
+    let port = first.local_addr()?.port();
+    let mut listeners = vec![(primary, first)];
+    for addr in bind_addrs.iter().copied().skip(1) {
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(addr, port)).await?;
+        listeners.push((addr, listener));
+    }
+    Ok(listeners)
+}
+
+async fn bind_all_on_port(
+    bind_addrs: &[IpAddr],
+    port: u16,
+) -> std::io::Result<Vec<(IpAddr, tokio::net::TcpListener)>> {
+    let mut listeners = Vec::with_capacity(bind_addrs.len());
+    for addr in bind_addrs {
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(*addr, port)).await?;
+        listeners.push((*addr, listener));
+    }
+    Ok(listeners)
 }
 
 impl Drop for RemoteServer {

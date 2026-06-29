@@ -62,7 +62,7 @@ impl HeadlessApp {
         workspace_data: WorkspaceData,
         pty_manager: Arc<PtyManager>,
         pty_events: Receiver<PtyEvent>,
-        listen_addr: IpAddr,
+        listen_addrs: Vec<IpAddr>,
         tls_enabled: bool,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -284,7 +284,7 @@ impl HeadlessApp {
         .detach();
 
         // Start remote server
-        app.start_remote_server(bridge_tx, listen_addr, tls_enabled, &remote_info);
+        app.start_remote_server(bridge_tx, listen_addrs, tls_enabled, &remote_info);
 
         app
     }
@@ -293,7 +293,7 @@ impl HeadlessApp {
     fn start_remote_server(
         &mut self,
         bridge_tx: bridge::BridgeSender,
-        listen_addr: IpAddr,
+        listen_addrs: Vec<IpAddr>,
         tls_enabled: bool,
         remote_info: &RemoteInfo,
     ) {
@@ -302,7 +302,7 @@ impl HeadlessApp {
             self.auth_store.clone(),
             self.pty_broadcaster.clone(),
             self.state_version.clone(),
-            listen_addr,
+            listen_addrs,
             self.git_status_tx.clone(),
             self.toast_tx.clone(),
             self.remote_subscribed_terminals.clone(),
