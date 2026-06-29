@@ -17,9 +17,9 @@ pub fn register() -> Result<String, String> {
 
     // Notify a running server to reload tokens (loopback-only route). A server
     // that isn't running yet will pick the token up from disk at startup.
-    if let Ok((host, port)) = discover_server() {
-        let url = format!("http://{}:{}/v1/auth/reload", host, port);
-        let _ = reqwest::blocking::Client::new()
+    if let Ok(server) = discover_server()
+        && let Ok((client, url)) = server.client_and_url("/v1/auth/reload") {
+        let _ = client
             .post(&url)
             .timeout(std::time::Duration::from_secs(5))
             .send();

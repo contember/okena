@@ -52,7 +52,7 @@ pub fn cli_pair() -> i32 {
 }
 
 pub fn cli_health(json_mode: bool) -> i32 {
-    let (host, port) = match discover_server() {
+    let server = match discover_server() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
@@ -60,8 +60,14 @@ pub fn cli_health(json_mode: bool) -> i32 {
         }
     };
 
-    let url = format!("http://{}:{}/health", host, port);
-    let resp = match reqwest::blocking::Client::new()
+    let (client, url) = match server.client_and_url("/health") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let resp = match client
         .get(&url)
         .timeout(std::time::Duration::from_secs(5))
         .send()

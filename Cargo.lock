@@ -6275,6 +6275,7 @@ dependencies = [
  "okena-transport",
  "okena-ui",
  "parking_lot",
+ "reqwest",
  "semver",
  "serde",
  "serde_json",
