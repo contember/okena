@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ApiLayoutNode, ApiProject } from "../api/types";
+import { postAction } from "../api/client";
 import { LayoutRenderer } from "./TerminalArea";
 
 export function TabLayout({
@@ -16,6 +17,32 @@ export function TabLayout({
   const [activeIdx, setActiveIdx] = useState(initialActive);
   const clamped = Math.min(activeIdx, children.length - 1);
 
+  useEffect(() => {
+    setActiveIdx(initialActive);
+  }, [initialActive]);
+
+  const selectTab = useCallback(
+    (index: number) => {
+      setActiveIdx(index);
+      postAction({
+        action: "set_active_tab",
+        project_id: project.id,
+        path,
+        index,
+      }).catch(() => {});
+    },
+    [project.id, path],
+  );
+
+  const addTab = useCallback(() => {
+    postAction({
+      action: "add_tab",
+      project_id: project.id,
+      path,
+      in_group: true,
+    }).catch(() => {});
+  }, [project.id, path]);
+
   return (
     <div className="flex flex-col h-full">
       {/* Tab bar */}
@@ -27,7 +54,7 @@ export function TabLayout({
           return (
             <button
               key={i}
-              onClick={() => setActiveIdx(i)}
+              onClick={() => selectTab(i)}
               className={`px-3 py-1.5 text-xs truncate max-w-32 transition-colors
                 ${i === clamped
                   ? "bg-zinc-800 text-zinc-100 border-b-2 border-blue-500"
@@ -38,6 +65,13 @@ export function TabLayout({
             </button>
           );
         })}
+        <button
+          onClick={addTab}
+          className="ml-auto px-2 py-1.5 text-xs text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+          title="New tab"
+        >
+          +
+        </button>
       </div>
 
       {/* Active tab content */}
