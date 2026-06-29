@@ -42,7 +42,7 @@ export async function getState(): Promise<StateResponse> {
   return res.json();
 }
 
-export async function postAction(action: ActionRequest): Promise<Record<string, unknown>> {
+export async function postAction(action: ActionRequest): Promise<unknown> {
   const res = await fetch(`${baseUrl()}/v1/actions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },

@@ -85,6 +85,13 @@ export interface ApiGitStatus {
   review_base?: string | null;
 }
 
+export interface FileDiffSummary {
+  path: string;
+  added: number;
+  removed: number;
+  is_new: boolean;
+}
+
 export type DiffMode =
   | "working_tree"
   | "staged"
