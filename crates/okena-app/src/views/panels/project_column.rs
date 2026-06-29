@@ -22,6 +22,10 @@ use okena_views_services::service_panel::ServicePanel;
 use crate::views::panels::hook_panel::HookPanel;
 use crate::views::window::TerminalsRegistry;
 
+fn project_header_display_name(project: &ProjectData) -> String {
+    project.name.clone()
+}
+
 /// A single project column with header and layout
 pub struct ProjectColumn {
     /// Identifies which window-scoped slot on the shared `Workspace` this
@@ -483,14 +487,7 @@ impl ProjectColumn {
         };
 
         let project_name_el = {
-            let display_name = if let Some(ref wt_info) = project.worktree_info {
-                let ws = self.workspace.read(cx);
-                ws.project(&wt_info.parent_project_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| project.name.clone())
-            } else {
-                project.name.clone()
-            };
+            let display_name = project_header_display_name(project);
             let path_for_tooltip = project.path.clone();
             let project_id_for_click = self.project_id.clone();
             let request_broker_for_click = self.request_broker.clone();
@@ -931,6 +928,51 @@ impl ProjectColumn {
                         cx.notify();
                     })),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_header_display_name;
+    use crate::workspace::settings::HooksConfig;
+    use crate::workspace::state::{ProjectData, WorktreeMetadata};
+    use okena_core::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn project_with_name(name: &str) -> ProjectData {
+        ProjectData {
+            id: "p1".to_string(),
+            name: name.to_string(),
+            path: "/tmp/repo-worktree".to_string(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+        }
+    }
+
+    #[test]
+    fn project_header_uses_worktree_project_name() {
+        let mut project = project_with_name("feature-login");
+        project.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/repo-worktree".to_string(),
+            branch_name: "feature/login".to_string(),
+        });
+
+        assert_eq!(project_header_display_name(&project), "feature-login");
     }
 }
 
