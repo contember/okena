@@ -21,7 +21,6 @@ use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_terminal::TerminalsRegistry;
 use okena_workspace::focus::FocusManager;
-use okena_workspace::hooks;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{WindowId, Workspace};
 use gpui::*;
@@ -379,78 +378,12 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         self.update_child_terminals(terminal, cx);
     }
 
-    fn create_new_terminal(&mut self, cx: &mut Context<Self>) {
-        if self.backend.is_remote() {
-            return;
-        }
-
-        let settings = terminal_view_settings(cx);
-        let ws = self.workspace.read(cx);
-        let mut shell = self.shell_type.clone().resolve_default(
-            ws.project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
-            &settings.default_shell,
+    fn create_new_terminal(&mut self, _cx: &mut Context<Self>) {
+        log::warn!(
+            "TerminalPane rendered without daemon-assigned terminal id for project {} at {:?}",
+            self.project_id,
+            self.layout_path
         );
-
-        // Read fresh path and project info from workspace state
-        let (project_path, project_name, project_hooks, parent_hooks, is_worktree, folder_id, folder_name) = {
-            let project = ws.project(&self.project_id);
-            let path = project.map(|p| p.path.clone())
-                .unwrap_or_else(|| self.project_path.clone());
-            let name = project.map(|p| p.name.clone()).unwrap_or_default();
-            let hooks_cfg = project.map(|p| p.hooks.clone()).unwrap_or_default();
-            let parent = project
-                .and_then(|p| p.worktree_info.as_ref())
-                .and_then(|wt| ws.project(&wt.parent_project_id))
-                .map(|p| p.hooks.clone());
-            let is_wt = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
-            let folder = ws.folder_for_project_or_parent(&self.project_id);
-            let fid = folder.map(|f| f.id.clone());
-            let fname = folder.map(|f| f.name.clone());
-            (path, name, hooks_cfg, parent, is_wt, fid, fname)
-        };
-
-        let env = hooks::terminal_hook_env(&self.project_id, &project_name, &project_path, is_worktree, folder_id.as_deref(), folder_name.as_deref());
-
-        // Apply shell_wrapper if configured
-        let global_hooks = settings.hooks;
-        if let Some(wrapper) = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
-            shell = hooks::apply_shell_wrapper(&shell, &wrapper, &env);
-        }
-
-        // Apply on_create: wrap shell to run command first, then exec into shell
-        if let Some(cmd) = hooks::resolve_terminal_on_create_simple(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
-            shell = hooks::apply_on_create(&shell, &cmd, &env);
-        }
-
-        match self
-            .backend
-            .create_terminal(&project_path, Some(&shell))
-        {
-            Ok(terminal_id) => {
-                self.terminal_id = Some(terminal_id.clone());
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_terminal_id(&self.project_id, &self.layout_path, terminal_id.clone(), cx);
-                });
-
-                let size = TerminalSize::default();
-                let terminal =
-                    Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), project_path));
-                if let Some(pid) = self.backend.get_shell_pid(&terminal_id) {
-                    terminal.set_shell_pid(pid);
-                }
-                self.terminals.lock().insert(terminal_id.clone(), terminal.clone());
-                self.terminal = Some(terminal.clone());
-
-                self.update_child_terminals(terminal, cx);
-
-                self.pending_focus = true;
-                cx.notify();
-            }
-            Err(e) => {
-                log::error!("Failed to create terminal: {}", e);
-                crate::toast_error(format!("Failed to create terminal: {}", e), cx);
-            }
-        }
     }
 
     fn update_child_terminals(&mut self, terminal: Arc<Terminal>, cx: &mut Context<Self>) {

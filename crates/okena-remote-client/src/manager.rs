@@ -370,7 +370,10 @@ impl RemoteConnectionManager {
     pub fn auto_connect_all(&mut self, cx: &mut Context<Self>) {
         let settings = load_settings();
         for config in settings.remote_connections {
-            if config.saved_token.is_some() && !self.connections.contains_key(&config.id) {
+            if config.saved_token.is_some()
+                && !self.connections.contains_key(&config.id)
+                && self.find_by_host_port(&config.host, config.port).is_none()
+            {
                 let id = config.id.clone();
                 let mut conn = RemoteConnection::new(
                     config,
