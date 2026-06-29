@@ -135,7 +135,7 @@ impl RemoteServer {
         };
 
         // Write remote.json
-        if let Err(e) = write_remote_json(port, tls_enabled, local_endpoint.as_ref()) {
+        if let Err(e) = write_remote_json(port, tls_enabled, &bind_addrs, local_endpoint.as_ref()) {
             log::warn!("Failed to write remote.json: {}", e);
         }
 
@@ -321,6 +321,7 @@ fn remote_json_path() -> std::path::PathBuf {
 fn write_remote_json(
     port: u16,
     tls_enabled: bool,
+    bind_addrs: &[IpAddr],
     local_endpoint: Option<&LocalEndpoint>,
 ) -> anyhow::Result<()> {
     let path = remote_json_path();
@@ -330,6 +331,7 @@ fn write_remote_json(
 
     let mut content = serde_json::json!({
         "port": port,
+        "local_host": local_tcp_host(bind_addrs),
         "pid": std::process::id(),
         "tls": tls_enabled,
     });
@@ -350,6 +352,24 @@ fn write_remote_json(
     std::fs::rename(&tmp_path, &path)?;
 
     Ok(())
+}
+
+fn local_tcp_host(bind_addrs: &[IpAddr]) -> &'static str {
+    if bind_addrs.iter().any(|addr| match addr {
+        IpAddr::V4(v4) => *v4 == std::net::Ipv4Addr::LOCALHOST || v4.is_unspecified(),
+        IpAddr::V6(_) => false,
+    }) {
+        return crate::local::LOCAL_HOST;
+    }
+
+    if bind_addrs.iter().any(|addr| match addr {
+        IpAddr::V4(_) => false,
+        IpAddr::V6(v6) => *v6 == std::net::Ipv6Addr::LOCALHOST || v6.is_unspecified(),
+    }) {
+        return "::1";
+    }
+
+    crate::local::LOCAL_HOST
 }
 
 /// Remove remote.json on shutdown.
@@ -381,5 +401,25 @@ fn cleanup_stale_remote_json() {
     {
         log::info!("Removing stale remote.json (pid {} is dead)", pid);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_tcp_host_prefers_ipv4_loopback_when_available() {
+        let addrs = [
+            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        ];
+        assert_eq!(local_tcp_host(&addrs), crate::local::LOCAL_HOST);
+    }
+
+    #[test]
+    fn local_tcp_host_uses_ipv6_loopback_for_ipv6_only_binds() {
+        let addrs = [IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)];
+        assert_eq!(local_tcp_host(&addrs), "::1");
     }
 }

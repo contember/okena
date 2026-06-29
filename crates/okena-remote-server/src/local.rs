@@ -22,14 +22,17 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Loopback host every local client connects on. `remote.json` records only the
-/// port — the daemon always binds loopback for local use.
+/// Default loopback host for local clients. Newer `remote.json` files can
+/// override this with `local_host` when the daemon only has an IPv6 local TCP
+/// endpoint.
 pub const LOCAL_HOST: &str = "127.0.0.1";
 
 /// A local daemon discovered from `remote.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalDaemon {
     pub port: u16,
+    /// Loopback host to dial for TCP clients.
+    pub host: String,
     /// Daemon process id (0 if the file omitted it).
     pub pid: u32,
     /// Whether the daemon negotiates TLS (dual-stack) on its port.
@@ -39,8 +42,8 @@ pub struct LocalDaemon {
 
 impl LocalDaemon {
     /// Loopback host to dial.
-    pub fn host(&self) -> &'static str {
-        LOCAL_HOST
+    pub fn host(&self) -> &str {
+        &self.host
     }
 }
 
@@ -50,12 +53,18 @@ pub fn discover_in(dir: &Path) -> Option<LocalDaemon> {
     let data = std::fs::read_to_string(dir.join("remote.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&data).ok()?;
     let port = u16::try_from(v.get("port")?.as_u64()?).ok()?;
+    let host = v
+        .get("local_host")
+        .and_then(|h| h.as_str())
+        .filter(|h| !h.is_empty())
+        .unwrap_or(LOCAL_HOST)
+        .to_string();
     let pid = v.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
     let tls = v.get("tls").and_then(|t| t.as_bool()).unwrap_or(false);
     let local_endpoint = v
         .get("local_endpoint")
         .and_then(|value| serde_json::from_value::<LocalEndpoint>(value.clone()).ok());
-    Some(LocalDaemon { port, pid, tls, local_endpoint })
+    Some(LocalDaemon { port, host, pid, tls, local_endpoint })
 }
 
 pub fn default_local_endpoint() -> Option<LocalEndpoint> {
@@ -569,12 +578,25 @@ mod tests {
             d,
             LocalDaemon {
                 port: 19123,
+                host: LOCAL_HOST.to_string(),
                 pid: 4242,
                 tls: true,
                 local_endpoint: None,
             }
         );
         assert_eq!(d.host(), "127.0.0.1");
+    }
+
+    #[test]
+    fn discover_parses_local_host() {
+        let dir = temp_dir();
+        std::fs::write(
+            dir.join("remote.json"),
+            r#"{"port": 19123, "local_host": "::1", "pid": 4242, "tls": false}"#,
+        )
+        .unwrap();
+        let d = discover_in(&dir).expect("should parse");
+        assert_eq!(d.host(), "::1");
     }
 
     #[test]
@@ -586,6 +608,7 @@ mod tests {
             d,
             LocalDaemon {
                 port: 19100,
+                host: LOCAL_HOST.to_string(),
                 pid: 0,
                 tls: false,
                 local_endpoint: None,

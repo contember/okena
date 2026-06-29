@@ -176,11 +176,6 @@ impl Okena {
         main_window.update(cx, |rv, cx| {
             rv.set_remote_manager(remote_manager.clone(), cx);
         });
-        // Auto-connect to saved connections with valid tokens
-        remote_manager.update(cx, |rm, cx| {
-            rm.auto_connect_all(cx);
-            rm.start_token_refresh_task(cx);
-        });
 
         // Register the implicit, trusted loopback connection to our local
         // daemon so its projects mirror into the GUI. We own the spawned child
@@ -203,10 +198,20 @@ impl Okena {
                 local_endpoint: ensured.daemon.local_endpoint.clone(),
             };
             if let Err(e) = remote_manager.update(cx, |rm, cx| rm.add_connection(cfg, cx)) {
-                log::error!("Failed to register local-daemon loopback connection: {e}");
+                eprintln!("Failed to register local-daemon loopback connection: {e}");
+                std::process::exit(1);
             }
             ensured.spawned
         };
+
+        // Auto-connect to saved connections with valid tokens after the
+        // reserved local-daemon connection is present. Saved user-managed
+        // remotes that point at the same endpoint are skipped by the manager;
+        // the implicit local connection is the authoritative one.
+        remote_manager.update(cx, |rm, cx| {
+            rm.auto_connect_all(cx);
+            rm.start_token_refresh_task(cx);
+        });
 
         // Observe window bounds changes to force re-render
         cx.observe_window_bounds(window, |_this, _window, cx| {

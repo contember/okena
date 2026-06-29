@@ -64,6 +64,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Daemon/client split gates
+        run: |
+          scripts/audit-daemon-client-gaps.sh
+          if cargo tree -p okena-daemon --edges no-dev | grep -E 'gpui|gpui-component'; then
+            echo "okena-daemon must stay GPUI-free"
+            exit 1
+          fi
+
       - name: Run tests
         run: cargo test
 

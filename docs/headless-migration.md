@@ -212,32 +212,25 @@ run-capable session. Test with `cargo run`; if the daemon-client path misbehaves
 These do not block the architecture; they are last-mile completeness/parity that
 genuinely needs a running app to get right:
 
-1. **Residual local-PTY handlers (finishes the in-process deletion).** Three GUI
-   handlers still drive the local `backend`/`pty_manager` instead of routing to
-   the daemon, so they are likely broken in client mode and keep `pty_manager` +
-   `start_pty_event_loop` alive:
-   - worktree creation (`terminal_actions.rs` `spawn_uninitialized_terminals` /
-     `create_worktree_from_focus`) → should dispatch `ActionRequest::CreateWorktree`
-     (already exists in the daemon) and let the worktree mirror back.
-   - shell switch (`terminal_actions.rs` ~L61/L106: `backend.kill` +
-     `backend.create_terminal`) → needs a daemon action (no `ActionRequest`
-     variant yet).
-   - workspace/session switch (`handlers.rs::handle_switch_workspace`) → needs a
-     daemon action.
-   Converting all three lets the last in-process PTY pieces be deleted.
-2. **Toasts / OS notifications** forwarded from the daemon over `WsOutbound`
-   (sync action errors are already returned via `CommandResult`; this is for
-   async daemon-side events). The `Toast` type is already gpui-free in
-   `okena-state`.
-3. **Terminal scrollback on (re)attach.** Pre-existing remote-protocol limitation
+1. **Terminal scrollback on (re)attach.** Pre-existing remote-protocol limitation
    (the SNAPSHOT frame replays the viewport, not history) — affects all remote
    clients, not just daemon-client. Matters on reconnect to an existing daemon
    session; the primary "create terminals live" flow is unaffected.
-4. **Per-window presentation restore** (sidebar_open / folder_filter / os_bounds /
+2. **Per-window presentation restore** (sidebar_open / folder_filter / os_bounds /
    panel heights) across a client restart — client-owned presentation that the
    client no longer persists locally. Decide: client-side persistence vs. daemon
    round-trip.
-5. **`HookMonitor` run status** into `StateResponse` for the client hooks panel.
+3. **`HookMonitor` run status** into `StateResponse` for the client hooks panel.
+4. **Soft-close-on-quit flush.** `DaemonCore` still has no shutdown/`Drop` hook,
+   so a soft-closed terminal's persistent (dtach/tmux) session could outlive the
+   daemon if the daemon exits during the grace window.
+5. **`worktree_removed` hook + background removal.** The daemon removes the
+   worktree synchronously and does **not** fire `worktree_removed` (matches the
+   normal `RemoveWorktreeProject` action). If wanted, add both to
+   `remove_worktree_project` so both entry points share them.
+6. **Claude env live refresh.** `CLAUDE_CONFIG_DIR` is resolved once at daemon
+   startup. Hook a `set_extra_env` re-call into the daemon's settings-update path
+   if live re-sync is desired after `claude-code.config_dir` changes.
 
 **Key spike conclusions carried forward:**
 - The action layer needs only `notify`/`refresh_views` — **no `spawn` on the trait.**
@@ -271,20 +264,15 @@ Also done this session: deleted the dead `Local{Git,Blame}Provider` /
 
 **Residual daemon-side gaps (flagged, *not* regressions — all were already inert
 in the dead GUI loop):**
-1. **Soft-close-on-quit flush.** `DaemonCore` has no shutdown/`Drop` hook, so
-   `drain_pending_closes` / `drain_pending_terminal_kills` are not flushed on
-   daemon exit. A soft-closed terminal's persistent (dtach/tmux) session could
-   outlive the daemon. Needs a daemon shutdown hook.
-2. **`pending_terminal_kills` is never drained on the daemon.** Pre-existing —
-   affects the existing `execute_action(DeleteProject)` path too, not just the
-   ported code. A kill-queue drain observer in the daemon would close it.
-3. **`worktree_removed` hook + background removal.** The daemon removes the
-   worktree synchronously and does **not** fire `worktree_removed` (matches the
-   normal `RemoveWorktreeProject` action). If wanted, add both to
+1. **Soft-close-on-quit flush.** Still needs a daemon shutdown hook.
+2. **`worktree_removed` hook + background removal.** If wanted, add both to
    `remove_worktree_project` so both entry points share them.
-4. **claude env is resolved once at daemon startup** (no live re-push on a
-   `claude-code.config_dir` settings change). Hook a `set_extra_env` re-call into
-   the daemon's settings-update path if live re-sync is desired.
+3. **Claude env live refresh.** Re-run `PtyManager::set_extra_env` from the
+   daemon settings-update path if live re-sync is desired.
+
+Closed since the original gap list: queued terminal kills are drained after each
+daemon workspace action, daemon-originated toasts are forwarded over the stream,
+and the GUI no longer owns local PTY machinery.
 
 These need a running app to validate end-to-end (the GPUI client + daemon can't
 be exercised headless).

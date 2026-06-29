@@ -998,11 +998,9 @@ impl Render for ProjectColumn {
                     .child(self.render_header(&project, cx))
                     .child(content)
                     // Hook panel (delegated to HookPanel entity)
-                    .child({
-                        self.hook_panel.update(cx, |hp, cx| {
-                            hp.render_panel(&t, cx)
-                        })
-                    })
+                    .child(self.hook_panel.update(cx, |hp, cx| {
+                        hp.render_panel(&t, cx)
+                    }))
                     // Service panel (delegated to ServicePanel entity)
                     .child({
                         self.service_panel.update(cx, |sp, cx| {
