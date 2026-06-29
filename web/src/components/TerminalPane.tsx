@@ -88,6 +88,18 @@ export function TerminalPane({
     postAction({ action: "close_terminal", project_id: projectId, terminal_id: terminalId }).catch(() => {});
   }, [terminalId, projectId]);
 
+  const handleRename = useCallback(() => {
+    if (!terminalId) return;
+    const nextName = window.prompt("Rename terminal", name ?? "")?.trim();
+    if (!nextName || nextName === name) return;
+    postAction({
+      action: "rename_terminal",
+      project_id: projectId,
+      terminal_id: terminalId,
+      name: nextName,
+    }).catch(() => {});
+  }, [terminalId, projectId, name]);
+
   // Create xterm.js instance
   useEffect(() => {
     if (!containerRef.current) return;
@@ -212,6 +224,13 @@ export function TerminalPane({
               </button>
             </>
           )}
+          <button
+            onClick={(e) => { e.stopPropagation(); handleRename(); }}
+            className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
+            title="Rename terminal"
+          >
+            rename
+          </button>
           <button
             onClick={(e) => { e.stopPropagation(); handleClose(); }}
             className="p-1 text-zinc-500 hover:text-red-400 hover:bg-zinc-700 rounded text-xs"
