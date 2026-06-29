@@ -57,8 +57,8 @@ echo "    Version: $VERSION"
 
 # Build if not skipping
 if [[ "$SKIP_BUILD" == false ]]; then
-    echo "==> Building release binary..."
-    cargo build --release --target "$TARGET"
+    echo "==> Building release binaries..."
+    cargo build --release --target "$TARGET" -p okena -p okena-daemon
 fi
 
 # Verify binary exists (check target-specific path first, then default)

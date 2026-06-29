@@ -291,7 +291,7 @@ struct GlobalHeadless(#[allow(dead_code)] Entity<HeadlessApp>);
 impl Global for GlobalHeadless {}
 
 /// Run the application in headless mode (no GUI, remote server only).
-fn run_headless(listen_addr: IpAddr) {
+fn run_headless(listen_addr: Option<IpAddr>) {
     println!("Starting Okena in headless mode...");
 
     Application::with_platform(gpui_platform::current_platform(true)).run(move |cx: &mut App| {
@@ -311,6 +311,10 @@ fn run_headless(listen_addr: IpAddr) {
         let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
         let pty_manager = Arc::new(pty_manager);
 
+        let listen_addrs = resolve_daemon_listen_addrs(listen_addr, &app_settings);
+        let tls_enabled = listen_addrs.iter().any(|addr| !addr.is_loopback())
+            && app_settings.remote_tls_enabled;
+
         // Create the headless app entity (starts PTY loop, command loop, and remote server)
         // Must be stored in a global to keep the entity alive — dropping the handle
         // would release the entity and cancel all spawned tasks + drop RemoteServer.
@@ -319,13 +323,47 @@ fn run_headless(listen_addr: IpAddr) {
                 workspace_data,
                 pty_manager,
                 pty_events,
-                listen_addr,
-                app_settings.remote_tls_enabled,
+                listen_addrs,
+                tls_enabled,
                 cx,
             )
         });
         cx.set_global(GlobalHeadless(headless));
     });
+}
+
+fn resolve_daemon_listen_addrs(
+    listen_override: Option<IpAddr>,
+    settings: &persistence::AppSettings,
+) -> Vec<IpAddr> {
+    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    if let Some(addr) = listen_override {
+        return daemon_bind_addrs_with_loopback(addr);
+    }
+    if !settings.remote_server_enabled {
+        return vec![loopback];
+    }
+    let configured = settings.remote_listen_address.trim();
+    match configured.parse::<IpAddr>() {
+        Ok(addr) => daemon_bind_addrs_with_loopback(addr),
+        Err(_) => {
+            if !configured.is_empty() {
+                log::warn!(
+                    "Invalid remote_listen_address in settings ({configured:?}); falling back to 127.0.0.1"
+                );
+            }
+            vec![loopback]
+        }
+    }
+}
+
+fn daemon_bind_addrs_with_loopback(addr: IpAddr) -> Vec<IpAddr> {
+    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    if addr == loopback || addr.is_unspecified() {
+        vec![addr]
+    } else {
+        vec![loopback, addr]
+    }
 }
 
 fn main() {
@@ -513,10 +551,6 @@ fn main() {
     let headless = explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
 
     if headless {
-        let Some(addr) = listen_addr else {
-            eprintln!("Headless mode requires --listen <addr>, e.g. --headless --listen 0.0.0.0");
-            std::process::exit(1);
-        };
         // Self-restart handoff (transitional `okena --headless` daemon): a
         // daemon restarting itself spawns this process with `--await-pid <old>`
         // (see okena_remote_server::routes::restart). Wait for the outgoing
@@ -544,13 +578,13 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        run_headless(addr);
+        run_headless(listen_addr);
         return;
     }
 
     if !has_display && cfg!(target_os = "linux") {
         eprintln!("No display server found (DISPLAY/WAYLAND_DISPLAY not set).");
-        eprintln!("Use --headless --listen <addr> to run without a GUI.");
+        eprintln!("Use --headless [--listen <addr>] to run without a GUI.");
         std::process::exit(1);
     }
 
