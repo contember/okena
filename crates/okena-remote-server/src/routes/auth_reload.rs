@@ -1,13 +1,12 @@
-use crate::routes::AppState;
-use axum::extract::{ConnectInfo, State};
+use crate::routes::{AppState, PeerInfo};
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
-use std::net::{IpAddr, SocketAddr};
 
 pub async fn post_reload(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(peer): Extension<PeerInfo>,
     State(state): State<AppState>,
 ) -> StatusCode {
-    if !is_trusted_reload_peer(addr) {
+    if !peer.is_local_trusted() {
         return StatusCode::FORBIDDEN;
     }
 
@@ -18,34 +17,22 @@ pub async fn post_reload(
     }
 }
 
-fn is_trusted_reload_peer(addr: SocketAddr) -> bool {
-    match addr.ip() {
-        IpAddr::V4(v4) => v4.is_loopback(),
-        // Dual-stack binds can surface an IPv4 loopback peer as the mapped
-        // form `::ffff:127.0.0.1`. `Ipv6Addr::is_loopback` only matches `::1`,
-        // so unwrap the mapping first and re-check at the v4 layer.
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => v4.is_loopback(),
-            None => v6.is_loopback(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::net::Ipv6Addr;
+    use crate::routes::PeerInfo;
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
     #[test]
     fn loopback_peers_can_reload_tokens() {
-        assert!(is_trusted_reload_peer(SocketAddr::from(([127, 0, 0, 1], 19100))));
-        assert!(is_trusted_reload_peer(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 19100))));
+        assert!(PeerInfo::Local.is_local_trusted());
+        assert!(PeerInfo::Tcp(SocketAddr::from(([127, 0, 0, 1], 19100))).is_local_trusted());
+        assert!(PeerInfo::Tcp(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 19100))).is_local_trusted());
     }
 
     #[test]
     fn non_loopback_peers_cannot_reload_tokens() {
-        assert!(!is_trusted_reload_peer(SocketAddr::from(([192, 168, 1, 50], 19100))));
-        assert!(!is_trusted_reload_peer(SocketAddr::from(([10, 0, 0, 2], 19100))));
+        assert!(!PeerInfo::Tcp(SocketAddr::from(([192, 168, 1, 50], 19100))).is_local_trusted());
+        assert!(!PeerInfo::Tcp(SocketAddr::from(([10, 0, 0, 2], 19100))).is_local_trusted());
     }
 
     #[test]
@@ -54,7 +41,7 @@ mod tests {
         // socket. Must be accepted: the CLI register flow uses this path on
         // some hosts and would otherwise hit FORBIDDEN.
         let mapped = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001);
-        assert!(is_trusted_reload_peer(SocketAddr::new(IpAddr::V6(mapped), 19100)));
+        assert!(PeerInfo::Tcp(SocketAddr::new(IpAddr::V6(mapped), 19100)).is_local_trusted());
     }
 
     #[test]
@@ -63,6 +50,6 @@ mod tests {
         // stay rejected; the unwrap-then-check at the v4 layer should not
         // be a back door for off-host callers.
         let mapped = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc0a8, 0x0132);
-        assert!(!is_trusted_reload_peer(SocketAddr::new(IpAddr::V6(mapped), 19100)));
+        assert!(!PeerInfo::Tcp(SocketAddr::new(IpAddr::V6(mapped), 19100)).is_local_trusted());
     }
 }

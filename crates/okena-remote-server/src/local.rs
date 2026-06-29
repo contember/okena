@@ -290,9 +290,14 @@ pub struct EnsuredDaemon {
 /// A freshly spawned daemon reads tokens at startup, so this is only needed on the
 /// attach path. Failures are ignored — the worst case is the caller's connection
 /// attempt fails and retries.
-pub fn notify_auth_reload(port: u16) {
-    let url = format!("http://{LOCAL_HOST}:{port}/v1/auth/reload");
-    let _ = reqwest::blocking::Client::new()
+pub fn notify_auth_reload(daemon: &LocalDaemon) {
+    let (client, url) = blocking_client_and_url(
+        daemon.host(),
+        daemon.port,
+        "/v1/auth/reload",
+        daemon.local_endpoint.as_ref(),
+    );
+    let _ = client
         .post(&url)
         .timeout(Duration::from_secs(5))
         .send();
@@ -314,11 +319,15 @@ pub fn notify_auth_reload(port: u16) {
 /// 3. Wait for the old pid to die (bounded), then poll `remote.json` until a LIVE
 ///    daemon advertises — [`wait_until_ready`] rejects a stale file whose pid is
 ///    dead, so it returns only once the replacement has written its own pid+port.
-pub fn restart_local_daemon(host: &str, port: u16) -> Result<LocalDaemon, String> {
+pub fn restart_local_daemon(
+    host: &str,
+    port: u16,
+    local_endpoint: Option<&LocalEndpoint>,
+) -> Result<LocalDaemon, String> {
     let old_pid = running_daemon().map(|d| d.pid).unwrap_or(0);
 
-    let url = format!("http://{host}:{port}/v1/restart");
-    match reqwest::blocking::Client::new()
+    let (client, url) = blocking_client_and_url(host, port, "/v1/restart", local_endpoint);
+    match client
         .post(&url)
         .timeout(Duration::from_secs(10))
         .send()
@@ -331,11 +340,33 @@ pub fn restart_local_daemon(host: &str, port: u16) -> Result<LocalDaemon, String
     }
 
     if old_pid != 0 {
-        let _ = wait_for_pid_exit(old_pid, Duration::from_secs(10));
+        if !wait_for_pid_exit(old_pid, Duration::from_secs(10)) {
+            return Err(format!(
+                "outgoing daemon pid {old_pid} did not exit before timeout"
+            ));
+        }
     }
 
-    wait_until_ready(Duration::from_secs(15))
+    wait_until_ready_replacing(old_pid, Duration::from_secs(15))
         .ok_or_else(|| "daemon did not come back in time".to_string())
+}
+
+/// Poll until the replacement daemon appears. Do not accept the stale
+/// `remote.json` that the outgoing process leaves behind while it is exiting.
+fn wait_until_ready_replacing(old_pid: u32, timeout: Duration) -> Option<LocalDaemon> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(daemon) = discover()
+            && (old_pid == 0 || daemon.pid != old_pid)
+            && (daemon.pid == 0 || is_process_alive(daemon.pid))
+        {
+            return Some(daemon);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// CLI flag the restart relauncher passes to the replacement daemon so it waits
@@ -442,7 +473,7 @@ pub fn ensure_local_daemon_in(
     if let Some(daemon) = running_daemon_in(dir) {
         // Attach: an already-running daemon must be told to reload the new token.
         let token = mint_local_token_in(dir)?.token;
-        notify_auth_reload(daemon.port);
+        notify_auth_reload(&daemon);
         return Ok(EnsuredDaemon {
             daemon,
             token,

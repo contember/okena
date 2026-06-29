@@ -25,10 +25,9 @@
 //! The client re-reads `remote.json` after restart to pick up the new port — see
 //! the GUI's restart handler.
 
-use crate::routes::AppState;
-use axum::extract::{ConnectInfo, State};
+use crate::routes::{AppState, PeerInfo};
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
-use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 /// Grace before the outgoing daemon exits, so the HTTP ack is fully flushed to
@@ -36,10 +35,10 @@ use std::time::Duration;
 const EXIT_DELAY: Duration = Duration::from_millis(300);
 
 pub async fn post_restart(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(peer): Extension<PeerInfo>,
     State(_state): State<AppState>,
 ) -> StatusCode {
-    if !is_trusted_restart_peer(addr) {
+    if !peer.is_local_trusted() {
         return StatusCode::FORBIDDEN;
     }
 
@@ -68,49 +67,33 @@ pub async fn post_restart(
     StatusCode::OK
 }
 
-/// Loopback-only gate, identical in shape to `auth_reload::is_trusted_reload_peer`.
-fn is_trusted_restart_peer(addr: SocketAddr) -> bool {
-    match addr.ip() {
-        IpAddr::V4(v4) => v4.is_loopback(),
-        // Dual-stack binds can surface an IPv4 loopback peer as the mapped form
-        // `::ffff:127.0.0.1`. `Ipv6Addr::is_loopback` only matches `::1`, so
-        // unwrap the mapping first and re-check at the v4 layer.
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => v4.is_loopback(),
-            None => v6.is_loopback(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::net::Ipv6Addr;
+    use crate::routes::PeerInfo;
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
     #[test]
     fn loopback_peers_can_restart() {
-        assert!(is_trusted_restart_peer(SocketAddr::from(([127, 0, 0, 1], 19100))));
-        assert!(is_trusted_restart_peer(SocketAddr::from((
-            [0, 0, 0, 0, 0, 0, 0, 1],
-            19100
-        ))));
+        assert!(PeerInfo::Local.is_local_trusted());
+        assert!(PeerInfo::Tcp(SocketAddr::from(([127, 0, 0, 1], 19100))).is_local_trusted());
+        assert!(PeerInfo::Tcp(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 19100))).is_local_trusted());
     }
 
     #[test]
     fn non_loopback_peers_cannot_restart() {
-        assert!(!is_trusted_restart_peer(SocketAddr::from(([192, 168, 1, 50], 19100))));
-        assert!(!is_trusted_restart_peer(SocketAddr::from(([10, 0, 0, 2], 19100))));
+        assert!(!PeerInfo::Tcp(SocketAddr::from(([192, 168, 1, 50], 19100))).is_local_trusted());
+        assert!(!PeerInfo::Tcp(SocketAddr::from(([10, 0, 0, 2], 19100))).is_local_trusted());
     }
 
     #[test]
     fn ipv4_mapped_loopback_is_trusted() {
         let mapped = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001);
-        assert!(is_trusted_restart_peer(SocketAddr::new(IpAddr::V6(mapped), 19100)));
+        assert!(PeerInfo::Tcp(SocketAddr::new(IpAddr::V6(mapped), 19100)).is_local_trusted());
     }
 
     #[test]
     fn ipv4_mapped_non_loopback_is_not_trusted() {
         let mapped = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc0a8, 0x0132);
-        assert!(!is_trusted_restart_peer(SocketAddr::new(IpAddr::V6(mapped), 19100)));
+        assert!(!PeerInfo::Tcp(SocketAddr::new(IpAddr::V6(mapped), 19100)).is_local_trusted());
     }
 }
