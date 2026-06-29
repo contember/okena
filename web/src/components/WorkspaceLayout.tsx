@@ -7,6 +7,7 @@ import { Sidebar } from "./Sidebar";
 import { TerminalArea } from "./TerminalArea";
 import { TerminalPane } from "./TerminalPane";
 import { StatusBar } from "./StatusBar";
+import { GitPanel } from "./GitPanel";
 
 export function WorkspaceLayout() {
   const isMobile = useIsMobile();
@@ -25,27 +26,30 @@ function DesktopLayout() {
         <aside className="w-56 flex-shrink-0 border-r border-zinc-800">
           <Sidebar />
         </aside>
-        <main className="flex-1 min-w-0">
-          {project?.layout ? (
-            <TerminalArea layout={project.layout} project={project} />
-          ) : (
-            <div className="flex items-center justify-center h-full text-zinc-500">
-              {state.workspace ? (
-                project ? (
-                  <button
-                    className="px-4 py-2 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 transition-colors"
-                    onClick={() => postAction({ action: "create_terminal", project_id: project.id })}
-                  >
-                    New Terminal
-                  </button>
+        <main className="flex flex-1 min-w-0 flex-col">
+          {project && <GitPanel project={project} />}
+          <div className="flex-1 min-h-0">
+            {project?.layout ? (
+              <TerminalArea layout={project.layout} project={project} />
+            ) : (
+              <div className="flex items-center justify-center h-full text-zinc-500">
+                {state.workspace ? (
+                  project ? (
+                    <button
+                      className="px-4 py-2 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 transition-colors"
+                      onClick={() => postAction({ action: "create_terminal", project_id: project.id })}
+                    >
+                      New Terminal
+                    </button>
+                  ) : (
+                    "Select a project"
+                  )
                 ) : (
-                  "Select a project"
-                )
-              ) : (
-                "Loading..."
-              )}
-            </div>
-          )}
+                  "Loading..."
+                )}
+              </div>
+            )}
+          </div>
         </main>
       </div>
       <StatusBar />
