@@ -92,6 +92,11 @@ export interface FileDiffSummary {
   is_new: boolean;
 }
 
+export interface DirectoryEntry {
+  name: string;
+  is_dir: boolean;
+}
+
 export type DiffMode =
   | "working_tree"
   | "staged"
