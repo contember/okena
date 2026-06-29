@@ -122,7 +122,15 @@ impl RemoteServer {
         let local_listener = match &local_endpoint {
             Some(LocalEndpoint::UnixSocket { path }) => {
                 let path_buf = std::path::PathBuf::from(path);
-                match crate::serve::bind_unix_socket(&path_buf) {
+                // `UnixListener::bind` registers with the tokio reactor, so it
+                // must run inside the runtime context. The TCP binds get this for
+                // free via `block_on` above; here we're on the plain caller thread
+                // (daemon main / GPUI thread), so enter the runtime explicitly.
+                let bound = {
+                    let _guard = runtime.enter();
+                    crate::serve::bind_unix_socket(&path_buf)
+                };
+                match bound {
                     Ok(listener) => Some((path_buf, listener)),
                     Err(e) => {
                         log::warn!("Failed to bind local daemon socket at {path}: {e}");
