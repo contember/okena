@@ -108,26 +108,26 @@ export function TerminalPane({
       fontSize: 14,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, monospace",
       theme: {
-        background: "#09090b",
-        foreground: "#e4e4e7",
-        cursor: "#e4e4e7",
-        selectionBackground: "#3f3f46",
-        black: "#18181b",
-        red: "#ef4444",
-        green: "#22c55e",
-        yellow: "#eab308",
-        blue: "#3b82f6",
-        magenta: "#a855f7",
-        cyan: "#06b6d4",
-        white: "#e4e4e7",
-        brightBlack: "#52525b",
-        brightRed: "#f87171",
-        brightGreen: "#4ade80",
-        brightYellow: "#facc15",
-        brightBlue: "#60a5fa",
-        brightMagenta: "#c084fc",
-        brightCyan: "#22d3ee",
-        brightWhite: "#fafafa",
+        background: "#1e1e1e",
+        foreground: "#cccccc",
+        cursor: "#aeafad",
+        selectionBackground: "#264f78",
+        black: "#000000",
+        red: "#cd3131",
+        green: "#0dbc79",
+        yellow: "#e5e510",
+        blue: "#2472c8",
+        magenta: "#bc3fbc",
+        cyan: "#11a8cd",
+        white: "#e5e5e5",
+        brightBlack: "#666666",
+        brightRed: "#f14c4c",
+        brightGreen: "#23d18b",
+        brightYellow: "#f5f543",
+        brightBlue: "#3b8eea",
+        brightMagenta: "#d670d6",
+        brightCyan: "#29b8db",
+        brightWhite: "#ffffff",
       },
       allowProposedApi: true,
       scrollback: 5000,
@@ -199,10 +199,9 @@ export function TerminalPane({
   }
 
   return (
-    <div className="flex flex-col h-full" onMouseDown={handleFocus}>
-      {/* Header with name and action buttons */}
-      <div className="flex items-center flex-shrink-0 px-2 py-1 bg-zinc-900 border-b border-zinc-800">
-        <span className="text-xs text-zinc-500 truncate flex-1">
+    <div className="terminal-pane flex h-full flex-col" onMouseDown={handleFocus}>
+      <div className="terminal-header flex flex-shrink-0 items-center border-b px-2">
+        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--ok-text-secondary)]">
           {name ?? "Terminal"}
         </span>
         <div className="flex items-center gap-0.5 ml-2">
@@ -210,31 +209,35 @@ export function TerminalPane({
             <>
               <button
                 onClick={(e) => { e.stopPropagation(); handleSplit("horizontal"); }}
-                className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
+                className="icon-button"
                 title="Split horizontal"
+                aria-label="Split horizontal"
               >
-                &#x2502;
+                &#x2500;
               </button>
               <button
                 onClick={(e) => { e.stopPropagation(); handleSplit("vertical"); }}
-                className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
+                className="icon-button"
                 title="Split vertical"
+                aria-label="Split vertical"
               >
-                &#x2500;
+                &#x2502;
               </button>
             </>
           )}
           <button
             onClick={(e) => { e.stopPropagation(); handleRename(); }}
-            className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
+            className="icon-button"
             title="Rename terminal"
+            aria-label="Rename terminal"
           >
-            rename
+            R
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); handleClose(); }}
-            className="p-1 text-zinc-500 hover:text-red-400 hover:bg-zinc-700 rounded text-xs"
+            className="icon-button icon-button-danger"
             title="Close terminal"
+            aria-label="Close terminal"
           >
             &#x2715;
           </button>
