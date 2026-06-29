@@ -252,22 +252,14 @@ pub fn apply_remote_snapshot(
             // Add new remote project_order entries
             data.project_order.extend(remote_order);
         } else {
-            // No state (disconnected/connecting) — remove materialized projects and folders
+            // No state (disconnected/connecting) — remove materialized projects
+            // and folders, but keep per-window presentation state. The same
+            // connection may reconnect with the same prefixed ids; scrubbing
+            // hidden_project_ids here would make every project visible again.
+            // Permanent removals still scrub below when a connection disappears
+            // from `snapshots`, and server-side deletions scrub via the stale
+            // project pass after a successful state snapshot.
             let prefix = format!("remote:{}:", conn_id);
-            let removed_project_ids: Vec<String> = data.projects.iter()
-                .filter(|p| p.id.starts_with(&prefix))
-                .map(|p| p.id.clone())
-                .collect();
-            let removed_folder_ids: Vec<String> = data.folders.iter()
-                .filter(|f| f.id.starts_with(&prefix))
-                .map(|f| f.id.clone())
-                .collect();
-            for project_id in removed_project_ids {
-                data.delete_project_scrub_all_windows(&project_id);
-            }
-            for folder_id in removed_folder_ids {
-                data.delete_folder_scrub_all_windows(&folder_id);
-            }
             data.projects.retain(|p| !p.id.starts_with(&prefix));
             data.folders.retain(|f| !f.id.starts_with(&prefix));
             data.project_order.retain(|id| !id.starts_with(&prefix));
@@ -631,6 +623,50 @@ mod tests {
         }], WindowId::Main);
         assert!(data.projects.is_empty());
         assert!(data.project_order.is_empty());
+    }
+
+    #[test]
+    fn transient_disconnect_preserves_per_window_visibility_for_reconnect() {
+        let mut data = empty_data();
+        let extra = okena_state::WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+        let mut rs = RemoteSyncState::new();
+
+        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![api_project("a", None)], vec!["a".into()], vec![])),
+        }], WindowId::Main);
+        data.main_window.hidden_project_ids.insert("remote:c1:a".to_string());
+        data.window_mut(WindowId::Extra(extra_id)).unwrap()
+            .hidden_project_ids
+            .insert("remote:c1:a".to_string());
+
+        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
+            config: config("c1"),
+            state: None,
+        }], WindowId::Main);
+
+        assert!(data.projects.is_empty());
+        assert!(data.main_window.hidden_project_ids.contains("remote:c1:a"));
+        assert!(
+            data.window(WindowId::Extra(extra_id)).unwrap()
+                .hidden_project_ids
+                .contains("remote:c1:a")
+        );
+
+        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![api_project("a", None)], vec!["a".into()], vec![])),
+        }], WindowId::Main);
+
+        assert_eq!(data.projects.len(), 1);
+        assert!(data.main_window.hidden_project_ids.contains("remote:c1:a"));
+        assert!(
+            data.window(WindowId::Extra(extra_id)).unwrap()
+                .hidden_project_ids
+                .contains("remote:c1:a")
+        );
     }
 
     #[test]

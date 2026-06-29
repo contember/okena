@@ -258,13 +258,13 @@ impl RemoteConnectionManager {
         }
     }
 
-    /// Re-point an existing connection at a (possibly new) port + token, then
+    /// Re-point an existing connection at a (possibly new) local daemon + token, then
     /// reconnect. Used after a local-daemon restart: the replacement daemon may
     /// bind a DIFFERENT port (the old one can linger in TIME_WAIT), so a plain
-    /// `reconnect` — which reuses the old config — could dial a dead port. The
-    /// caller re-reads `remote.json` for the new port and passes it here.
+    /// `reconnect` — which reuses the old config — could dial a dead endpoint.
+    /// The caller re-reads `remote.json` and passes the full fresh config here.
     ///
-    /// `connect()` clones the config at call time, so mutating it first and then
+    /// `connect()` clones the config at call time, so replacing it first and
     /// reconnecting picks up the new endpoint. The token usually survives a
     /// restart (the daemon reloads `remote_tokens.json` at startup), so `token`
     /// is normally the existing one; it is refreshed here for completeness. Does
@@ -272,12 +272,12 @@ impl RemoteConnectionManager {
     pub fn redirect_and_reconnect(
         &mut self,
         connection_id: &str,
-        port: u16,
+        next_config: RemoteConnectionConfig,
         token: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if let Some(conn) = self.connections.get_mut(connection_id) {
-            conn.config_mut().port = port;
+            *conn.config_mut() = next_config;
             if let Some(token) = token {
                 conn.config_mut().saved_token = Some(token);
             }

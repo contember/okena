@@ -675,9 +675,16 @@ impl WindowView {
                 .connections()
                 .into_iter()
                 .find(|(c, _, _)| c.id == LOCAL_DAEMON_CONNECTION_ID)
-                .map(|(c, _, _)| (c.host.clone(), c.port, c.saved_token.clone()))
+                .map(|(c, _, _)| {
+                    (
+                        c.host.clone(),
+                        c.port,
+                        c.saved_token.clone(),
+                        c.local_endpoint.clone(),
+                    )
+                })
         };
-        let Some((host, old_port, token)) = endpoint else {
+        let Some((host, old_port, token, local_endpoint)) = endpoint else {
             ToastManager::error("Local daemon connection not found", cx);
             return;
         };
@@ -691,16 +698,31 @@ impl WindowView {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    okena_remote_server::local::restart_local_daemon(&host, old_port)
+                    okena_remote_server::local::restart_local_daemon(
+                        &host,
+                        old_port,
+                        local_endpoint.as_ref(),
+                    )
                 })
                 .await;
 
             match outcome {
                 Ok(daemon) => {
                     let _ = rm.update(cx, |rm, cx| {
+                        let next_config = okena_transport::client::RemoteConnectionConfig {
+                            id: LOCAL_DAEMON_CONNECTION_ID.to_string(),
+                            name: "Local".to_string(),
+                            host: daemon.host().to_string(),
+                            port: daemon.port,
+                            saved_token: token.clone(),
+                            token_obtained_at: None,
+                            tls: daemon.tls,
+                            pinned_cert_sha256: None,
+                            local_endpoint: daemon.local_endpoint,
+                        };
                         rm.redirect_and_reconnect(
                             LOCAL_DAEMON_CONNECTION_ID,
-                            daemon.port,
+                            next_config,
                             token,
                             cx,
                         );
