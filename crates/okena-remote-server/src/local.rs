@@ -339,12 +339,10 @@ pub fn restart_local_daemon(
         Err(e) => log::warn!("restart POST error (daemon likely exiting): {e}"),
     }
 
-    if old_pid != 0 {
-        if !wait_for_pid_exit(old_pid, Duration::from_secs(10)) {
-            return Err(format!(
-                "outgoing daemon pid {old_pid} did not exit before timeout"
-            ));
-        }
+    if old_pid != 0 && !wait_for_pid_exit(old_pid, Duration::from_secs(10)) {
+        return Err(format!(
+            "outgoing daemon pid {old_pid} did not exit before timeout"
+        ));
     }
 
     wait_until_ready_replacing(old_pid, Duration::from_secs(15))

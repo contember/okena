@@ -305,15 +305,15 @@ fn ensure_token() -> Result<String, String> {
     if let Some(config) = load_cli_config() {
         // Quick validation: try an authenticated request
         if let Ok(server) = discover_server()
-            && let Ok((client, url)) = server.client_and_url("/v1/tokens") {
-            if let Ok(resp) = client
+            && let Ok((client, url)) = server.client_and_url("/v1/tokens")
+            && let Ok(resp) = client
                 .get(&url)
                 .header("Authorization", format!("Bearer {}", config.token))
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
-                && resp.status().is_success() {
-                    return Ok(config.token);
-                }
+            && resp.status().is_success()
+        {
+            return Ok(config.token);
         }
     }
 
