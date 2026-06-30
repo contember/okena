@@ -42,7 +42,10 @@ impl GitHeader {
                 let review_head = status.branch.clone();
 
                 h_flex()
-                    .flex_shrink_0()
+                    // Grow to fill the header row so the base-compare chip can
+                    // be pushed to the right edge (via the flex spacer below).
+                    .flex_1()
+                    .min_w_0()
                     .items_center()
                     .gap(px(4.0))
                     .text_size(ui_text_sm(cx))
@@ -209,24 +212,31 @@ impl GitHeader {
                                 ).absolute().size_full())
                         )
                     })
-                    // Ahead/behind vs the review base. When a base exists this
-                    // doubles as the "review changes" affordance: a leading
-                    // pull-request glyph + clicking opens a three-dot diff of
+                    // Commits to push (vs origin/<branch>): the standard green
+                    // ↑N arrow. Standalone — not part of the review action.
+                    .when_some(
+                        project_header::render_unpushed_badge(status.unpushed, t),
+                        |d, badge| d.child(badge),
+                    )
+                    // Flexible spacer: pushes the base-compare chip to the right
+                    // edge of the header row.
+                    .child(div().flex_1().min_w(px(8.0)))
+                    // Branch-vs-base comparison, shown only when a base exists,
+                    // as a labeled `⎇ main +N −M` chip. Doubles as the "review
+                    // changes" affordance: clicking opens a three-dot diff of
                     // the branch against its base (e.g. origin/main).
                     .when_some(
-                        project_header::render_ahead_behind_badge(
-                            status.ahead,
-                            status.behind,
-                            status.unpushed,
-                            review_base.as_deref(),
-                            t,
-                        ),
-                        |d, badge| {
-                            let Some(base) = review_base.clone() else {
-                                // No base (HEAD on the default branch): show the
-                                // badge (e.g. unpushed) without the review action.
-                                return d.child(badge);
-                            };
+                        review_base.as_deref().and_then(|base| {
+                            project_header::render_base_compare_badge(
+                                status.ahead,
+                                status.behind,
+                                base,
+                                status.default_branch.as_deref(),
+                                t,
+                            )
+                            .map(|badge| (base.to_string(), badge))
+                        }),
+                        |d, (base, badge)| {
                             let request_broker = self.request_broker.clone();
                             let project_id_for_review = self.project_id.clone();
                             let head = review_head.clone().unwrap_or_else(|| "HEAD".to_string());
@@ -262,7 +272,7 @@ impl GitHeader {
                                     }))
                                     .child(
                                         svg()
-                                            .path("icons/git-pull-request.svg")
+                                            .path("icons/git-branch.svg")
                                             .size(px(10.0))
                                             .text_color(rgb(t.text_muted)),
                                     )

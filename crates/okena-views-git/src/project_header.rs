@@ -81,48 +81,14 @@ pub(crate) fn tint(color: u32, alpha: f32) -> Rgba {
 
 // ── Standalone badges ───────────────────────────────────────────────────────
 
-/// Tooltip text describing ahead/behind/unpushed counts.
-///
-/// `ahead`/`behind` are relative to the upstream tracking branch (which for
-/// worktree branches off `origin/main` may be `origin/main` itself, not the
-/// branch's own remote). `unpushed` counts commits missing from
-/// `origin/<branch>` specifically — `None` when that ref doesn't exist.
-///
-/// Returns `None` when there is nothing meaningful to show.
-pub fn ahead_behind_tooltip(
-    ahead: Option<usize>,
-    behind: Option<usize>,
-    unpushed: Option<usize>,
-    base: Option<&str>,
-) -> Option<String> {
-    let a = ahead.unwrap_or(0);
-    let b = behind.unwrap_or(0);
-    let u = unpushed.unwrap_or(0);
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let base_label = base.unwrap_or("base");
+/// Strip a leading `origin/` so a base ref reads as a plain branch name
+/// (`origin/main` → `main`) in the comparison chip.
+pub(crate) fn base_short_name(base: &str) -> &str {
+    base.strip_prefix("origin/").unwrap_or(base)
+}
 
-    // When unpushed differs from ahead, the branch's own remote isn't the base
-    // (typical worktree case). Surface both numbers so the user can tell
-    // "ahead of base" from "not pushed to origin/<branch>".
-    let show_unpushed = unpushed.is_some() && Some(a) != unpushed;
-
-    let mut parts: Vec<String> = Vec::new();
-    if a > 0 {
-        // The ahead count is the clickable "review" affordance when we have a base.
-        let hint = if base.is_some() { " — click to review" } else { "" };
-        parts.push(format!("{a} commit{} ahead of {base_label}{hint}", plural(a)));
-    }
-    if b > 0 {
-        parts.push(format!("{b} commit{} behind {base_label}", plural(b)));
-    }
-    if show_unpushed {
-        parts.push(format!(
-            "{u} commit{} not pushed to origin/<branch>",
-            plural(u)
-        ));
-    }
-
-    if parts.is_empty() { None } else { Some(parts.join("\n")) }
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 /// Render a single "<sign> <count>" pair where the sign character is rendered
@@ -143,47 +109,83 @@ fn render_sign_count(sign: &str, count: usize, color: u32, alpha: f32) -> Div {
         )
 }
 
-/// Render an ahead/behind/unpushed indicator.
+/// Render the "commits to push" indicator: a green `↑N` counting commits not
+/// yet on `origin/<branch>`. This is the standard git convention (matches the
+/// upstream-sync arrow in VS Code, lazygit, etc.) — it drops to 0 after a push.
 ///
-/// - `↑N` (green) — commits ahead of the review base (`origin/<default>`)
-/// - `↓M` (yellow) — commits behind the review base (branch is stale)
-/// - `↟K` (cyan, double-headed) — commits not on `origin/<branch>`. Only
-///   shown when the count differs from `ahead` (i.e. the branch's own remote
-///   isn't the base — typical worktree case), so it doesn't double up in the
-///   common case where `↑N` already means "to push".
+/// Returns `None` when nothing is unpushed (or the upstream ref is unknown).
+pub fn render_unpushed_badge(unpushed: Option<usize>, t: &ThemeColors) -> Option<AnyElement> {
+    let u = unpushed.filter(|&u| u > 0)?;
+    let tooltip = format!("{u} commit{} to push (not on origin/<branch>)", plural(u));
+    Some(
+        div()
+            .id("unpushed-badge")
+            .flex()
+            .items_center()
+            .px(px(3.0))
+            .child(render_sign_count("\u{2191}", u, t.term_green, 0.7))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .into_any_element(),
+    )
+}
+
+/// Render the branch-vs-base comparison content: ahead (`+N`) and behind (`−M`)
+/// commit counts, e.g. `main +2 −1`. The base name is shown only when it isn't
+/// the repository's default branch (`default_branch`) — comparing against the
+/// default is the common case, so its name would be redundant noise. The
+/// caller pairs this with a branch glyph and the click-to-review affordance.
 ///
-/// `base` is the base ref name (e.g. `origin/main`) used in the tooltip.
-/// Zero-count sides are hidden. Returns `None` when nothing is worth showing.
-pub fn render_ahead_behind_badge(
+/// Zero-count sides are hidden. Returns `None` when the branch is level with
+/// its base (nothing to review).
+pub fn render_base_compare_badge(
     ahead: Option<usize>,
     behind: Option<usize>,
-    unpushed: Option<usize>,
-    base: Option<&str>,
+    base: &str,
+    default_branch: Option<&str>,
     t: &ThemeColors,
 ) -> Option<AnyElement> {
-    let tooltip_text = ahead_behind_tooltip(ahead, behind, unpushed, base)?;
     let a = ahead.unwrap_or(0);
     let b = behind.unwrap_or(0);
-    let u = unpushed.unwrap_or(0);
-    let show_unpushed = unpushed.is_some() && Some(a) != unpushed && u > 0;
+    if a == 0 && b == 0 {
+        return None;
+    }
+
+    let base_label = base_short_name(base).to_string();
+    // Hide the label when the base is the default branch (the redundant case);
+    // show it only for a non-default base so it carries information.
+    let show_label = default_branch.is_none_or(|d| d != base_label);
+    let tooltip = {
+        let mut parts = Vec::new();
+        if a > 0 {
+            parts.push(format!("{a} commit{} ahead of {base_label}", plural(a)));
+        }
+        if b > 0 {
+            parts.push(format!("{b} commit{} behind {base_label}", plural(b)));
+        }
+        parts.push("click to review".to_string());
+        parts.join("\n")
+    };
 
     Some(
         div()
-            .id("ahead-behind-badge")
+            .id("base-compare-badge")
             .flex()
             .items_center()
-            .gap(px(5.0))
-            .px(px(3.0))
+            .gap(px(4.0))
+            .when(show_label, |d| {
+                d.child(
+                    div()
+                        .text_color(rgb(t.text_muted))
+                        .child(base_label.clone()),
+                )
+            })
             .when(a > 0, |d| {
-                d.child(render_sign_count("\u{2191}", a, t.term_green, 0.7))
+                d.child(render_sign_count("+", a, t.term_green, 0.7))
             })
             .when(b > 0, |d| {
-                d.child(render_sign_count("\u{2193}", b, t.term_yellow, 0.7))
+                d.child(render_sign_count("\u{2212}", b, t.term_yellow, 0.7))
             })
-            .when(show_unpushed, |d| {
-                d.child(render_sign_count("\u{219F}", u, t.term_cyan, 0.7))
-            })
-            .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .into_any_element(),
     )
 }

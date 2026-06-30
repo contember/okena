@@ -105,6 +105,11 @@ pub struct GitStatus {
     /// is on the default branch, or no default branch is resolvable).
     #[serde(default)]
     pub review_base: Option<String>,
+    /// The repository's default branch (e.g. `main`). Used to suppress the
+    /// redundant base label on the ahead/behind chip when the review base is
+    /// the default branch (the common case). `None` when unresolved.
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 /// Per-file diff summary for popover display
@@ -234,6 +239,7 @@ pub fn warm_branch_cache(path: &Path) {
             behind: None,
             unpushed: None,
             review_base: None,
+            default_branch: None,
         }));
     });
 }

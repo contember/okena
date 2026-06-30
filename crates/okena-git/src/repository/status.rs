@@ -32,6 +32,11 @@ pub fn get_status(path: &Path) -> StatusFetch {
     };
     let unpushed = count_unpushed_commits(path);
     let review_base = super::branch::resolve_review_base(path);
+    // Only needed to decide whether the base label is redundant (base == default);
+    // skip the lookup when there's no base chip to render.
+    let default_branch = review_base
+        .as_ref()
+        .and_then(|_| super::branch::get_default_branch(path));
     // Ahead/behind are measured against the review base (`origin/<default>`),
     // not the branch's configured upstream — so the count is consistent
     // regardless of how `@{u}` is set and matches the "review changes" diff.
@@ -54,6 +59,7 @@ pub fn get_status(path: &Path) -> StatusFetch {
         behind,
         unpushed,
         review_base,
+        default_branch,
     }))
 }
 
