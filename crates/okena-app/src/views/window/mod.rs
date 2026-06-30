@@ -393,7 +393,7 @@ impl WindowView {
             // When the active terminal changes project, ensure it's visible
             else if focused_terminal_project != this.last_scroll_project && focused_terminal_project.is_some() {
                 this.last_scroll_project = focused_terminal_project.clone();
-                this.scroll_to_focused_project(focused_terminal_project.as_deref(), cx);
+                this.scroll_to_focused_project(focused_terminal_project.as_deref(), true, cx);
             }
 
             this.was_project_focused = is_project_focused;

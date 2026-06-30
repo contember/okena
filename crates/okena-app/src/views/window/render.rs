@@ -32,9 +32,14 @@ impl WindowView {
     }
 
     /// Scroll the projects grid horizontally to ensure the focused project column is visible.
-    /// Scroll the project grid just enough to bring the focused project into
-    /// view (no-op if it is already visible). Never re-centers.
-    pub(super) fn scroll_to_focused_project(&self, focused_id: Option<&str>, cx: &Context<Self>) {
+    /// Scroll the project grid to reveal the focused project.
+    ///
+    /// `center: true` centers it in the viewport — used when actively
+    /// navigating to a project (project switcher Tab, switching the active
+    /// project) so it lands in the middle rather than flush against an edge.
+    /// `center: false` scrolls the minimum needed and is a no-op when the
+    /// project is already fully visible.
+    pub(super) fn scroll_to_focused_project(&self, focused_id: Option<&str>, center: bool, cx: &Context<Self>) {
         let focused_id = match focused_id {
             Some(id) => id,
             None => return,
@@ -85,7 +90,11 @@ impl WindowView {
             f32::from(if is_rows { o.y } else { o.x })
         };
 
-        let new_offset = {
+        let new_offset = if center {
+            // Center the focused project in the viewport.
+            let col_center = col_lead + pixel_widths[focused_idx] / 2.0;
+            -(col_center - container_size / 2.0)
+        } else {
             let col_trail = col_lead + pixel_widths[focused_idx];
             let viewport_lead = -current_offset_axis;
             let viewport_trail = viewport_lead + container_size;
@@ -138,7 +147,7 @@ impl WindowView {
                 } else {
                     // No saved position (e.g. focus entered before this window
                     // observed it) — fall back to just ensuring it's visible.
-                    self.scroll_to_focused_project(Some(&project_id), cx);
+                    self.scroll_to_focused_project(Some(&project_id), false, cx);
                 }
             } else {
                 // Layout hasn't updated yet — re-queue for next frame
