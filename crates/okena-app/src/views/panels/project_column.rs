@@ -433,11 +433,12 @@ impl ProjectColumn {
                         ahead: g.ahead,
                         behind: g.behind,
                         unpushed: g.unpushed,
-                        // Carried over the wire (ApiGitStatus.review_base) so the
-                        // "Review changes" branch-vs-base chip renders for
+                        // Carried over the wire (ApiGitStatus.review_base /
+                        // .default_branch) so the "Review changes" chip renders
+                        // and the base label hides on the default branch for
                         // daemon-backed projects too.
                         review_base: g.review_base.clone(),
-                        default_branch: None,
+                        default_branch: g.default_branch.clone(),
                     })
             })
     }

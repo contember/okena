@@ -216,6 +216,13 @@ pub struct ApiGitStatus {
     /// chip — without it the GUI hard-codes `None` and the chip never renders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_base: Option<String>,
+    /// The repository's default branch (e.g. `main`). Used to suppress the
+    /// redundant base label on the ahead/behind chip when the review base is
+    /// the default branch (the common case). Carried over the wire so the
+    /// daemon-client GUI can hide the label too — without it the GUI hard-codes
+    /// `None` and the label always shows. `None` when unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
 }
 
 /// Wire projection of a daemon-originated toast, forwarded to thin clients so
@@ -1190,6 +1197,7 @@ mod tests {
             behind: Some(1),
             unpushed: Some(2),
             review_base: Some("origin/main".into()),
+            default_branch: Some("main".into()),
         };
         let json = serde_json::to_string(&status).unwrap();
         let parsed: ApiGitStatus = serde_json::from_str(&json).unwrap();
@@ -1198,6 +1206,7 @@ mod tests {
         assert_eq!(parsed.ahead, Some(3));
         assert_eq!(parsed.behind, Some(1));
         assert_eq!(parsed.review_base.as_deref(), Some("origin/main"));
+        assert_eq!(parsed.default_branch.as_deref(), Some("main"));
         assert_eq!(parsed.unpushed, Some(2));
         assert_eq!(parsed.ci_checks.as_ref().unwrap().checks[0].elapsed_label(), "1m5s");
     }
