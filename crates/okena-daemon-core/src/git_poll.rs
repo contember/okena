@@ -65,6 +65,7 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
         behind: s.behind,
         unpushed: s.unpushed,
         review_base: s.review_base.clone(),
+        default_branch: s.default_branch.clone(),
     }
 }
 
