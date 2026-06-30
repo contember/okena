@@ -98,6 +98,23 @@ impl ActionDispatcher {
         matches!(self, Self::Remote { .. })
     }
 
+    fn queue_focus_for_next_remote_terminal(
+        workspace: &Entity<Workspace>,
+        window_id: WindowId,
+        project_id: &str,
+        cx: &mut impl AppContext,
+    ) {
+        let pid = project_id.to_string();
+        workspace.update(cx, |ws, _cx| {
+            let old_terminal_ids = ws
+                .project(&pid)
+                .and_then(|p| p.layout.as_ref())
+                .map(|layout| layout.collect_terminal_ids())
+                .unwrap_or_default();
+            ws.queue_pending_remote_focus(window_id, &pid, old_terminal_ids);
+        });
+    }
+
     /// Dispatch a standard action (split, close, create terminal, service action, etc.).
     pub fn dispatch(&self, action: ActionRequest, cx: &mut impl AppContext) {
         let Self::Remote {
@@ -175,16 +192,14 @@ impl ActionDispatcher {
                 // Record pending focus — the actual focus will happen when
                 // the next state sync brings the new terminal into the
                 // client's layout (see sync_remote_projects_into_workspace).
-                let pid = project_id.clone();
-                let window_id = *window_id;
-                workspace.update(cx, |ws, _cx| {
-                    let old_terminal_ids = ws
-                        .project(&pid)
-                        .and_then(|p| p.layout.as_ref())
-                        .map(|layout| layout.collect_terminal_ids())
-                        .unwrap_or_default();
-                    ws.queue_pending_remote_focus(window_id, &pid, old_terminal_ids);
-                });
+                Self::queue_focus_for_next_remote_terminal(workspace, *window_id, project_id, cx);
+                // Don't return — action proceeds to be sent to server below
+            }
+            ActionRequest::SplitTerminal { project_id, .. }
+            | ActionRequest::AddTab { project_id, .. } => {
+                // Split/tab creation also happens on the daemon now. Defer
+                // terminal focus until the synced layout contains the new PTY.
+                Self::queue_focus_for_next_remote_terminal(workspace, *window_id, project_id, cx);
                 // Don't return — action proceeds to be sent to server below
             }
             ActionRequest::CreateWorktree { branch, .. } => {
