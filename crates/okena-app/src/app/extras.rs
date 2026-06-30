@@ -412,6 +412,10 @@ impl Okena {
             },
         };
 
+        // Mark this as an explicit jump so the target window centers the
+        // project (arrow/click switches only ensure visibility).
+        view.update(cx, |v, _| v.request_center_on_next_navigation());
+
         // Point that window's FocusManager at the first visible terminal.
         let focus_manager = view.read(cx).focus_manager();
         let pid = project_id.to_string();

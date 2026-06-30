@@ -155,6 +155,10 @@ pub struct WindowView {
     /// so the project stays in the same place rather than jumping to center.
     /// (The offset is otherwise clamped to 0 while a single project is zoomed.)
     saved_grid_offset: Option<Point<Pixels>>,
+    /// Set by an explicit "jump to project" (project switcher Tab) so the next
+    /// focus-change observation centers the target. Other project switches
+    /// (cmd+alt+arrow, mouse click) leave it unset and only ensure visibility.
+    center_next_navigation: bool,
     /// Last-known on-disk paths per local project, used to detect renames
     /// so we can refresh cached git providers / service paths.
     last_project_paths: HashMap<String, String>,
@@ -337,6 +341,7 @@ impl WindowView {
             was_project_focused: false,
             pending_center_scroll: None,
             saved_grid_offset: None,
+            center_next_navigation: false,
             last_project_paths: HashMap::new(),
             last_data_replacement_epoch,
         };
@@ -376,6 +381,9 @@ impl WindowView {
             let focused_terminal_project = fm
                 .focused_terminal_state()
                 .map(|f| f.project_id.clone());
+            // Consumed once per observation: an explicit jump (switcher Tab)
+            // centers the target; other switches just ensure it's visible.
+            let center_navigation = std::mem::take(&mut this.center_next_navigation);
 
             // Entering project zoom: capture the grid scroll position now (before
             // the zoomed single-project layout clamps it to 0) so it can be
@@ -393,7 +401,7 @@ impl WindowView {
             // When the active terminal changes project, ensure it's visible
             else if focused_terminal_project != this.last_scroll_project && focused_terminal_project.is_some() {
                 this.last_scroll_project = focused_terminal_project.clone();
-                this.scroll_to_focused_project(focused_terminal_project.as_deref(), true, cx);
+                this.scroll_to_focused_project(focused_terminal_project.as_deref(), center_navigation, cx);
             }
 
             this.was_project_focused = is_project_focused;
@@ -455,6 +463,13 @@ impl WindowView {
     /// supplied via `focus_manager.update(cx, |fm, cx| ws.method(fm, ...))`.
     pub fn focus_manager(&self) -> Entity<FocusManager> {
         self.focus_manager.clone()
+    }
+
+    /// Request that the next focus-change observation center the focused project
+    /// in the overview. Used for explicit "jump to project" (project switcher
+    /// Tab); arrow/click switches leave this unset and only ensure visibility.
+    pub fn request_center_on_next_navigation(&mut self) {
+        self.center_next_navigation = true;
     }
 
     /// Set the git watcher entity (called by Okena after creation).
