@@ -931,51 +931,6 @@ impl ProjectColumn {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::project_header_display_name;
-    use crate::workspace::settings::HooksConfig;
-    use crate::workspace::state::{ProjectData, WorktreeMetadata};
-    use okena_core::theme::FolderColor;
-    use std::collections::HashMap;
-
-    fn project_with_name(name: &str) -> ProjectData {
-        ProjectData {
-            id: "p1".to_string(),
-            name: name.to_string(),
-            path: "/tmp/repo-worktree".to_string(),
-            layout: None,
-            terminal_names: HashMap::new(),
-            hidden_terminals: HashMap::new(),
-            worktree_info: None,
-            worktree_ids: Vec::new(),
-            folder_color: FolderColor::default(),
-            hooks: HooksConfig::default(),
-            is_remote: false,
-            connection_id: None,
-            service_terminals: HashMap::new(),
-            default_shell: None,
-            hook_terminals: HashMap::new(),
-            pinned: false,
-            last_activity_at: None,
-        }
-    }
-
-    #[test]
-    fn project_header_uses_worktree_project_name() {
-        let mut project = project_with_name("feature-login");
-        project.worktree_info = Some(WorktreeMetadata {
-            parent_project_id: "parent".to_string(),
-            color_override: None,
-            main_repo_path: "/tmp/repo".to_string(),
-            worktree_path: "/tmp/repo-worktree".to_string(),
-            branch_name: "feature/login".to_string(),
-        });
-
-        assert_eq!(project_header_display_name(&project), "feature-login");
-    }
-}
-
 impl Render for ProjectColumn {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -1092,5 +1047,50 @@ impl Render for ProjectColumn {
                 .child("Project not found")
                 .into_any_element(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_header_display_name;
+    use crate::workspace::settings::HooksConfig;
+    use crate::workspace::state::{ProjectData, WorktreeMetadata};
+    use okena_core::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn project_with_name(name: &str) -> ProjectData {
+        ProjectData {
+            id: "p1".to_string(),
+            name: name.to_string(),
+            path: "/tmp/repo-worktree".to_string(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+        }
+    }
+
+    #[test]
+    fn project_header_uses_worktree_project_name() {
+        let mut project = project_with_name("feature-login");
+        project.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/repo-worktree".to_string(),
+            branch_name: "feature/login".to_string(),
+        });
+
+        assert_eq!(project_header_display_name(&project), "feature-login");
     }
 }
