@@ -497,15 +497,22 @@ pub fn get_window_layout_path() -> PathBuf {
 /// schema versions in place (see [`WINDOW_LAYOUT_VERSION`]).
 pub fn load_window_layout() -> Option<ClientWindowLayout> {
     let path = get_window_layout_path();
-    let content = std::fs::read_to_string(&path).ok()?;
+    let legacy_layout = load_workspace_window_layout();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => return legacy_layout,
+    };
     match serde_json::from_str::<ClientWindowLayout>(&content) {
         Ok(mut layout) => {
             migrate_window_layout(&mut layout);
+            if let Some(legacy_layout) = legacy_layout {
+                merge_missing_window_layout_state(&mut layout, legacy_layout);
+            }
             Some(layout)
         }
         Err(e) => {
             log::warn!("Failed to parse window-layout.json: {e}; ignoring.");
-            None
+            legacy_layout
         }
     }
 }
@@ -519,7 +526,138 @@ pub fn load_window_layout() -> Option<ClientWindowLayout> {
 /// [`WINDOW_LAYOUT_VERSION`] for why the old v1 → v2 visibility wipe was a
 /// regression and is gone.)
 fn migrate_window_layout(layout: &mut ClientWindowLayout) {
+    prefix_local_daemon_window_refs(layout);
     layout.version = WINDOW_LAYOUT_VERSION;
+}
+
+/// Best-effort upgrade bridge from the pre-daemon-client layout shape.
+///
+/// Before `window-layout.json` existed, the main/extra window presentation lived
+/// inside `workspace.json` and referenced local project/folder ids directly
+/// (`p1`, `f1`). The GUI now mirrors the local daemon as
+/// `remote:local-daemon:p1`, while the daemon continues to persist the raw
+/// local ids in `workspace.json`. On first launch after the daemon-client
+/// upgrade, use the old workspace window state as the initial client layout and
+/// rewrite its local refs to the mirror ids.
+fn load_workspace_window_layout() -> Option<ClientWindowLayout> {
+    let content = std::fs::read_to_string(get_workspace_path()).ok()?;
+    let migrated = match migrate_legacy_json(&content) {
+        Ok(content) => content,
+        Err(e) => {
+            log::warn!("Failed to migrate workspace window layout JSON: {e}; ignoring.");
+            content
+        }
+    };
+    let data = match serde_json::from_str::<WorkspaceData>(&migrated) {
+        Ok(data) => migrate_workspace(data),
+        Err(e) => {
+            log::warn!("Failed to parse workspace window layout fallback: {e}; ignoring.");
+            return None;
+        }
+    };
+
+    let mut layout = ClientWindowLayout {
+        version: WINDOW_LAYOUT_VERSION,
+        main_window: data.main_window,
+        extra_windows: data.extra_windows,
+    };
+    prefix_local_daemon_window_refs(&mut layout);
+    Some(layout)
+}
+
+fn merge_missing_window_layout_state(target: &mut ClientWindowLayout, source: ClientWindowLayout) {
+    merge_missing_window_state(&mut target.main_window, source.main_window);
+
+    for source_extra in source.extra_windows {
+        if let Some(target_extra) = target
+            .extra_windows
+            .iter_mut()
+            .find(|extra| extra.id == source_extra.id)
+        {
+            merge_missing_window_state(target_extra, source_extra);
+        } else if window_state_has_presentation(&source_extra) {
+            target.extra_windows.push(source_extra);
+        }
+    }
+}
+
+fn merge_missing_window_state(target: &mut WindowState, source: WindowState) {
+    if target.hidden_project_ids.is_empty() {
+        target.hidden_project_ids = source.hidden_project_ids;
+    }
+    if target.folder_filter.is_none() {
+        target.folder_filter = source.folder_filter;
+    }
+    if target.project_widths.is_empty() {
+        target.project_widths = source.project_widths;
+    }
+    if target.folder_collapsed.is_empty() {
+        target.folder_collapsed = source.folder_collapsed;
+    }
+    if target.project_layout == Default::default() {
+        target.project_layout = source.project_layout;
+    }
+    if target.project_sort_mode == Default::default() {
+        target.project_sort_mode = source.project_sort_mode;
+    }
+    if !target.show_attention_section {
+        target.show_attention_section = source.show_attention_section;
+    }
+    if target.sidebar_open.is_none() {
+        target.sidebar_open = source.sidebar_open;
+    }
+}
+
+fn window_state_has_presentation(window: &WindowState) -> bool {
+    !window.hidden_project_ids.is_empty()
+        || window.folder_filter.is_some()
+        || !window.project_widths.is_empty()
+        || !window.folder_collapsed.is_empty()
+        || window.os_bounds.is_some()
+        || window.sidebar_open.is_some()
+        || window.project_layout != Default::default()
+        || window.project_sort_mode != Default::default()
+        || window.show_attention_section
+}
+
+fn prefix_local_daemon_window_refs(layout: &mut ClientWindowLayout) {
+    prefix_local_daemon_window_state_refs(&mut layout.main_window);
+    for extra in &mut layout.extra_windows {
+        prefix_local_daemon_window_state_refs(extra);
+    }
+}
+
+fn prefix_local_daemon_window_state_refs(window: &mut WindowState) {
+    window.hidden_project_ids = window
+        .hidden_project_ids
+        .drain()
+        .map(|id| prefix_local_daemon_id(&id))
+        .collect();
+    window.project_widths = window
+        .project_widths
+        .drain()
+        .map(|(id, width)| (prefix_local_daemon_id(&id), width))
+        .collect();
+    window.folder_collapsed = window
+        .folder_collapsed
+        .drain()
+        .map(|(id, collapsed)| (prefix_local_daemon_id(&id), collapsed))
+        .collect();
+    if let Some(filter) = window.folder_filter.take() {
+        window.folder_filter = Some(prefix_local_daemon_id(&filter));
+    }
+}
+
+fn prefix_local_daemon_id(id: &str) -> String {
+    if id.starts_with("remote:") {
+        id.to_string()
+    } else {
+        format!(
+            "remote:{}:{}",
+            okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+            id
+        )
+    }
 }
 
 /// Save the client window layout (main + extra windows) atomically
@@ -818,7 +956,10 @@ mod tests {
 
         assert_eq!(layout.version, WINDOW_LAYOUT_VERSION);
         assert!(layout.main_window.hidden_project_ids.contains("remote:local-daemon:p1"));
-        assert_eq!(layout.main_window.folder_filter.as_deref(), Some("f1"));
+        assert_eq!(
+            layout.main_window.folder_filter.as_deref(),
+            Some("remote:local-daemon:f1"),
+        );
         assert!(layout.extra_windows[0].hidden_project_ids.contains("remote:local-daemon:p2"));
 
         // A current-version layout is likewise left untouched.
@@ -831,6 +972,131 @@ mod tests {
         };
         migrate_window_layout(&mut current);
         assert!(current.main_window.hidden_project_ids.contains("remote:local-daemon:p3"));
+    }
+
+    #[test]
+    fn migrate_window_layout_prefixes_legacy_local_refs_for_daemon_mirror() {
+        let mut main = WindowState::default();
+        main.hidden_project_ids.insert("p1".to_string());
+        main.project_widths.insert("p2".to_string(), 0.4);
+        main.folder_filter = Some("f1".to_string());
+        main.folder_collapsed.insert("f2".to_string(), true);
+        main.hidden_project_ids.insert("remote:server:p3".to_string());
+        let mut layout = ClientWindowLayout {
+            version: 1,
+            main_window: main,
+            extra_windows: Vec::new(),
+        };
+
+        migrate_window_layout(&mut layout);
+
+        assert!(layout
+            .main_window
+            .hidden_project_ids
+            .contains("remote:local-daemon:p1"));
+        assert!(layout
+            .main_window
+            .hidden_project_ids
+            .contains("remote:server:p3"));
+        assert!(!layout.main_window.hidden_project_ids.contains("p1"));
+        assert_eq!(
+            layout
+                .main_window
+                .project_widths
+                .get("remote:local-daemon:p2")
+                .copied(),
+            Some(0.4),
+        );
+        assert_eq!(
+            layout.main_window.folder_filter.as_deref(),
+            Some("remote:local-daemon:f1"),
+        );
+        assert_eq!(
+            layout
+                .main_window
+                .folder_collapsed
+                .get("remote:local-daemon:f2")
+                .copied(),
+            Some(true),
+        );
+    }
+
+    #[test]
+    fn merge_missing_window_layout_state_recovers_hidden_ids_from_workspace_fallback() {
+        // Covers users who already launched one bad daemon-client build: the
+        // newly-created window-layout.json can be empty, but workspace.json
+        // still carries the old local hidden ids. Merge those ids in and map
+        // them to the local-daemon mirror instead of treating every project as
+        // visible forever.
+        let mut source_main = WindowState::default();
+        source_main.hidden_project_ids.insert("p1".to_string());
+        source_main.project_widths.insert("p1".to_string(), 0.5);
+        source_main.folder_filter = Some("f1".to_string());
+        let mut source = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: source_main,
+            extra_windows: Vec::new(),
+        };
+        prefix_local_daemon_window_refs(&mut source);
+
+        let mut target = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        };
+
+        merge_missing_window_layout_state(&mut target, source);
+
+        assert!(target
+            .main_window
+            .hidden_project_ids
+            .contains("remote:local-daemon:p1"));
+        assert_eq!(
+            target
+                .main_window
+                .project_widths
+                .get("remote:local-daemon:p1")
+                .copied(),
+            Some(0.5),
+        );
+        assert_eq!(
+            target.main_window.folder_filter.as_deref(),
+            Some("remote:local-daemon:f1"),
+        );
+    }
+
+    #[test]
+    fn merge_missing_window_layout_state_does_not_override_existing_client_choices() {
+        let mut target_main = WindowState::default();
+        target_main
+            .hidden_project_ids
+            .insert("remote:local-daemon:client-hidden".to_string());
+        let mut source_main = WindowState::default();
+        source_main
+            .hidden_project_ids
+            .insert("remote:local-daemon:workspace-hidden".to_string());
+
+        let mut target = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: target_main,
+            extra_windows: Vec::new(),
+        };
+        let source = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: source_main,
+            extra_windows: Vec::new(),
+        };
+
+        merge_missing_window_layout_state(&mut target, source);
+
+        assert!(target
+            .main_window
+            .hidden_project_ids
+            .contains("remote:local-daemon:client-hidden"));
+        assert!(!target
+            .main_window
+            .hidden_project_ids
+            .contains("remote:local-daemon:workspace-hidden"));
     }
 
     fn make_project(id: &str) -> ProjectData {
