@@ -231,6 +231,7 @@ impl GitHeader {
                                 status.ahead,
                                 status.behind,
                                 base,
+                                status.default_branch.as_deref(),
                                 t,
                             )
                             .map(|badge| (base.to_string(), badge))

@@ -422,6 +422,7 @@ impl ProjectColumn {
                         // Not carried over the wire yet; remote projects don't
                         // surface the "Review changes" chip.
                         review_base: None,
+                        default_branch: None,
                     })
             });
 

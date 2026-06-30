@@ -129,10 +129,11 @@ pub fn render_unpushed_badge(unpushed: Option<usize>, t: &ThemeColors) -> Option
     )
 }
 
-/// Render the branch-vs-base comparison content: the base name followed by
-/// ahead (`+N`) and behind (`−M`) commit counts, e.g. `main +2 −1`. This is
-/// explicitly labeled with the base so it doesn't read as push state; the
-/// caller pairs it with a branch glyph and the click-to-review affordance.
+/// Render the branch-vs-base comparison content: ahead (`+N`) and behind (`−M`)
+/// commit counts, e.g. `main +2 −1`. The base name is shown only when it isn't
+/// the repository's default branch (`default_branch`) — comparing against the
+/// default is the common case, so its name would be redundant noise. The
+/// caller pairs this with a branch glyph and the click-to-review affordance.
 ///
 /// Zero-count sides are hidden. Returns `None` when the branch is level with
 /// its base (nothing to review).
@@ -140,6 +141,7 @@ pub fn render_base_compare_badge(
     ahead: Option<usize>,
     behind: Option<usize>,
     base: &str,
+    default_branch: Option<&str>,
     t: &ThemeColors,
 ) -> Option<AnyElement> {
     let a = ahead.unwrap_or(0);
@@ -149,6 +151,9 @@ pub fn render_base_compare_badge(
     }
 
     let base_label = base_short_name(base).to_string();
+    // Hide the label when the base is the default branch (the redundant case);
+    // show it only for a non-default base so it carries information.
+    let show_label = default_branch.is_none_or(|d| d != base_label);
     let tooltip = {
         let mut parts = Vec::new();
         if a > 0 {
@@ -167,11 +172,13 @@ pub fn render_base_compare_badge(
             .flex()
             .items_center()
             .gap(px(4.0))
-            .child(
-                div()
-                    .text_color(rgb(t.text_muted))
-                    .child(base_label.clone()),
-            )
+            .when(show_label, |d| {
+                d.child(
+                    div()
+                        .text_color(rgb(t.text_muted))
+                        .child(base_label.clone()),
+                )
+            })
             .when(a > 0, |d| {
                 d.child(render_sign_count("+", a, t.term_green, 0.7))
             })
