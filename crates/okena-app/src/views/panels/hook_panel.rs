@@ -303,7 +303,9 @@ impl HookPanel {
         let hooks = self.get_hook_list(cx);
 
         if hooks.is_empty() {
-            return div().into_any_element();
+            // `hidden` (not an empty visible div) so it claims no flex gap in
+            // the header's button cluster.
+            return div().hidden().into_any_element();
         }
 
         // Compute aggregate status color
@@ -327,7 +329,9 @@ impl HookPanel {
         div()
             .id("hook-indicator-btn")
             .cursor_pointer()
-            .w(px(24.0))
+            // Uniform horizontal padding (not a fixed width) so header buttons
+            // are evenly spaced regardless of glyph size. See project_column.
+            .px(px(5.0))
             .h(px(24.0))
             .flex()
             .items_center()

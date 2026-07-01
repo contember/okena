@@ -60,6 +60,12 @@ pub struct ProjectColumn {
     /// Advanced by the "Another tip" control; seeded per column so different
     /// empty columns don't all open on the same tip.
     tip_index: usize,
+    /// Whether the pointer is over the header. Drives revealing the hide/focus
+    /// controls. Tracked in state (not `group_hover`) because the reveal frees
+    /// layout space, and toggling `display` via hover styles crashes GPUI
+    /// (`must call prepaint before paint`) — the hover state can differ between
+    /// prepaint and paint. State + `notify` re-renders a consistent tree.
+    header_hovered: bool,
 }
 
 impl ProjectColumn {
@@ -145,6 +151,7 @@ impl ProjectColumn {
             service_panel,
             hook_panel,
             tip_index: crate::views::tips::next_start_index(),
+            header_hovered: false,
         }
     }
 
@@ -307,7 +314,8 @@ impl ProjectColumn {
             .unwrap_or_default();
 
         if minimized_terminals.is_empty() && detached_terminals.is_empty() {
-            return div().into_any_element();
+            // `hidden` (not an empty visible div) so it claims no flex gap.
+            return div().hidden().into_any_element();
         }
 
         h_flex()
@@ -517,102 +525,112 @@ impl ProjectColumn {
             ("icons/fullscreen.svg", "Focus Project")
         };
 
+        // Reveal the hide/focus controls only while the header is hovered (or
+        // always, in the focused view). Tracked via `header_hovered` state +
+        // conditional rendering rather than a `group_hover` style: the hidden
+        // controls must take no layout space, and toggling `display` on hover
+        // crashes GPUI (prepaint and paint can see different hover states).
+        let show_reveal = is_focused_view || self.header_hovered;
+
         let right_controls = h_flex()
             .gap(px(8.0))
             .child(self.render_hidden_taskbar(project, t, cx))
+            // All four action buttons share one cluster with a single, uniform
+            // gap. Absent buttons (the hover-revealed hide/fullscreen while the
+            // header isn't hovered, or an empty hook/service indicator) leave
+            // the flex layout entirely, so a gap only ever appears between
+            // buttons that are actually visible.
             .child(
-                div()
-                    .flex()
+                h_flex()
                     .gap(px(2.0))
-                    // In the overview the controls reveal on header hover; in
-                    // the focused view they stay pinned so exiting focus is
-                    // always one click away.
-                    .when(!is_focused_view, |d| {
-                        d.opacity(0.0)
-                            .group_hover("project-header", |s| s.opacity(1.0))
+                    .when(show_reveal, |d| {
+                        d.child(
+                            div()
+                                .id("hide-project-btn")
+                                .cursor_pointer()
+                                // Uniform horizontal padding (not a fixed width)
+                                // so every header button sits 5px from its
+                                // neighbours regardless of glyph size — a small
+                                // dot no longer floats in a wide box.
+                                .px(px(5.0))
+                                .h(px(24.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(move |_, _window, cx| {
+                                    cx.stop_propagation();
+                                    focus_manager_for_hide.update(cx, |fm, cx| {
+                                        workspace_for_hide.update(cx, |ws, cx| {
+                                            ws.toggle_project_overview_visibility(
+                                                fm, window_id_for_hide, &project_id_for_hide, cx,
+                                            );
+                                        });
+                                    });
+                                })
+                                .child(
+                                    svg()
+                                        .path(vis_icon)
+                                        .size(px(14.0))
+                                        .text_color(rgb(t.text_secondary)),
+                                )
+                                .tooltip(move |_window, cx| {
+                                    Tooltip::new(vis_tooltip).build(_window, cx)
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("fullscreen-project-btn")
+                                .cursor_pointer()
+                                .px(px(5.0))
+                                .h(px(24.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(move |_, _window, cx| {
+                                    cx.stop_propagation();
+                                    let pid = project_id.clone();
+                                    focus_manager.update(cx, |fm, cx| {
+                                        workspace.update(cx, |ws, cx| {
+                                            // Toggle: when already focused, clear
+                                            // focus to return to the overview.
+                                            let target = if is_focused_view { None } else { Some(pid) };
+                                            ws.set_focused_project(fm, target, cx);
+                                        });
+                                        cx.notify();
+                                    });
+                                })
+                                .child(
+                                    svg()
+                                        .path(focus_icon)
+                                        .size(px(14.0))
+                                        .text_color(rgb(t.text_secondary)),
+                                )
+                                .tooltip(move |_window, cx| {
+                                    Tooltip::new(focus_tooltip).build(_window, cx)
+                                }),
+                        )
                     })
-                    .child(
-                        div()
-                            .id("hide-project-btn")
-                            .cursor_pointer()
-                            .w(px(24.0))
-                            .h(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(move |_, _window, cx| {
-                                cx.stop_propagation();
-                                focus_manager_for_hide.update(cx, |fm, cx| {
-                                    workspace_for_hide.update(cx, |ws, cx| {
-                                        ws.toggle_project_overview_visibility(
-                                            fm, window_id_for_hide, &project_id_for_hide, cx,
-                                        );
-                                    });
-                                });
-                            })
-                            .child(
-                                svg()
-                                    .path(vis_icon)
-                                    .size(px(14.0))
-                                    .text_color(rgb(t.text_secondary)),
-                            )
-                            .tooltip(move |_window, cx| {
-                                Tooltip::new(vis_tooltip).build(_window, cx)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("fullscreen-project-btn")
-                            .cursor_pointer()
-                            .w(px(24.0))
-                            .h(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(move |_, _window, cx| {
-                                cx.stop_propagation();
-                                let pid = project_id.clone();
-                                focus_manager.update(cx, |fm, cx| {
-                                    workspace.update(cx, |ws, cx| {
-                                        // Toggle: when already focused, clear
-                                        // focus to return to the overview.
-                                        let target = if is_focused_view { None } else { Some(pid) };
-                                        ws.set_focused_project(fm, target, cx);
-                                    });
-                                    cx.notify();
-                                });
-                            })
-                            .child(
-                                svg()
-                                    .path(focus_icon)
-                                    .size(px(14.0))
-                                    .text_color(rgb(t.text_secondary)),
-                            )
-                            .tooltip(move |_window, cx| {
-                                Tooltip::new(focus_tooltip).build(_window, cx)
-                            }),
-                    ),
-            )
-            .child({
-                self.hook_panel.update(cx, |hp, cx| {
-                    hp.render_hook_indicator(&t, cx)
-                })
-            })
-            .child({
-                self.service_panel.update(cx, |sp, cx| {
-                    sp.render_service_indicator(&t, cx)
-                })
-            });
+                    .child({
+                        self.hook_panel.update(cx, |hp, cx| {
+                            hp.render_hook_indicator(&t, cx)
+                        })
+                    })
+                    .child({
+                        self.service_panel.update(cx, |sp, cx| {
+                            sp.render_service_indicator(&t, cx)
+                        })
+                    }),
+            );
 
         let git_status_el = self.git_header.update(cx, |gh, cx| {
             gh.render_git_status(git_status.clone(), &t, cx)
@@ -649,6 +667,12 @@ impl ProjectColumn {
                 .bg(rgb(t.bg_header))
                 .border_b_1()
                 .border_color(rgb(t.border))
+                .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                    if this.header_hovered != *hovered {
+                        this.header_hovered = *hovered;
+                        cx.notify();
+                    }
+                }))
                 .on_mouse_down(MouseButton::Right, context_menu_handler)
                 // Row 1: name + right controls
                 .child(
@@ -687,6 +711,12 @@ impl ProjectColumn {
                 .bg(rgb(t.bg_header))
                 .border_b_1()
                 .border_color(rgb(t.border))
+                .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                    if this.header_hovered != *hovered {
+                        this.header_hovered = *hovered;
+                        cx.notify();
+                    }
+                }))
                 .on_mouse_down(MouseButton::Right, context_menu_handler)
                 .child(
                     h_flex()

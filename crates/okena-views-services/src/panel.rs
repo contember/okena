@@ -647,7 +647,9 @@ pub fn render_service_indicator(
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> gpui::AnyElement {
     if services.is_empty() {
-        return div().into_any_element();
+        // `hidden` (not an empty visible div) so it claims no flex gap in the
+        // header's button cluster.
+        return div().hidden().into_any_element();
     }
 
     // Compute aggregate status color
@@ -681,7 +683,10 @@ pub fn render_service_indicator(
     div()
         .id("service-indicator-btn")
         .cursor_pointer()
-        .w(px(24.0))
+        // Uniform horizontal padding (not a fixed width) so the small status
+        // dot gets the same 5px breathing room as the icon buttons instead of
+        // floating in a wide 24px box. See project_column's header cluster.
+        .px(px(5.0))
         .h(px(24.0))
         .flex()
         .items_center()
