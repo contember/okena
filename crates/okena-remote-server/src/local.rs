@@ -281,6 +281,35 @@ pub fn wait_until_ready(timeout: Duration) -> Option<LocalDaemon> {
     wait_until_ready_in(&config_dir(), timeout)
 }
 
+fn wait_until_reachable_in(dir: &Path, timeout: Duration) -> Option<LocalDaemon> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(daemon) = discover_in(dir)
+            && (daemon.pid == 0 || is_process_alive(daemon.pid))
+            && daemon_responds_to_health(&daemon, Duration::from_millis(300))
+        {
+            return Some(daemon);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn daemon_responds_to_health(daemon: &LocalDaemon, timeout: Duration) -> bool {
+    let (client, url) = blocking_client_and_url(
+        daemon.host(),
+        daemon.port,
+        "/health",
+        daemon.local_endpoint.as_ref(),
+    );
+    matches!(
+        client.get(&url).timeout(timeout).send(),
+        Ok(resp) if resp.status().is_success()
+    )
+}
+
 /// Result of ensuring a local daemon is available.
 pub struct EnsuredDaemon {
     pub daemon: LocalDaemon,
@@ -362,6 +391,7 @@ fn wait_until_ready_replacing(old_pid: u32, timeout: Duration) -> Option<LocalDa
         if let Some(daemon) = discover()
             && (old_pid == 0 || daemon.pid != old_pid)
             && (daemon.pid == 0 || is_process_alive(daemon.pid))
+            && daemon_responds_to_health(&daemon, Duration::from_millis(300))
         {
             return Some(daemon);
         }
@@ -487,7 +517,7 @@ pub fn ensure_local_daemon_in(
     // Spawn: mint before spawning so the fresh daemon loads the token at startup.
     let token = mint_local_token_in(dir)?.token;
     let mut child = spawn_daemon().map_err(|e| format!("Failed to spawn daemon: {e}"))?;
-    match wait_until_ready_in(dir, spawn_timeout) {
+    match wait_until_reachable_in(dir, spawn_timeout) {
         Some(daemon) => Ok(EnsuredDaemon {
             daemon,
             token,

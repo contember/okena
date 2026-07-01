@@ -105,7 +105,7 @@ fn local_unix_path(config: &RemoteConnectionConfig) -> Option<&str> {
 
 fn initial_connect_attempts(config: &RemoteConnectionConfig) -> u32 {
     if config.id == LOCAL_DAEMON_CONNECTION_ID || config.local_endpoint.is_some() {
-        6
+        30
     } else {
         1
     }
@@ -296,12 +296,18 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             };
             let mut chosen: Option<(bool, reqwest::Client, String)> = None;
             let attempts = initial_connect_attempts(&config);
+            let mut last_connect_failure: Option<String> = None;
             for attempt in 1..=attempts {
                 if attempt > 1 {
                     let delay = initial_connect_retry_delay(attempt - 1);
+                    let detail = last_connect_failure
+                        .as_deref()
+                        .map(|failure| format!(": {failure}"))
+                        .unwrap_or_default();
                     log::warn!(
-                        "Initial connection to {} failed. Retrying in {}ms (attempt {}/{})",
+                        "Initial connection to {} failed{}. Retrying in {}ms (attempt {}/{})",
                         config.display_endpoint(),
+                        detail,
                         delay.as_millis(),
                         attempt,
                         attempts
@@ -321,14 +327,20 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         let scheme = if tls { "https" } else { "http" };
                         (client, format!("{}://{}:{}", scheme, config.host, config.port))
                     };
+                    let health_result = client
+                        .get(format!("{}/health", base_url))
+                        .timeout(std::time::Duration::from_secs(5))
+                        .send()
+                        .await;
                     let ok = matches!(
-                        client
-                            .get(format!("{}/health", base_url))
-                            .timeout(std::time::Duration::from_secs(5))
-                            .send()
-                            .await,
+                        health_result.as_ref(),
                         Ok(resp) if resp.status().is_success()
                     );
+                    last_connect_failure = match health_result {
+                        Ok(resp) if resp.status().is_success() => None,
+                        Ok(resp) => Some(format!("health returned HTTP {}", resp.status())),
+                        Err(e) => Some(e.to_string()),
+                    };
                     if ok {
                         chosen = Some((tls, client, base_url));
                         break;
@@ -342,7 +354,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             let (detected_tls, client, base_url) = match chosen {
                 Some(v) => v,
                 None => {
-                    let msg = format!("Cannot reach server {}", config.display_endpoint());
+                    let msg = match last_connect_failure {
+                        Some(failure) => format!(
+                            "Cannot reach server {} (last error: {})",
+                            config.display_endpoint(),
+                            failure
+                        ),
+                        None => format!("Cannot reach server {}", config.display_endpoint()),
+                    };
                     log::warn!("{}", msg);
                     let _ = event_tx
                         .send(ConnectionEvent::StatusChanged {
