@@ -32,7 +32,7 @@ pub use branch::{
 pub use ci::{get_ci_checks, get_pr_info, has_github_remote};
 pub use paths::{
     compute_target_paths, get_repo_root, normalize_path, project_path_in_worktree,
-    resolve_git_root_and_subdir,
+    resolve_git_root_and_subdir, resolve_worktree_root_fs,
 };
 pub use status::{
     count_ahead_behind, count_ahead_behind_vs, count_unpushed_commits, get_current_branch,

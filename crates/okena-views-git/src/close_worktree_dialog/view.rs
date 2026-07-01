@@ -41,6 +41,7 @@ impl Render for CloseWorktreeDialog {
         let can_merge = self.can_merge();
         let confirm_label = self.confirm_label();
         let error_msg = self.error_message.clone();
+        let show_force_remove = self.show_force_remove;
 
         modal_backdrop("close-worktree-dialog-backdrop", &t)
             .track_focus(&focus_handle)
@@ -581,7 +582,28 @@ impl Render for CloseWorktreeDialog {
                                     .when(is_processing, |d| {
                                         d.opacity(0.5).cursor(CursorStyle::default())
                                     }),
-                            ),
+                            )
+                            // Destructive fallback: only after a removal failure.
+                            // Force-deletes the on-disk directory for orphaned
+                            // worktrees git refuses to remove.
+                            .when(show_force_remove, |d| {
+                                d.child(
+                                    button("force-remove-wt-btn", "Delete folder anyway", &t)
+                                        .px(px(16.0))
+                                        .py(px(8.0))
+                                        .bg(rgb(t.error))
+                                        .text_color(rgb(0xffffff))
+                                        .hover(|s| s.opacity(0.85))
+                                        .when(!is_processing, |d| {
+                                            d.on_click(cx.listener(|this, _, _, cx| {
+                                                this.force_remove(cx);
+                                            }))
+                                        })
+                                        .when(is_processing, |d| {
+                                            d.opacity(0.5).cursor(CursorStyle::default())
+                                        }),
+                                )
+                            }),
                     ),
             )
     }

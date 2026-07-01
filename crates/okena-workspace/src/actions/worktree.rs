@@ -456,4 +456,44 @@ impl Workspace {
 
         Ok(())
     }
+
+    /// Force-remove a worktree project whose normal removal failed — e.g. an
+    /// orphaned worktree whose directory still exists but is no longer tracked
+    /// by git (the `.git` pointer dangles because the main repo's metadata
+    /// entry was pruned). Deletes the on-disk directory and prunes the main
+    /// repo's worktree metadata, then de-registers the project.
+    ///
+    /// This deliberately bypasses git's dirty-state safety check (git can't run
+    /// it on a worktree it no longer recognizes), so callers must only reach
+    /// this after the normal, safe removal has already been attempted.
+    pub fn force_remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> Result<(), String> {
+        let project = self.project(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+        if project.worktree_info.is_none() {
+            return Err("Not a worktree project".to_string());
+        }
+        let project_path = project.path.clone();
+
+        // Resolve the worktree checkout root. `get_repo_root` goes through gix
+        // and fails for an orphan, so walk the filesystem to the `.git` pointer
+        // instead; fall back to the project path (correct for root-level
+        // worktrees, which is the common case).
+        let project_pathbuf = std::path::PathBuf::from(&project_path);
+        let worktree_root = okena_git::resolve_worktree_root_fs(&project_pathbuf)
+            .unwrap_or(project_pathbuf);
+
+        // The main repo is the worktree parent project's path.
+        let main_repo = self.worktree_parent_path(project_id)
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "Could not resolve main repository path".to_string())?;
+
+        // Delete the directory and prune stale metadata (NotFound is treated as success).
+        okena_git::remove_worktree_fast(&worktree_root, &main_repo)
+            .map_err(|e| e.to_string())?;
+
+        // De-register the project from the workspace (also fires on_project_close).
+        self.delete_project(focus_manager, project_id, global_hooks, cx);
+
+        Ok(())
+    }
 }

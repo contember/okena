@@ -248,4 +248,34 @@ mod tests {
         branches.sort();
         assert_eq!(branches, vec!["feat", "main"]);
     }
+
+    /// Reproduce an orphaned worktree: the checkout directory still exists but
+    /// the main repo's metadata entry was pruned (so the `.git` pointer
+    /// dangles). `git worktree remove` fails, but the filesystem-based
+    /// resolver finds the root and `remove_worktree_fast` cleans it up.
+    #[test]
+    fn force_removes_orphaned_worktree() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("orphan-wt");
+        git_in(&repo, &["worktree", "add", wt_path.to_str().unwrap(), "-b", "orphan"]);
+        assert!(wt_path.exists());
+
+        // Simulate the prune that orphaned the worktree: drop the main repo's
+        // metadata entry, leaving the checkout (with its dangling `.git`) behind.
+        let meta = repo.join(".git").join("worktrees").join("orphan-wt");
+        std::fs::remove_dir_all(&meta).expect("remove worktree metadata entry");
+
+        // Normal removal fails (this is the status-128 the user hit).
+        assert!(remove_worktree(&wt_path, false).is_err());
+
+        // The fs resolver still finds the root even though gix can't open it.
+        let resolved = crate::resolve_worktree_root_fs(&wt_path)
+            .expect("resolve orphaned worktree root");
+        assert_eq!(normalize_path(&resolved), normalize_path(&wt_path));
+
+        // Force cleanup deletes the directory and prunes; returns Ok.
+        remove_worktree_fast(&wt_path, &repo).expect("force remove orphan");
+        assert!(!wt_path.exists());
+    }
 }
