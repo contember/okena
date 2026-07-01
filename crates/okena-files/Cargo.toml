@@ -4,24 +4,41 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[features]
+default = ["gpui"]
+gpui = [
+    "dep:gpui",
+    "dep:gpui-component",
+    "dep:okena-ui",
+    "dep:okena-markdown",
+    "dep:syntect",
+    "dep:two-face",
+    "dep:tree-sitter",
+    "dep:tree-sitter-md",
+    "dep:streaming-iterator",
+    "dep:usvg",
+    "dep:ttf-parser",
+    "dep:image",
+]
+
 [dependencies]
 okena-core = { path = "../okena-core" }
 okena-transport = { path = "../okena-transport", features = ["blocking-http"] }
-okena-markdown = { path = "../okena-markdown" }
-okena-ui = { path = "../okena-ui" }
+okena-markdown = { path = "../okena-markdown", optional = true }
+okena-ui = { path = "../okena-ui", optional = true }
 
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component", optional = true }
 
-syntect = { version = "5", features = ["default-fancy"] }
-two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+syntect = { version = "5", features = ["default-fancy"], optional = true }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"], optional = true }
 
 # Markdown highlighting: tree-sitter is ~20x faster than syntect's Markdown
 # grammar on large files. tree-sitter (0.26) and streaming-iterator are already
 # in the workspace via gpui-component, so this only adds the grammar crate.
-tree-sitter = "0.26"
-tree-sitter-md = { version = "0.5", features = ["parser"] }
-streaming-iterator = "0.1"
+tree-sitter = { version = "0.26", optional = true }
+tree-sitter-md = { version = "0.5", features = ["parser"], optional = true }
+streaming-iterator = { version = "0.1", optional = true }
 
 grep-searcher = "0.1"
 grep-regex = "0.1"
@@ -32,9 +49,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 base64 = "0.22"
-usvg = { version = "0.45", default-features = false }
-ttf-parser = "0.25"
-image = { version = "0.25", default-features = false }
+usvg = { version = "0.45", default-features = false, optional = true }
+ttf-parser = { version = "0.25", optional = true }
+image = { version = "0.25", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -56,6 +56,7 @@ actions!(
         ShowBranchSwitcher,
         ShowProfileManager,
         NewWindow,
+        RestartDaemon,
     ]
 );
 

@@ -1,10 +1,13 @@
 [workspace]
-members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-transport", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli", "crates/okena-app-core", "crates/okena-app"]
+members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-transport", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli", "crates/okena-app-core", "crates/okena-app", "crates/okena-daemon-core", "crates/okena-daemon"]
 resolver = "2"
+
+[workspace.package]
+version = "0.27.0"
 
 [package]
 name = "okena"
-version = "0.27.0"
+version.workspace = true
 edition = "2024"
 license = "MIT"
 
@@ -25,6 +28,11 @@ okena-files = { path = "crates/okena-files" }
 okena-views-terminal = { path = "crates/okena-views-terminal" }
 okena-views-git = { path = "crates/okena-views-git" }
 okena-ui = { path = "crates/okena-ui" }
+
+# `--daemon-client` startup: ensure_local_daemon() (discover-or-spawn the local
+# headless daemon + mint a loopback token). Already a transitive dep via
+# okena-app, so this adds no new linkage — only a direct path to the `local` API.
+okena-remote-server = { path = "crates/okena-remote-server" }
 
 # Extension system — registered at startup in main.rs.
 okena-extensions = { path = "crates/okena-extensions" }

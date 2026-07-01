@@ -5,9 +5,254 @@
 //! desktop layer drives the timer + toast; this module owns the layout
 //! bookkeeping: recording the close, restoring it, and finalizing the kill.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
+
+use okena_core::soft_close::{encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX};
+use okena_state::{Toast, ToastAction, ToastActionStyle};
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::TerminalsRegistry;
+
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::state::{LayoutNode, PendingClose, RestoredClose, Workspace};
-use gpui::*;
+
+/// Shared `terminal_id -> grace deadline` map for in-flight soft-closes.
+///
+/// Runtime-agnostic: the daemon-core loop and the headless loop each own one of
+/// these and hand a reference to the shared flows below. The command path arms a
+/// deadline; the finalizer tick ([`finalize_expired`]) reaps the ones that
+/// elapsed; Undo / Close-now remove the deadline first.
+pub type SoftCloseDeadlines = Arc<Mutex<HashMap<String, Instant>>>;
+
+/// Probe whether a terminal is "busy" (has a live foreground child) and, if so,
+/// what its foreground command is (for the toast label).
+///
+/// This forks `tmux`/`lsof`/`pgrep` under the hood, so callers must run it OFF
+/// their reactor thread (tokio `spawn_blocking` / `smol::unblock`) and hold NO
+/// state locks across it. Returns `(busy, command)`.
+pub fn probe_busy(backend: &dyn TerminalBackend, terminal_id: &str) -> (bool, Option<String>) {
+    let fg = backend.get_foreground_shell_pid(terminal_id);
+    let busy = fg
+        .map(okena_terminal::terminal::has_child_processes)
+        .unwrap_or(false);
+    let command = fg.and_then(okena_terminal::terminal::foreground_command);
+    (busy, command)
+}
+
+/// Build the two-line Undo / Close-now toast for a busy soft-close:
+///
+///   title:  Closed "make"             — what's closing
+///   detail: okena · ~/projects/okena  — project · working directory (muted)
+///
+/// `command` is the live foreground command (probed off-thread by the caller),
+/// used as the title fallback when the terminal has no meaningful display name.
+pub fn build_soft_close_toast(
+    ws: &Workspace,
+    terminals: &TerminalsRegistry,
+    project_id: &str,
+    terminal_id: &str,
+    command: Option<String>,
+    toast_id: &str,
+    grace: u32,
+) -> Toast {
+    // Read the live OSC title + cwd under a single registry lock.
+    let (osc_title, cwd) = {
+        let reg = terminals.lock();
+        let term = reg.get(terminal_id);
+        (term.and_then(|t| t.title()), term.map(|t| t.current_cwd()))
+    };
+
+    let (title, detail) = ws
+        .project(project_id)
+        .map(|p| {
+            // Title label precedence: a meaningful display name (user-set custom
+            // name or non-prompt OSC title) wins; else the live foreground
+            // command; else a generic "Terminal closed".
+            let display = p.terminal_display_name(terminal_id, osc_title);
+            let label = if display == p.directory_name() { command } else { Some(display) };
+            let title = match label {
+                Some(l) => format!("Closed \u{201c}{}\u{201d}", truncate_label(&l)),
+                None => "Terminal closed".to_string(),
+            };
+            // Detail line: project name, plus the cwd when we have one.
+            let mut detail = p.name.clone();
+            if let Some(cwd) = &cwd {
+                detail.push_str(" \u{00b7} ");
+                detail.push_str(&shorten_cwd(cwd));
+            }
+            (title, detail)
+        })
+        .unwrap_or_else(|| ("Terminal closed".to_string(), String::new()));
+
+    let actions = vec![
+        ToastAction::new(
+            encode_action(SOFT_CLOSE_UNDO_PREFIX, project_id, terminal_id),
+            "Undo",
+            ToastActionStyle::Primary,
+        ),
+        ToastAction::new(
+            encode_action(SOFT_CLOSE_KILL_PREFIX, project_id, terminal_id),
+            "Close now",
+            ToastActionStyle::Danger,
+        ),
+    ];
+    let base = Toast::info(title)
+        .with_id(toast_id)
+        .with_ttl(Duration::from_secs(grace as u64))
+        .with_actions(actions);
+    if detail.is_empty() { base } else { base.with_detail(detail) }
+}
+
+/// Cap a terminal label so the toast stays tidy. OSC titles can be arbitrarily
+/// long; truncate on a char boundary with an ellipsis.
+fn truncate_label(label: &str) -> String {
+    const MAX_CHARS: usize = 42;
+    if label.chars().count() <= MAX_CHARS {
+        return label.to_string();
+    }
+    let mut out: String = label.chars().take(MAX_CHARS - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// Home-relative, tail-preserving working directory for the toast detail line.
+/// `~`-collapses the home dir and keeps the *end* of long paths.
+fn shorten_cwd(path: &str) -> String {
+    let shown = match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path == home => return "~".to_string(),
+        Ok(home) if !home.is_empty() && path.starts_with(&format!("{home}/")) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path.to_string(),
+    };
+    const MAX_CHARS: usize = 30;
+    if shown.chars().count() <= MAX_CHARS {
+        return shown;
+    }
+    let tail: String = shown
+        .chars()
+        .rev()
+        .take(MAX_CHARS - 1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("\u{2026}{tail}")
+}
+
+/// Begin a soft close: eject the busy pane, build its Undo / Close-now toast,
+/// and arm the grace deadline for the finalizer tick.
+///
+/// Returns `Some(toast)` when the terminal was in the layout (the caller pushes
+/// it into its own `HookMonitor`). Returns `None` when the terminal has no
+/// layout path — the caller should fall back to an immediate close.
+///
+/// The engine stays `HookMonitor`-free on purpose: it returns the toast rather
+/// than pushing it, so each loop wires its own toast surface.
+#[allow(clippy::too_many_arguments)]
+pub fn begin_soft_close_flow(
+    deadlines: &SoftCloseDeadlines,
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    terminals: &TerminalsRegistry,
+    project_id: &str,
+    terminal_id: &str,
+    grace: u32,
+    command: Option<String>,
+    cx: &mut impl WorkspaceCx,
+) -> Option<Toast> {
+    let path = ws
+        .project(project_id)
+        .and_then(|p| p.layout.as_ref())
+        .and_then(|l| l.find_terminal_path(terminal_id))?;
+
+    let toast_id = format!("soft-close:{terminal_id}");
+    let toast =
+        build_soft_close_toast(ws, terminals, project_id, terminal_id, command, &toast_id, grace);
+    ws.begin_soft_close(focus_manager, project_id, &path, terminal_id, &toast_id, cx);
+    deadlines.lock().insert(
+        terminal_id.to_string(),
+        Instant::now() + Duration::from_secs(grace as u64),
+    );
+    Some(toast)
+}
+
+/// Undo a soft close: drop the grace deadline and restore the ejected pane (if
+/// its PTY is still alive in the registry).
+pub fn undo_soft_close_flow(
+    deadlines: &SoftCloseDeadlines,
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    terminals: &TerminalsRegistry,
+    terminal_id: &str,
+    cx: &mut impl WorkspaceCx,
+) {
+    deadlines.lock().remove(terminal_id);
+    // The PTY is restorable only if still in the registry; the loop owns it, so
+    // the alive-check happens here.
+    let alive = terminals.lock().contains_key(terminal_id);
+    ws.undo_soft_close(focus_manager, terminal_id, alive, cx);
+}
+
+/// Finalize a soft close now ("Close now"): drop the deadline, finalize the
+/// pending record, then kill the PTY + drop it from the registry.
+pub fn close_now_flow(
+    deadlines: &SoftCloseDeadlines,
+    ws: &mut Workspace,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    terminal_id: &str,
+    cx: &mut impl WorkspaceCx,
+) {
+    deadlines.lock().remove(terminal_id);
+    ws.finalize_soft_close(terminal_id, cx);
+    for id in ws.drain_pending_terminal_kills() {
+        backend.kill(&id);
+        terminals.lock().remove(&id);
+    }
+}
+
+/// One finalizer tick: reap every soft-close whose grace period elapsed.
+///
+/// Collects + removes the expired ids under the deadline lock, finalizes each on
+/// the workspace (queues the kills), then drains the kill queue and tears the
+/// PTYs down. The client toast TTLs out on its own. Callers drive this on a
+/// timer (~200ms).
+pub fn finalize_expired(
+    deadlines: &SoftCloseDeadlines,
+    ws: &mut Workspace,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) {
+    // Collect + remove expired ids under the deadline lock only.
+    let expired: Vec<String> = {
+        let now = Instant::now();
+        let mut d = deadlines.lock();
+        let exp: Vec<String> =
+            d.iter().filter(|(_, dl)| **dl <= now).map(|(t, _)| t.clone()).collect();
+        for t in &exp {
+            d.remove(t);
+        }
+        exp
+    };
+    if expired.is_empty() {
+        return;
+    }
+
+    // Finalize on the workspace (queues kills), then drain the kill queue.
+    for tid in &expired {
+        ws.finalize_soft_close(tid, cx);
+    }
+    for id in ws.drain_pending_terminal_kills() {
+        backend.kill(&id);
+        terminals.lock().remove(&id);
+    }
+}
 
 /// Outcome of resolving an optimistic close once the (off-thread) busy check
 /// has come back. The terminal was already removed from the layout when the
@@ -39,7 +284,7 @@ impl Workspace {
         path: &[usize],
         terminal_id: &str,
         toast_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let pre_close_layout = self.project(project_id).and_then(|p| p.layout.clone());
 
@@ -80,7 +325,7 @@ impl Workspace {
     /// real teardown (the Okena observer drains `pending_terminal_kills` and
     /// calls `pty_manager.kill` + removes it from the registry). Idempotent —
     /// returns false if there was no pending close for this terminal.
-    pub fn finalize_soft_close(&mut self, terminal_id: &str, cx: &mut Context<Self>) -> bool {
+    pub fn finalize_soft_close(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) -> bool {
         if self.take_pending_close(terminal_id).is_none() {
             return false;
         }
@@ -104,7 +349,7 @@ impl Workspace {
         &mut self,
         terminal_id: &str,
         busy: bool,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> PendingDecision {
         if !self.has_pending_close(terminal_id) {
             return PendingDecision::Raced;
@@ -128,7 +373,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         terminal_id: &str,
         alive: bool,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> bool {
         let pending = match self.take_pending_close(terminal_id) {
             Some(p) => p,
@@ -200,7 +445,7 @@ impl Workspace {
     /// still sitting in the layout, remove that pane (it can't be reconnected, and
     /// a lingering layout node would respawn a fresh shell on the next render).
     /// Returns true if a breadcrumb was consumed. Idempotent.
-    pub fn reap_restored_close(&mut self, terminal_id: &str, cx: &mut Context<Self>) -> bool {
+    pub fn reap_restored_close(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) -> bool {
         let Some(idx) = self
             .restored_closes
             .iter()
@@ -256,17 +501,26 @@ impl Workspace {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod tests {
     use gpui::AppContext as _;
 
-    use super::PendingDecision;
+    use super::{
+        begin_soft_close_flow, close_now_flow, finalize_expired, undo_soft_close_flow,
+        PendingDecision, SoftCloseDeadlines,
+    };
     use crate::focus::FocusManager;
     use crate::settings::HooksConfig;
     use crate::state::{LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
     use okena_core::theme::FolderColor;
+    use okena_terminal::backend::TerminalBackend;
     use okena_terminal::shell_config::ShellType;
+    use okena_terminal::terminal::TerminalTransport;
+    use okena_terminal::TerminalsRegistry;
+    use parking_lot::Mutex;
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn term(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
@@ -553,6 +807,196 @@ mod tests {
                 vec!["a".to_string()]
             );
             assert!(!ws.has_pending_close("a"));
+        });
+    }
+
+    // ── Shared soft-close flow tests ─────────────────────────────────────────
+
+    /// No-op transport for the test backend.
+    struct StubTransport;
+    impl TerminalTransport for StubTransport {
+        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    /// `TerminalBackend` that records every `kill`ed id. The soft-close flow
+    /// tests never spawn PTYs, so the create/reconnect paths are unreachable.
+    struct RecordingBackend {
+        killed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TerminalBackend for RecordingBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+        fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
+            anyhow::bail!("stub backend: create_terminal not supported")
+        }
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("stub backend: reconnect_terminal not supported")
+        }
+        fn kill(&self, terminal_id: &str) {
+            self.killed.lock().push(terminal_id.to_string());
+        }
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    fn empty_deadlines() -> SoftCloseDeadlines {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    fn empty_registry() -> TerminalsRegistry {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    #[gpui::test]
+    fn begin_flow_arms_deadline_and_returns_toast(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            let deadlines = empty_deadlines();
+            let terminals = empty_registry();
+
+            let toast = begin_soft_close_flow(
+                &deadlines, ws, &mut fm, &terminals, "p1", "a", 5, Some("make".into()), cx,
+            );
+
+            let toast = toast.expect("terminal in layout → toast returned");
+            assert_eq!(toast.id, "soft-close:a");
+            assert_eq!(toast.actions.len(), 2, "Undo + Close now");
+            assert!(ws.has_pending_close("a"), "pending close recorded");
+            assert!(deadlines.lock().contains_key("a"), "deadline armed");
+            assert_eq!(
+                ws.project("p1").unwrap().layout,
+                Some(term("b")),
+                "pane ejected from layout"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn begin_flow_returns_none_when_terminal_not_in_layout(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            let deadlines = empty_deadlines();
+            let terminals = empty_registry();
+
+            // "z" is not in the layout → caller should immediate-close instead.
+            let toast = begin_soft_close_flow(
+                &deadlines, ws, &mut fm, &terminals, "p1", "z", 5, None, cx,
+            );
+            assert!(toast.is_none());
+            assert!(!ws.has_pending_close("z"));
+            assert!(deadlines.lock().is_empty(), "no deadline armed");
+        });
+    }
+
+    #[gpui::test]
+    fn finalize_expired_kills_only_past_deadline_ids(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            let killed = Arc::new(Mutex::new(Vec::new()));
+            let backend = RecordingBackend { killed: killed.clone() };
+            let terminals = empty_registry();
+            let deadlines = empty_deadlines();
+
+            // "a" is mid soft-close with an already-expired deadline; "b" is
+            // soft-closed but its deadline is far in the future.
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+            ws.begin_soft_close(&mut fm, "p1", &[0], "b", "toast-b", cx);
+            deadlines
+                .lock()
+                .insert("a".to_string(), Instant::now() - Duration::from_secs(1));
+            deadlines
+                .lock()
+                .insert("b".to_string(), Instant::now() + Duration::from_secs(60));
+
+            finalize_expired(&deadlines, ws, &backend, &terminals, cx);
+
+            assert_eq!(&*killed.lock(), &vec!["a".to_string()], "only past-deadline killed");
+            assert!(!deadlines.lock().contains_key("a"), "expired deadline removed");
+            assert!(deadlines.lock().contains_key("b"), "future deadline retained");
+            assert!(!ws.has_pending_close("a"), "finalized");
+            assert!(ws.has_pending_close("b"), "still pending");
+        });
+    }
+
+    #[gpui::test]
+    fn close_now_flow_clears_deadline_and_kills(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            let killed = Arc::new(Mutex::new(Vec::new()));
+            let backend = RecordingBackend { killed: killed.clone() };
+            let terminals = empty_registry();
+            let deadlines = empty_deadlines();
+
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+            deadlines
+                .lock()
+                .insert("a".to_string(), Instant::now() + Duration::from_secs(60));
+
+            close_now_flow(&deadlines, ws, &backend, &terminals, "a", cx);
+
+            assert!(!deadlines.lock().contains_key("a"), "deadline cleared");
+            assert!(!ws.has_pending_close("a"), "pending finalized");
+            assert_eq!(&*killed.lock(), &vec!["a".to_string()], "PTY killed");
+        });
+    }
+
+    #[gpui::test]
+    fn undo_flow_clears_deadline(cx: &mut gpui::TestAppContext) {
+        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+            let terminals = empty_registry();
+            let deadlines = empty_deadlines();
+
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+            deadlines
+                .lock()
+                .insert("a".to_string(), Instant::now() + Duration::from_secs(60));
+
+            // Empty registry → PTY reads as dead, so nothing is restored, but the
+            // deadline is always cleared and the pending record dropped.
+            undo_soft_close_flow(&deadlines, ws, &mut fm, &terminals, "a", cx);
+
+            assert!(!deadlines.lock().contains_key("a"), "deadline cleared");
+            assert!(!ws.has_pending_close("a"), "pending dropped");
         });
     }
 }

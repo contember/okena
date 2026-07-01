@@ -4,14 +4,19 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[features]
+default = ["gpui-ui"]
+gpui-ui = ["dep:gpui", "dep:gpui-component", "dep:okena-extensions", "dep:okena-ui"]
+
 [dependencies]
 okena-core = { path = "../okena-core" }
 okena-transport = { path = "../okena-transport", features = ["blocking-http"] }
-okena-extensions = { path = "../okena-extensions" }
-okena-ui = { path = "../okena-ui" }
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+okena-extensions = { path = "../okena-extensions", optional = true }
+okena-ui = { path = "../okena-ui", optional = true }
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component", optional = true }
 serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 smol = "2.0"
 parking_lot = "0.12"
 dirs = "5.0"
@@ -19,3 +24,4 @@ log = "0.4"
 anyhow = "1.0"
 semver = "1"
 sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }

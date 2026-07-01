@@ -1,5 +1,4 @@
-//! Extra window observer + spawn-side OS window creation + CLI/remote
-//! focused-window routing.
+//! Extra window observer + spawn-side OS window creation.
 //!
 //! Slice 05 keystone. The `Workspace::spawn_extra_window` data-layer mutation
 //! pushes a fresh `WindowState` onto `WorkspaceData.extra_windows`; this module
@@ -16,16 +15,7 @@
 //! `WindowOptions::window_bounds`. When `os_bounds` is `None` (e.g. a future
 //! caller spawns without bounds, or a slice 07 restore loads an entry with no
 //! recorded bounds), the OS picks a default position.
-//!
-//! Beyond spawn, this module also hosts the focused-window routing helper
-//! `resolve_focused_window_id` used by the remote/CLI bridge to send actions
-//! to the per-window `FocusManager` of whichever Okena window currently has
-//! OS focus (PRD user story 27 / acceptance criterion 13). When no Okena
-//! window is focused (another app is in front, or focus is unknown), the
-//! helper falls back to `WindowId::Main`.
 
-use crate::remote::types::{ApiFullscreen, ApiWindow, ApiWindowBounds};
-use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WorkspaceData};
 use crate::views::window::{WindowView, WindowViewEvent};
 use gpui::*;
@@ -113,37 +103,6 @@ pub(super) fn resolve_extra_window_bounds(
     })
 }
 
-/// Resolve the `WindowId` that the currently focused OS window corresponds to,
-/// or fall back to `WindowId::Main` if no Okena window is focused (e.g. another
-/// application has focus, or the active window isn't tracked).
-///
-/// Pure function — generic over the handle type so the routing rule can be
-/// exercised without standing up real `gpui::AnyWindowHandle` values (which
-/// have private fields and can only be constructed via `cx.open_window`). The
-/// production caller passes `gpui::AnyWindowHandle`; tests use a trivial
-/// stand-in.
-///
-/// PRD ref: `plans/multi-window.md` user story 27 ("CLI lands its action in
-/// the focused window if any, falling back to main otherwise") +
-/// `plans/issues/multi-window/05-spawn-extra-window.md` acceptance criterion
-/// 13 (CLI fallback). Used by `Okena::focus_manager_for_active_window` to
-/// route remote-bridge actions (the existing `okena action` CLI verb +
-/// future `okena open <path>`-style verbs) to the correct per-window
-/// `FocusManager`.
-pub(super) fn resolve_focused_window_id<H: PartialEq + Copy>(
-    active: Option<H>,
-    window_handles: &[(WindowId, H)],
-) -> WindowId {
-    match active {
-        Some(a) => window_handles
-            .iter()
-            .find(|(_, h)| *h == a)
-            .map(|(id, _)| *id)
-            .unwrap_or(WindowId::Main),
-        None => WindowId::Main,
-    }
-}
-
 impl Okena {
     /// Workspace observer body: walk `extra_windows`, open an OS window for
     /// each entry not yet tracked in `Okena.extra_windows`. Idempotent —
@@ -166,192 +125,6 @@ impl Okena {
         }
     }
 
-    /// Resolve the `(WindowId, Entity<FocusManager>)` of whichever Okena
-    /// window currently has OS focus, falling back to
-    /// `(WindowId::Main, main_window.focus_manager())` if no Okena window is
-    /// focused (e.g. another app is in front, or the active window isn't
-    /// tracked). Used by the remote-bridge command loop so CLI/remote-driven
-    /// actions land in the focused window's per-window state per PRD user
-    /// story 27 + slice 05 cri 13. The `WindowId` flows into `execute_action`
-    /// so per-window data mutations (e.g. `SetProjectShowInOverview`)
-    /// also target the focused window, not just focus state.
-    pub(super) fn focus_manager_for_active_window(
-        &self,
-        cx: &App,
-    ) -> (WindowId, Entity<FocusManager>) {
-        let active = cx.active_window();
-        let mut handles: Vec<(WindowId, AnyWindowHandle)> = Vec::with_capacity(1 + self.extra_window_handles.len());
-        handles.push((WindowId::Main, self.main_window_handle));
-        handles.extend(self.extra_window_handles.iter().map(|(id, h)| (*id, *h)));
-        let resolved = resolve_focused_window_id(active, &handles);
-        match resolved {
-            WindowId::Main => (WindowId::Main, self.main_window.read(cx).focus_manager()),
-            extra_id @ WindowId::Extra(_) => match self.extra_windows.get(&extra_id) {
-                // Drop-race fallback: the resolver matched on a tracked extra
-                // handle but the corresponding `WindowView` entity has been
-                // dropped between handle-tracking and resolution. Fall back
-                // to main's `(WindowId, FocusManager)` so per-window data
-                // mutations target a slot that exists.
-                Some(view) => (extra_id, view.read(cx).focus_manager()),
-                None => (WindowId::Main, self.main_window.read(cx).focus_manager()),
-            },
-        }
-    }
-
-    /// Resolve the `(WindowId, Entity<FocusManager>)` of a remote-bridge
-    /// action's target window.
-    ///
-    /// `target == None` reuses the focused-window default
-    /// (`focus_manager_for_active_window`, which always resolves to Some).
-    /// `Some(WindowId::Main)` always resolves to the main window.
-    /// `Some(WindowId::Extra(_))` resolves to that extra's `WindowView` if it
-    /// is currently open, or `None` if no such extra exists (so the caller can
-    /// report "window not found"). The `WindowId` flows into `execute_action`
-    /// so per-window data mutations target the addressed window.
-    pub(super) fn focus_manager_for_window(
-        &self,
-        cx: &App,
-        target: Option<WindowId>,
-    ) -> Option<(WindowId, Entity<FocusManager>)> {
-        match target {
-            None => Some(self.focus_manager_for_active_window(cx)),
-            Some(WindowId::Main) => {
-                Some((WindowId::Main, self.main_window.read(cx).focus_manager()))
-            }
-            Some(extra @ WindowId::Extra(_)) => self
-                .extra_windows
-                .get(&extra)
-                .map(|view| (extra, view.read(cx).focus_manager())),
-        }
-    }
-
-    /// Resolve a target window to its OS handle, for dispatching GUI actions
-    /// (the command palette) from the remote bridge. `None` → the focused
-    /// window (falling back to main); `Some(id)` → that window, or `None` if it
-    /// doesn't exist.
-    pub(super) fn window_handle_for(
-        &self,
-        cx: &App,
-        target: Option<WindowId>,
-    ) -> Option<AnyWindowHandle> {
-        match target {
-            None => cx.active_window().or(Some(self.main_window_handle)),
-            Some(WindowId::Main) => Some(self.main_window_handle),
-            Some(extra @ WindowId::Extra(_)) => self.extra_window_handles.get(&extra).copied(),
-        }
-    }
-
-    /// Enumerate the open OS windows for `GET /v1/state`.
-    ///
-    /// Stable order: main first, then extras in `WorkspaceData.extra_windows`
-    /// Vec order (NOT `Okena.extra_windows` HashMap order) so a client sees a
-    /// deterministic list that matches persistence. For each window the result
-    /// reports its OS-focus flag, per-window focus (project + terminal),
-    /// fullscreen target, the persistent visible-project set (after
-    /// `hidden_project_ids` + `folder_filter`), the active folder filter, OS
-    /// bounds, and sidebar state.
-    pub(super) fn build_api_windows(&self, cx: &App) -> Vec<ApiWindow> {
-        let active = cx.active_window();
-        let workspace = self.workspace.read(cx);
-
-        // Drive enumeration from the persisted `extra_windows` Vec so the
-        // ordering is stable, regardless of the `Okena.extra_windows` HashMap
-        // iteration order. Main is always first.
-        let mut order: Vec<WindowId> = Vec::with_capacity(1 + workspace.data().extra_windows.len());
-        order.push(WindowId::Main);
-        order.extend(
-            workspace
-                .data()
-                .extra_windows
-                .iter()
-                .map(|w| WindowId::Extra(w.id)),
-        );
-
-        order
-            .into_iter()
-            .filter_map(|window_id| {
-                // Resolve the per-window view + OS handle. An extra present in
-                // persistence but not yet tracked on `Okena` (spawn observer
-                // hasn't run, or a close race) is skipped — it has no live
-                // window to report.
-                let (view, handle) = match window_id {
-                    WindowId::Main => (&self.main_window, Some(self.main_window_handle)),
-                    extra @ WindowId::Extra(_) => match self.extra_windows.get(&extra) {
-                        Some(v) => (v, self.extra_window_handles.get(&extra).copied()),
-                        None => return None,
-                    },
-                };
-
-                let (id, kind) = match window_id {
-                    WindowId::Main => ("main".to_string(), "main"),
-                    WindowId::Extra(uuid) => (uuid.to_string(), "extra"),
-                };
-
-                let is_active = match (active, handle) {
-                    (Some(a), Some(h)) => a == h,
-                    _ => false,
-                };
-
-                let fm = view.read(cx).focus_manager().read(cx);
-
-                // Resolve the focused terminal id: the FocusManager tracks a
-                // (project_id, layout_path) target; map the path to the
-                // terminal id at that path in the project's current layout.
-                let focused_terminal_id = fm.focused_terminal_state().and_then(|ft| {
-                    workspace
-                        .project(&ft.project_id)
-                        .and_then(|p| p.layout.as_ref())
-                        .and_then(|layout| layout.get_at_path(&ft.layout_path))
-                        .and_then(|node| match node {
-                            crate::workspace::state::LayoutNode::Terminal { terminal_id, .. } => {
-                                terminal_id.clone()
-                            }
-                            _ => None,
-                        })
-                });
-
-                let fullscreen = fm.fullscreen_state().map(|(pid, tid)| ApiFullscreen {
-                    project_id: pid.to_string(),
-                    terminal_id: tid.to_string(),
-                });
-
-                let focused_project_id = fm.focused_project_id().cloned();
-
-                // Persistent visible set: hidden_project_ids + folder_filter
-                // only (NOT the transient focus narrowing), matching what the
-                // sidebar persists rather than the momentary zoom state.
-                let visible_project_ids: Vec<String> = workspace
-                    .visible_projects(window_id, None, false)
-                    .iter()
-                    .map(|p| p.id.clone())
-                    .collect();
-
-                let window_state = workspace.data().window(window_id);
-                let folder_filter =
-                    window_state.and_then(|w| w.folder_filter.clone());
-                let bounds = window_state.and_then(|w| w.os_bounds).map(|b| ApiWindowBounds {
-                    x: b.origin_x,
-                    y: b.origin_y,
-                    width: b.width,
-                    height: b.height,
-                });
-                let sidebar_open = window_state.and_then(|w| w.sidebar_open);
-
-                Some(ApiWindow {
-                    id,
-                    kind: kind.to_string(),
-                    active: is_active,
-                    focused_project_id,
-                    focused_terminal_id,
-                    fullscreen,
-                    visible_project_ids,
-                    folder_filter,
-                    bounds,
-                    sidebar_open,
-                })
-            })
-            .collect()
-    }
 
     /// Route a [`WindowViewEvent`] raised by any window to the right handler.
     pub(super) fn handle_window_view_event(
@@ -458,7 +231,6 @@ impl Okena {
     /// `extra_window_handles` maps.
     fn open_extra_window(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
-        let pty_manager = self.pty_manager.clone();
         let terminals = self.terminals.clone();
         let okena = cx.entity().clone();
 
@@ -525,7 +297,7 @@ impl Okena {
             },
             move |window, cx| {
                 let view = cx.new(|cx| {
-                    WindowView::new(window_id, workspace.clone(), pty_manager.clone(), terminals.clone(), window, cx)
+                    WindowView::new(window_id, workspace.clone(), terminals.clone(), window, cx)
                 });
                 let view_for_okena = view.clone();
                 let handle = window.window_handle();
@@ -550,18 +322,14 @@ impl Okena {
                         // a "jump into project" can target this window too.
                         cx.subscribe(&view_for_okena, Okena::handle_window_view_event).detach();
 
-                        // Wire the per-window UI to the shared singletons
+                        // Wire the per-window UI to the shared remote manager
                         // main was wired with at startup. Without this, the
-                        // extra's ProjectColumns have no git_watcher (no +/-
-                        // diff badges), no service_manager (service panel
-                        // dead), and no remote_manager (remote actions don't
-                        // route).
-                        let git_watcher = this.git_watcher.clone();
-                        let service_manager = this.service_manager.clone();
+                        // extra's ProjectColumns have no remote_manager (remote
+                        // actions don't route). Git status + services arrive via
+                        // the daemon snapshot, so there is nothing in-process to
+                        // wire here.
                         let remote_manager = this.remote_manager.clone();
                         view_for_okena.update(cx, |rv, cx| {
-                            rv.set_git_watcher(git_watcher, cx);
-                            rv.set_service_manager(service_manager, cx);
                             rv.set_remote_manager(remote_manager, cx);
                         });
                     });
@@ -604,7 +372,7 @@ impl Okena {
 
 #[cfg(test)]
 mod tests {
-    use super::{extras_to_close, extras_to_open, resolve_extra_window_bounds, resolve_focused_window_id};
+    use super::{extras_to_close, extras_to_open, resolve_extra_window_bounds};
     use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WindowState, WorkspaceData};
     use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
@@ -817,67 +585,6 @@ mod tests {
         assert_eq!(extras_to_open(&data, &opened), ids, "helper must surface every pending entry");
     }
 
-    // ── Focused-window routing ───────────────────────────────────────────
-
-    #[test]
-    fn no_active_window_falls_back_to_main() {
-        // Another OS app is in front (or focus is unknown). The CLI/remote
-        // action must still land somewhere — main is the fallback per PRD
-        // user story 27 ("falling back to main otherwise").
-        let main_handle: u32 = 1;
-        let extra_id = WindowId::Extra(Uuid::new_v4());
-        let handles = vec![(WindowId::Main, main_handle), (extra_id, 2)];
-        assert_eq!(resolve_focused_window_id::<u32>(None, &handles), WindowId::Main);
-    }
-
-    #[test]
-    fn active_main_resolves_to_main() {
-        let main_handle: u32 = 1;
-        let extra_id = WindowId::Extra(Uuid::new_v4());
-        let handles = vec![(WindowId::Main, main_handle), (extra_id, 2)];
-        assert_eq!(
-            resolve_focused_window_id(Some(main_handle), &handles),
-            WindowId::Main,
-        );
-    }
-
-    #[test]
-    fn active_extra_resolves_to_that_extra() {
-        // PRD cri 13's W2-focused branch: the focused window is an extra;
-        // routing must land on that extra's WindowId so the remote bridge
-        // mutates that extra's per-window FocusManager.
-        let main_handle: u32 = 1;
-        let extra_a = WindowId::Extra(Uuid::new_v4());
-        let extra_b = WindowId::Extra(Uuid::new_v4());
-        let handles = vec![
-            (WindowId::Main, main_handle),
-            (extra_a, 2),
-            (extra_b, 3),
-        ];
-        assert_eq!(resolve_focused_window_id(Some(2), &handles), extra_a);
-        assert_eq!(resolve_focused_window_id(Some(3), &handles), extra_b);
-    }
-
-    #[test]
-    fn unknown_active_window_falls_back_to_main() {
-        // The active window isn't tracked (e.g. detached terminal popup, or
-        // a window opened by a future feature that doesn't register here).
-        // Fall back to main rather than dropping the action.
-        let main_handle: u32 = 1;
-        let handles = vec![(WindowId::Main, main_handle)];
-        assert_eq!(resolve_focused_window_id(Some(99), &handles), WindowId::Main);
-    }
-
-    #[test]
-    fn empty_handles_falls_back_to_main() {
-        // Defensive — should never happen in practice (main is always tracked)
-        // but the helper stays total: any input shape produces a valid
-        // WindowId, never panics.
-        let handles: Vec<(WindowId, u32)> = Vec::new();
-        assert_eq!(resolve_focused_window_id(Some(1), &handles), WindowId::Main);
-        assert_eq!(resolve_focused_window_id::<u32>(None, &handles), WindowId::Main);
-    }
-
     // ── Restore-bounds resolver ──────────────────────────────────────────
 
     #[test]
@@ -950,17 +657,5 @@ mod tests {
         let resolved = resolve_extra_window_bounds(Some(persisted), None)
             .expect("persisted alone is sufficient");
         assert_eq!(resolved, persisted);
-    }
-
-    #[test]
-    fn first_match_wins_on_duplicate_handles() {
-        // Pathological input — two entries point at the same handle. The
-        // helper picks the first match (Vec order). In production, handles
-        // are unique per OS window, but pinning the rule keeps the helper
-        // deterministic if a future bug duplicates an entry.
-        let extra_a = WindowId::Extra(Uuid::new_v4());
-        let extra_b = WindowId::Extra(Uuid::new_v4());
-        let handles = vec![(WindowId::Main, 1u32), (extra_a, 2), (extra_b, 2)];
-        assert_eq!(resolve_focused_window_id(Some(2), &handles), extra_a);
     }
 }

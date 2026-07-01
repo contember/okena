@@ -12,11 +12,12 @@
 mod files;
 mod git;
 mod project;
+mod session;
 mod tab;
 mod terminal;
 
 use okena_core::api::{ActionRequest, CommandResult};
-use crate::settings::settings;
+use crate::workspace::persistence::AppSettings;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
@@ -24,7 +25,7 @@ use okena_terminal::TerminalsRegistry;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::hooks;
 use crate::workspace::state::{LayoutNode, WindowId, Workspace};
-use gpui::*;
+use okena_workspace::context::WorkspaceCx;
 use std::sync::Arc;
 
 /// Result of executing an action.
@@ -48,6 +49,10 @@ impl ActionResult {
 ///
 /// This is the single source of truth for all client-facing actions.
 /// Both desktop UI handlers and the remote API delegate here.
+// Takes the workspace, focus manager, backend, terminals registry, settings
+// and cx as distinct dependencies; bundling them into a context struct would
+// obscure more than it clarifies here (matching the sub-handler modules).
+#[allow(clippy::too_many_arguments)]
 pub fn execute_action(
     action: ActionRequest,
     ws: &mut Workspace,
@@ -55,15 +60,16 @@ pub fn execute_action(
     focus_manager: &mut FocusManager,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     match action {
         // ── Terminal ops ─────────────────────────────────────────────
         ActionRequest::CreateTerminal { project_id } => {
-            terminal::create(ws, focus_manager, project_id, backend, terminals, cx)
+            terminal::create(ws, focus_manager, project_id, backend, terminals, settings, cx)
         }
         ActionRequest::SplitTerminal { project_id, path, direction } => {
-            terminal::split(ws, focus_manager, project_id, path, direction, backend, terminals, cx)
+            terminal::split(ws, focus_manager, project_id, path, direction, backend, terminals, settings, cx)
         }
         ActionRequest::CloseTerminal { project_id, terminal_id } => {
             terminal::close(ws, focus_manager, project_id, terminal_id, backend, terminals, cx)
@@ -101,13 +107,25 @@ pub fn execute_action(
         ActionRequest::RenameTerminal { project_id, terminal_id, name } => {
             terminal::rename(ws, project_id, terminal_id, name, cx)
         }
+        ActionRequest::SwitchTerminalShell { project_id, terminal_id, shell } => {
+            terminal::switch_shell(ws, project_id, terminal_id, shell, backend, terminals, settings, cx)
+        }
+        ActionRequest::AddDiscoveredWorktree { parent_project_id, worktree_path, branch } => {
+            project::add_discovered_worktree(ws, window_id, parent_project_id, worktree_path, branch, backend, terminals, settings, cx)
+        }
+        ActionRequest::RerunHook { project_id, terminal_id } => {
+            project::rerun_hook(ws, project_id, terminal_id, backend, terminals, cx)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             terminal::read_content(ws, terminal_id, backend, terminals)
+        }
+        ActionRequest::ExportBuffer { terminal_id } => {
+            terminal::export_buffer(terminal_id, backend)
         }
 
         // ── Tab / pane-move ops ──────────────────────────────────────
         ActionRequest::AddTab { project_id, path, in_group } => {
-            tab::add_tab(ws, focus_manager, project_id, path, in_group, backend, terminals, cx)
+            tab::add_tab(ws, focus_manager, project_id, path, in_group, backend, terminals, settings, cx)
         }
         ActionRequest::SetActiveTab { project_id, path, index } => {
             tab::set_active_tab(ws, project_id, path, index, cx)
@@ -136,6 +154,21 @@ pub fn execute_action(
             git::commit_graph(ws, project_id, count, branch)
         }
         ActionRequest::GitListBranches { project_id } => git::list_branches(ws, project_id),
+        ActionRequest::GitListWorktrees { project_id } => git::list_worktrees(ws, project_id),
+        ActionRequest::WorktreeCloseInfo { project_id } => git::worktree_close_info(ws, project_id),
+        ActionRequest::GenerateWorktreeBranchName { project_id } => git::generate_worktree_branch_name(ws, project_id),
+        ActionRequest::GitListBranchesClassified { project_id } => {
+            git::list_branches_classified(ws, project_id)
+        }
+        ActionRequest::GitCheckoutLocalBranch { project_id, branch } => {
+            git::checkout_local_branch(ws, project_id, branch)
+        }
+        ActionRequest::GitCheckoutRemoteBranch { project_id, remote_branch } => {
+            git::checkout_remote_branch(ws, project_id, remote_branch)
+        }
+        ActionRequest::GitCreateAndCheckoutBranch { project_id, new_name, start_point } => {
+            git::create_and_checkout_branch(ws, project_id, new_name, start_point)
+        }
         ActionRequest::GitStageFile { project_id, file_path } => {
             git::stage_file(ws, project_id, file_path)
         }
@@ -183,7 +216,7 @@ pub fn execute_action(
 
         // ── Project / folder / worktree ops ──────────────────────────
         ActionRequest::AddProject { name, path } => {
-            project::add_project(ws, window_id, name, path, backend, terminals, cx)
+            project::add_project(ws, window_id, name, path, backend, terminals, settings, cx)
         }
         ActionRequest::ReorderProjectInFolder { folder_id, project_id, new_index } => {
             project::reorder_in_folder(ws, folder_id, project_id, new_index, cx)
@@ -197,17 +230,23 @@ pub fn execute_action(
         ActionRequest::RenameProject { project_id, name } => {
             project::rename_project(ws, project_id, name, cx)
         }
+        ActionRequest::UpdateProjectHooks { project_id, hooks } => {
+            project::update_project_hooks(ws, project_id, *hooks, cx)
+        }
         ActionRequest::RenameProjectDirectory { project_id, new_name } => {
             project::rename_project_directory(ws, project_id, new_name, cx)
         }
         ActionRequest::DeleteProject { project_id } => {
-            project::delete_project(ws, focus_manager, project_id, cx)
+            project::delete_project(ws, focus_manager, project_id, settings, cx)
         }
         ActionRequest::SetProjectShowInOverview { project_id, show, window: _ } => {
             project::set_show_in_overview(ws, focus_manager, window_id, project_id, show, cx)
         }
         ActionRequest::RemoveWorktreeProject { project_id, force } => {
-            project::remove_worktree_project(ws, focus_manager, project_id, force, cx)
+            project::remove_worktree_project(ws, focus_manager, project_id, force, settings, cx)
+        }
+        ActionRequest::CloseWorktree { project_id, merge, stash, fetch, push, delete_branch } => {
+            project::close_worktree(ws, focus_manager, project_id, merge, stash, fetch, push, delete_branch, settings, cx)
         }
         ActionRequest::CreateFolder { name } => project::create_folder(ws, name, cx),
         ActionRequest::DeleteFolder { folder_id } => project::delete_folder(ws, folder_id, cx),
@@ -220,8 +259,40 @@ pub fn execute_action(
         ActionRequest::MoveProjectOutOfFolder { project_id, top_level_index } => {
             project::move_out_of_folder(ws, project_id, top_level_index, cx)
         }
+        ActionRequest::MoveProject { project_id, new_index } => {
+            project::move_project(ws, project_id, new_index, cx)
+        }
+        ActionRequest::MoveItemInOrder { item_id, new_index } => {
+            project::move_item_in_order(ws, item_id, new_index, cx)
+        }
+        ActionRequest::ToggleProjectPinned { project_id } => {
+            project::toggle_project_pinned(ws, project_id, cx)
+        }
+        ActionRequest::ReorderWorktree { parent_id, worktree_id, new_index } => {
+            project::reorder_worktree(ws, parent_id, worktree_id, new_index, cx)
+        }
+        ActionRequest::SetWorktreeColorOverride { project_id, color } => {
+            project::set_worktree_color_override(ws, project_id, color, cx)
+        }
         ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
-            project::create_worktree(ws, window_id, project_id, branch, create_branch, backend, terminals, cx)
+            project::create_worktree(ws, window_id, project_id, branch, create_branch, backend, terminals, settings, cx)
+        }
+
+        // ── Sessions (whole-workspace; daemon owns session files + state) ──
+        ActionRequest::LoadSession { name } => {
+            session::load_session_action(ws, focus_manager, name, backend, terminals, settings, cx)
+        }
+        ActionRequest::SaveSession { name } => session::save_session_action(ws, name),
+        ActionRequest::ImportWorkspace { path } => {
+            session::import_workspace_action(ws, focus_manager, path, backend, terminals, settings, cx)
+        }
+        ActionRequest::ExportWorkspace { path } => session::export_workspace_action(ws, path),
+
+        // Soft-close undo / finalize are handled by the daemon command loop
+        // directly (it owns the grace deadlines + kept-alive PTYs).
+        ActionRequest::UndoSoftClose { .. }
+        | ActionRequest::CloseTerminalNow { .. } => {
+            ActionResult::Err("soft-close undo/finalize must be handled by the daemon command loop".to_string())
         }
 
         // Service actions are handled by the remote command loop directly
@@ -306,7 +377,8 @@ pub fn spawn_uninitialized_terminals(
     project_id: &str,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     // Don't spawn terminals for projects whose worktree is still being created
     if ws.is_creating_project(project_id) {
@@ -332,13 +404,12 @@ pub fn spawn_uninitialized_terminals(
     }
     log::info!("spawn_uninitialized_terminals: project={}, uninitialized_count={}", project_id, uninitialized.len());
 
-    let app_settings = settings(cx);
-    let global_default = app_settings.default_shell.clone();
-    let global_hooks = app_settings.hooks;
+    let global_default = settings.default_shell.clone();
+    let global_hooks = settings.hooks.clone();
 
     // Resolve shell_wrapper and on_create once for all terminals in this project
     let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
-    let on_create_cmd = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), &global_hooks, cx);
+    let on_create_cmd = hooks::resolve_terminal_on_create_simple(&project_hooks, parent_hooks.as_ref(), &global_hooks);
     let folder = ws.folder_for_project_or_parent(project_id);
     let folder_id = folder.map(|f| f.id.as_str());
     let folder_name = folder.map(|f| f.name.as_str());

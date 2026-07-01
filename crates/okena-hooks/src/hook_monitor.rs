@@ -48,6 +48,7 @@ struct HookMonitorInner {
 #[derive(Clone)]
 pub struct HookMonitor(Arc<Mutex<HookMonitorInner>>);
 
+#[cfg(feature = "gpui")]
 impl gpui::Global for HookMonitor {}
 
 impl Default for HookMonitor {
@@ -145,6 +146,14 @@ impl HookMonitor {
     pub fn drain_pending_toasts(&self) -> Vec<Toast> {
         let mut inner = self.0.lock();
         std::mem::take(&mut inner.pending_toasts)
+    }
+
+    /// Enqueue an arbitrary toast for the daemon's toast-forward loop to
+    /// broadcast to clients. Used by daemon flows (e.g. soft-close) that must
+    /// surface a toast but aren't hook-driven.
+    pub fn push_toast(&self, toast: Toast) {
+        let mut inner = self.0.lock();
+        inner.pending_toasts.push(toast);
     }
 
     /// Get a snapshot of the execution history (newest first).

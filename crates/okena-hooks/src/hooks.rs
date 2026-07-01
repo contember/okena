@@ -9,6 +9,7 @@ use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_terminal::TerminalsRegistry;
 use okena_state::HooksConfig;
 use crate::hook_monitor::{HookMonitor, HookStatus};
+#[cfg(feature = "gpui")]
 use gpui::App;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ impl HookRunner {
     }
 }
 
+#[cfg(feature = "gpui")]
 impl gpui::Global for HookRunner {}
 
 /// Pending terminal-backed hook actions paired with their env vars, returned
@@ -351,11 +353,13 @@ fn resolve_hook_with_parent(
 }
 
 /// Try to get the global HookMonitor from GPUI context.
+#[cfg(feature = "gpui")]
 pub fn try_monitor(cx: &App) -> Option<HookMonitor> {
     cx.try_global::<HookMonitor>().cloned()
 }
 
 /// Try to get the global HookRunner from GPUI context.
+#[cfg(feature = "gpui")]
 pub fn try_runner(cx: &App) -> Option<HookRunner> {
     cx.try_global::<HookRunner>().cloned()
 }
@@ -581,6 +585,10 @@ fn project_env(
 }
 
 /// Fire the `on_project_open` hook for a project.
+///
+/// GPUI-free: takes the `HookRunner`/`HookMonitor` services explicitly so the
+/// daemon reactor can drive it without an `&App`. Callers in scope of GPUI pass
+/// `try_runner(cx)`/`try_monitor(cx)`.
 pub fn fire_on_project_open(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -589,14 +597,13 @@ pub fn fire_on_project_open(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
     global_hooks: &HooksConfig,
-    cx: &App,
+    runner: Option<&HookRunner>,
+    monitor: Option<&HookMonitor>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_open) {
         let env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         log::info!("Running on_project_open hook for project '{}'", project_name);
-        let monitor = try_monitor(cx);
-        let runner = try_runner(cx);
-        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_project_open", project_name, runner.as_ref(), project_id, true) {
+        if let Some(result) = run_hook(cmd, env, monitor, "on_project_open", project_name, runner, project_id, true) {
             return vec![result];
         }
     }
@@ -605,6 +612,9 @@ pub fn fire_on_project_open(
 
 /// Fire the `on_project_close` hook for a project.
 /// Runs headlessly (no PTY terminal) since the project is being deleted.
+///
+/// GPUI-free: takes the `HookMonitor` service explicitly (no runner — close
+/// hooks never spawn a PTY terminal).
 pub fn fire_on_project_close(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -613,17 +623,18 @@ pub fn fire_on_project_close(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
     global_hooks: &HooksConfig,
-    cx: &App,
+    monitor: Option<&HookMonitor>,
 ) {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_close) {
         let env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         log::info!("Running on_project_close hook for project '{}'", project_name);
-        let monitor = try_monitor(cx);
-        run_hook(cmd, env, monitor.as_ref(), "on_project_close", project_name, None, project_id, true);
+        run_hook(cmd, env, monitor, "on_project_close", project_name, None, project_id, true);
     }
 }
 
 /// Fire the `on_worktree_create` hook after a worktree is successfully created.
+///
+/// GPUI-free: takes the `HookRunner`/`HookMonitor` services explicitly.
 pub fn fire_on_worktree_create(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -633,15 +644,14 @@ pub fn fire_on_worktree_create(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
     global_hooks: &HooksConfig,
-    cx: &App,
+    runner: Option<&HookRunner>,
+    monitor: Option<&HookMonitor>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_create) {
         let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_worktree_create hook for branch '{}'", branch);
-        let monitor = try_monitor(cx);
-        let runner = try_runner(cx);
-        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_worktree_create", project_name, runner.as_ref(), project_id, true) {
+        if let Some(result) = run_hook(cmd, env, monitor, "on_worktree_create", project_name, runner, project_id, true) {
             return vec![result];
         }
     }
@@ -650,6 +660,32 @@ pub fn fire_on_worktree_create(
 
 /// Fire the `on_worktree_close` hook after a worktree is successfully removed.
 /// Runs headlessly (no PTY terminal) since the worktree project is being deleted.
+///
+/// GPUI-free: takes the `HookMonitor` service explicitly (no runner — close
+/// hooks never spawn a PTY terminal).
+pub fn fire_on_worktree_close_with_services(
+    project_hooks: &HooksConfig,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    branch: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    global_hooks: &HooksConfig,
+    monitor: Option<&HookMonitor>,
+) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_close) {
+        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+        env.insert("OKENA_BRANCH".into(), branch.into());
+        log::info!("Running on_worktree_close hook for project '{}' (branch: {})", project_name, branch);
+        run_hook(cmd, env, monitor, "on_worktree_close", project_name, None, project_id, true);
+    }
+}
+
+/// GPUI wrapper around [`fire_on_worktree_close_with_services`]: reads the
+/// `HookMonitor` global from `&App` and delegates. Kept so existing `&App`
+/// callers (e.g. okena-app's pending-worktree-close path) compile unchanged.
+#[cfg(feature = "gpui")]
 pub fn fire_on_worktree_close(
     project_hooks: &HooksConfig,
     project_id: &str,
@@ -661,13 +697,18 @@ pub fn fire_on_worktree_close(
     global_hooks: &HooksConfig,
     cx: &App,
 ) {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_close) {
-        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
-        env.insert("OKENA_BRANCH".into(), branch.into());
-        log::info!("Running on_worktree_close hook for project '{}' (branch: {})", project_name, branch);
-        let monitor = try_monitor(cx);
-        run_hook(cmd, env, monitor.as_ref(), "on_worktree_close", project_name, None, project_id, true);
-    }
+    let monitor = try_monitor(cx);
+    fire_on_worktree_close_with_services(
+        project_hooks,
+        project_id,
+        project_name,
+        project_path,
+        branch,
+        folder_id,
+        folder_name,
+        global_hooks,
+        monitor.as_ref(),
+    );
 }
 
 /// Bare sync hook runner for tests (no monitor, no runner).
@@ -873,6 +914,7 @@ pub fn fire_worktree_removed(
 
 /// Resolve the `terminal.on_create` hook command.
 /// Returns the command string if configured at any level (project/parent/global).
+#[cfg(feature = "gpui")]
 pub fn resolve_terminal_on_create(
     project_hooks: &HooksConfig,
     parent_hooks: Option<&HooksConfig>,
@@ -903,9 +945,14 @@ pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str, env_vars: &HashMa
     ShellType::for_command(script)
 }
 
-/// Fire the `terminal.on_close` hook after a terminal PTY exits.
-/// Runs headlessly (no PTY runner) since the terminal just exited.
-pub fn fire_terminal_on_close(
+/// Fire the `terminal.on_close` hook after a terminal PTY exits, taking the
+/// `HookMonitor` explicitly (GPUI-free). Runs headlessly (no PTY runner) since
+/// the terminal just exited.
+///
+/// This is the core; the GPUI [`fire_terminal_on_close`] wrapper just reads the
+/// monitor global from `&App` and delegates here. The daemon (no GPUI globals)
+/// calls this directly with the monitor it owns.
+pub fn fire_terminal_on_close_with_services(
     project_hooks: &HooksConfig,
     parent_hooks: Option<&HooksConfig>,
     project_id: &str,
@@ -918,7 +965,7 @@ pub fn fire_terminal_on_close(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
     global_hooks: &HooksConfig,
-    cx: &App,
+    monitor: Option<&HookMonitor>,
 ) {
     if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_close) {
         let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
@@ -939,9 +986,46 @@ pub fn fire_terminal_on_close(
             }
         }
         log::info!("Running terminal.on_close hook for terminal '{}'", terminal_id);
-        let monitor = try_monitor(cx);
-        run_hook(cmd, env, monitor.as_ref(), "terminal.on_close", project_name, None, project_id, true);
+        run_hook(cmd, env, monitor, "terminal.on_close", project_name, None, project_id, true);
     }
+}
+
+/// GPUI wrapper around [`fire_terminal_on_close_with_services`]: reads the
+/// `HookMonitor` global from `&App` and delegates. Kept so existing `&App`
+/// callers (e.g. okena-app's PTY exit loop) compile unchanged.
+#[cfg(feature = "gpui")]
+#[allow(clippy::too_many_arguments)]
+pub fn fire_terminal_on_close(
+    project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    terminal_id: &str,
+    terminal_name: Option<&str>,
+    is_worktree: bool,
+    exit_code: Option<u32>,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    global_hooks: &HooksConfig,
+    cx: &App,
+) {
+    let monitor = try_monitor(cx);
+    fire_terminal_on_close_with_services(
+        project_hooks,
+        parent_hooks,
+        project_id,
+        project_name,
+        project_path,
+        terminal_id,
+        terminal_name,
+        is_worktree,
+        exit_code,
+        folder_id,
+        folder_name,
+        global_hooks,
+        monitor.as_ref(),
+    );
 }
 
 /// Resolve the shell_wrapper for terminal creation.

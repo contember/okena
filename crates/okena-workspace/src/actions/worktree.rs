@@ -4,11 +4,11 @@
 //! worktree projects, plus worktree-specific properties and ordering.
 
 use okena_core::theme::FolderColor;
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
-use crate::state::{LayoutNode, ProjectData, Workspace, WindowId};
-use gpui::*;
+use crate::state::{LayoutNode, PendingWorktreeClose, ProjectData, Workspace, WindowId};
 use std::collections::HashMap;
 
 impl Workspace {
@@ -20,12 +20,12 @@ impl Workspace {
     /// viewport model, hidden state IS persisted -- the bump is unconditional,
     /// even for ids that do not currently match a project. Unknown extra ids
     /// are a silent no-op (close-race contract inherited from `toggle_hidden`).
-    pub fn toggle_worktree_visibility(&mut self, window_id: WindowId, project_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_worktree_visibility(&mut self, window_id: WindowId, project_id: &str, cx: &mut impl WorkspaceCx) {
         self.toggle_hidden(window_id, project_id, cx);
     }
 
     /// Set or clear the color override for a worktree project
-    pub fn set_worktree_color_override(&mut self, project_id: &str, color: Option<FolderColor>, cx: &mut Context<Self>) {
+    pub fn set_worktree_color_override(&mut self, project_id: &str, color: Option<FolderColor>, cx: &mut impl WorkspaceCx) {
         self.with_project(project_id, cx, |project| {
             if let Some(ref mut wt) = project.worktree_info {
                 wt.color_override = color;
@@ -37,7 +37,7 @@ impl Workspace {
     }
 
     /// Reorder a worktree within its parent's worktree_ids list
-    pub fn reorder_worktree(&mut self, parent_id: &str, worktree_id: &str, new_index: usize, cx: &mut Context<Self>) {
+    pub fn reorder_worktree(&mut self, parent_id: &str, worktree_id: &str, new_index: usize, cx: &mut impl WorkspaceCx) {
         if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_id)
             && let Some(current_index) = parent.worktree_ids.iter().position(|id| id == worktree_id) {
                 let id = parent.worktree_ids.remove(current_index);
@@ -79,7 +79,7 @@ impl Workspace {
         create_branch: bool,
         global_hooks: &HooksConfig,
         window_id: WindowId,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
@@ -114,7 +114,7 @@ impl Workspace {
         project_path: &str,
         global_hooks: &HooksConfig,
         window_id: WindowId,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
         self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, true, global_hooks, window_id, cx)
     }
@@ -135,7 +135,7 @@ impl Workspace {
         project_path: &str,
         global_hooks: &HooksConfig,
         window_id: WindowId,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
         self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, false, global_hooks, window_id, cx)
     }
@@ -151,7 +151,7 @@ impl Workspace {
         fire_hooks: bool,
         global_hooks: &HooksConfig,
         window_id: WindowId,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
         // Get parent project info
         let parent = self.project(parent_project_id)
@@ -219,6 +219,8 @@ impl Workspace {
             let folder = self.folder_for_project_or_parent(&id);
             let folder_id = folder.map(|f| f.id.as_str());
             let folder_name = folder.map(|f| f.name.as_str());
+            let runner = cx.hook_runner();
+            let monitor = cx.hook_monitor();
             let hook_results = hooks::fire_on_worktree_create(
                 &new_project_hooks,
                 &id,
@@ -228,7 +230,8 @@ impl Workspace {
                 folder_id,
                 folder_name,
                 global_hooks,
-                cx,
+                runner.as_ref(),
+                monitor.as_ref(),
             );
             self.register_hook_results(hook_results, cx);
         }
@@ -238,7 +241,7 @@ impl Workspace {
 
     /// Finalize a deferred worktree: set the layout from the parent and fire hooks.
     /// Called once the worktree directory exists on disk.
-    pub fn fire_worktree_hooks(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
+    pub fn fire_worktree_hooks(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
         let Some(project) = self.project(project_id) else { return };
         let hooks_config = project.hooks.clone();
         let name = project.name.clone();
@@ -262,6 +265,8 @@ impl Workspace {
         let folder = self.folder_for_project_or_parent(project_id);
         let folder_id = folder.map(|f| f.id.as_str());
         let folder_name = folder.map(|f| f.name.as_str());
+        let runner = cx.hook_runner();
+        let monitor = cx.hook_monitor();
         let hook_results = hooks::fire_on_worktree_create(
             &hooks_config,
             project_id,
@@ -271,7 +276,8 @@ impl Workspace {
             folder_id,
             folder_name,
             global_hooks,
-            cx,
+            runner.as_ref(),
+            monitor.as_ref(),
         );
         self.register_hook_results(hook_results, cx);
     }
@@ -419,7 +425,7 @@ impl Workspace {
     }
 
     /// Remove a worktree project and its git worktree
-    pub fn remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) -> Result<(), String> {
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
 
@@ -445,7 +451,8 @@ impl Workspace {
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
 
         // Fire on_worktree_close hook BEFORE removal so the hook has a valid CWD
-        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, cx);
+        let monitor = cx.hook_monitor();
+        hooks::fire_on_worktree_close_with_services(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, monitor.as_ref());
 
         // Remove the git worktree
         okena_git::remove_worktree(&worktree_path, force)
@@ -455,5 +462,274 @@ impl Workspace {
         self.delete_project(focus_manager, project_id, global_hooks, cx);
 
         Ok(())
+    }
+
+    /// Close a worktree project: optionally stash/fetch/rebase/merge/push/
+    /// delete-branch, then remove the worktree. Hook integration runs before
+    /// the merge step and before the actual removal.
+    ///
+    /// Daemon-side port of the client `CloseWorktreeDialog::execute` pipeline:
+    /// runs synchronously off the UI thread, so there is no `processing`/error
+    /// UI state — failures return `Err` with the same message text. The
+    /// stash-pop recovery on a failed merge step still runs; a failed recovery
+    /// only logs a warning, and the original step error is returned.
+    ///
+    /// Inputs are recomputed authoritatively from git/state (the client request
+    /// only carries the toggle booleans).
+    #[allow(clippy::too_many_arguments)] // cohesive close-pipeline toggle flags
+    pub fn close_worktree(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        merge: bool,
+        stash: bool,
+        fetch: bool,
+        push: bool,
+        delete_branch: bool,
+        global_hooks: &HooksConfig,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<(), String> {
+        // Recompute the git-derived values authoritatively (don't trust the client).
+        let project = self.project(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+        let project_name = project.name.clone();
+        let project_path = project.path.clone();
+        let project_hooks = project.hooks.clone();
+
+        let main_repo_path = self.worktree_parent_path(project_id).unwrap_or_default();
+        let branch = okena_git::get_current_branch(std::path::Path::new(&project_path)).unwrap_or_default();
+        let default_branch = okena_git::get_default_branch(std::path::Path::new(&main_repo_path)).unwrap_or_default();
+        let is_dirty = okena_git::has_uncommitted_changes(std::path::Path::new(&project_path));
+
+        let merge_enabled = merge && (!is_dirty || stash) && !branch.is_empty() && !default_branch.is_empty();
+        let stash_enabled = stash && is_dirty;
+        let fetch_enabled = fetch;
+        let push_enabled = push;
+        let delete_branch_enabled = delete_branch;
+
+        let folder = self.folder_for_project_or_parent(project_id);
+        let folder_id = folder.map(|f| f.id.clone());
+        let folder_name = folder.map(|f| f.name.clone());
+
+        let monitor = cx.hook_monitor();
+        let runner = cx.hook_runner();
+
+        let mut did_stash = false;
+
+        // Step 1: If merge enabled, run merge flow
+        if merge_enabled {
+            // Stash (if stash_enabled and is_dirty)
+            if stash_enabled {
+                if let Err(e) = okena_git::stash_changes(std::path::Path::new(&project_path)) {
+                    return Err(format!("Stash failed: {}", e));
+                }
+                did_stash = true;
+            }
+
+            // Fetch (if fetch_enabled)
+            if fetch_enabled
+                && let Err(e) = okena_git::fetch_all(std::path::Path::new(&project_path)) {
+                if did_stash
+                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
+                    log::warn!(
+                        "Failed to restore stashed changes for worktree '{}' at {} after fetch failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+                        branch, project_path, pop_err
+                    );
+                }
+                return Err(format!("Fetch failed: {}", e));
+            }
+
+            // pre_merge hook (sync, headless — no PTY runner)
+            let pre_merge_result = hooks::fire_pre_merge(
+                &project_hooks,
+                global_hooks,
+                project_id,
+                &project_name,
+                &project_path,
+                &branch,
+                &default_branch,
+                &main_repo_path,
+                folder_id.as_deref(),
+                folder_name.as_deref(),
+                monitor.as_ref(),
+                None,
+            );
+
+            if let Err(e) = pre_merge_result {
+                if did_stash
+                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
+                    log::warn!(
+                        "Failed to restore stashed changes for worktree '{}' at {} after pre_merge hook failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+                        branch, project_path, pop_err
+                    );
+                }
+                return Err(format!("pre_merge hook failed: {}", e));
+            }
+
+            // Rebase
+            if let Err(e) = okena_git::rebase_onto(std::path::Path::new(&project_path), &default_branch) {
+                // Fire on_rebase_conflict hook
+                let error_msg = e.to_string();
+                let (terminal_actions, hook_results) = hooks::fire_on_rebase_conflict(
+                    &project_hooks,
+                    global_hooks,
+                    project_id,
+                    &project_name,
+                    &project_path,
+                    &branch,
+                    &default_branch,
+                    &main_repo_path,
+                    &error_msg,
+                    folder_id.as_deref(),
+                    folder_name.as_deref(),
+                    monitor.as_ref(),
+                    runner.as_ref(),
+                );
+                for (cmd, env) in terminal_actions {
+                    self.add_terminal_with_command(project_id, &cmd, &env, cx);
+                }
+                self.register_hook_results(hook_results, cx);
+
+                if did_stash
+                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
+                    log::warn!(
+                        "Failed to restore stashed changes for worktree '{}' at {} after rebase failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+                        branch, project_path, pop_err
+                    );
+                }
+                return Err(format!("Rebase failed: {}", e));
+            }
+
+            // Merge (ff-only) in the main repo
+            if let Err(e) = okena_git::merge_branch(std::path::Path::new(&main_repo_path), &branch, true) {
+                if did_stash
+                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
+                    log::warn!(
+                        "Failed to restore stashed changes for worktree '{}' at {} after merge failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+                        branch, project_path, pop_err
+                    );
+                }
+                return Err(format!("Merge failed: {}", e));
+            }
+
+            // post_merge hook (async)
+            let _ = hooks::fire_post_merge(
+                &project_hooks,
+                global_hooks,
+                project_id,
+                &project_name,
+                &project_path,
+                &branch,
+                &default_branch,
+                &main_repo_path,
+                folder_id.as_deref(),
+                folder_name.as_deref(),
+                monitor.as_ref(),
+                runner.as_ref(),
+            );
+
+            // Push default branch (if push_enabled)
+            if push_enabled
+                && let Err(e) = okena_git::push_branch(std::path::Path::new(&main_repo_path), &default_branch) {
+                log::warn!("Push failed (continuing): {}", e);
+            }
+
+            // Delete branch (if delete_branch_enabled)
+            if delete_branch_enabled {
+                if let Err(e) = okena_git::delete_local_branch(std::path::Path::new(&main_repo_path), &branch) {
+                    log::warn!("Delete local branch failed (continuing): {}", e);
+                }
+
+                if let Err(e) = okena_git::delete_remote_branch(std::path::Path::new(&main_repo_path), &branch) {
+                    log::warn!("Delete remote branch failed (continuing): {}", e);
+                }
+            }
+        }
+
+        let force_remove = is_dirty && !did_stash;
+
+        // Step 2: before_worktree_remove hook
+        // If the hook exists and we have a runner, fire it as a visible PTY terminal
+        // and register a pending close — the actual removal happens when the hook exits.
+        // If no hook or no runner, proceed with immediate removal.
+        let has_before_remove_hook =
+            project_hooks.worktree.before_remove.is_some() || global_hooks.worktree.before_remove.is_some();
+
+        if has_before_remove_hook && runner.is_some() {
+            // Fire hook as visible PTY terminal and defer removal
+            let hook_results = hooks::fire_before_worktree_remove_async(
+                &project_hooks,
+                global_hooks,
+                project_id,
+                &project_name,
+                &project_path,
+                &branch,
+                &main_repo_path,
+                folder_id.as_deref(),
+                folder_name.as_deref(),
+                monitor.as_ref(),
+                runner.as_ref(),
+            );
+
+            let pending_terminal_id = hook_results.first().map(|r| r.terminal_id.clone());
+
+            if let Some(hook_terminal_id) = pending_terminal_id {
+                self.register_hook_results(hook_results, cx);
+
+                // Register pending close — PTY exit handler will complete it
+                self.register_pending_worktree_close(PendingWorktreeClose {
+                    project_id: project_id.to_string(),
+                    hook_terminal_id,
+                    branch: branch.clone(),
+                    main_repo_path: main_repo_path.clone(),
+                });
+                Ok(())
+            } else {
+                // Hook terminal failed to spawn — abort, don't remove
+                Err("before_worktree_remove hook failed to start".to_string())
+            }
+        } else {
+            // No hook or no runner — run headlessly then remove immediately
+            if has_before_remove_hook
+                && let Err(e) = hooks::fire_before_worktree_remove(
+                    &project_hooks,
+                    global_hooks,
+                    project_id,
+                    &project_name,
+                    &project_path,
+                    &branch,
+                    &main_repo_path,
+                    folder_id.as_deref(),
+                    folder_name.as_deref(),
+                    monitor.as_ref(),
+                    None,
+                ) {
+                return Err(format!("before_worktree_remove hook failed: {}", e));
+            }
+
+            // Fire on_dirty_worktree_close hook when closing dirty worktree without stash
+            if force_remove {
+                let (terminal_actions, hook_results) = hooks::fire_on_dirty_worktree_close(
+                    &project_hooks,
+                    global_hooks,
+                    project_id,
+                    &project_name,
+                    &project_path,
+                    &branch,
+                    folder_id.as_deref(),
+                    folder_name.as_deref(),
+                    monitor.as_ref(),
+                    runner.as_ref(),
+                );
+                for (cmd, env) in terminal_actions {
+                    self.add_terminal_with_command(project_id, &cmd, &env, cx);
+                }
+                self.register_hook_results(hook_results, cx);
+            }
+
+            // remove_worktree_project fires on_worktree_close + removes the git
+            // worktree + deletes the project (which fires on_project_close).
+            self.remove_worktree_project(focus_manager, project_id, force_remove, global_hooks, cx)
+        }
     }
 }

@@ -130,6 +130,7 @@ impl ConnectionManager {
             token_obtained_at: None,
             tls,
             pinned_cert_sha256: None,
+            local_endpoint: None,
         };
         let conn_id = config.id.clone();
 
@@ -401,6 +402,17 @@ impl ConnectionManager {
                 }
                 ConnectionEvent::ServerWarning { message, .. } => {
                     log::warn!("Server warning for {}: {}", conn_id, message);
+                }
+                ConnectionEvent::Toast { toast, .. } => {
+                    // The mobile bridge has no toast surface yet; surfacing these
+                    // in the RN UI would need a dedicated FFI callback. Log for now
+                    // so daemon-originated toasts are at least observable.
+                    log::info!(
+                        "Toast for {} [{}]: {}",
+                        conn_id,
+                        toast.level,
+                        toast.message
+                    );
                 }
             }
         }

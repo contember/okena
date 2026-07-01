@@ -7,10 +7,12 @@
 
 use okena_core::theme::FolderColor;
 use crate::access_history::ProjectAccessHistory;
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::lifecycle::ProjectLifecycleTracker;
 use crate::remote_sync::{PendingRemoteFocus, RemoteProjectSnapshot, RemoteSyncState};
 use crate::visibility::compute_visible_projects;
+#[cfg(feature = "gpui")]
 use gpui::*;
 use std::collections::HashMap;
 
@@ -22,9 +24,11 @@ pub use okena_state::{
 };
 
 /// Global workspace wrapper for app-wide access (used by quit handler)
+#[cfg(feature = "gpui")]
 #[derive(Clone)]
 pub struct GlobalWorkspace(pub Entity<Workspace>);
 
+#[cfg(feature = "gpui")]
 impl Global for GlobalWorkspace {}
 
 /// GPUI Entity for workspace state.
@@ -130,15 +134,15 @@ impl Workspace {
     /// data changes, but it means callers fired in a hot loop will re-shape
     /// every visible terminal grid each time. Keep such callers rare or
     /// throttled (see `bump_activity`).
-    pub fn notify_data(&mut self, cx: &mut Context<Self>) {
+    pub fn notify_data(&mut self, cx: &mut impl WorkspaceCx) {
         self.data_version += 1;
         cx.notify();
-        cx.refresh_windows();
+        cx.refresh_views();
     }
 
     /// Replace workspace data wholesale (e.g. from disk reload).
     /// Does NOT bump data_version — the data came from disk, not a user edit.
-    pub fn replace_data(&mut self, focus_manager: &mut FocusManager, data: WorkspaceData, cx: &mut Context<Self>) {
+    pub fn replace_data(&mut self, focus_manager: &mut FocusManager, data: WorkspaceData, cx: &mut impl WorkspaceCx) {
         self.data = data;
         self.data_replacement_epoch += 1;
         // Snapshots in pending_closes refer to the old data — drop them so an
@@ -148,7 +152,7 @@ impl Workspace {
         self.restored_closes.clear();
         focus_manager.clear_all();
         cx.notify();
-        cx.refresh_windows();
+        cx.refresh_views();
     }
 
     /// Record that a project was accessed (for sorting by recency)
@@ -163,7 +167,7 @@ impl Workspace {
     /// on raw terminal output, since output volume is not "activity". A no-op
     /// for an unknown project id. Uses `notify_data` so the change is persisted
     /// (debounced) and the sidebar re-renders to reorder.
-    pub fn bump_activity(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn bump_activity(&mut self, project_id: &str, cx: &mut impl WorkspaceCx) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -224,7 +228,7 @@ impl Workspace {
         &mut self,
         window_id: WindowId,
         folder_id: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.data.set_folder_filter(window_id, folder_id);
         self.notify_data(cx);
@@ -243,7 +247,7 @@ impl Workspace {
         &mut self,
         window_id: WindowId,
         project_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.data.toggle_hidden(window_id, project_id);
         self.notify_data(cx);
@@ -263,7 +267,7 @@ impl Workspace {
         window_id: WindowId,
         project_id: &str,
         width: f32,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.data.set_project_width(window_id, project_id, width);
         self.notify_data(cx);
@@ -285,7 +289,7 @@ impl Workspace {
         window_id: WindowId,
         folder_id: &str,
         collapsed: bool,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.data.set_folder_collapsed(window_id, folder_id, collapsed);
         self.notify_data(cx);
@@ -308,7 +312,7 @@ impl Workspace {
         &mut self,
         window_id: WindowId,
         bounds: Option<WindowBounds>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.data.set_os_bounds(window_id, bounds);
         self.notify_data(cx);
@@ -320,7 +324,7 @@ impl Workspace {
         &mut self,
         window_id: WindowId,
         open: bool,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         self.data.set_sidebar_open(window_id, open);
         self.notify_data(cx);
@@ -348,7 +352,7 @@ impl Workspace {
     ///
     /// Percentages in `project_widths` are axis-agnostic, so relative grid
     /// sizing is preserved across the flip. Persisted via `notify_data`.
-    pub fn toggle_project_layout_mode(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+    pub fn toggle_project_layout_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
         let Some(window_state) = self.data.window(window_id) else {
             return;
         };
@@ -377,7 +381,7 @@ impl Workspace {
 
     /// Flip the sidebar project sort mode (manual ↔ activity) for a window.
     /// Persisted via `notify_data`.
-    pub fn toggle_project_sort_mode(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+    pub fn toggle_project_sort_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
         if self.data.toggle_project_sort_mode(window_id).is_some() {
             self.notify_data(cx);
         }
@@ -385,7 +389,7 @@ impl Workspace {
 
     /// Flip the "needs attention" section opt-in for a window's manual view.
     /// Persisted via `notify_data`.
-    pub fn toggle_show_attention_section(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+    pub fn toggle_show_attention_section(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
         if self.data.toggle_show_attention_section(window_id).is_some() {
             self.notify_data(cx);
         }
@@ -393,7 +397,7 @@ impl Workspace {
 
     /// Toggle whether a project is pinned to the top of the activity-sorted
     /// view. No-op for an unknown project id. Persisted via `notify_data`.
-    pub fn toggle_project_pinned(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_project_pinned(&mut self, project_id: &str, cx: &mut impl WorkspaceCx) {
         if let Some(project) = self.project_mut(project_id) {
             project.pinned = !project.pinned;
             self.notify_data(cx);
@@ -426,7 +430,7 @@ impl Workspace {
     pub fn spawn_extra_window(
         &mut self,
         spawning_bounds: Option<WindowBounds>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) -> WindowId {
         let id = self.data.spawn_extra_window(spawning_bounds);
         self.notify_data(cx);
@@ -450,7 +454,7 @@ impl Workspace {
     /// persisted state — the auto-save observer must trigger so the
     /// next launch (slice 07 cri 6) does not see the closed extra
     /// reappear.
-    pub fn close_extra_window(&mut self, id: WindowId, cx: &mut Context<Self>) {
+    pub fn close_extra_window(&mut self, id: WindowId, cx: &mut impl WorkspaceCx) {
         self.data.close_extra_window(id);
         self.notify_data(cx);
     }
@@ -534,7 +538,7 @@ impl Workspace {
 
     /// Update the saved service terminal IDs for a project.
     /// Called by the ServiceManager observer to persist terminal IDs across restarts.
-    pub fn sync_service_terminals(&mut self, project_id: &str, terminals: HashMap<String, String>, cx: &mut Context<Self>) {
+    pub fn sync_service_terminals(&mut self, project_id: &str, terminals: HashMap<String, String>, cx: &mut impl WorkspaceCx) {
         if let Some(project) = self.project_mut(project_id)
             && project.service_terminals != terminals {
                 project.service_terminals = terminals;
@@ -547,7 +551,7 @@ impl Workspace {
         project_id: &str,
         terminal_id: &str,
         entry: HookTerminalEntry,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if let Some(project) = self.project_mut(project_id) {
             let label = entry.label.clone();
@@ -566,7 +570,7 @@ impl Workspace {
     pub fn register_hook_results(
         &mut self,
         results: Vec<crate::hooks::HookTerminalResult>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         for result in results {
             self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
@@ -583,7 +587,7 @@ impl Workspace {
         &mut self,
         terminal_id: &str,
         status: HookTerminalStatus,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         for project in &mut self.data.projects {
             if let Some(entry) = project.hook_terminals.get_mut(terminal_id) {
@@ -599,7 +603,7 @@ impl Workspace {
     pub fn remove_hook_terminal(
         &mut self,
         terminal_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         for project in &mut self.data.projects {
             if project.hook_terminals.remove(terminal_id).is_some() {
@@ -649,7 +653,7 @@ impl Workspace {
         project_id: &str,
         old_id: &str,
         new_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let Some(project) = self.project_mut(project_id) else {
             return;
@@ -753,6 +757,17 @@ impl Workspace {
         self.data.projects.iter().find(|p| p.id == id)
     }
 
+    /// True when the project is served by the co-located local daemon (shared
+    /// filesystem) — i.e. local paths are openable on this machine. A project
+    /// mirrored from a user-added remote connection returns false. A project
+    /// with no connection is treated as local (legacy / non-headless).
+    pub fn is_local_daemon_project(&self, project_id: &str) -> bool {
+        match self.project(project_id).and_then(|p| p.connection_id.as_deref()) {
+            Some(id) => id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+            None => true,
+        }
+    }
+
     /// Get the parent project's path for a worktree project (i.e. the main repo path).
     pub fn worktree_parent_path(&self, project_id: &str) -> Option<String> {
         self.project(project_id)
@@ -835,7 +850,7 @@ impl Workspace {
 
     /// Remove all remote projects (and their folder) for a given connection_id.
     #[allow(dead_code)]
-    pub fn remove_remote_projects(&mut self, focus_manager: &mut FocusManager, connection_id: &str, cx: &mut Context<Self>) {
+    pub fn remove_remote_projects(&mut self, focus_manager: &mut FocusManager, connection_id: &str, cx: &mut impl WorkspaceCx) {
         let prefix = format!("remote:{}:", connection_id);
 
         let removed_project_ids: Vec<String> = self
@@ -875,7 +890,7 @@ impl Workspace {
     }
 
     /// Notify UI without bumping data_version (for remote state changes that shouldn't trigger auto-save).
-    pub fn notify_ui_only(&mut self, cx: &mut Context<Self>) {
+    pub fn notify_ui_only(&mut self, cx: &mut impl WorkspaceCx) {
         cx.notify();
     }
 
@@ -890,7 +905,7 @@ impl Workspace {
         snapshots: &[crate::remote_apply::RemoteSnapshot],
         window_id: WindowId,
         focus_manager: &mut FocusManager,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let outcome = crate::remote_apply::apply_remote_snapshot(
             &mut self.data,
@@ -909,7 +924,7 @@ impl Workspace {
 
     /// Helper to mutate a layout node at a path, with automatic notify.
     /// Returns true if the mutation was applied.
-    pub fn with_layout_node<F>(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>, f: F) -> bool
+    pub fn with_layout_node<F>(&mut self, project_id: &str, path: &[usize], cx: &mut impl WorkspaceCx, f: F) -> bool
     where
         F: FnOnce(&mut LayoutNode) -> bool,
     {
@@ -925,7 +940,7 @@ impl Workspace {
 
     /// Helper to mutate a project, with automatic notify.
     /// Returns true if the mutation was applied.
-    pub fn with_project<F>(&mut self, project_id: &str, cx: &mut Context<Self>, f: F) -> bool
+    pub fn with_project<F>(&mut self, project_id: &str, cx: &mut impl WorkspaceCx, f: F) -> bool
     where
         F: FnOnce(&mut ProjectData) -> bool,
     {
@@ -1704,7 +1719,7 @@ mod workspace_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
     use gpui::AppContext as _;
     use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, WindowBounds, WindowId, WindowState, Workspace, WorkspaceData};

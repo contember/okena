@@ -7,9 +7,12 @@
 //! - [`port_detection`] — centralized listening-port discovery poller
 
 mod commands;
+mod context;
 mod docker;
 mod lifecycle;
 mod port_detection;
+
+pub use context::{ServiceAsyncCx, ServiceCx, ServiceHandle};
 
 use crate::config::ServiceDefinition;
 use okena_terminal::backend::TerminalBackend;
@@ -57,6 +60,39 @@ pub struct ServiceInstance {
     pub is_extra: bool,
 }
 
+impl ServiceInstance {
+    /// Project this runtime service instance onto its wire form
+    /// ([`okena_core::api::ApiServiceInfo`]).
+    ///
+    /// Shared by both remote command loops (GUI `remote_command_loop` and the
+    /// headless `daemon_command_loop`) so the `status` / `kind` string mapping
+    /// lives in exactly one place. Keeping it here (rather than in the gpui-free
+    /// `okena-app-core` shared builder) avoids adding an `okena-services`
+    /// dependency to `okena-app-core`.
+    pub fn to_api(&self) -> okena_core::api::ApiServiceInfo {
+        let (status, exit_code) = match &self.status {
+            ServiceStatus::Stopped => ("stopped", None),
+            ServiceStatus::Starting => ("starting", None),
+            ServiceStatus::Running => ("running", None),
+            ServiceStatus::Crashed { exit_code } => ("crashed", *exit_code),
+            ServiceStatus::Restarting => ("restarting", None),
+        };
+        let kind = match &self.kind {
+            ServiceKind::Okena => "okena",
+            ServiceKind::DockerCompose { .. } => "docker_compose",
+        };
+        okena_core::api::ApiServiceInfo {
+            name: self.definition.name.clone(),
+            status: status.to_string(),
+            terminal_id: self.terminal_id.clone(),
+            ports: self.detected_ports.clone(),
+            exit_code,
+            kind: kind.to_string(),
+            is_extra: self.is_extra,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServiceStatus {
     Stopped,
@@ -80,6 +116,96 @@ impl ServiceStatus {
 }
 
 pub(super) const MAX_RESTART_COUNT: u32 = 5;
+
+impl ServiceManager {
+    /// Remote-action wrappers for the service commands, returning the wire
+    /// [`CommandResult`] directly.
+    ///
+    /// Both remote command loops (GUI `remote_command_loop` and the headless
+    /// `daemon_command_loop`) dispatch the service `ActionRequest`s with
+    /// identical inner logic: look up the project path and, if present, run the
+    /// command and reply `Ok`; otherwise reply `Err("project not found: …")`.
+    /// The only difference between the loops is how they obtain `&mut self` +
+    /// `cx` (entity `update` vs. `Mutex` lock + reactor cx). Centralizing the
+    /// logic here (generic over any [`ServiceCx`]) keeps the two loops to pure
+    /// cx-access glue.
+    pub fn start_service_action(
+        &mut self,
+        project_id: &str,
+        service_name: &str,
+        cx: &mut impl ServiceCx,
+    ) -> okena_core::api::CommandResult {
+        match self.project_path(project_id).cloned() {
+            Some(path) => {
+                self.start_service(project_id, service_name, &path, cx);
+                okena_core::api::CommandResult::Ok(None)
+            }
+            None => okena_core::api::CommandResult::Err(format!("project not found: {project_id}")),
+        }
+    }
+
+    pub fn stop_service_action(
+        &mut self,
+        project_id: &str,
+        service_name: &str,
+        cx: &mut impl ServiceCx,
+    ) -> okena_core::api::CommandResult {
+        self.stop_service(project_id, service_name, cx);
+        okena_core::api::CommandResult::Ok(None)
+    }
+
+    pub fn restart_service_action(
+        &mut self,
+        project_id: &str,
+        service_name: &str,
+        cx: &mut impl ServiceCx,
+    ) -> okena_core::api::CommandResult {
+        match self.project_path(project_id).cloned() {
+            Some(path) => {
+                self.restart_service(project_id, service_name, &path, cx);
+                okena_core::api::CommandResult::Ok(None)
+            }
+            None => okena_core::api::CommandResult::Err(format!("project not found: {project_id}")),
+        }
+    }
+
+    pub fn start_all_action(
+        &mut self,
+        project_id: &str,
+        cx: &mut impl ServiceCx,
+    ) -> okena_core::api::CommandResult {
+        match self.project_path(project_id).cloned() {
+            Some(path) => {
+                self.start_all(project_id, &path, cx);
+                okena_core::api::CommandResult::Ok(None)
+            }
+            None => okena_core::api::CommandResult::Err(format!("project not found: {project_id}")),
+        }
+    }
+
+    pub fn stop_all_action(
+        &mut self,
+        project_id: &str,
+        cx: &mut impl ServiceCx,
+    ) -> okena_core::api::CommandResult {
+        self.stop_all(project_id, cx);
+        okena_core::api::CommandResult::Ok(None)
+    }
+
+    pub fn reload_services_action(
+        &mut self,
+        project_id: &str,
+        cx: &mut impl ServiceCx,
+    ) -> okena_core::api::CommandResult {
+        match self.project_path(project_id).cloned() {
+            Some(path) => {
+                self.reload_project_services(project_id, &path, cx);
+                okena_core::api::CommandResult::Ok(None)
+            }
+            None => okena_core::api::CommandResult::Err(format!("project not found: {project_id}")),
+        }
+    }
+}
 
 impl ServiceManager {
     pub fn new(backend: Arc<dyn TerminalBackend>, terminals: TerminalsRegistry) -> Self {

@@ -3,20 +3,22 @@
 #![allow(clippy::expect_used)]
 
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiProject, ApiServiceInfo, ApiWindow, StateResponse};
-use crate::services::manager::{ServiceManager, ServiceStatus};
+use crate::remote::types::{ActionRequest, ApiServiceInfo, ApiWindow};
+use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
 use crate::views::window::TerminalsRegistry;
 use crate::workspace::actions::execute::{ensure_terminal, execute_action};
+use crate::workspace::hook_monitor::HookMonitor;
 use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
 use okena_core::api::ApiGitStatus;
-use std::collections::{HashMap, HashSet};
+use okena_workspace::actions::soft_close::{
+    begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow, SoftCloseDeadlines,
+};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch as tokio_watch;
 use uuid::Uuid;
-
-use super::Okena;
 
 /// Parse a wire-format window id into a [`WindowId`].
 ///
@@ -90,6 +92,8 @@ pub(crate) async fn remote_command_loop(
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
     service_manager: Entity<ServiceManager>,
     action_dispatcher: ActionDispatcher,
+    hook_monitor: HookMonitor,
+    deadlines: SoftCloseDeadlines,
     cx: &mut AsyncApp,
 ) {
     loop {
@@ -106,71 +110,49 @@ pub(crate) async fn remote_command_loop(
                     ActionRequest::StartService { project_id, service_name } => {
                         cx.update(|cx| {
                             service_manager.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(&project_id).cloned() {
-                                    sm.start_service(&project_id, &service_name, &path, cx);
-                                    CommandResult::Ok(None)
-                                } else {
-                                    CommandResult::Err(format!("project not found: {}", project_id))
-                                }
+                                sm.start_service_action(&project_id, &service_name, cx)
                             })
                         })
                     }
                     ActionRequest::StopService { project_id, service_name } => {
                         cx.update(|cx| {
                             service_manager.update(cx, |sm, cx| {
-                                sm.stop_service(&project_id, &service_name, cx);
-                                CommandResult::Ok(None)
+                                sm.stop_service_action(&project_id, &service_name, cx)
                             })
                         })
                     }
                     ActionRequest::RestartService { project_id, service_name } => {
                         cx.update(|cx| {
                             service_manager.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(&project_id).cloned() {
-                                    sm.restart_service(&project_id, &service_name, &path, cx);
-                                    CommandResult::Ok(None)
-                                } else {
-                                    CommandResult::Err(format!("project not found: {}", project_id))
-                                }
+                                sm.restart_service_action(&project_id, &service_name, cx)
                             })
                         })
                     }
                     ActionRequest::StartAllServices { project_id } => {
                         cx.update(|cx| {
                             service_manager.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(&project_id).cloned() {
-                                    sm.start_all(&project_id, &path, cx);
-                                    CommandResult::Ok(None)
-                                } else {
-                                    CommandResult::Err(format!("project not found: {}", project_id))
-                                }
+                                sm.start_all_action(&project_id, cx)
                             })
                         })
                     }
                     ActionRequest::StopAllServices { project_id } => {
                         cx.update(|cx| {
                             service_manager.update(cx, |sm, cx| {
-                                sm.stop_all(&project_id, cx);
-                                CommandResult::Ok(None)
+                                sm.stop_all_action(&project_id, cx)
                             })
                         })
                     }
                     ActionRequest::ReloadServices { project_id } => {
                         cx.update(|cx| {
                             service_manager.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(&project_id).cloned() {
-                                    sm.reload_project_services(&project_id, &path, cx);
-                                    CommandResult::Ok(None)
-                                } else {
-                                    CommandResult::Err(format!("project not found: {}", project_id))
-                                }
+                                sm.reload_services_action(&project_id, cx)
                             })
                         })
                     }
 
                     // ── App-scoped: settings / theme / command palette ────
                     ActionRequest::GetSettings => {
-                        cx.update(|cx| super::remote_config::get_settings(cx))
+                        cx.update(super::remote_config::get_settings)
                     }
                     ActionRequest::GetSettingsSchema => {
                         cx.update(|_cx| super::remote_config::get_settings_schema())
@@ -179,7 +161,7 @@ pub(crate) async fn remote_command_loop(
                         cx.update(|cx| super::remote_config::set_settings(cx, patch))
                     }
                     ActionRequest::GetThemes => {
-                        cx.update(|cx| super::remote_config::get_themes(cx))
+                        cx.update(super::remote_config::get_themes)
                     }
                     ActionRequest::GetTheme { id } => {
                         cx.update(|cx| super::remote_config::get_theme(cx, id))
@@ -215,6 +197,121 @@ pub(crate) async fn remote_command_loop(
                         })
                     }
 
+                    // ── Soft-close: undo (restore the ejected pane) ──────────
+                    ActionRequest::UndoSoftClose { terminal_id } => {
+                        // Resolve the dormant main FocusManager (headless has a
+                        // single synthetic window). Then clear the deadline +
+                        // restore the pane through the shared flow.
+                        cx.update(|cx| {
+                            match focus_manager_resolver(cx, None) {
+                                None => CommandResult::Err("window not found: main".to_string()),
+                                Some((_window_id, focus_manager)) => {
+                                    focus_manager.update(cx, |fm, cx| {
+                                        workspace.update(cx, |ws, cx| {
+                                            undo_soft_close_flow(
+                                                &deadlines, ws, fm, &terminals, &terminal_id, cx,
+                                            );
+                                        });
+                                        cx.notify();
+                                    });
+                                    CommandResult::Ok(None)
+                                }
+                            }
+                        })
+                    }
+
+                    // ── Soft-close: finalize now ("Close now") ───────────────
+                    ActionRequest::CloseTerminalNow { terminal_id } => {
+                        cx.update(|cx| {
+                            workspace.update(cx, |ws, cx| {
+                                close_now_flow(
+                                    &deadlines, ws, &*backend, &terminals, &terminal_id, cx,
+                                );
+                            });
+                            CommandResult::Ok(None)
+                        })
+                    }
+
+                    // ── Close terminal: grace-aware soft close ───────────────
+                    // Mirrors the daemon-core loop: a busy terminal is ejected
+                    // from the layout but its PTY is kept alive for the grace
+                    // period (the finalizer tick kills it on expiry); idle
+                    // terminals and `grace == 0` keep the immediate close.
+                    ActionRequest::CloseTerminal { project_id, terminal_id } => {
+                        let grace = cx.update(|cx| crate::settings::settings(cx).terminal_close_grace_secs);
+
+                        if grace == 0 {
+                            // Feature off → immediate close (unchanged behavior).
+                            cx.update(|cx| {
+                                let app_settings = crate::settings::settings(cx);
+                                match focus_manager_resolver(cx, None) {
+                                    None => CommandResult::Err("window not found: main".to_string()),
+                                    Some((window_id, focus_manager)) => {
+                                        focus_manager.update(cx, |fm, cx| {
+                                            let result = workspace.update(cx, |ws, cx| {
+                                                execute_action(
+                                                    ActionRequest::CloseTerminal { project_id, terminal_id },
+                                                    ws, window_id, fm, &*backend, &terminals, &app_settings, cx,
+                                                )
+                                                .into_command_result()
+                                            });
+                                            cx.notify();
+                                            result
+                                        })
+                                    }
+                                }
+                            })
+                        } else {
+                            // Probe busy-ness OFF the gpui thread (forks
+                            // tmux/lsof/pgrep). Hold NO gpui lock across it.
+                            let (busy, command) = smol::unblock({
+                                let backend = backend.clone();
+                                let tid = terminal_id.clone();
+                                move || probe_busy(&*backend, &tid)
+                            })
+                            .await;
+
+                            cx.update(|cx| {
+                                let app_settings = crate::settings::settings(cx);
+                                match focus_manager_resolver(cx, None) {
+                                    None => CommandResult::Err("window not found: main".to_string()),
+                                    Some((window_id, focus_manager)) => {
+                                        focus_manager.update(cx, |fm, cx| {
+                                            // Try the soft close first when busy;
+                                            // `None` means the terminal wasn't in
+                                            // the layout, so fall through to the
+                                            // immediate close (same as idle).
+                                            if busy {
+                                                let toast = workspace.update(cx, |ws, cx| {
+                                                    begin_soft_close_flow(
+                                                        &deadlines, ws, fm, &terminals,
+                                                        &project_id, &terminal_id, grace, command, cx,
+                                                    )
+                                                });
+                                                if let Some(toast) = toast {
+                                                    hook_monitor.push_toast(toast);
+                                                    cx.notify();
+                                                    return CommandResult::Ok(None);
+                                                }
+                                            }
+                                            // Idle, or busy-but-not-in-layout →
+                                            // immediate close.
+                                            let result = workspace.update(cx, |ws, cx| {
+                                                execute_action(
+                                                    ActionRequest::CloseTerminal { project_id, terminal_id },
+                                                    ws, window_id, fm, &*backend, &terminals, &app_settings, cx,
+                                                )
+                                                .into_command_result()
+                                            });
+                                            cx.notify();
+                                            result
+                                        })
+                                    }
+                                }
+                            })
+                        }
+                    }
+
                     action => {
                         cx.update(|cx| {
                             // Resolve the action's explicit target window (if
@@ -242,6 +339,11 @@ pub(crate) async fn remote_command_loop(
                                     return CommandResult::Err(format!("invalid window id: {bad}"));
                                 }
                             };
+                            // Snapshot app settings to thread into the gpui-free
+                            // `execute_action` (hooks / worktree template / default
+                            // shell). Read here on the gpui thread before the
+                            // nested entity updates borrow `cx`.
+                            let app_settings = crate::settings::settings(cx);
                             // Resolve focus_manager + window_id so the targeted
                             // (or focused) window's per-window state is the
                             // target for both focus mutations and per-window
@@ -258,7 +360,7 @@ pub(crate) async fn remote_command_loop(
                                 Some((window_id, focus_manager)) => {
                                     focus_manager.update(cx, |fm, cx| {
                                         let result = workspace.update(cx, |ws, cx| {
-                                            execute_action(action, ws, window_id, fm, &*backend, &terminals, cx)
+                                            execute_action(action, ws, window_id, fm, &*backend, &terminals, &app_settings, cx)
                                                 .into_command_result()
                                         });
                                         cx.notify();
@@ -287,121 +389,47 @@ pub(crate) async fn remote_command_loop(
                         }).collect()
                     };
 
-                    // Build a lookup map for projects
-                    let project_map: std::collections::HashMap<&str, &crate::workspace::state::ProjectData> =
-                        data.projects.iter().map(|p| (p.id.as_str(), p)).collect();
-
                     // Source of truth for runtime visibility (per-window
                     // viewport model).
                     let hidden_project_ids = &data.main_window.hidden_project_ids;
 
-                    // Build ordered projects following project_order + folder expansion
-                    let mut projects: Vec<ApiProject> = Vec::new();
-                    let mut seen: HashSet<String> = HashSet::new();
-
-                    let build_api_project = |p: &crate::workspace::state::ProjectData| -> ApiProject {
-                        let git_status = git_statuses.get(&p.id).cloned();
-                        let services: Vec<ApiServiceInfo> = sm.services_for_project(&p.id)
-                            .into_iter()
-                            .map(|inst| {
-                                let (status, exit_code) = match &inst.status {
-                                    ServiceStatus::Stopped => ("stopped", None),
-                                    ServiceStatus::Starting => ("starting", None),
-                                    ServiceStatus::Running => ("running", None),
-                                    ServiceStatus::Crashed { exit_code } => ("crashed", *exit_code),
-                                    ServiceStatus::Restarting => ("restarting", None),
-                                };
-                                let kind = match &inst.kind {
-                                    crate::services::manager::ServiceKind::Okena => "okena",
-                                    crate::services::manager::ServiceKind::DockerCompose { .. } => "docker_compose",
-                                };
-                                ApiServiceInfo {
-                                    name: inst.definition.name.clone(),
-                                    status: status.to_string(),
-                                    terminal_id: inst.terminal_id.clone(),
-                                    ports: inst.detected_ports.clone(),
-                                    exit_code,
-                                    kind: kind.to_string(),
-                                    is_extra: inst.is_extra,
-                                }
-                            })
-                            .collect();
-                        ApiProject {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            path: p.path.clone(),
-                            show_in_overview: api_project_visibility(&p.id, hidden_project_ids),
-                            layout: p.layout.as_ref().map(|l| l.to_api_with_sizes(&size_map)),
-                            terminal_names: p.terminal_names.clone(),
-                            git_status,
-                            folder_color: p.folder_color,
-                            services,
-                            worktree_info: p.worktree_info.as_ref().map(|wt| {
-                                okena_core::api::ApiWorktreeMetadata {
-                                    parent_project_id: wt.parent_project_id.clone(),
-                                    color_override: wt.color_override,
-                                }
-                            }),
-                            worktree_ids: p.worktree_ids.clone(),
-                        }
-                    };
-
-                    for id in &data.project_order {
-                        if let Some(folder) = data.folders.iter().find(|f| &f.id == id) {
-                            for pid in &folder.project_ids {
-                                if seen.insert(pid.clone())
-                                    && let Some(p) = project_map.get(pid.as_str()) {
-                                        projects.push(build_api_project(p));
-                                    }
-                            }
-                        } else if seen.insert(id.clone())
-                            && let Some(p) = project_map.get(id.as_str()) {
-                                projects.push(build_api_project(p));
-                            }
-                    }
-
-                    // Append orphan projects not in any order
-                    for p in &data.projects {
-                        if seen.insert(p.id.clone()) {
-                            projects.push(build_api_project(p));
-                        }
-                    }
-
-                    // Build folders for response
-                    let folders: Vec<ApiFolder> = data.folders.iter().map(|f| {
-                        ApiFolder {
-                            id: f.id.clone(),
-                            name: f.name.clone(),
-                            project_ids: f.project_ids.clone(),
-                            folder_color: f.folder_color,
-                        }
-                    }).collect();
+                    // Pre-build the per-project wire service lists from THIS
+                    // caller's `ServiceManager` (keeps `okena-services` out of the
+                    // shared `okena-app-core` builder). The
+                    // `ServiceInstance -> ApiServiceInfo` mapping is
+                    // `ServiceInstance::to_api`, shared with the daemon loop.
+                    let services_by_project: HashMap<String, Vec<ApiServiceInfo>> = data
+                        .projects
+                        .iter()
+                        .map(|p| {
+                            let services = sm
+                                .services_for_project(&p.id)
+                                .into_iter()
+                                .map(|inst| inst.to_api())
+                                .collect();
+                            (p.id.clone(), services)
+                        })
+                        .collect();
 
                     // Enumerate the open OS windows (main first, then extras in
                     // persistence order) so the client sees exactly what the
                     // user sees per-window. The back-compat flat fields
                     // (`focused_project_id`, `fullscreen_terminal`) are derived
-                    // from the ACTIVE window so old clients still get a sensible
-                    // focused project / fullscreen.
+                    // from the ACTIVE window inside `build_state_response`.
                     let windows = windows_resolver(cx);
-                    let focused_project_id = windows
-                        .iter()
-                        .find(|w| w.active)
-                        .and_then(|w| w.focused_project_id.clone());
-                    let fullscreen: Option<ApiFullscreen> = windows
-                        .iter()
-                        .find(|w| w.active)
-                        .and_then(|w| w.fullscreen.clone());
 
-                    let resp = StateResponse {
-                        state_version: sv,
-                        projects,
-                        focused_project_id,
-                        fullscreen_terminal: fullscreen,
-                        project_order: data.project_order.clone(),
-                        folders,
+                    // Shared projection: ordered projects + folders + flat
+                    // back-compat fields → `StateResponse` (identical to the
+                    // daemon loop).
+                    let resp = okena_app_core::remote_snapshot::build_state_response(
+                        sv,
+                        data,
+                        &git_statuses,
+                        &services_by_project,
+                        hidden_project_ids,
+                        &size_map,
                         windows,
-                    };
+                    );
 
                     CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
                 })
@@ -455,92 +483,12 @@ pub(crate) async fn remote_command_loop(
     }
 }
 
-impl Okena {
-    /// Process commands from the remote API bridge.
-    /// Thin wrapper that spawns the shared `remote_command_loop`.
-    ///
-    /// Builds a focus-manager resolver that, per-action, asks the live `Okena`
-    /// entity which OS window currently has focus and returns that window's
-    /// `(WindowId, FocusManager)` (PRD cri 13). When the `Okena` weak handle
-    /// has been dropped (loop racing app shutdown) the resolver falls back to
-    /// `(WindowId::Main, captured main FocusManager)`.
-    pub(super) fn start_remote_command_loop(
-        &mut self,
-        bridge_rx: BridgeReceiver,
-        backend: Arc<dyn TerminalBackend>,
-        cx: &mut Context<Self>,
-    ) {
-        let workspace = self.workspace.clone();
-        let main_focus_manager = self.main_window.read(cx).focus_manager();
-        let okena_weak = cx.entity().downgrade();
-        let focus_okena_weak = okena_weak.clone();
-        let focus_manager_resolver: FocusManagerResolver =
-            Arc::new(move |cx: &App, target: Option<WindowId>| {
-                match focus_okena_weak.upgrade() {
-                    Some(okena) => okena.read(cx).focus_manager_for_window(cx, target),
-                    // Drop-race fallback (loop racing app shutdown): the live
-                    // Okena is gone, so honor only the focused/main default.
-                    None => match target {
-                        None | Some(WindowId::Main) => {
-                            Some((WindowId::Main, main_focus_manager.clone()))
-                        }
-                        Some(WindowId::Extra(_)) => None,
-                    },
-                }
-            });
-        let windows_okena_weak = okena_weak.clone();
-        let windows_resolver: WindowsResolver = Arc::new(move |cx: &App| {
-            windows_okena_weak
-                .upgrade()
-                .map(|okena| okena.read(cx).build_api_windows(cx))
-                .unwrap_or_default()
-        });
-        // Command-palette dispatch: resolve the target window and the named
-        // GUI action, then dispatch it into that window.
-        let dispatch_okena_weak = okena_weak;
-        let action_dispatcher: ActionDispatcher =
-            Arc::new(move |cx: &mut App, target: Option<WindowId>, name: &str| {
-                let okena = dispatch_okena_weak
-                    .upgrade()
-                    .ok_or_else(|| "app is shutting down".to_string())?;
-                let handle = okena
-                    .read(cx)
-                    .window_handle_for(cx, target)
-                    .ok_or_else(|| "window not found".to_string())?;
-                let descriptions = crate::keybindings::get_action_descriptions();
-                let desc = descriptions
-                    .get(name)
-                    .ok_or_else(|| format!("unknown command: {name}"))?;
-                let action = (desc.factory)();
-                handle
-                    .update(cx, |_view, window, cx| window.dispatch_action(action, cx))
-                    .map_err(|e| format!("dispatch failed: {e}"))
-            });
-        let terminals = self.terminals.clone();
-        let state_version = self.state_version.clone();
-        let git_status_tx = self.git_status_tx.clone();
-        let service_manager = self.service_manager.clone();
-
-        cx.spawn(async move |_this: WeakEntity<Okena>, cx: &mut AsyncApp| {
-            remote_command_loop(
-                bridge_rx, backend, workspace, focus_manager_resolver, windows_resolver, terminals,
-                state_version, git_status_tx, service_manager, action_dispatcher, cx,
-            ).await;
-        })
-        .detach();
-    }
-}
-
-/// Pure visibility projection for the remote `ApiProject.show_in_overview`
-/// wire flag. A project is "shown in overview" iff it is absent from the
-/// per-window hidden set (today: `main_window.hidden_project_ids`).
-fn api_project_visibility(project_id: &str, hidden_project_ids: &HashSet<String>) -> bool {
-    !hidden_project_ids.contains(project_id)
-}
-
 #[cfg(test)]
 mod api_project_visibility_tests {
-    use super::api_project_visibility;
+    // The visibility projection now lives in the shared `okena-app-core`
+    // snapshot builder (`build_state_response` uses it internally); this test
+    // pins its contract from the GUI-crate side.
+    use okena_app_core::remote_snapshot::api_project_visibility;
     use std::collections::HashSet;
 
     /// Regression: the wire-format visibility flag must derive from the

@@ -1,7 +1,7 @@
-//! ProjectFs trait and implementations for local and remote file operations.
+//! ProjectFs trait and the remote-server (HTTP) implementation.
 
 use crate::content_search::{ContentSearchConfig, FileSearchResult, SearchMode};
-use crate::file_search::FileEntry;
+use crate::file_scan::FileEntry;
 use crate::list_directory::DirEntry;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -28,6 +28,12 @@ pub trait ProjectFs: Send + Sync + 'static {
     /// Get file size in bytes.
     fn file_size(&self, relative_path: &str) -> Result<u64, String>;
 
+    /// Rename a file or folder (project-relative path) to `new_name`.
+    fn rename_file(&self, relative_path: &str, new_name: &str) -> Result<(), String>;
+
+    /// Delete a file or folder (project-relative path).
+    fn delete_file(&self, relative_path: &str) -> Result<(), String>;
+
     /// Search content across project files.
     fn search_content(
         &self,
@@ -48,92 +54,11 @@ pub trait ProjectFs: Send + Sync + 'static {
     /// operations (e.g. context-menu rename/delete). Remote projects return
     /// `None` because the root only exists on the remote machine.
     fn project_root(&self) -> Option<PathBuf>;
-}
 
-/// Local file system provider — delegates to existing functions.
-pub struct LocalProjectFs {
-    path: PathBuf,
-}
-
-impl LocalProjectFs {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-
-    /// Canonicalize `relative_path` inside the project root and reject any
-    /// path that escapes via `..` or absolute-path replacement. Mirrors the
-    /// server-side `resolve_project_file` so the trait has the same
-    /// containment guarantee on both implementations.
-    fn resolve(&self, relative_path: &str) -> Result<PathBuf, String> {
-        let joined = self.path.join(relative_path);
-        let canonical = joined
-            .canonicalize()
-            .map_err(|e| format!("Cannot read file: {}", e))?;
-        let root = self
-            .path
-            .canonicalize()
-            .map_err(|e| format!("Cannot resolve project path: {}", e))?;
-        if !canonical.starts_with(&root) {
-            return Err("path traversal not allowed".to_string());
-        }
-        Ok(canonical)
-    }
-}
-
-impl ProjectFs for LocalProjectFs {
-    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry> {
-        crate::file_search::FileSearchDialog::scan_files(&self.path, show_ignored)
-    }
-
-    fn list_directory(
-        &self,
-        relative_path: &str,
-        show_ignored: bool,
-    ) -> Result<Vec<DirEntry>, String> {
-        crate::list_directory::list_directory(&self.path, relative_path, show_ignored)
-    }
-
-    fn read_file(&self, relative_path: &str) -> Result<String, String> {
-        let full = self.resolve(relative_path)?;
-        std::fs::read_to_string(&full).map_err(|e| format!("Cannot read file: {}", e))
-    }
-
-    fn read_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>, String> {
-        let full = self.resolve(relative_path)?;
-        std::fs::read(&full).map_err(|e| format!("Cannot read file: {}", e))
-    }
-
-    fn file_size(&self, relative_path: &str) -> Result<u64, String> {
-        let full = self.resolve(relative_path)?;
-        std::fs::metadata(&full)
-            .map(|m| m.len())
-            .map_err(|e| format!("Cannot read file: {}", e))
-    }
-
-    fn search_content(
-        &self,
-        query: &str,
-        config: &ContentSearchConfig,
-        cancelled: &AtomicBool,
-        on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-    ) {
-        crate::content_search::search_content(&self.path, query, config, cancelled, on_result);
-    }
-
-    fn project_name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Project".to_string())
-    }
-
-    fn project_id(&self) -> String {
-        self.path.to_string_lossy().to_string()
-    }
-
-    fn project_root(&self) -> Option<PathBuf> {
-        Some(self.path.clone())
-    }
+    /// Daemon-side absolute path for a project-relative path, for display/copy
+    /// (e.g. the "Copy Absolute Path" context-menu action). The path lives on
+    /// the daemon's filesystem. Returns `None` when the daemon root is unknown.
+    fn absolute_path(&self, relative_path: &str) -> Option<String>;
 }
 
 /// Remote file system provider — fetches data via HTTP from a remote server.
@@ -141,17 +66,33 @@ pub struct RemoteProjectFs {
     host: String,
     port: u16,
     token: String,
+    local_endpoint: Option<okena_transport::client::LocalEndpoint>,
     project_id: String,
     project_name: String,
+    root: String,
 }
 
 impl RemoteProjectFs {
-    pub fn new(host: String, port: u16, token: String, project_id: String, project_name: String) -> Self {
-        Self { host, port, token, project_id, project_name }
+    pub fn new(
+        host: String,
+        port: u16,
+        token: String,
+        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+        project_id: String,
+        project_name: String,
+        root: String,
+    ) -> Self {
+        Self { host, port, token, local_endpoint, project_id, project_name, root }
     }
 
     fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
-        okena_transport::remote_action::post_action(&self.host, self.port, &self.token, action)
+        okena_transport::remote_action::post_action_with_endpoint(
+            &self.host,
+            self.port,
+            &self.token,
+            self.local_endpoint.as_ref(),
+            action,
+        )
     }
 }
 
@@ -238,6 +179,23 @@ impl ProjectFs for RemoteProjectFs {
         }
     }
 
+    fn rename_file(&self, relative_path: &str, new_name: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::RenameFile {
+            project_id: self.project_id.clone(),
+            relative_path: relative_path.to_string(),
+            new_name: new_name.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn delete_file(&self, relative_path: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::DeleteFile {
+            project_id: self.project_id.clone(),
+            relative_path: relative_path.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
     fn search_content(
         &self,
         query: &str,
@@ -283,5 +241,13 @@ impl ProjectFs for RemoteProjectFs {
 
     fn project_root(&self) -> Option<PathBuf> {
         None
+    }
+
+    fn absolute_path(&self, relative_path: &str) -> Option<String> {
+        if self.root.is_empty() {
+            return None;
+        }
+        let base = self.root.trim_end_matches(['/', '\\']);
+        Some(format!("{}/{}", base, relative_path))
     }
 }

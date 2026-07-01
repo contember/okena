@@ -6,13 +6,15 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::{ActionResult, find_first_terminal_id, spawn_uninitialized_terminals};
-use crate::settings::settings;
+use crate::workspace::persistence::AppSettings;
 use okena_terminal::backend::TerminalBackend;
+use okena_terminal::terminal::{Terminal, TerminalSize};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
-use gpui::*;
+use okena_workspace::context::WorkspaceCx;
 use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
+use std::sync::Arc;
 
 pub(super) fn add_project(
     ws: &mut Workspace,
@@ -21,15 +23,16 @@ pub(super) fn add_project(
     path: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let project_id = ws.add_project(name, path, true, &settings(cx).hooks, window_id, cx);
+    let project_id = ws.add_project(name, path, true, &settings.hooks, window_id, cx);
     // Surface the newly-created project's id alongside the spawned terminal
     // ids so callers (e.g. the CLI `add-project` verb) can address the project
     // they just created without re-fetching state. `spawn_uninitialized_terminals`
     // returns `{ "terminal_ids": [...] }`; we merge `project_id` into that
     // object, leaving its terminal-spawning behavior unchanged.
-    match spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx) {
+    match spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx) {
         ActionResult::Ok(Some(serde_json::Value::Object(mut map))) => {
             map.insert(
                 "project_id".to_string(),
@@ -50,7 +53,7 @@ pub(super) fn reorder_in_folder(
     folder_id: String,
     project_id: String,
     new_index: usize,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.reorder_project_in_folder(&folder_id, &project_id, new_index, cx);
     ActionResult::Ok(None)
@@ -60,7 +63,7 @@ pub(super) fn set_project_color(
     ws: &mut Workspace,
     project_id: String,
     color: FolderColor,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.set_folder_color(&project_id, color, cx);
     ActionResult::Ok(None)
@@ -70,7 +73,7 @@ pub(super) fn set_folder_color(
     ws: &mut Workspace,
     folder_id: String,
     color: FolderColor,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.set_folder_item_color(&folder_id, color, cx);
     ActionResult::Ok(None)
@@ -80,7 +83,7 @@ pub(super) fn rename_project(
     ws: &mut Workspace,
     project_id: String,
     name: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
@@ -89,11 +92,37 @@ pub(super) fn rename_project(
     ActionResult::Ok(None)
 }
 
+pub(super) fn update_project_hooks(
+    ws: &mut Workspace,
+    project_id: String,
+    hooks: okena_core::api::ApiHooksConfig,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let new_hooks = crate::workspace::settings::HooksConfig::from_api(&hooks);
+    // Dirty-check inside the closure: clients flush hooks on every panel
+    // close/project-switch even when unchanged, so skip the notify (→ state bump
+    // → full-snapshot churn to all clients) when the hooks are identical.
+    let mut existed = false;
+    ws.with_project(&project_id, cx, |p| {
+        existed = true;
+        if p.hooks == new_hooks {
+            false
+        } else {
+            p.hooks = new_hooks;
+            true
+        }
+    });
+    if !existed {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    ActionResult::Ok(None)
+}
+
 pub(super) fn rename_project_directory(
     ws: &mut Workspace,
     project_id: String,
     new_name: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if let Err(e) = super::validate_leaf_name(&new_name) {
         return ActionResult::Err(e);
@@ -123,12 +152,13 @@ pub(super) fn delete_project(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
     project_id: String,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
     }
-    let global_hooks = settings(cx).hooks.clone();
+    let global_hooks = settings.hooks.clone();
     ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
     ActionResult::Ok(None)
 }
@@ -139,7 +169,7 @@ pub(super) fn set_show_in_overview(
     window_id: WindowId,
     project_id: String,
     show: bool,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     apply_set_project_show_in_overview(ws, focus_manager, window_id, &project_id, show, cx)
 }
@@ -158,7 +188,7 @@ fn apply_set_project_show_in_overview(
     window_id: WindowId,
     project_id: &str,
     show: bool,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
@@ -180,29 +210,51 @@ pub(super) fn remove_worktree_project(
     focus_manager: &mut FocusManager,
     project_id: String,
     force: bool,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
     }
-    let global_hooks = settings(cx).hooks.clone();
+    let global_hooks = settings.hooks.clone();
     match ws.remove_worktree_project(focus_manager, &project_id, force, &global_hooks, cx) {
         Ok(()) => ActionResult::Ok(None),
         Err(e) => ActionResult::Err(e),
     }
 }
 
-pub(super) fn create_folder(ws: &mut Workspace, name: String, cx: &mut Context<Workspace>) -> ActionResult {
+pub(super) fn close_worktree(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    project_id: String,
+    merge: bool,
+    stash: bool,
+    fetch: bool,
+    push: bool,
+    delete_branch: bool,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    match ws.close_worktree(focus_manager, &project_id, merge, stash, fetch, push, delete_branch, &settings.hooks, cx) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(e) => ActionResult::Err(e),
+    }
+}
+
+pub(super) fn create_folder(ws: &mut Workspace, name: String, cx: &mut impl WorkspaceCx) -> ActionResult {
     let id = ws.create_folder(name, cx);
     ActionResult::Ok(Some(serde_json::json!({ "folder_id": id })))
 }
 
-pub(super) fn delete_folder(ws: &mut Workspace, folder_id: String, cx: &mut Context<Workspace>) -> ActionResult {
+pub(super) fn delete_folder(ws: &mut Workspace, folder_id: String, cx: &mut impl WorkspaceCx) -> ActionResult {
     ws.delete_folder(&folder_id, cx);
     ActionResult::Ok(None)
 }
 
-pub(super) fn rename_folder(ws: &mut Workspace, folder_id: String, name: String, cx: &mut Context<Workspace>) -> ActionResult {
+pub(super) fn rename_folder(ws: &mut Workspace, folder_id: String, name: String, cx: &mut impl WorkspaceCx) -> ActionResult {
     ws.rename_folder(&folder_id, name, cx);
     ActionResult::Ok(None)
 }
@@ -212,7 +264,7 @@ pub(super) fn move_to_folder(
     project_id: String,
     folder_id: String,
     position: Option<usize>,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
@@ -225,12 +277,76 @@ pub(super) fn move_out_of_folder(
     ws: &mut Workspace,
     project_id: String,
     top_level_index: usize,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if ws.project(&project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
     }
     ws.move_project_out_of_folder(&project_id, top_level_index, cx);
+    ActionResult::Ok(None)
+}
+
+pub(super) fn move_project(
+    ws: &mut Workspace,
+    project_id: String,
+    new_index: usize,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    ws.move_project(&project_id, new_index, cx);
+    ActionResult::Ok(None)
+}
+
+pub(super) fn move_item_in_order(
+    ws: &mut Workspace,
+    item_id: String,
+    new_index: usize,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    // `item_id` may be a folder id or a top-level project id; the workspace
+    // method is a no-op when the id isn't in `project_order`.
+    ws.move_item_in_order(&item_id, new_index, cx);
+    ActionResult::Ok(None)
+}
+
+pub(super) fn toggle_project_pinned(
+    ws: &mut Workspace,
+    project_id: String,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    ws.toggle_project_pinned(&project_id, cx);
+    ActionResult::Ok(None)
+}
+
+pub(super) fn reorder_worktree(
+    ws: &mut Workspace,
+    parent_id: String,
+    worktree_id: String,
+    new_index: usize,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&parent_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", parent_id));
+    }
+    ws.reorder_worktree(&parent_id, &worktree_id, new_index, cx);
+    ActionResult::Ok(None)
+}
+
+pub(super) fn set_worktree_color_override(
+    ws: &mut Workspace,
+    project_id: String,
+    color: Option<FolderColor>,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    ws.set_worktree_color_override(&project_id, color, cx);
     ActionResult::Ok(None)
 }
 
@@ -242,7 +358,8 @@ pub(super) fn create_worktree(
     create_branch: bool,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let project = match ws.project(&project_id) {
         Some(p) => p,
@@ -250,13 +367,13 @@ pub(super) fn create_worktree(
     };
     let project_path = std::path::PathBuf::from(&project.path);
     let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(&project_path);
-    let path_template = settings(cx).worktree.path_template.clone();
+    let path_template = settings.worktree.path_template.clone();
     let (worktree_path, wt_project_path) = okena_git::compute_target_paths(&git_root, &subdir, &path_template, &branch);
-    let global_hooks = settings(cx).hooks.clone();
+    let global_hooks = settings.hooks.clone();
 
     match ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &wt_project_path, create_branch, &global_hooks, window_id, cx) {
         Ok(new_project_id) => {
-            let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, cx);
+            let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, settings, cx);
             let terminal_id = ws.project(&new_project_id)
                 .and_then(|p| p.layout.as_ref())
                 .and_then(find_first_terminal_id);
@@ -273,7 +390,96 @@ pub(super) fn create_worktree(
     }
 }
 
-#[cfg(test)]
+/// Register an already-on-disk git worktree as a tracked project under its
+/// parent. The worktree path is discovered client-side from a local git scan
+/// (same filesystem for a local daemon) and passed verbatim — the daemon
+/// creates the project, links it to the parent's worktree list, and spawns its
+/// terminal. Mirrors the old in-process `add_discovered_worktree` +
+/// `add_to_worktree_ids` GUI path.
+pub(super) fn add_discovered_worktree(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    parent_project_id: String,
+    worktree_path: String,
+    branch: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&parent_project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", parent_project_id));
+    }
+    let new_id = match ws.add_discovered_worktree(&worktree_path, &branch, &parent_project_id, window_id) {
+        Some(id) => id,
+        None => {
+            return ActionResult::Err(format!(
+                "worktree already tracked or not addable: {}",
+                worktree_path
+            ));
+        }
+    };
+    ws.add_to_worktree_ids(&parent_project_id, &new_id);
+    // `add_discovered_worktree` deliberately doesn't notify (caller's job).
+    ws.notify_data(cx);
+    let result = spawn_uninitialized_terminals(ws, &new_id, backend, terminals, settings, cx);
+    let terminal_id = ws
+        .project(&new_id)
+        .and_then(|p| p.layout.as_ref())
+        .and_then(find_first_terminal_id);
+    match result {
+        ActionResult::Ok(_) => ActionResult::Ok(Some(serde_json::json!({
+            "project_id": new_id,
+            "terminal_id": terminal_id,
+        }))),
+        err => err,
+    }
+}
+
+/// Rerun a lifecycle-hook terminal: kill the old PTY, spawn a fresh shell at the
+/// same cwd, swap the id in state (status back to Running), and type the stored
+/// command into the new shell. The daemon is authoritative for the hook's
+/// command + cwd (read from `hook_terminals`), so the action only carries the
+/// project + terminal ids. Mirrors the old in-process `rerun_hook` GUI path.
+pub(super) fn rerun_hook(
+    ws: &mut Workspace,
+    project_id: String,
+    terminal_id: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let (command, cwd) = match ws
+        .project(&project_id)
+        .and_then(|p| p.hook_terminals.get(&terminal_id))
+    {
+        Some(e) => (e.command.clone(), e.cwd.clone()),
+        None => return ActionResult::Err(format!("hook terminal not found: {}", terminal_id)),
+    };
+    backend.kill(&terminal_id);
+    let new_id = match backend.create_terminal(&cwd, None) {
+        Ok(id) => id,
+        Err(e) => return ActionResult::Err(format!("failed to spawn hook terminal: {}", e)),
+    };
+    let transport = backend.transport();
+    let terminal = Arc::new(Terminal::new(
+        new_id.clone(),
+        TerminalSize::default(),
+        transport.clone(),
+        cwd.clone(),
+    ));
+    {
+        let mut guard = terminals.lock();
+        guard.remove(&terminal_id);
+        guard.insert(new_id.clone(), terminal);
+    }
+    ws.swap_hook_terminal_id(&project_id, &terminal_id, &new_id, cx);
+    let cmd_with_newline = format!("{}\n", command);
+    transport.send_input(&new_id, cmd_with_newline.as_bytes());
+    ActionResult::Ok(Some(serde_json::json!({ "terminal_id": new_id })))
+}
+
+#[cfg(all(test, feature = "gpui"))]
 mod set_show_in_overview_tests {
     use super::{apply_set_project_show_in_overview, ActionResult};
     use crate::workspace::state::{ProjectData, Workspace, WindowId, WindowState, WorkspaceData};

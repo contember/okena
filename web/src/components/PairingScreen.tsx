@@ -27,16 +27,16 @@ export function PairingScreen({ onPaired }: { onPaired: () => void }) {
   };
 
   return (
-    <div className="flex items-center justify-center h-screen">
-      <div className="w-80 space-y-6">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold text-zinc-100">Okena</h1>
-          <p className="mt-2 text-sm text-zinc-400">
+    <div className="app-shell flex h-screen items-center justify-center">
+      <div className="w-[360px] border border-[var(--ok-border)] bg-[var(--ok-panel)]">
+        <div className="project-header border-b border-[var(--ok-border)] px-4 py-3">
+          <h1 className="text-[15px] font-bold text-[var(--ok-text)]">Okena</h1>
+          <p className="mt-1 text-[11px] text-[var(--ok-text-secondary)]">
             Enter the pairing code from the desktop app status bar
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4 px-4 py-4">
           <input
             ref={inputRef}
             type="text"
@@ -45,23 +45,21 @@ export function PairingScreen({ onPaired }: { onPaired: () => void }) {
             placeholder="XXXX-XXXX"
             maxLength={9}
             autoFocus
-            className="w-full px-4 py-3 text-center text-2xl tracking-[0.2em] font-mono
-              bg-zinc-900 border border-zinc-700 rounded-lg text-zinc-100
-              placeholder:text-zinc-600 focus:outline-none focus:border-blue-500
+            className="w-full border border-[var(--ok-border)] bg-[var(--ok-terminal)] px-4 py-3 text-center font-mono text-2xl tracking-[0.2em]
+              text-[var(--ok-text)] placeholder:text-[var(--ok-text-muted)]
               disabled:opacity-50"
             disabled={loading}
           />
 
           {error && (
-            <p className="text-sm text-red-400 text-center">{error}</p>
+            <p className="text-center text-[12px] text-[var(--ok-red)]">{error}</p>
           )}
 
           <button
             type="submit"
             disabled={loading || code.trim().length === 0}
-            className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700
-              disabled:text-zinc-500 text-white font-medium rounded-lg
-              transition-colors"
+            className="w-full bg-[var(--ok-blue)] py-3 font-bold text-white transition-colors
+              hover:bg-[#005a9e] disabled:bg-[var(--ok-header)] disabled:text-[var(--ok-text-muted)]"
           >
             {loading ? "Pairing..." : "Connect"}
           </button>

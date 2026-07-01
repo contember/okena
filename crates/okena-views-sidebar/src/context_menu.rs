@@ -1,7 +1,6 @@
 //! Project context menu overlay.
 
 use crate::Cancel;
-use okena_git;
 use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
 use okena_ui::theme::theme;
 use okena_workspace::requests::ContextMenuRequest;
@@ -75,6 +74,7 @@ pub enum ContextMenuEvent {
     ShowDiff { project_id: String },
     FocusProject { project_id: String },
     HideProject { project_id: String },
+    ToggleProjectPinned { project_id: String },
 }
 
 impl okena_ui::overlay::CloseEvent for ContextMenuEvent {
@@ -153,14 +153,14 @@ impl ContextMenu {
         });
     }
 
-    /// Toggle the project's pinned state directly on the workspace, then close.
-    /// Self-contained (no event round-trip) since pinning is a single persisted
-    /// bool flip — see [`okena_workspace::state::Workspace::toggle_project_pinned`].
+    /// Toggle the project's pinned state. The daemon owns the authoritative
+    /// `ProjectData.pinned` flag, so emit an event that routes up to
+    /// `WindowView`, which dispatches `ActionRequest::ToggleProjectPinned`; the
+    /// new pinned state mirrors back. The GUI must not mutate its read-only
+    /// mirror directly.
     fn toggle_pinned(&self, cx: &mut Context<Self>) {
         let project_id = self.request.project_id.clone();
-        self.workspace.update(cx, |ws, cx| {
-            ws.toggle_project_pinned(&project_id, cx);
-        });
+        cx.emit(ContextMenuEvent::ToggleProjectPinned { project_id });
         self.close(cx);
     }
 
@@ -243,7 +243,10 @@ impl Render for ContextMenu {
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
         let is_worktree = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
         let is_pinned = project.map(|p| p.pinned).unwrap_or(false);
-        let is_git_repo = okena_git::is_git_repo(std::path::Path::new(&project_path));
+        let is_git_repo = ws
+            .remote_snapshot(&self.request.project_id)
+            .and_then(|s| s.git_status.as_ref())
+            .is_some();
         let project_path_for_worktree = project_path.clone();
         let project_path_for_rename_dir = project_path.clone();
         let project_name_for_rename = project_name.clone();

@@ -48,6 +48,23 @@ pub struct WorkspaceData {
 }
 
 impl WorkspaceData {
+    /// An empty workspace: no projects, no folders. Used as the GUI client's
+    /// starting state in `--daemon-client` mode — the daemon owns the real
+    /// workspace and its projects arrive via the mirror snapshot
+    /// (`apply_remote_snapshot`), so the client must not seed a default project.
+    pub fn empty() -> Self {
+        WorkspaceData {
+            version: default_workspace_version(),
+            projects: Vec::new(),
+            project_order: Vec::new(),
+            folders: Vec::new(),
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
     /// Return a copy with all remote projects, remote folders, and their
     /// associated widths/heights stripped out (for saving to disk).
     ///
@@ -134,6 +151,56 @@ pub struct HookTerminalEntry {
     pub command: String,
     /// Working directory for the hook command.
     pub cwd: String,
+}
+
+impl HookTerminalStatus {
+    /// Project onto the wire mirror (`okena-core` can't reference this enum).
+    pub fn to_api(&self) -> okena_core::api::ApiHookTerminalStatus {
+        use okena_core::api::ApiHookTerminalStatus as A;
+        match self {
+            HookTerminalStatus::Running => A::Running,
+            HookTerminalStatus::Succeeded => A::Succeeded,
+            HookTerminalStatus::Failed { exit_code } => A::Failed { exit_code: *exit_code },
+        }
+    }
+
+    /// Reconstruct from the wire mirror.
+    pub fn from_api(api: &okena_core::api::ApiHookTerminalStatus) -> Self {
+        use okena_core::api::ApiHookTerminalStatus as A;
+        match api {
+            A::Running => HookTerminalStatus::Running,
+            A::Succeeded => HookTerminalStatus::Succeeded,
+            A::Failed { exit_code } => HookTerminalStatus::Failed { exit_code: *exit_code },
+        }
+    }
+}
+
+impl HookTerminalEntry {
+    /// Project onto the wire mirror, inlining the map key as `terminal_id`.
+    pub fn to_api(&self, terminal_id: String) -> okena_core::api::ApiHookTerminalEntry {
+        okena_core::api::ApiHookTerminalEntry {
+            terminal_id,
+            label: self.label.clone(),
+            status: self.status.to_api(),
+            hook_type: self.hook_type.clone(),
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+        }
+    }
+
+    /// Reconstruct the `(terminal_id, entry)` pair from the wire mirror.
+    pub fn from_api(api: &okena_core::api::ApiHookTerminalEntry) -> (String, Self) {
+        (
+            api.terminal_id.clone(),
+            HookTerminalEntry {
+                label: api.label.clone(),
+                status: HookTerminalStatus::from_api(&api.status),
+                hook_type: api.hook_type.clone(),
+                command: api.command.clone(),
+                cwd: api.cwd.clone(),
+            },
+        )
+    }
 }
 
 /// A single project with its layout tree

@@ -11,6 +11,7 @@ use parser::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use okena_transport::client::LocalEndpoint;
 
 /// CLI config stored in `~/.config/okena/cli.json`.
 #[derive(Serialize, Deserialize)]
@@ -229,9 +230,33 @@ fn save_cli_config(config: &CliConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// A running Okena instance discovered from `remote.json`.
+pub(crate) struct DiscoveredServer {
+    pub host: String,
+    pub port: u16,
+    local_endpoint: Option<LocalEndpoint>,
+}
+
+impl DiscoveredServer {
+    pub fn client_and_url(&self, path: &str) -> Result<(reqwest::blocking::Client, String), String> {
+        #[cfg(unix)]
+        if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = &self.local_endpoint {
+            let client = reqwest::blocking::Client::builder()
+                .unix_socket(socket_path.as_str())
+                .build()
+                .map_err(|e| format!("Cannot initialise Unix socket client: {e}"))?;
+            return Ok((client, format!("http://okena.local{path}")));
+        }
+
+        Ok((
+            reqwest::blocking::Client::new(),
+            format!("http://{}:{}{}", self.host, self.port, path),
+        ))
+    }
+}
+
 /// Discover a running Okena instance by reading `remote.json`.
-/// Returns `(host, port)`.
-fn discover_server() -> Result<(String, u16), String> {
+fn discover_server() -> Result<DiscoveredServer, String> {
     let path = config_dir().join("remote.json");
     let data =
         std::fs::read_to_string(&path).map_err(|_| "Okena is not running (no remote.json).")?;
@@ -241,14 +266,24 @@ fn discover_server() -> Result<(String, u16), String> {
     let port = json
         .get("port")
         .and_then(|v| v.as_u64())
-        .ok_or("Missing port in remote.json.")? as u16;
+        .ok_or("Missing port in remote.json.")
+        .and_then(|port| u16::try_from(port).map_err(|_| "Invalid port in remote.json."))?;
+    let host = json
+        .get("local_host")
+        .and_then(|v| v.as_str())
+        .filter(|host| !host.is_empty())
+        .unwrap_or("127.0.0.1")
+        .to_string();
+    let local_endpoint = json
+        .get("local_endpoint")
+        .and_then(|value| serde_json::from_value::<LocalEndpoint>(value.clone()).ok());
 
     let pid = json.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     if pid != 0 && !is_process_alive(pid) {
         return Err("Okena is not running (stale remote.json).".to_string());
     }
 
-    Ok(("127.0.0.1".to_string(), port))
+    Ok(DiscoveredServer { host, port, local_endpoint })
 }
 
 fn is_process_alive(pid: u32) -> bool {
@@ -269,17 +304,16 @@ fn ensure_token() -> Result<String, String> {
     // Try existing token
     if let Some(config) = load_cli_config() {
         // Quick validation: try an authenticated request
-        if let Ok((host, port)) = discover_server() {
-            let url = format!("http://{}:{}/v1/tokens", host, port);
-            let client = reqwest::blocking::Client::new();
-            if let Ok(resp) = client
+        if let Ok(server) = discover_server()
+            && let Ok((client, url)) = server.client_and_url("/v1/tokens")
+            && let Ok(resp) = client
                 .get(&url)
                 .header("Authorization", format!("Bearer {}", config.token))
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
-                && resp.status().is_success() {
-                    return Ok(config.token);
-                }
+            && resp.status().is_success()
+        {
+            return Ok(config.token);
         }
     }
 
@@ -288,9 +322,8 @@ fn ensure_token() -> Result<String, String> {
 }
 
 fn api_get(path: &str, token: &str) -> Result<String, String> {
-    let (host, port) = discover_server()?;
-    let url = format!("http://{}:{}{}", host, port, path);
-    let client = reqwest::blocking::Client::new();
+    let server = discover_server()?;
+    let (client, url) = server.client_and_url(path)?;
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", token))
@@ -309,9 +342,8 @@ fn api_get(path: &str, token: &str) -> Result<String, String> {
 }
 
 fn api_post(path: &str, token: &str, body: &str) -> Result<String, String> {
-    let (host, port) = discover_server()?;
-    let url = format!("http://{}:{}{}", host, port, path);
-    let client = reqwest::blocking::Client::new();
+    let server = discover_server()?;
+    let (client, url) = server.client_and_url(path)?;
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", token))

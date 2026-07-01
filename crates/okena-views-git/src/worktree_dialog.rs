@@ -4,7 +4,6 @@
 //! The `Render` impl lives in `worktree_dialog/view.rs`.
 
 use okena_git as git;
-use okena_git::repository::{compute_target_paths, normalize_path};
 use okena_core::process::command;
 use okena_workspace::settings::{HooksConfig, WorktreeConfig};
 use okena_workspace::state::{WindowId, Workspace};
@@ -13,7 +12,7 @@ use crate::simple_input::SimpleInputState;
 
 use gpui::prelude::*;
 use gpui::*;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 mod view;
 
@@ -29,26 +28,31 @@ pub(super) struct PrInfo {
 pub enum WorktreeDialogEvent {
     /// Dialog closed without creating a worktree (cancelled)
     Close,
-    /// Worktree was successfully created, contains the new project ID
-    Created(String),
+    /// User confirmed creation. The daemon owns worktree creation, so the host
+    /// dispatches `ActionRequest::CreateWorktree { project_id, branch,
+    /// create_branch }`; the new worktree project (and its terminals) mirror
+    /// back. `project_id` is the parent project the worktree is created from.
+    RequestCreate {
+        project_id: String,
+        branch: String,
+        create_branch: bool,
+    },
 }
 
 impl EventEmitter<WorktreeDialogEvent> for WorktreeDialog {}
 
-/// Dialog for creating a new worktree from a project
+/// Dialog for creating a new worktree from a project.
+///
+/// The dialog only collects user intent (which branch / PR, or a new branch
+/// name). On confirm it emits `WorktreeDialogEvent::RequestCreate`; the host
+/// dispatches `ActionRequest::CreateWorktree` to the daemon, which owns the
+/// actual worktree creation (path computation, fetch, `git worktree add`,
+/// project registration, terminals and hooks). The new worktree project then
+/// mirrors back. Hence the dialog holds no `workspace`, git-root, path-template
+/// or hooks state — only branch selection.
 pub struct WorktreeDialog {
-    pub(super) workspace: Entity<Workspace>,
-    /// Spawning window for the multi-window new-project visibility rule
-    /// (PRD user story 14): the new worktree is visible in this window
-    /// only, hidden in every other window. Threaded from the originating
-    /// `WindowView` through `OverlayManager::show_worktree_dialog`.
-    pub(super) window_id: WindowId,
     pub(super) project_id: String,
     pub(super) project_path: String,
-    /// The git repository root (may differ from project_path in monorepos)
-    pub(super) git_root: PathBuf,
-    /// Relative path from git root to project (empty if project is at repo root)
-    pub(super) subdir: PathBuf,
     pub(super) branches: Vec<String>,
     pub(super) filtered_branches: Vec<usize>,
     pub(super) selected_branch_index: Option<usize>,
@@ -63,8 +67,6 @@ pub struct WorktreeDialog {
     pub(super) pr_error: Option<String>,
     pub(super) selected_pr_branch: Option<String>,
     pub(super) prs_loaded_once: bool,
-    pub(super) path_template: String,
-    pub(super) hooks_config: HooksConfig,
 }
 
 impl WorktreeDialog {
@@ -72,26 +74,21 @@ impl WorktreeDialog {
         workspace: Entity<Workspace>,
         project_id: String,
         project_path: String,
-        worktree_config: WorktreeConfig,
-        hooks_config: HooksConfig,
-        window_id: WindowId,
+        _worktree_config: WorktreeConfig,
+        _hooks_config: HooksConfig,
+        _window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Determine git repo root: if parent is already a worktree, use its
-        // stored main_repo_path; otherwise detect via `git rev-parse --show-toplevel`.
+        // Determine git repo root for branch listing / name suggestion: if the
+        // parent is already a worktree use its stored main_repo_path; otherwise
+        // detect via `git rev-parse --show-toplevel`. (The daemon recomputes
+        // paths on its side at create time; this is only for the picker.)
         let project_pathbuf = PathBuf::from(&project_path);
         let parent_main_repo = workspace.read(cx).worktree_parent_path(&project_id)
             .map(PathBuf::from);
         let git_root = parent_main_repo
             .or_else(|| git::get_repo_root(&project_pathbuf))
             .unwrap_or_else(|| project_pathbuf.clone());
-        // Normalize both paths before strip_prefix to handle relative paths,
-        // symlinks, or platform-specific path representations
-        let normalized_project = normalize_path(&project_pathbuf);
-        let normalized_root = normalize_path(&git_root);
-        let subdir = normalized_project.strip_prefix(&normalized_root)
-            .unwrap_or(Path::new(""))
-            .to_path_buf();
 
         // Get available branches using the git root
         let branches = git::get_available_branches_for_worktree(&git_root);
@@ -109,15 +106,10 @@ impl WorktreeDialog {
 
         let filtered_branches: Vec<usize> = (0..branches.len()).collect();
         let focus_handle = cx.focus_handle();
-        let path_template = worktree_config.path_template;
 
         Self {
-            workspace,
-            window_id,
             project_id,
             project_path,
-            git_root,
-            subdir,
             branches,
             filtered_branches,
             selected_branch_index: None,
@@ -132,8 +124,6 @@ impl WorktreeDialog {
             pr_error: None,
             selected_pr_branch: None,
             prs_loaded_once: false,
-            path_template,
-            hooks_config,
         }
     }
 
@@ -162,14 +152,6 @@ impl WorktreeDialog {
 
     pub(super) fn close(&mut self, cx: &mut Context<Self>) {
         cx.emit(WorktreeDialogEvent::Close);
-    }
-
-    /// Returns (worktree_path, project_path).
-    /// `worktree_path` is where `git worktree add` creates the checkout (at the repo root level).
-    /// `project_path` is the subdirectory within that worktree where the project lives
-    /// (same as worktree_path when project is at repo root).
-    fn get_target_paths(&self, branch: &str) -> (String, String) {
-        compute_target_paths(&self.git_root, &self.subdir, &self.path_template, branch)
     }
 
     pub(super) fn create_worktree(&mut self, cx: &mut Context<Self>) {
@@ -213,26 +195,17 @@ impl WorktreeDialog {
             }
         };
 
-        let (worktree_path, project_path) = self.get_target_paths(&branch);
+        // The daemon owns worktree creation. Emit a request so the host
+        // dispatches `ActionRequest::CreateWorktree`; the new worktree project
+        // and its terminals mirror back. The GUI no longer mutates the
+        // read-only mirror or computes the worktree path itself (the daemon
+        // does, from its settings).
         let project_id = self.project_id.clone();
-        let git_root = self.git_root.clone();
-        let hooks_config = self.hooks_config.clone();
-
-        // Create the worktree project
-        let window_id = self.window_id;
-        let result = self.workspace.update(cx, |ws, cx| {
-            ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &project_path, create_branch, &hooks_config, window_id, cx)
+        cx.emit(WorktreeDialogEvent::RequestCreate {
+            project_id,
+            branch,
+            create_branch,
         });
-
-        match result {
-            Ok(new_project_id) => {
-                cx.emit(WorktreeDialogEvent::Created(new_project_id));
-            }
-            Err(e) => {
-                self.error_message = Some(e);
-                cx.notify();
-            }
-        }
     }
 
     pub(super) fn load_prs(&mut self, cx: &mut Context<Self>) {

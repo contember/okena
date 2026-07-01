@@ -228,6 +228,7 @@ impl RemoteConnectDialog {
             token_obtained_at: None,
             tls: false, // set by auto-detection below
             pinned_cert_sha256: None,
+            local_endpoint: None,
         };
 
         let runtime = self.runtime(cx);

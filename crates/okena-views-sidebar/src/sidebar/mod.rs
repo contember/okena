@@ -59,6 +59,12 @@ pub type GetRemoteConnectionsFn = Box<dyn Fn(&App) -> Vec<RemoteConnectionSnapsh
 /// Arguments: (conn_id, action, cx)
 pub type SendRemoteActionFn = Box<dyn Fn(&str, ActionRequest, &mut App)>;
 
+/// Callback to dispatch an action to a connection by id, with id-stripping (the
+/// connection-targeted analog of [`DispatchActionFn`], for folder-scoped and
+/// workspace-global actions that carry no project to resolve a connection from).
+/// Arguments: (conn_id, action, cx)
+pub type DispatchForConnectionFn = Box<dyn Fn(&str, ActionRequest, &mut App)>;
+
 /// Callback to get the server folder ID for a remote folder reorder operation.
 /// Arguments: (conn_id, prefixed_project_id, cx) -> Option<folder_id>
 pub type GetRemoteFolderFn = Box<dyn Fn(&str, &str, &App) -> Option<String>>;
@@ -152,12 +158,13 @@ pub struct Sidebar {
     pub(crate) collapsed_groups: HashSet<(String, GroupKind)>,
     /// Parent project IDs with in-flight worktree creation (debounce guard)
     pub(crate) creating_worktree: HashSet<String>,
-    /// Callback to get settings
-    pub(crate) get_settings: Option<GetSettingsFn>,
     /// Callback to get remote connections
     pub(crate) get_remote_connections: Option<GetRemoteConnectionsFn>,
     /// Callback to send remote actions
     pub(crate) send_remote_action: Option<SendRemoteActionFn>,
+    /// Callback to dispatch a folder-scoped / workspace-global action to a
+    /// connection by id (with id-stripping). See [`DispatchForConnectionFn`].
+    pub(crate) dispatch_for_connection: Option<DispatchForConnectionFn>,
     /// Callback to get remote folder ID for reordering
     pub(crate) get_remote_folder: Option<GetRemoteFolderFn>,
     /// Last computed activity-view ordering `(tier, project_id)`. Reused while
@@ -226,9 +233,9 @@ impl Sidebar {
             service_manager: None,
             collapsed_groups: HashSet::new(),
             creating_worktree: HashSet::new(),
-            get_settings: None,
             get_remote_connections: None,
             send_remote_action: None,
+            dispatch_for_connection: None,
             get_remote_folder: None,
             activity_order_cache: Vec::new(),
             activity_pointer_inside: false,
@@ -258,11 +265,6 @@ impl Sidebar {
         self.dispatch_action = Some(f);
     }
 
-    /// Set the settings callback.
-    pub fn set_settings(&mut self, f: GetSettingsFn) {
-        self.get_settings = Some(f);
-    }
-
     /// Set the remote connections callback.
     pub fn set_remote_connections(&mut self, f: GetRemoteConnectionsFn) {
         self.get_remote_connections = Some(f);
@@ -271,6 +273,11 @@ impl Sidebar {
     /// Set the send remote action callback.
     pub fn set_send_remote_action(&mut self, f: SendRemoteActionFn) {
         self.send_remote_action = Some(f);
+    }
+
+    /// Set the connection-targeted dispatch callback.
+    pub fn set_dispatch_for_connection(&mut self, f: DispatchForConnectionFn) {
+        self.dispatch_for_connection = Some(f);
     }
 
     /// Set the get remote folder callback.
@@ -285,9 +292,27 @@ impl Sidebar {
         }
     }
 
-    /// Get the current sidebar settings.
-    pub(crate) fn sidebar_settings(&self, cx: &App) -> SidebarSettings {
-        self.get_settings.as_ref().map(|f| (f)(cx)).unwrap_or_default()
+    /// Dispatch a folder-scoped action to the connection that owns the folder.
+    /// Folder ids are `remote:<conn>:<id>`; the dispatcher strips the prefix
+    /// against the resolved connection. Falls back to the local daemon for an
+    /// unprefixed id.
+    pub(crate) fn dispatch_action_for_folder(&self, folder_id: &str, action: ActionRequest, cx: &mut App) {
+        let conn_id = folder_id
+            .strip_prefix("remote:")
+            .and_then(|rest| rest.split(':').next())
+            .unwrap_or(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID);
+        if let Some(ref dispatch) = self.dispatch_for_connection {
+            (dispatch)(conn_id, action, cx);
+        }
+    }
+
+    /// Dispatch a workspace-global action (e.g. creating a folder) to the local
+    /// daemon, which owns the authoritative workspace; the result mirrors back
+    /// on the next snapshot.
+    pub(crate) fn dispatch_daemon_action(&self, action: ActionRequest, cx: &mut App) {
+        if let Some(ref dispatch) = self.dispatch_for_connection {
+            (dispatch)(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID, action, cx);
+        }
     }
 
     /// Check for double-click on terminal and return true if detected
@@ -649,9 +674,14 @@ impl SidebarProjectInfo {
     pub(crate) fn from_project(project: &ProjectData, workspace: &Workspace, window_id: WindowId) -> Self {
         let layout = project.layout.as_ref();
         // For worktree projects, show the git branch instead of the stored name.
+        // The branch comes from the daemon's git poll over the wire
+        // (`remote_snapshot().git_status.branch`) — a local `get_git_status` would
+        // return None in client mode since the daemon owns the working tree.
         let name = if project.worktree_info.is_some() {
-            okena_git::get_git_status(std::path::Path::new(&project.path))
-                .and_then(|s| s.branch)
+            workspace
+                .remote_snapshot(&project.id)
+                .and_then(|s| s.git_status.as_ref())
+                .and_then(|g| g.branch.clone())
                 .unwrap_or_else(|| project.name.clone())
         } else {
             project.name.clone()

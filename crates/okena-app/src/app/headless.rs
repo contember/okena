@@ -13,7 +13,7 @@ use crate::workspace::persistence;
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
-use okena_core::api::ApiGitStatus;
+use okena_core::api::{ApiGitStatus, ApiToast};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -43,6 +43,10 @@ pub struct HeadlessApp {
     pty_broadcaster: Arc<PtyBroadcaster>,
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Broadcast of daemon-originated toasts forwarded to thin clients. Held so
+    /// the wiring matches the daemon's; the headless app has no toast producer of
+    /// its own yet (a follow-up could drain its `HookMonitor` into it).
+    toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>>,
     next_remote_connection_id: Arc<AtomicU64>,
     #[allow(dead_code)]
@@ -58,7 +62,7 @@ impl HeadlessApp {
         workspace_data: WorkspaceData,
         pty_manager: Arc<PtyManager>,
         pty_events: Receiver<PtyEvent>,
-        listen_addr: IpAddr,
+        listen_addrs: Vec<IpAddr>,
         tls_enabled: bool,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -132,6 +136,10 @@ impl HeadlessApp {
         // Git status watcher
         let (git_status_tx, _) = tokio_watch::channel(HashMap::new());
         let git_status_tx = Arc::new(git_status_tx);
+        // Toast broadcast (capacity matches a small backlog; lagging clients just
+        // drop non-critical notifications). No producer in headless mode yet.
+        let (toast_tx, _) = tokio::sync::broadcast::channel::<ApiToast>(64);
+        let toast_tx = Arc::new(toast_tx);
         let remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>> =
             Arc::new(std::sync::RwLock::new(HashMap::new()));
         let next_remote_connection_id = Arc::new(AtomicU64::new(0));
@@ -199,6 +207,7 @@ impl HeadlessApp {
             pty_broadcaster: pty_broadcaster.clone(),
             state_version: state_version.clone(),
             git_status_tx: git_status_tx.clone(),
+            toast_tx: toast_tx.clone(),
             remote_subscribed_terminals: remote_subscribed_terminals.clone(),
             next_remote_connection_id: next_remote_connection_id.clone(),
             git_watcher,
@@ -212,6 +221,10 @@ impl HeadlessApp {
         // Start remote command bridge loop (shared with GUI)
         let local_backend: Arc<dyn TerminalBackend> =
             Arc::new(LocalBackend::new(pty_manager));
+        // A second backend handle for the soft-close finalizer tick (kills
+        // grace-expired PTYs). `LocalBackend` is a thin `Arc<PtyManager>` wrapper,
+        // so cloning the `Arc<dyn TerminalBackend>` shares the same PtyManager.
+        let finalizer_backend: Arc<dyn TerminalBackend> = local_backend.clone();
         // Headless mode has no GUI window. Provide a standalone FocusManager
         // so remote action methods that take `&mut FocusManager` still
         // compile -- in headless the focus state never drives a render so it
@@ -259,23 +272,80 @@ impl HeadlessApp {
         let action_dispatcher: ActionDispatcher = Arc::new(|_cx, _target, _name| {
             Err("command palette unavailable in headless mode".to_string())
         });
+
+        // Soft-close plumbing (parity with the daemon-core loop): a HookMonitor
+        // to receive the Undo/Close-now toasts and the shared grace-deadline
+        // map. The finalizer + toast-drain spawn loops below realize them.
+        let hook_monitor = crate::workspace::hook_monitor::HookMonitor::new();
+        let deadlines: okena_workspace::actions::soft_close::SoftCloseDeadlines =
+            Arc::new(Mutex::new(HashMap::new()));
+
         cx.spawn({
             let workspace = workspace.clone();
             let terminals = terminals.clone();
             let state_version = state_version.clone();
             let git_status_tx = git_status_tx.clone();
             let service_manager = service_manager.clone();
+            let hook_monitor = hook_monitor.clone();
+            let deadlines = deadlines.clone();
             async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
                 remote_command_loop(
                     bridge_rx, local_backend, workspace, focus_manager_resolver, windows_resolver,
-                    terminals, state_version, git_status_tx, service_manager, action_dispatcher, cx,
+                    terminals, state_version, git_status_tx, service_manager, action_dispatcher,
+                    hook_monitor, deadlines, cx,
                 ).await;
             }
         })
         .detach();
 
+        // Grace-period finalizer tick: kill soft-closed PTYs whose grace elapsed.
+        // Mirrors the daemon-core `run_soft_close_poll` loop, driven off a gpui
+        // timer instead of tokio.
+        cx.spawn({
+            let workspace = workspace.clone();
+            let terminals = terminals.clone();
+            let deadlines = deadlines.clone();
+            let backend = finalizer_backend.clone();
+            async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
+                loop {
+                    smol::Timer::after(std::time::Duration::from_millis(200)).await;
+                    // `cx.update` returns the closure result directly here; the
+                    // detached task is cancelled when the app executor is torn
+                    // down at shutdown.
+                    cx.update(|cx| {
+                        workspace.update(cx, |ws, cx| {
+                            okena_workspace::actions::soft_close::finalize_expired(
+                                &deadlines, ws, &*backend, &terminals, cx,
+                            );
+                        });
+                    });
+                }
+            }
+        })
+        .detach();
+
+        // Toast drain: forward the HookMonitor's pending soft-close (and hook)
+        // toasts onto the remote broadcast the server fans out to thin clients.
+        // Mirrors the daemon-core `run_toast_poll` loop; realizes the previously
+        // producer-less `toast_tx`.
+        cx.spawn({
+            let hook_monitor = hook_monitor.clone();
+            let toast_tx = toast_tx.clone();
+            async move |_this: WeakEntity<HeadlessApp>, _cx: &mut AsyncApp| {
+                loop {
+                    smol::Timer::after(std::time::Duration::from_millis(200)).await;
+                    for toast in hook_monitor.drain_pending_toasts() {
+                        // Fire-and-forget: a send with no receivers is expected
+                        // (clients come and go) and ignored.
+                        let _ = toast_tx.send(toast.to_api());
+                    }
+                }
+            }
+        })
+        .detach();
+
         // Start remote server
-        app.start_remote_server(bridge_tx, listen_addr, tls_enabled, &remote_info);
+        app.start_remote_server(bridge_tx, listen_addrs, tls_enabled, &remote_info);
 
         app
     }
@@ -284,7 +354,7 @@ impl HeadlessApp {
     fn start_remote_server(
         &mut self,
         bridge_tx: bridge::BridgeSender,
-        listen_addr: IpAddr,
+        listen_addrs: Vec<IpAddr>,
         tls_enabled: bool,
         remote_info: &RemoteInfo,
     ) {
@@ -293,11 +363,13 @@ impl HeadlessApp {
             self.auth_store.clone(),
             self.pty_broadcaster.clone(),
             self.state_version.clone(),
-            listen_addr,
+            listen_addrs,
             self.git_status_tx.clone(),
+            self.toast_tx.clone(),
             self.remote_subscribed_terminals.clone(),
             self.next_remote_connection_id.clone(),
             tls_enabled,
+            env!("CARGO_PKG_VERSION"),
         ) {
             Ok(server) => {
                 let port = server.port();

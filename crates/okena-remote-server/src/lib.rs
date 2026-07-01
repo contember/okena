@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod bridge;
+pub mod local;
 pub mod pty_broadcaster;
 pub mod routes;
 pub mod serve;
@@ -80,8 +81,10 @@ impl RemoteInfo {
 }
 
 /// GPUI global wrapper for RemoteInfo.
+#[cfg(feature = "gpui")]
 #[derive(Clone)]
 pub struct GlobalRemoteInfo(pub RemoteInfo);
 
+#[cfg(feature = "gpui")]
 impl gpui::Global for GlobalRemoteInfo {}
 

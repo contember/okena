@@ -5,13 +5,11 @@
 //! `execute.rs` holds the async close pipeline; `view.rs` holds the
 //! `Render` impl.
 
-use okena_git as git;
 use okena_workspace::settings::{HooksConfig, WorktreeConfig};
 use okena_workspace::state::Workspace;
 
 use gpui::prelude::*;
 use gpui::*;
-use std::path::PathBuf;
 
 mod execute;
 mod view;
@@ -29,31 +27,31 @@ impl okena_ui::overlay::CloseEvent for CloseWorktreeDialogEvent {
     fn is_close(&self) -> bool { matches!(self, Self::Closed) }
 }
 
-/// Processing state for async operations
+/// Processing state for the close operation.
+///
+/// The per-step pipeline (stash/fetch/rebase/merge/push/delete-branch) runs
+/// daemon-side inside `Workspace::close_worktree`, so the dialog only tracks
+/// whether the single `CloseWorktree` action is in flight — it has no
+/// per-step progress to surface.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum ProcessingState {
     Idle,
-    Stashing,
-    Fetching,
-    Rebasing,
-    Merging,
-    Pushing,
-    DeletingBranch,
-    Removing,
+    Working,
 }
 
 /// Confirmation dialog shown when closing a worktree.
 /// Checks for dirty state and optionally merges the branch back.
 pub struct CloseWorktreeDialog {
-    pub(super) workspace: Entity<Workspace>,
-    pub(super) focus_manager: Entity<okena_workspace::focus::FocusManager>,
+    pub(super) host: String,
+    pub(super) port: u16,
+    pub(super) token: String,
+    pub(super) local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+    pub(super) daemon_project_id: String,
     pub(super) focus_handle: FocusHandle,
-    pub(super) project_id: String,
     pub(super) project_name: String,
     pub(super) project_path: String,
     pub(super) branch: Option<String>,
     pub(super) default_branch: Option<String>,
-    pub(super) main_repo_path: Option<String>,
     pub(super) is_dirty: bool,
     pub(super) merge_enabled: bool,
     pub(super) stash_enabled: bool,
@@ -63,16 +61,25 @@ pub struct CloseWorktreeDialog {
     pub(super) unpushed_count: usize,
     pub(super) error_message: Option<String>,
     pub(super) processing: ProcessingState,
-    pub(super) hooks_config: HooksConfig,
 }
 
 impl CloseWorktreeDialog {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        host: String,
+        port: u16,
+        token: String,
+        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+        daemon_project_id: String,
         workspace: Entity<Workspace>,
-        focus_manager: Entity<okena_workspace::focus::FocusManager>,
+        // The daemon owns worktree removal; the dialog no longer scrubs focus
+        // state itself, so this is unused (kept for call-site stability).
+        _focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         worktree_config: WorktreeConfig,
-        hooks_config: HooksConfig,
+        // Hooks now fire daemon-side inside `Workspace::close_worktree`; the
+        // dialog no longer reads them (kept for call-site stability).
+        _hooks_config: HooksConfig,
         cx: &mut Context<Self>,
     ) -> Self {
         let ws = workspace.read(cx);
@@ -80,26 +87,21 @@ impl CloseWorktreeDialog {
 
         let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
-        let main_repo_path = ws.worktree_parent_path(&project_id);
 
-        let path = PathBuf::from(&project_path);
-        let is_dirty = git::has_uncommitted_changes(&path);
-        let branch = git::get_current_branch(&path);
-        let default_branch = main_repo_path
-            .as_ref()
-            .and_then(|p| git::get_default_branch(&PathBuf::from(p)));
-        let unpushed_count = git::count_unpushed_commits(&path).unwrap_or(0);
+        let (is_dirty, branch, default_branch, unpushed_count) =
+            Self::fetch_close_info(&host, port, &token, local_endpoint.as_ref(), daemon_project_id.clone());
 
         Self {
-            workspace,
-            focus_manager,
+            host,
+            port,
+            token,
+            local_endpoint,
+            daemon_project_id,
             focus_handle: cx.focus_handle(),
-            project_id,
             project_name,
             project_path,
             branch,
             default_branch,
-            main_repo_path,
             is_dirty,
             merge_enabled: worktree_config.default_merge,
             stash_enabled: worktree_config.default_stash,
@@ -109,7 +111,38 @@ impl CloseWorktreeDialog {
             unpushed_count,
             error_message: None,
             processing: ProcessingState::Idle,
-            hooks_config,
+        }
+    }
+
+    /// Fetch the git-derived close info from the daemon. The repo lives on the
+    /// daemon, so we post a `WorktreeCloseInfo` action rather than reading local
+    /// git. Kept synchronous on purpose — the old code did blocking local git
+    /// here, so a blocking HTTP call is no worse.
+    fn fetch_close_info(
+        host: &str,
+        port: u16,
+        token: &str,
+        local_endpoint: Option<&okena_transport::client::LocalEndpoint>,
+        project_id: String,
+    )
+        -> (bool, Option<String>, Option<String>, usize)
+    {
+        let action = okena_core::api::ActionRequest::WorktreeCloseInfo { project_id };
+        match okena_transport::remote_action::post_action_with_endpoint(
+            host,
+            port,
+            token,
+            local_endpoint,
+            action,
+        ) {
+            Ok(Some(v)) => {
+                let is_dirty = v.get("is_dirty").and_then(|x| x.as_bool()).unwrap_or(false);
+                let branch = v.get("branch").and_then(|x| x.as_str()).map(String::from);
+                let default_branch = v.get("default_branch").and_then(|x| x.as_str()).map(String::from);
+                let unpushed_count = v.get("unpushed_count").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                (is_dirty, branch, default_branch, unpushed_count)
+            }
+            _ => (false, None, None, 0),
         }
     }
 

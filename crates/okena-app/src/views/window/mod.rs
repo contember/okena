@@ -4,11 +4,8 @@ mod render;
 mod sidebar;
 mod terminal_actions;
 
-use crate::git::watcher::GitStatusWatcher;
 use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
 use crate::services::manager::ServiceManager;
-use crate::terminal::backend::{TerminalBackend, LocalBackend};
-use crate::terminal::pty_manager::PtyManager;
 use crate::views::overlay_manager::OverlayManager;
 use crate::views::panels::project_column::ProjectColumn;
 use crate::views::sidebar_controller::SidebarController;
@@ -107,7 +104,6 @@ pub struct WindowView {
     focus_manager: Entity<FocusManager>,
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
-    backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
     sidebar: Entity<Sidebar>,
     /// Sidebar state controller
@@ -135,8 +131,6 @@ pub struct WindowView {
     hscroll_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// Remote connection manager (set after creation)
     remote_manager: Option<Entity<RemoteConnectionManager>>,
-    /// Git status watcher (set by Okena after creation)
-    git_watcher: Option<Entity<GitStatusWatcher>>,
     /// Whether the pane switcher overlay is active
     pane_switch_active: bool,
     /// Pane switcher overlay entity (separate entity for proper focus handling)
@@ -170,7 +164,6 @@ impl WindowView {
     pub fn new(
         window_id: WindowId,
         workspace: Entity<Workspace>,
-        pty_manager: Arc<PtyManager>,
         terminals: TerminalsRegistry,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -271,15 +264,10 @@ impl WindowView {
 
         let last_data_replacement_epoch = workspace.read(cx).data_replacement_epoch();
 
-        // Wrap PtyManager in LocalBackend for the TerminalBackend trait
-        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager));
-
         // Wire up sidebar callbacks
         {
             let workspace_for_dispatch = workspace.clone();
             let focus_manager_for_dispatch = focus_manager.clone();
-            let backend_for_dispatch = backend.clone();
-            let terminals_for_dispatch = terminals.clone();
             sidebar.update(cx, |s, _cx| {
                 // Dispatch action callback
                 s.set_dispatch_action(Box::new(move |project_id, action, cx| {
@@ -288,22 +276,10 @@ impl WindowView {
                         window_id,
                         &workspace_for_dispatch,
                         &focus_manager_for_dispatch,
-                        &Some(backend_for_dispatch.clone()),
-                        &terminals_for_dispatch,
-                        &None, // service_manager - wired later
                         &None, // remote_manager - wired later
                         cx,
                     ) {
                         dispatcher.dispatch(action, cx);
-                    }
-                }));
-
-                // Settings callback
-                s.set_settings(Box::new(|cx| {
-                    let app_settings = crate::settings::settings(cx);
-                    okena_views_sidebar::SidebarSettings {
-                        worktree_path_template: app_settings.worktree.path_template.clone(),
-                        hooks: app_settings.hooks.clone(),
                     }
                 }));
             });
@@ -314,7 +290,6 @@ impl WindowView {
             focus_manager,
             workspace,
             request_broker,
-            backend,
             terminals,
             sidebar,
             sidebar_ctrl,
@@ -334,7 +309,6 @@ impl WindowView {
             hscroll_bounds: Rc::new(RefCell::new(None)),
             service_manager: None,
             remote_manager: None,
-            git_watcher: None,
             pane_switch_active: false,
             pane_switcher_entity: None,
             last_scroll_project: None,
@@ -472,14 +446,6 @@ impl WindowView {
         self.center_next_navigation = true;
     }
 
-    /// Set the git watcher entity (called by Okena after creation).
-    pub fn set_git_watcher(&mut self, watcher: Entity<GitStatusWatcher>, cx: &mut Context<Self>) {
-        self.git_watcher = Some(watcher);
-        // Drop existing local columns so they get recreated with the watcher
-        self.project_columns.retain(|id, _| id.starts_with("remote:"));
-        self.sync_project_columns(cx);
-    }
-
     /// Set the remote connection manager (called after creation by Okena).
     pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
         // Observe remote manager and sync remote projects into workspace
@@ -549,7 +515,10 @@ impl WindowView {
             // observer above.
             let sidebar_for_activity = self.sidebar.clone();
             cx.subscribe(&manager, move |_this, _rm, event, cx| match event {
-                RemoteManagerEvent::TerminalActivity => {
+                // The payload (advanced terminal ids) is for `Okena`'s
+                // notification drain; the sidebar re-reads every terminal's
+                // bell/idle flags, so it just repaints.
+                RemoteManagerEvent::TerminalActivity(_) => {
                     sidebar_for_activity.update(cx, |_, cx| cx.notify());
                 }
             }).detach();
@@ -584,15 +553,16 @@ impl WindowView {
         self.service_manager = Some(manager);
     }
 
-    /// Rebuild the sidebar dispatch action callback with current service/remote managers.
+    /// Rebuild the sidebar dispatch action callback with the current remote manager.
     fn rebuild_sidebar_dispatch(&self, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
-        let backend = self.backend.clone();
-        let terminals = self.terminals.clone();
-        let service_manager = self.service_manager.clone();
         let remote_manager = self.remote_manager.clone();
         let window_id = self.window_id;
+        // Separate clones for the connection-targeted dispatch closure below.
+        let workspace_conn = self.workspace.clone();
+        let focus_manager_conn = self.focus_manager.clone();
+        let remote_manager_conn = self.remote_manager.clone();
         self.sidebar.update(cx, |s, _cx| {
             s.set_dispatch_action(Box::new(move |project_id, action, cx| {
                 if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
@@ -600,11 +570,22 @@ impl WindowView {
                     window_id,
                     &workspace,
                     &focus_manager,
-                    &Some(backend.clone()),
-                    &terminals,
-                    &service_manager,
                     &remote_manager,
                     cx,
+                ) {
+                    dispatcher.dispatch(action, cx);
+                }
+            }));
+            // Folder-scoped / workspace-global dispatch (no project to resolve a
+            // connection from). The sidebar resolves the connection id from the
+            // folder prefix (or uses the local daemon) and calls this.
+            s.set_dispatch_for_connection(Box::new(move |conn_id, action, cx| {
+                if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_connection(
+                    conn_id,
+                    window_id,
+                    &workspace_conn,
+                    &focus_manager_conn,
+                    &remote_manager_conn,
                 ) {
                     dispatcher.dispatch(action, cx);
                 }
@@ -700,17 +681,14 @@ impl WindowView {
             .collect();
         self.project_columns.retain(|id, _| visible_ids.contains(id.as_str()));
 
-        // Create columns for new projects
-        for (project_id, is_remote, connection_id) in &visible_projects {
-            if !self.project_columns.contains_key(project_id) {
-                let entity = if *is_remote {
+        // Create columns for new projects. Every project is a remote project
+        // of the local daemon.
+        for (project_id, _is_remote, connection_id) in &visible_projects {
+            if !self.project_columns.contains_key(project_id)
+                && let Some(entity) =
                     self.create_remote_column(project_id, connection_id.as_deref(), cx)
-                } else {
-                    Some(self.create_local_column(project_id, cx))
-                };
-                if let Some(entity) = entity {
-                    self.project_columns.insert(project_id.clone(), entity);
-                }
+            {
+                self.project_columns.insert(project_id.clone(), entity);
             }
         }
     }
@@ -770,68 +748,6 @@ impl WindowView {
         }))
     }
 
-    /// Create a ProjectColumn for a local project.
-    fn create_local_column(
-        &self,
-        project_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Entity<ProjectColumn> {
-        let workspace_clone = self.workspace.clone();
-        let focus_manager_clone = self.focus_manager.clone();
-        let request_broker_clone = self.request_broker.clone();
-        let terminals_clone = self.terminals.clone();
-        let active_drag_clone = self.active_drag.clone();
-        let id = project_id.to_string();
-        let backend_clone = self.backend.clone();
-        let workspace_for_dispatch = self.workspace.clone();
-        let focus_manager_for_dispatch = self.focus_manager.clone();
-        let backend_for_dispatch = self.backend.clone();
-        let terminals_for_dispatch = self.terminals.clone();
-        let git_watcher = self.git_watcher.clone();
-
-        let git_provider = match self.build_git_provider(project_id, cx) {
-            Some(p) => p,
-            None => {
-                log::warn!("Cannot build git provider for project {}", project_id);
-                let path = self.workspace.read(cx).project(project_id)
-                    .map(|p| p.path.clone())
-                    .unwrap_or_default();
-                Arc::new(okena_views_git::diff_viewer::provider::LocalGitProvider::new(path))
-            }
-        };
-
-        let window_id = self.window_id;
-        let entity = cx.new(move |cx| {
-            let mut col = ProjectColumn::new(
-                window_id,
-                workspace_clone,
-                focus_manager_clone,
-                request_broker_clone,
-                id,
-                backend_clone,
-                terminals_clone,
-                active_drag_clone,
-                git_watcher,
-                git_provider,
-                cx,
-            );
-            col.set_action_dispatcher(Some(
-                crate::action_dispatch::ActionDispatcher::Local {
-                    workspace: workspace_for_dispatch,
-                    focus_manager: focus_manager_for_dispatch,
-                    backend: backend_for_dispatch,
-                    terminals: terminals_for_dispatch,
-                    service_manager: None, // set later via set_service_manager
-                    window_id,
-                },
-            ));
-            col
-        });
-        if let Some(ref sm) = self.service_manager {
-            entity.update(cx, |col, cx| col.set_service_manager(sm.clone(), cx));
-        }
-        entity
-    }
 }
 
 impl_focusable!(WindowView);

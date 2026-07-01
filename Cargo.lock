@@ -6058,6 +6058,7 @@ dependencies = [
  "okena-ext-updater",
  "okena-extensions",
  "okena-files",
+ "okena-remote-server",
  "okena-terminal",
  "okena-ui",
  "okena-views-git",
@@ -6071,7 +6072,7 @@ dependencies = [
 
 [[package]]
 name = "okena-app"
-version = "0.1.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6168,6 +6169,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "okena-daemon"
+version = "0.27.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "okena-core",
+ "okena-daemon-core",
+ "okena-remote-server",
+ "okena-workspace",
+]
+
+[[package]]
+name = "okena-daemon-core"
+version = "0.27.0"
+dependencies = [
+ "anyhow",
+ "async-channel 2.5.0",
+ "log",
+ "okena-app-core",
+ "okena-core",
+ "okena-git",
+ "okena-hooks",
+ "okena-remote-server",
+ "okena-services",
+ "okena-state",
+ "okena-terminal",
+ "okena-theme",
+ "okena-workspace",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "okena-ext-claude"
 version = "0.1.0"
 dependencies = [
@@ -6238,7 +6275,9 @@ dependencies = [
  "okena-transport",
  "okena-ui",
  "parking_lot",
+ "reqwest",
  "semver",
+ "serde",
  "serde_json",
  "sha2",
  "smol",
@@ -6372,7 +6411,7 @@ dependencies = [
 
 [[package]]
 name = "okena-remote-server"
-version = "0.1.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -6386,6 +6425,7 @@ dependencies = [
  "libc",
  "log",
  "okena-core",
+ "okena-ext-updater",
  "okena-terminal",
  "okena-transport",
  "okena-workspace",
@@ -6583,6 +6623,7 @@ dependencies = [
  "okena-views-services",
  "okena-views-terminal",
  "okena-workspace",
+ "serde_json",
  "smol",
 ]
 
@@ -9275,6 +9316,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

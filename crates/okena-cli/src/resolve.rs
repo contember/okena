@@ -306,6 +306,11 @@ mod tests {
             services: vec![],
             worktree_info: None,
             worktree_ids: vec![],
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: vec![],
+            hooks: Default::default(),
         }
     }
 

@@ -32,8 +32,8 @@ pub fn list_directory(
     // root — `relative_path` may carry `..` segments or even be absolute
     // (Path::join with an absolute argument replaces). Without this guard
     // a caller passing `../../etc` would list arbitrary directories. The
-    // read_file / read_file_bytes path enforces the same invariant via
-    // LocalProjectFs::resolve; this is the listing-side mirror.
+    // read_file / read_file_bytes path enforces the same invariant via the
+    // server-side `resolve_project_file`; this is the listing-side mirror.
     let canonical_root = project_root
         .canonicalize()
         .map_err(|e| format!("Cannot resolve project path: {}", e))?;

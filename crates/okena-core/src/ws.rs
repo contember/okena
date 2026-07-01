@@ -1,4 +1,4 @@
-use crate::api::ApiGitStatus;
+use crate::api::{ApiGitStatus, ApiToast};
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +59,11 @@ pub enum WsOutbound {
     GitStatusChanged {
         projects: std::collections::HashMap<String, ApiGitStatus>,
     },
+    /// A daemon-originated toast to display on the client. Fire-and-forget event
+    /// (mirrors `GitStatusChanged`): the daemon has no surface of its own, so
+    /// notifications it produces (e.g. hook failures) are pushed here and the
+    /// client's `ToastManager` renders them.
+    Toast(ApiToast),
     TerminalResized {
         terminal_id: String,
         cols: u16,
@@ -183,6 +188,14 @@ mod tests {
                 .into_iter()
                 .collect(),
             },
+            WsOutbound::Toast(ApiToast {
+                id: "toast-1".into(),
+                level: "error".into(),
+                message: "Hook `pre_merge` failed".into(),
+                detail: Some("exit code 1".into()),
+                ttl_ms: 5000,
+                actions: Vec::new(),
+            }),
             WsOutbound::TerminalResized {
                 terminal_id: "t1".into(),
                 cols: 120,

@@ -6,8 +6,7 @@
 use okena_ui::overlay::CloseEvent;
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_md};
-use okena_workspace::settings::HooksConfig;
-use okena_workspace::state::{WindowId, Workspace};
+use okena_workspace::state::Workspace;
 use gpui::*;
 use gpui::prelude::*;
 
@@ -16,6 +15,18 @@ use crate::Cancel;
 /// Event emitted by WorktreeListPopover.
 pub enum WorktreeListPopoverEvent {
     Close,
+    /// Untrack (delete) a tracked worktree project. The daemon owns the
+    /// project, so the host routes this to `ActionRequest::DeleteProject`
+    /// rather than mutating the read-only mirror here.
+    DeleteProject { project_id: String },
+    /// Track an already-on-disk worktree as a project. The daemon owns the
+    /// project list, so the host routes this to
+    /// `ActionRequest::AddDiscoveredWorktree` rather than mutating the mirror.
+    AddDiscoveredWorktree {
+        parent_project_id: String,
+        worktree_path: String,
+        branch: String,
+    },
 }
 
 impl CloseEvent for WorktreeListPopoverEvent {
@@ -27,17 +38,9 @@ impl EventEmitter<WorktreeListPopoverEvent> for WorktreeListPopover {}
 /// Standalone worktree list popover entity.
 pub struct WorktreeListPopover {
     workspace: Entity<Workspace>,
-    focus_manager: Entity<okena_workspace::focus::FocusManager>,
-    /// Spawning window for the multi-window new-project visibility rule
-    /// (PRD user story 14): a click that adds a discovered worktree
-    /// makes the new project visible in this window only, hidden in
-    /// every other window. Threaded from the originating `WindowView`
-    /// through `OverlayManager::show_worktree_list`.
-    window_id: WindowId,
     project_id: String,
     entries: Vec<(String, String)>,
     position: Point<Pixels>,
-    hooks: HooksConfig,
     focus_handle: FocusHandle,
     /// Normalized git root (for filtering out the main repo entry).
     norm_git_root: std::path::PathBuf,
@@ -46,25 +49,62 @@ pub struct WorktreeListPopover {
 }
 
 impl WorktreeListPopover {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        host: String,
+        port: u16,
+        token: String,
+        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+        daemon_project_id: String,
         workspace: Entity<Workspace>,
-        focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         position: Point<Pixels>,
-        hooks: HooksConfig,
-        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
-        let project_path = workspace.read(cx).project(&project_id)
-            .map(|p| p.path.clone())
-            .unwrap_or_default();
-        let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(
-            std::path::Path::new(&project_path),
-        );
-        let norm_git_root = okena_git::repository::normalize_path(&git_root);
-        let entries = okena_git::repository::list_git_worktrees(&git_root);
+        let (norm_git_root, subdir, entries) =
+            Self::fetch_worktrees(&host, port, &token, local_endpoint.as_ref(), daemon_project_id);
         let focus_handle = cx.focus_handle();
-        Self { workspace, focus_manager, window_id, project_id, entries, position, hooks, focus_handle, norm_git_root, subdir }
+        Self {
+            workspace,
+            project_id,
+            entries,
+            position,
+            focus_handle,
+            norm_git_root,
+            subdir,
+        }
+    }
+
+    /// Fetch the worktree listing from the daemon. The git repo lives on the
+    /// daemon, so we post a `GitListWorktrees` action rather than scanning the
+    /// local filesystem. Kept synchronous on purpose — the old code did a
+    /// blocking local git scan here, so a blocking HTTP call is no worse.
+    fn fetch_worktrees(
+        host: &str,
+        port: u16,
+        token: &str,
+        local_endpoint: Option<&okena_transport::client::LocalEndpoint>,
+        project_id: String,
+    ) -> (std::path::PathBuf, std::path::PathBuf, Vec<(String, String)>) {
+        let action = okena_core::api::ActionRequest::GitListWorktrees { project_id };
+        match okena_transport::remote_action::post_action_with_endpoint(
+            host,
+            port,
+            token,
+            local_endpoint,
+            action,
+        ) {
+            Ok(Some(value)) => {
+                let git_root = value.get("git_root").and_then(|v| v.as_str()).unwrap_or_default();
+                let subdir = value.get("subdir").and_then(|v| v.as_str()).unwrap_or_default();
+                let worktrees: Vec<(String, String)> = value
+                    .get("worktrees")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                (std::path::PathBuf::from(git_root), std::path::PathBuf::from(subdir), worktrees)
+            }
+            _ => (std::path::PathBuf::new(), std::path::PathBuf::new(), Vec::new()),
+        }
     }
 
     /// Find a tracked worktree project by its worktree root path.
@@ -150,7 +190,6 @@ impl Render for WorktreeListPopover {
                 let project_id = self.project_id.clone();
                 let wt_path_clone = wt_path.clone();
                 let branch_clone = branch.clone();
-                let hooks = self.hooks.clone();
 
                 div()
                     .id(ElementId::Name(format!("wt-list-{}", wt_path).into()))
@@ -165,26 +204,20 @@ impl Render for WorktreeListPopover {
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         if is_tracked {
                             if let Some(id) = this.find_tracked_project_id(&wt_path_clone, cx) {
-                                let workspace = this.workspace.clone();
-                                this.focus_manager.update(cx, |fm, cx| {
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.delete_project(fm, &id, &hooks, cx);
-                                    });
-                                    cx.notify();
-                                });
+                                // Daemon owns the project — emit an event so the
+                                // host dispatches DeleteProject; the removal
+                                // mirrors back. No direct mirror mutation here.
+                                cx.emit(WorktreeListPopoverEvent::DeleteProject { project_id: id });
                             }
                         } else {
-                            let window_id = this.window_id;
-                            this.workspace.update(cx, |ws, cx| {
-                                if let Some(new_id) = ws.add_discovered_worktree(
-                                    &wt_path_clone,
-                                    &branch_clone,
-                                    &project_id,
-                                    window_id,
-                                ) {
-                                    ws.add_to_worktree_ids(&project_id, &new_id);
-                                }
-                                ws.notify_data(cx);
+                            // The daemon owns the project list — emit an event so
+                            // the host dispatches AddDiscoveredWorktree; the new
+                            // worktree project mirrors back. No direct mirror
+                            // mutation here.
+                            cx.emit(WorktreeListPopoverEvent::AddDiscoveredWorktree {
+                                parent_project_id: project_id.clone(),
+                                worktree_path: wt_path_clone.clone(),
+                                branch: branch_clone.clone(),
                             });
                         }
                         cx.notify();

@@ -21,7 +21,7 @@ crates/okena-app/src/
 ├── action_dispatch.rs    # Action → workspace dispatch glue
 ├── logging.rs            # In-app log console (ring buffer + reloadable filter)
 ├── simple_root.rs        # Linux Wayland maximize workaround (cfg(target_os = "linux"))
-├── soft_close.rs         # Confirm-before-close helpers
+├── soft_close.rs         # Soft-close + restart-daemon toast-action ids (grace logic lives on the daemon)
 ├── app/                  # Main app entity — real code (see app/CLAUDE.md)
 ├── views/                # UI views — real code (overlays, chrome, panels, components)
 ├── keybindings/          # Keyboard actions — real code (see keybindings/CLAUDE.md)

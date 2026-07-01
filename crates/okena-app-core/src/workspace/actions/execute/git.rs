@@ -97,6 +97,117 @@ pub(super) fn list_branches(ws: &Workspace, project_id: String) -> ActionResult 
     }
 }
 
+pub(super) fn list_worktrees(ws: &Workspace, project_id: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(std::path::Path::new(&path));
+            let norm_git_root = okena_git::repository::normalize_path(&git_root);
+            let worktrees = okena_git::repository::list_git_worktrees(&git_root);
+            ActionResult::Ok(Some(serde_json::json!({
+                "git_root": norm_git_root.to_string_lossy(),
+                "subdir": subdir.to_string_lossy(),
+                "worktrees": worktrees,
+            })))
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+pub(super) fn worktree_close_info(ws: &Workspace, project_id: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let project_path = p.path.clone();
+            let main_repo_path = ws.worktree_parent_path(&project_id);
+            let path = std::path::Path::new(&project_path);
+            let is_dirty = okena_git::has_uncommitted_changes(path);
+            let branch = okena_git::get_current_branch(path);
+            let default_branch = main_repo_path
+                .as_ref()
+                .and_then(|p| okena_git::get_default_branch(std::path::Path::new(p)));
+            let unpushed_count = okena_git::count_unpushed_commits(path).unwrap_or(0);
+            ActionResult::Ok(Some(serde_json::json!({
+                "is_dirty": is_dirty,
+                "branch": branch,
+                "default_branch": default_branch,
+                "unpushed_count": unpushed_count,
+            })))
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+pub(super) fn generate_worktree_branch_name(ws: &Workspace, project_id: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            let (git_root, _subdir) = okena_git::resolve_git_root_and_subdir(std::path::Path::new(&path));
+            let branch = okena_git::branch_names::generate_branch_name(&git_root);
+            ActionResult::Ok(Some(serde_json::json!({ "branch": branch })))
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+pub(super) fn list_branches_classified(ws: &Workspace, project_id: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            let branches = okena_git::list_branches_classified(std::path::Path::new(&path));
+            ActionResult::Ok(Some(serde_json::to_value(branches).expect("BUG: BranchList must serialize")))
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+pub(super) fn checkout_local_branch(ws: &Workspace, project_id: String, branch: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            match okena_git::checkout_local_branch(std::path::Path::new(&path), &branch) {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(e.to_string()),
+            }
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+pub(super) fn checkout_remote_branch(ws: &Workspace, project_id: String, remote_branch: String) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            match okena_git::checkout_remote_branch(std::path::Path::new(&path), &remote_branch) {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(e.to_string()),
+            }
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+pub(super) fn create_and_checkout_branch(
+    ws: &Workspace,
+    project_id: String,
+    new_name: String,
+    start_point: Option<String>,
+) -> ActionResult {
+    match ws.project(&project_id) {
+        Some(p) => {
+            let path = p.path.clone();
+            match okena_git::create_and_checkout_branch(
+                std::path::Path::new(&path),
+                &new_name,
+                start_point.as_deref(),
+            ) {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(e.to_string()),
+            }
+        }
+        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
 pub(super) fn stage_file(ws: &Workspace, project_id: String, file_path: String) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {

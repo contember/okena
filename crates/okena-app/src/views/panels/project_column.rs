@@ -22,6 +22,10 @@ use okena_views_services::service_panel::ServicePanel;
 use crate::views::panels::hook_panel::HookPanel;
 use crate::views::window::TerminalsRegistry;
 
+fn project_header_display_name(project: &ProjectData) -> String {
+    project.name.clone()
+}
+
 /// A single project column with header and layout
 pub struct ProjectColumn {
     /// Identifies which window-scoped slot on the shared `Workspace` this
@@ -82,6 +86,16 @@ impl ProjectColumn {
         if let Some(ref watcher) = git_watcher {
             cx.observe(watcher, |_, _, cx| cx.notify()).detach();
         }
+
+        // Observe the workspace itself. In daemon-client mode there is no local
+        // git_watcher (it's `None`); the header reads git status from the remote
+        // snapshot, which is refreshed via `apply_remote_snapshot` +
+        // `notify_ui_only` on the Workspace. Since ProjectColumn renders inside a
+        // `.cached()` view, only a notify from an entity it observes repaints it
+        // — without this observer remote git-status updates (branch, ahead/behind,
+        // diff stats) never reach the header chip and go stale. Services don't
+        // hit this because ServicePanel already observes the workspace.
+        cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
 
         let initial_service_height = workspace.read(cx).data.service_panel_heights
             .get(&project_id).copied().unwrap_or(200.0);
@@ -182,14 +196,21 @@ impl ProjectColumn {
         });
     }
 
+    /// Sync the action dispatcher to the hook panel entity (mirrors the service
+    /// panel sync — the hook panel needs it to dispatch RerunHook to the daemon).
+    fn sync_hook_panel_dispatcher(&self, cx: &mut Context<Self>) {
+        let dispatcher = self.action_dispatcher.clone();
+        self.hook_panel.update(cx, |hp, _cx| {
+            hp.set_action_dispatcher(dispatcher);
+        });
+    }
+
     /// Set the service manager and observe it for changes.
     pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
-        // Also update the action dispatcher so it can route service actions locally
-        if let Some(ActionDispatcher::Local { ref mut service_manager, .. }) = self.action_dispatcher {
-            *service_manager = Some(manager.clone());
-        }
-        // Sync dispatcher to service panel (may have been set before panel was created)
+        // Sync dispatcher to service + hook panels (may have been set before the
+        // panels were created).
         self.sync_service_panel_dispatcher(cx);
+        self.sync_hook_panel_dispatcher(cx);
         self.service_panel.update(cx, |sp, cx| {
             sp.set_service_manager(manager, cx);
         });
@@ -252,8 +273,11 @@ impl ProjectColumn {
 
     /// Observe workspace for remote service state changes (used for remote project columns).
     pub fn observe_remote_services(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) {
-        // Sync dispatcher to service panel (may have been set before panel was created)
+        // Sync dispatcher to service + hook panels (may have been set before the
+        // panels were created). This is the sync point for daemon-client columns,
+        // which is how the hook panel gets its dispatcher to route RerunHook.
         self.sync_service_panel_dispatcher(cx);
+        self.sync_hook_panel_dispatcher(cx);
         self.service_panel.update(cx, |sp, cx| {
             sp.observe_remote_services(workspace, cx);
         });
@@ -385,6 +409,40 @@ impl ProjectColumn {
             .into_any_element()
     }
 
+    /// Resolve the project's git status: prefer the local watcher, fall back to
+    /// the remote snapshot (daemon-client mode, where `git_watcher` is `None`).
+    /// Both the header badge and the CI-checks popover MUST go through this so
+    /// they agree on the source — otherwise the badge renders from the snapshot
+    /// while the popover reads an empty watcher and shows nothing (a pill you
+    /// can't open).
+    fn resolve_git_status(&self, cx: &Context<Self>) -> Option<git::GitStatus> {
+        self.git_watcher
+            .as_ref()
+            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
+            .or_else(|| {
+                self.workspace
+                    .read(cx)
+                    .remote_snapshot(&self.project_id)
+                    .and_then(|snap| snap.git_status.as_ref())
+                    .map(|g| git::GitStatus {
+                        branch: g.branch.clone(),
+                        lines_added: g.lines_added,
+                        lines_removed: g.lines_removed,
+                        pr_info: g.pr_info.clone(),
+                        ci_checks: g.ci_checks.clone(),
+                        ahead: g.ahead,
+                        behind: g.behind,
+                        unpushed: g.unpushed,
+                        // Carried over the wire (ApiGitStatus.review_base /
+                        // .default_branch) so the "Review changes" chip renders
+                        // and the base label hides on the default branch for
+                        // daemon-backed projects too.
+                        review_base: g.review_base.clone(),
+                        default_branch: g.default_branch.clone(),
+                    })
+            })
+    }
+
     fn render_header(&self, project: &ProjectData, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.clone();
@@ -404,27 +462,10 @@ impl ProjectColumn {
         let is_comfortable =
             density == crate::workspace::settings::HeaderDensity::Comfortable && !is_rows;
 
-        // Fetch git status once for both header badge and git status area
-        let git_status = self.git_watcher.as_ref()
-            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-            .or_else(|| {
-                self.workspace.read(cx).remote_snapshot(&self.project_id)
-                    .and_then(|snap| snap.git_status.as_ref())
-                    .map(|g| git::GitStatus {
-                        branch: g.branch.clone(),
-                        lines_added: g.lines_added,
-                        lines_removed: g.lines_removed,
-                        pr_info: g.pr_info.clone(),
-                        ci_checks: g.ci_checks.clone(),
-                        ahead: g.ahead,
-                        behind: g.behind,
-                        unpushed: g.unpushed,
-                        // Not carried over the wire yet; remote projects don't
-                        // surface the "Review changes" chip.
-                        review_base: None,
-                        default_branch: None,
-                    })
-            });
+        // Fetch git status once for both header badge and git status area.
+        // Goes through resolve_git_status so the CI popover (below) sees the
+        // same source — watcher locally, remote snapshot in daemon-client mode.
+        let git_status = self.resolve_git_status(cx);
 
         // Worktree indicator: filled dot for normal project, ring for worktree.
         let worktree_dot = if project.worktree_info.is_some() {
@@ -447,14 +488,7 @@ impl ProjectColumn {
         };
 
         let project_name_el = {
-            let display_name = if let Some(ref wt_info) = project.worktree_info {
-                let ws = self.workspace.read(cx);
-                ws.project(&wt_info.parent_project_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| project.name.clone())
-            } else {
-                project.name.clone()
-            };
+            let display_name = project_header_display_name(project);
             let path_for_tooltip = project.path.clone();
             let project_id_for_click = self.project_id.clone();
             let request_broker_for_click = self.request_broker.clone();
@@ -943,10 +977,10 @@ impl Render for ProjectColumn {
                     self.render_empty_state(cx).into_any_element()
                 };
 
-                // Get current branch for commit log popover and update git header
-                let current_branch = self.git_watcher.as_ref()
-                    .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-                    .and_then(|s| s.branch);
+                // Get current branch for commit log popover and update git header.
+                // Same source as the badge (resolve_git_status) so the branch is
+                // present in daemon-client mode too, where git_watcher is None.
+                let current_branch = self.resolve_git_status(cx).and_then(|s| s.branch);
                 self.git_header.update(cx, |gh, _cx| {
                     gh.set_current_branch(current_branch.clone());
                 });
@@ -962,11 +996,9 @@ impl Render for ProjectColumn {
                     .child(self.render_header(&project, cx))
                     .child(content)
                     // Hook panel (delegated to HookPanel entity)
-                    .child({
-                        self.hook_panel.update(cx, |hp, cx| {
-                            hp.render_panel(&t, cx)
-                        })
-                    })
+                    .child(self.hook_panel.update(cx, |hp, cx| {
+                        hp.render_panel(&t, cx)
+                    }))
                     // Service panel (delegated to ServicePanel entity)
                     .child({
                         self.service_panel.update(cx, |sp, cx| {
@@ -991,10 +1023,13 @@ impl Render for ProjectColumn {
                             gh.render_branch_picker(window, &t, cx)
                         })
                     })
-                    // CI checks popover (delegated to GitHeader entity)
+                    // CI checks popover (delegated to GitHeader entity).
+                    // Resolve via the same path as the badge: in daemon-client
+                    // mode git_watcher is None, so the watcher-only fetch left
+                    // ci_checks empty and the popover rendered nothing (the pill
+                    // toggled but never opened). Fall back to the remote snapshot.
                     .child({
-                        let git_status = self.git_watcher.as_ref()
-                            .and_then(|w| w.read(cx).get(&self.project_id).cloned());
+                        let git_status = self.resolve_git_status(cx);
                         let ci_checks = git_status.as_ref().and_then(|g| g.ci_checks.clone());
                         let pr_info = git_status.and_then(|g| g.pr_info);
                         self.git_header.update(cx, |gh, cx| {
@@ -1013,5 +1048,50 @@ impl Render for ProjectColumn {
                 .child("Project not found")
                 .into_any_element(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_header_display_name;
+    use crate::workspace::settings::HooksConfig;
+    use crate::workspace::state::{ProjectData, WorktreeMetadata};
+    use okena_core::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn project_with_name(name: &str) -> ProjectData {
+        ProjectData {
+            id: "p1".to_string(),
+            name: name.to_string(),
+            path: "/tmp/repo-worktree".to_string(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+        }
+    }
+
+    #[test]
+    fn project_header_uses_worktree_project_name() {
+        let mut project = project_with_name("feature-login");
+        project.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/repo-worktree".to_string(),
+            branch_name: "feature/login".to_string(),
+        });
+
+        assert_eq!(project_header_display_name(&project), "feature-login");
     }
 }

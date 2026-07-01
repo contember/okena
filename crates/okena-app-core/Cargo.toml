@@ -4,15 +4,19 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[features]
+default = ["gpui"]
+gpui = ["dep:gpui", "okena-workspace/gpui", "okena-files/gpui", "okena-theme/gpui"]
+
 [dependencies]
 okena-core = { path = "../okena-core" }
 okena-terminal = { path = "../okena-terminal" }
-okena-workspace = { path = "../okena-workspace" }
+okena-workspace = { path = "../okena-workspace", default-features = false }
 okena-git = { path = "../okena-git" }
-okena-files = { path = "../okena-files" }
-okena-theme = { path = "../okena-theme" }
+okena-files = { path = "../okena-files", default-features = false }
+okena-theme = { path = "../okena-theme", default-features = false }
 
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
 
 # Terminal emulation (grid/index types used by action execution)
 alacritty_terminal = "0.25"
@@ -25,3 +29,15 @@ serde_json = "1.0"
 log = "0.4"
 uuid = { version = "1.10", features = ["v4"] }
 base64 = "0.22"
+
+# `gpui` here is the *same* optional dependency declared in `[dependencies]`;
+# this entry only layers on the `test-support` feature so the gpui-gated test
+# modules can use `#[gpui::test]` / `TestAppContext`. As a dev-dependency it is
+# never part of a production (non-test) build, so the shipped binary's gpui
+# feature set is unchanged. It is intentionally NOT routed through the `gpui`
+# feature: doing so would enable `test-support` in consumers' production builds
+# (a real feature-set change). A `--no-default-features` build never compiles
+# gpui (verified: zero `Compiling gpui`); the dependency only appears in the
+# `cargo tree` metadata graph, not in any compiled artifact.
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }

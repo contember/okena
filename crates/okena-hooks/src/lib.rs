@@ -20,7 +20,12 @@ pub use hooks::{
     HookRunner, HookTerminalResult,
     apply_shell_wrapper, fire_before_worktree_remove, fire_before_worktree_remove_async,
     fire_on_dirty_worktree_close, fire_on_project_close, fire_on_project_open,
-    fire_on_rebase_conflict, fire_on_worktree_close, fire_on_worktree_create,
-    fire_post_merge, fire_pre_merge, fire_terminal_on_close, fire_worktree_removed,
-    resolve_terminal_on_create, terminal_hook_env, try_monitor, try_runner,
+    fire_on_rebase_conflict, fire_on_worktree_close_with_services, fire_on_worktree_create,
+    fire_post_merge, fire_pre_merge, fire_terminal_on_close_with_services, fire_worktree_removed,
+    terminal_hook_env,
+};
+#[cfg(feature = "gpui")]
+pub use hooks::{
+    fire_on_worktree_close, fire_terminal_on_close, resolve_terminal_on_create, try_monitor,
+    try_runner,
 };

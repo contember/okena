@@ -5,7 +5,7 @@ pub mod state;
 pub mod tls;
 pub mod types;
 
-pub use config::RemoteConnectionConfig;
+pub use config::{LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
 pub use connection::{ConnectionHandler, RemoteClient};
 pub use id::{is_remote_terminal, make_prefixed_id, strip_prefix};
 pub use state::{collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states, StateDiff};

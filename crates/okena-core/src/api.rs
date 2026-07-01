@@ -1,4 +1,5 @@
 use crate::keys::SpecialKey;
+use crate::shell::ShellType;
 use crate::theme::FolderColor;
 use crate::types::{DiffMode, SplitDirection};
 use serde::{Deserialize, Serialize};
@@ -209,6 +210,52 @@ pub struct ApiGitStatus {
     /// Commits not yet pushed to `origin/<branch>` (`None` if never pushed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unpushed: Option<usize>,
+    /// The base ref (e.g. `origin/main`) this branch is reviewed against,
+    /// driving the "Review changes" branch-vs-base diff chip. `None` if not
+    /// resolvable. Carried over the wire so daemon-client projects surface the
+    /// chip — without it the GUI hard-codes `None` and the chip never renders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<String>,
+    /// The repository's default branch (e.g. `main`). Used to suppress the
+    /// redundant base label on the ahead/behind chip when the review base is
+    /// the default branch (the common case). Carried over the wire so the
+    /// daemon-client GUI can hide the label too — without it the GUI hard-codes
+    /// `None` and the label always shows. `None` when unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+}
+
+/// Wire projection of a daemon-originated toast, forwarded to thin clients so
+/// the daemon-client GUI can surface notifications that the daemon itself has no
+/// surface to show (e.g. lifecycle-hook failures from the daemon's
+/// `HookMonitor`).
+///
+/// Deliberately omits the local-only `Toast` fields: `created: Instant` and
+/// `ttl: Duration` are not serde-serializable as-is, so the TTL travels as
+/// `ttl_ms` and the client stamps a fresh `created` on receipt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiToast {
+    pub id: String,
+    /// One of "success" | "error" | "warning" | "info".
+    pub level: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Time-to-live in milliseconds.
+    pub ttl_ms: u64,
+    /// Clickable actions (buttons). Empty for ordinary informational toasts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ApiToastAction>,
+}
+
+/// A clickable button on a wire toast. `id` is opaque (the client decodes it,
+/// e.g. `soft_close_undo:<project>:<terminal>`); `style` is one of
+/// "default" | "primary" | "danger".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiToastAction {
+    pub id: String,
+    pub label: String,
+    pub style: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -230,6 +277,120 @@ pub struct ApiProject {
     pub worktree_info: Option<ApiWorktreeMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktree_ids: Vec<String>,
+    /// Whether this project is pinned to the top of the activity-sorted view.
+    /// Carried over the wire so daemon-client projects keep their pin marker
+    /// and stable pinned-tier ordering.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Unix-millis timestamp of last meaningful activity, driving the
+    /// activity-sorted sidebar order. Without it daemon-client projects would
+    /// all sort as "no activity".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<u64>,
+    /// Per-project default shell override (so the shell picker reflects the
+    /// current selection for daemon-client projects).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_shell: Option<ShellType>,
+    /// Lifecycle-hook terminals shown in the service panel. Projected onto the
+    /// wire so daemon-client projects surface their hook terminals (the domain
+    /// `HookTerminalEntry` lives in `okena-state` and can't be referenced here
+    /// without a dependency cycle — see [`ApiHookTerminalEntry`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook_terminals: Vec<ApiHookTerminalEntry>,
+    /// Per-project lifecycle-hook overrides. Carried so daemon-client clients
+    /// can display + edit the real hooks (the daemon, not the client, applies
+    /// them on PTY spawn). Empty for projects with no per-project overrides.
+    #[serde(default, skip_serializing_if = "ApiHooksConfig::is_empty")]
+    pub hooks: ApiHooksConfig,
+}
+
+/// Wire mirror of `okena_state::HookTerminalStatus` (which can't be referenced
+/// from `okena-core` without a dependency cycle). Converted via
+/// `HookTerminalStatus::{to_api,from_api}` in `okena-state`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ApiHookTerminalStatus {
+    Running,
+    Succeeded,
+    Failed { exit_code: i32 },
+}
+
+/// Wire mirror of a hook terminal entry shown in the service panel. The
+/// terminal id (the map key in the domain type) is inlined here as `terminal_id`
+/// so the wire form is a flat list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiHookTerminalEntry {
+    pub terminal_id: String,
+    pub label: String,
+    pub status: ApiHookTerminalStatus,
+    pub hook_type: String,
+    pub command: String,
+    pub cwd: String,
+}
+
+/// Wire mirror of `okena_state::ProjectHooks`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiProjectHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_open: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_close: Option<String>,
+}
+
+/// Wire mirror of `okena_state::TerminalHooks`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiTerminalHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_create: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_close: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_wrapper: Option<String>,
+}
+
+/// Wire mirror of `okena_state::WorktreeHooks`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiWorktreeHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_create: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_close: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_merge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_merge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_remove: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_remove: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_rebase_conflict: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_dirty_close: Option<String>,
+}
+
+/// Wire mirror of `okena_state::HooksConfig` — per-project lifecycle hook
+/// overrides. Carried so daemon-client clients show and edit the *real*
+/// per-project hooks (the daemon applies them when it spawns PTYs). Converted
+/// via `HooksConfig::{to_api,from_api}` in `okena-state`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiHooksConfig {
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub project: ApiProjectHooks,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub terminal: ApiTerminalHooks,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub worktree: ApiWorktreeHooks,
+}
+
+impl ApiHooksConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == ApiHooksConfig::default()
+    }
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -300,7 +461,7 @@ pub struct ApiFullscreen {
 }
 
 /// POST /v1/actions request body (tagged enum)
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionRequest {
     SendText {
@@ -328,6 +489,16 @@ pub enum ActionRequest {
         project_id: String,
         terminal_ids: Vec<String>,
     },
+    /// Undo an in-flight soft-close: restore the terminal to the layout (the
+    /// daemon checks whether its PTY is still alive). Terminal-only.
+    UndoSoftClose {
+        terminal_id: String,
+    },
+    /// Finalize an in-flight soft-close immediately ("Close now"): kill the
+    /// kept-alive PTY without waiting out the grace period. Terminal-only.
+    CloseTerminalNow {
+        terminal_id: String,
+    },
     FocusTerminal {
         project_id: String,
         terminal_id: String,
@@ -336,6 +507,13 @@ pub enum ActionRequest {
         window: Option<String>,
     },
     ReadContent {
+        terminal_id: String,
+    },
+    /// Capture a terminal's full scrollback buffer (tmux `capture-pane`). The
+    /// daemon writes it to a temp file, reads it back, and returns the content
+    /// as `{"content": <string>}`; the client writes its own local copy.
+    /// Terminal-only, mirroring `ReadContent`.
+    ExportBuffer {
         terminal_id: String,
     },
     Resize {
@@ -366,6 +544,15 @@ pub enum ActionRequest {
         project_id: String,
         terminal_id: String,
         name: String,
+    },
+    /// Switch the shell of an existing terminal: the daemon kills the old PTY
+    /// and respawns at the same layout path with `shell` (resolving Default →
+    /// project default → global default and applying shell-wrapper/on_create
+    /// hooks, like any uninitialized terminal).
+    SwitchTerminalShell {
+        project_id: String,
+        terminal_id: String,
+        shell: ShellType,
     },
     AddTab {
         project_id: String,
@@ -429,6 +616,32 @@ pub enum ActionRequest {
     GitListBranches {
         project_id: String,
     },
+    GitListWorktrees {
+        project_id: String,
+    },
+    WorktreeCloseInfo {
+        project_id: String,
+    },
+    GenerateWorktreeBranchName {
+        project_id: String,
+    },
+    GitListBranchesClassified {
+        project_id: String,
+    },
+    GitCheckoutLocalBranch {
+        project_id: String,
+        branch: String,
+    },
+    GitCheckoutRemoteBranch {
+        project_id: String,
+        remote_branch: String,
+    },
+    GitCreateAndCheckoutBranch {
+        project_id: String,
+        new_name: String,
+        #[serde(default)]
+        start_point: Option<String>,
+    },
     GitStageFile {
         project_id: String,
         file_path: String,
@@ -489,6 +702,21 @@ pub enum ActionRequest {
         #[serde(default)]
         create_branch: bool,
     },
+    /// Track an already-on-disk git worktree (discovered by a client-side git
+    /// scan) as a project under `parent_project_id`. The daemon creates the
+    /// project, links it to the parent, and spawns its terminal.
+    AddDiscoveredWorktree {
+        parent_project_id: String,
+        worktree_path: String,
+        branch: String,
+    },
+    /// Rerun a lifecycle-hook terminal. The daemon kills the old PTY, spawns a
+    /// fresh shell at the hook's cwd, and re-types the stored command — command
+    /// + cwd are read daemon-side from the hook terminal entry.
+    RerunHook {
+        project_id: String,
+        terminal_id: String,
+    },
     ListFiles {
         project_id: String,
         #[serde(default)]
@@ -548,6 +776,15 @@ pub enum ActionRequest {
         project_id: String,
         name: String,
     },
+    /// Replace a project's per-project lifecycle-hook overrides. Sent by a
+    /// client whose settings panel edited them; the daemon owns the
+    /// authoritative `ProjectData.hooks` and applies them on PTY spawn.
+    UpdateProjectHooks {
+        project_id: String,
+        // Boxed: this is by far the largest `ActionRequest` variant, and an
+        // unboxed `ApiHooksConfig` here trips `clippy::large_enum_variant`.
+        hooks: Box<ApiHooksConfig>,
+    },
     RenameProjectDirectory {
         project_id: String,
         new_name: String,
@@ -566,6 +803,19 @@ pub enum ActionRequest {
         project_id: String,
         #[serde(default)]
         force: bool,
+    },
+    CloseWorktree {
+        project_id: String,
+        #[serde(default)]
+        merge: bool,
+        #[serde(default)]
+        stash: bool,
+        #[serde(default)]
+        fetch: bool,
+        #[serde(default)]
+        push: bool,
+        #[serde(default)]
+        delete_branch: bool,
     },
     CreateFolder {
         name: String,
@@ -586,6 +836,53 @@ pub enum ActionRequest {
     MoveProjectOutOfFolder {
         project_id: String,
         top_level_index: usize,
+    },
+    /// Reorder a top-level item (project or folder id) within `project_order`.
+    /// Backs the sidebar drag of a project/folder onto a top-level slot.
+    MoveProject {
+        project_id: String,
+        new_index: usize,
+    },
+    /// Reorder an existing top-level item (folder or already-top-level project)
+    /// within `project_order` by its id.
+    MoveItemInOrder {
+        item_id: String,
+        new_index: usize,
+    },
+    /// Toggle a project's pinned flag.
+    ToggleProjectPinned {
+        project_id: String,
+    },
+    /// Reorder a worktree within its parent project's `worktree_ids`.
+    ReorderWorktree {
+        parent_id: String,
+        worktree_id: String,
+        new_index: usize,
+    },
+    /// Set or clear a worktree project's color override.
+    SetWorktreeColorOverride {
+        project_id: String,
+        #[serde(default)]
+        color: Option<FolderColor>,
+    },
+
+    // ── Sessions (workspace-global; the daemon owns session files + state) ──
+    /// Load a saved session by name: the daemon reads its own session file
+    /// (local ids), kills all terminals, replaces its workspace, and respawns.
+    LoadSession {
+        name: String,
+    },
+    /// Save the daemon's current workspace as a named session file.
+    SaveSession {
+        name: String,
+    },
+    /// Import a workspace file from `path` and switch to it (like LoadSession).
+    ImportWorkspace {
+        path: String,
+    },
+    /// Export the daemon's current workspace to a file at `path`.
+    ExportWorkspace {
+        path: String,
     },
 
     // ── Settings (app-scoped; handled at the remote bridge) ───────────
@@ -756,6 +1053,28 @@ mod tests {
                 services: vec![],
                 worktree_info: None,
                 worktree_ids: vec![],
+                pinned: true,
+                last_activity_at: Some(1_700_000_000_000),
+                default_shell: Some(ShellType::Default),
+                hook_terminals: vec![ApiHookTerminalEntry {
+                    terminal_id: "h1".into(),
+                    label: "on_project_open".into(),
+                    status: ApiHookTerminalStatus::Failed { exit_code: 2 },
+                    hook_type: "on_project_open".into(),
+                    command: "echo hi".into(),
+                    cwd: "/tmp".into(),
+                }],
+                hooks: ApiHooksConfig {
+                    project: ApiProjectHooks {
+                        on_open: Some("echo open".into()),
+                        on_close: None,
+                    },
+                    terminal: ApiTerminalHooks {
+                        shell_wrapper: Some("devcontainer exec -- {shell}".into()),
+                        ..Default::default()
+                    },
+                    worktree: ApiWorktreeHooks::default(),
+                },
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,
@@ -793,6 +1112,25 @@ mod tests {
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].id, "p1");
         assert!(matches!(parsed.projects[0].folder_color, FolderColor::Blue));
+        assert!(parsed.projects[0].pinned);
+        assert_eq!(parsed.projects[0].last_activity_at, Some(1_700_000_000_000));
+        assert_eq!(parsed.projects[0].default_shell, Some(ShellType::Default));
+        assert_eq!(parsed.projects[0].hook_terminals.len(), 1);
+        assert_eq!(parsed.projects[0].hook_terminals[0].terminal_id, "h1");
+        assert!(matches!(
+            parsed.projects[0].hook_terminals[0].status,
+            ApiHookTerminalStatus::Failed { exit_code: 2 }
+        ));
+        assert_eq!(
+            parsed.projects[0].hooks.project.on_open.as_deref(),
+            Some("echo open")
+        );
+        assert_eq!(parsed.projects[0].hooks.project.on_close, None);
+        assert_eq!(
+            parsed.projects[0].hooks.terminal.shell_wrapper.as_deref(),
+            Some("devcontainer exec -- {shell}")
+        );
+        assert_eq!(parsed.projects[0].hooks.worktree, ApiWorktreeHooks::default());
         assert!(parsed.fullscreen_terminal.is_none());
         assert_eq!(parsed.project_order, vec!["folder1", "p1"]);
         assert_eq!(parsed.folders.len(), 1);
@@ -858,6 +1196,8 @@ mod tests {
             ahead: Some(3),
             behind: Some(1),
             unpushed: Some(2),
+            review_base: Some("origin/main".into()),
+            default_branch: Some("main".into()),
         };
         let json = serde_json::to_string(&status).unwrap();
         let parsed: ApiGitStatus = serde_json::from_str(&json).unwrap();
@@ -865,6 +1205,8 @@ mod tests {
         assert_eq!(parsed.ci_checks, status.ci_checks);
         assert_eq!(parsed.ahead, Some(3));
         assert_eq!(parsed.behind, Some(1));
+        assert_eq!(parsed.review_base.as_deref(), Some("origin/main"));
+        assert_eq!(parsed.default_branch.as_deref(), Some("main"));
         assert_eq!(parsed.unpushed, Some(2));
         assert_eq!(parsed.ci_checks.as_ref().unwrap().checks[0].elapsed_label(), "1m5s");
     }
@@ -948,6 +1290,11 @@ mod tests {
                 project_id: "p1".into(),
                 terminal_id: "t1".into(),
                 name: "my-term".into(),
+            },
+            ActionRequest::SwitchTerminalShell {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                shell: ShellType::Default,
             },
             ActionRequest::AddTab {
                 project_id: "p1".into(),
@@ -1089,6 +1436,15 @@ mod tests {
                 project_id: "p1".into(),
                 force: true,
             },
+            ActionRequest::AddDiscoveredWorktree {
+                parent_project_id: "p1".into(),
+                worktree_path: "/home/user/projects/my-project-wt".into(),
+                branch: "feature/x".into(),
+            },
+            ActionRequest::RerunHook {
+                project_id: "p1".into(),
+                terminal_id: "h1".into(),
+            },
             ActionRequest::CreateFolder {
                 name: "My Folder".into(),
             },
@@ -1108,6 +1464,30 @@ mod tests {
                 project_id: "p1".into(),
                 top_level_index: 0,
             },
+            ActionRequest::MoveProject {
+                project_id: "p1".into(),
+                new_index: 1,
+            },
+            ActionRequest::MoveItemInOrder {
+                item_id: "f1".into(),
+                new_index: 0,
+            },
+            ActionRequest::ToggleProjectPinned {
+                project_id: "p1".into(),
+            },
+            ActionRequest::ReorderWorktree {
+                parent_id: "p1".into(),
+                worktree_id: "w1".into(),
+                new_index: 0,
+            },
+            ActionRequest::SetWorktreeColorOverride {
+                project_id: "p1".into(),
+                color: Some(FolderColor::Blue),
+            },
+            ActionRequest::LoadSession { name: "work".into() },
+            ActionRequest::SaveSession { name: "work".into() },
+            ActionRequest::ImportWorkspace { path: "/tmp/ws.json".into() },
+            ActionRequest::ExportWorkspace { path: "/tmp/ws.json".into() },
         ];
         for action in actions {
             let json = serde_json::to_string(&action).unwrap();

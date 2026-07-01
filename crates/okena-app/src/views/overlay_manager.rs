@@ -21,7 +21,7 @@ use crate::views::overlays::session_manager::{SessionManager, SessionManagerEven
 use crate::views::overlays::profile_manager::{ProfileManager, ProfileManagerEvent};
 use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
-use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
+use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent, PairingEndpoint};
 use crate::views::overlays::remote_connect_dialog::{RemoteConnectDialog, RemoteConnectDialogEvent};
 use crate::views::overlays::remote_pair_dialog::{RemotePairDialog, RemotePairDialogEvent};
 use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteContextMenuEvent};
@@ -35,11 +35,10 @@ use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEven
 use okena_views_sidebar::{WorktreeListPopover, WorktreeListPopoverEvent};
 use okena_views_sidebar::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
 use okena_transport::client::RemoteConnectionConfig;
-use crate::remote::GlobalRemoteInfo;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, ProjectOverlay, ProjectOverlayKind, SidebarRequest};
-use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
+use crate::workspace::state::{WindowId, Workspace};
 
 // Re-export generic overlay utilities from okena-ui
 pub use okena_ui::overlay::{CloseEvent, OverlaySlot};
@@ -76,12 +75,27 @@ impl CloseEvent for PairingDialogEvent {
 /// actions that need access to WindowView's state (terminals, PTY manager, etc.)
 #[derive(Clone)]
 pub enum OverlayManagerEvent {
-    /// Session manager requested workspace switch
-    // Boxed: WorkspaceData is large and would bloat every event otherwise.
-    SwitchWorkspace(Box<WorkspaceData>),
+    /// Session manager requested a session/workspace action (load/save/import/
+    /// export). The host dispatches it to the local daemon, which owns session
+    /// files + the authoritative workspace.
+    SessionAction(okena_core::api::ActionRequest),
 
-    /// Worktree dialog created a new project
-    WorktreeCreated(String),
+    /// Settings panel edited a project's per-project hooks. The host strips the
+    /// remote prefix and dispatches `UpdateProjectHooks` to the daemon (which
+    /// owns the authoritative `ProjectData.hooks`).
+    ProjectHooksChanged {
+        project_id: String,
+        hooks: okena_core::api::ApiHooksConfig,
+    },
+
+    /// Worktree dialog confirmed: create a worktree on the parent project.
+    /// The host dispatches `ActionRequest::CreateWorktree`; the daemon creates
+    /// the worktree + its terminals, which mirror back.
+    WorktreeCreateRequested {
+        project_id: String,
+        branch: String,
+        create_branch: bool,
+    },
 
     /// Shell selector selected a shell for a terminal
     ShellSelected {
@@ -102,11 +116,30 @@ pub enum OverlayManagerEvent {
     /// Context menu: Rename directory on disk
     RenameDirectory { project_id: String, project_path: String },
 
-    /// Context menu: Close worktree project
+    /// Rename-directory dialog confirmed: the host dispatches
+    /// `ActionRequest::RenameProjectDirectory`; the daemon performs the rename,
+    /// updates the record, and mirrors the new path+name back.
+    RenameDirectoryConfirmed { project_id: String, new_name: String },
+
+    /// Context menu: Close worktree project (opens the confirm dialog)
     CloseWorktree { project_id: String },
+
+    /// Worktree list: track an already-on-disk worktree. The host dispatches
+    /// `ActionRequest::AddDiscoveredWorktree`; the new project mirrors back.
+    AddDiscoveredWorktree {
+        parent_project_id: String,
+        worktree_path: String,
+        branch: String,
+    },
 
     /// Context menu: Delete project
     DeleteProject { project_id: String },
+
+    /// Context menu: Toggle a project's pinned flag
+    ToggleProjectPinned { project_id: String },
+
+    /// Folder context menu: Delete folder
+    DeleteFolder { folder_id: String },
 
     /// Context menu: Configure hooks for a project
     ConfigureHooks { project_id: String },
@@ -116,6 +149,12 @@ pub enum OverlayManagerEvent {
 
     /// Color picker: project color was changed (for remote sync)
     ProjectColorChanged { project_id: String, color: okena_core::theme::FolderColor },
+
+    /// Color picker: a worktree project's color override was reset to its parent
+    WorktreeColorReset { project_id: String },
+
+    /// Color picker: folder color was changed
+    FolderColorChanged { folder_id: String, color: okena_core::theme::FolderColor },
 
     /// Context menu: Reload services (okena.yaml) for a project
     ReloadServices { project_id: String },
@@ -470,10 +509,33 @@ impl OverlayManager {
 
     /// Toggle settings panel overlay.
     pub fn toggle_settings_panel(&mut self, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        toggle_overlay!(self, cx, SettingsPanel, SettingsPanelEvent, |cx| {
-            SettingsPanel::new(workspace, cx)
-        });
+        if self.is_modal::<SettingsPanel>() {
+            self.close_modal(cx);
+        } else {
+            let workspace = self.workspace.clone();
+            let entity = cx.new(|cx| SettingsPanel::new(workspace, cx));
+            self.subscribe_settings_panel(&entity, cx);
+            self.open_modal(entity, cx);
+        }
+    }
+
+    /// Subscribe to a settings panel: close on `Close`, forward per-project hook
+    /// edits as an `OverlayManagerEvent` the host dispatches to the daemon.
+    fn subscribe_settings_panel(
+        &mut self,
+        entity: &Entity<SettingsPanel>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe(entity, |this, _, event: &SettingsPanelEvent, cx| match event {
+            SettingsPanelEvent::Close => this.close_modal(cx),
+            SettingsPanelEvent::ProjectHooksChanged { project_id, hooks } => {
+                cx.emit(OverlayManagerEvent::ProjectHooksChanged {
+                    project_id: project_id.clone(),
+                    hooks: (**hooks).clone(),
+                });
+            }
+        })
+        .detach();
     }
 
     /// Toggle hook log overlay.
@@ -487,12 +549,11 @@ impl OverlayManager {
     }
 
     /// Toggle pairing dialog overlay.
-    pub fn toggle_pairing_dialog(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_pairing_dialog(&mut self, endpoint: Option<PairingEndpoint>, cx: &mut Context<Self>) {
         if self.is_modal::<PairingDialog>() {
             self.close_modal(cx);
-        } else if let Some(remote_info) = cx.try_global::<GlobalRemoteInfo>()
-        && let Some(auth_store) = remote_info.0.auth_store() {
-            let entity = cx.new(|cx| PairingDialog::new(auth_store, cx));
+        } else {
+            let entity = cx.new(|cx| PairingDialog::new(endpoint, cx));
             cx.subscribe(&entity, |this, _, event: &PairingDialogEvent, cx| {
                 if event.is_close() {
                     this.close_modal(cx);
@@ -505,9 +566,9 @@ impl OverlayManager {
     /// Show settings panel opened to Hooks category for a specific project.
     pub fn show_settings_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
-        open_overlay!(self, cx, SettingsPanelEvent, |cx| {
-            SettingsPanel::new_for_project(workspace, project_id, cx)
-        });
+        let entity = cx.new(|cx| SettingsPanel::new_for_project(workspace, project_id, cx));
+        self.subscribe_settings_panel(&entity, cx);
+        self.open_modal(entity, cx);
     }
 
     /// Toggle project switcher overlay.
@@ -551,15 +612,16 @@ impl OverlayManager {
         if self.is_modal::<SessionManager>() {
             self.close_modal(cx);
         } else {
-            let workspace = self.workspace.clone();
-            let manager = cx.new(|cx| SessionManager::new(workspace, cx));
+            let manager = cx.new(SessionManager::new);
             cx.subscribe(&manager, |this, _, event: &SessionManagerEvent, cx| {
                 match event {
                     SessionManagerEvent::Close => {
                         this.close_modal(cx);
                     }
-                    SessionManagerEvent::SwitchWorkspace(data) => {
-                        cx.emit(OverlayManagerEvent::SwitchWorkspace(data.clone()));
+                    SessionManagerEvent::Action(action) => {
+                        cx.emit(OverlayManagerEvent::SessionAction(action.clone()));
+                        // Load/import close the manager (state swaps); save/export
+                        // are quick fire-and-forget — close in all cases.
                         this.close_modal(cx);
                     }
                 }
@@ -651,8 +713,12 @@ impl OverlayManager {
                 WorktreeDialogEvent::Close => {
                     this.close_modal(cx);
                 }
-                WorktreeDialogEvent::Created(new_project_id) => {
-                    cx.emit(OverlayManagerEvent::WorktreeCreated(new_project_id.clone()));
+                WorktreeDialogEvent::RequestCreate { project_id, branch, create_branch } => {
+                    cx.emit(OverlayManagerEvent::WorktreeCreateRequested {
+                        project_id: project_id.clone(),
+                        branch: branch.clone(),
+                        create_branch: *create_branch,
+                    });
                     this.close_modal(cx);
                 }
             }
@@ -669,14 +735,25 @@ impl OverlayManager {
     pub fn show_close_worktree_dialog(
         &mut self,
         project_id: String,
+        params: Option<(String, u16, String, Option<okena_transport::client::LocalEndpoint>, String)>,
         cx: &mut Context<Self>,
     ) {
+        let (host, port, token, local_endpoint, daemon_id) = params.unwrap_or_else(|| (String::new(), 0, String::new(), None, project_id.clone()));
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
         let app_settings = crate::settings::settings(cx);
-        open_overlay!(self, cx, CloseWorktreeDialogEvent, |cx| {
-            CloseWorktreeDialog::new(workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
+        let entity = cx.new(|cx| {
+            CloseWorktreeDialog::new(host, port, token, local_endpoint, daemon_id, workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
         });
+        cx.subscribe(&entity, |this, _, event: &CloseWorktreeDialogEvent, cx| {
+            match event {
+                CloseWorktreeDialogEvent::Closed => {
+                    this.close_modal(cx);
+                }
+            }
+        })
+        .detach();
+        self.open_modal(entity, cx);
     }
 
     // ========================================================================
@@ -690,10 +767,20 @@ impl OverlayManager {
         project_path: String,
         cx: &mut Context<Self>,
     ) {
-        let workspace = self.workspace.clone();
-        open_overlay!(self, cx, RenameDirectoryDialogEvent, |cx| {
-            RenameDirectoryDialog::new(workspace, project_id, project_path, cx)
-        });
+        let entity = cx.new(|cx| RenameDirectoryDialog::new(project_id, project_path, cx));
+        cx.subscribe(&entity, |this, _, event: &RenameDirectoryDialogEvent, cx| {
+            if let RenameDirectoryDialogEvent::Confirmed { project_id, new_name } = event {
+                cx.emit(OverlayManagerEvent::RenameDirectoryConfirmed {
+                    project_id: project_id.clone(),
+                    new_name: new_name.clone(),
+                });
+            }
+            if event.is_close() {
+                this.close_modal(cx);
+            }
+        })
+        .detach();
+        self.open_modal(entity, cx);
     }
 
     // ========================================================================
@@ -753,6 +840,12 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
+                ContextMenuEvent::ToggleProjectPinned { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::ToggleProjectPinned {
+                        project_id: project_id.clone(),
+                    });
+                }
                 ContextMenuEvent::ConfigureHooks { project_id } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::ConfigureHooks {
@@ -767,7 +860,7 @@ impl OverlayManager {
                 }
                 ContextMenuEvent::ManageWorktrees { project_id, position } => {
                     this.hide_context_menu(cx);
-                    this.show_worktree_list(project_id.clone(), *position, cx);
+                    this.show_worktree_list(project_id.clone(), *position, None, cx);
                 }
                 ContextMenuEvent::ReloadServices { project_id } => {
                     this.hide_context_menu(cx);
@@ -862,8 +955,8 @@ impl OverlayManager {
                 }
                 FolderContextMenuEvent::DeleteFolder { folder_id } => {
                     this.hide_folder_context_menu(cx);
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.delete_folder(folder_id, cx);
+                    cx.emit(OverlayManagerEvent::DeleteFolder {
+                        folder_id: folder_id.clone(),
                     });
                 }
                 FolderContextMenuEvent::FilterToFolder { folder_id } => {
@@ -1135,18 +1228,36 @@ impl OverlayManager {
     }
 
     /// Show worktree list popover.
-    pub fn show_worktree_list(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
+    pub fn show_worktree_list(&mut self, project_id: String, position: Point<Pixels>, params: Option<(String, u16, String, Option<okena_transport::client::LocalEndpoint>, String)>, cx: &mut Context<Self>) {
         self.close_all_context_menus();
 
+        let (host, port, token, local_endpoint, daemon_id) = params.unwrap_or_else(|| (String::new(), 0, String::new(), None, project_id.clone()));
         let workspace = self.workspace.clone();
-        let focus_manager = self.focus_manager.clone();
-        let window_id = self.window_id;
-        let hooks = crate::settings::settings(cx).hooks.clone();
-        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, focus_manager, project_id, position, hooks, window_id, cx));
+        let popover = cx.new(|cx| WorktreeListPopover::new(host, port, token, local_endpoint, daemon_id, workspace, project_id, position, cx));
 
         cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
-            if event.is_close() {
-                this.hide_worktree_list(cx);
+            match event {
+                WorktreeListPopoverEvent::Close => {
+                    this.hide_worktree_list(cx);
+                }
+                WorktreeListPopoverEvent::DeleteProject { project_id } => {
+                    this.hide_worktree_list(cx);
+                    cx.emit(OverlayManagerEvent::DeleteProject {
+                        project_id: project_id.clone(),
+                    });
+                }
+                WorktreeListPopoverEvent::AddDiscoveredWorktree {
+                    parent_project_id,
+                    worktree_path,
+                    branch,
+                } => {
+                    this.hide_worktree_list(cx);
+                    cx.emit(OverlayManagerEvent::AddDiscoveredWorktree {
+                        parent_project_id: parent_project_id.clone(),
+                        worktree_path: worktree_path.clone(),
+                        branch: branch.clone(),
+                    });
+                }
             }
         }).detach();
 
@@ -1190,6 +1301,17 @@ impl OverlayManager {
                     // Emit for sidebar to handle remote sync
                     cx.emit(OverlayManagerEvent::ProjectColorChanged {
                         project_id: project_id.clone(),
+                        color: *color,
+                    });
+                }
+                ColorPickerPopoverEvent::WorktreeColorReset { project_id } => {
+                    cx.emit(OverlayManagerEvent::WorktreeColorReset {
+                        project_id: project_id.clone(),
+                    });
+                }
+                ColorPickerPopoverEvent::FolderColorChanged { folder_id, color } => {
+                    cx.emit(OverlayManagerEvent::FolderColorChanged {
+                        folder_id: folder_id.clone(),
                         color: *color,
                     });
                 }

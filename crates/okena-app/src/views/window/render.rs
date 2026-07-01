@@ -1,8 +1,9 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ReviewChanges, ShowHookLog, ShowLogConsole, NewProject, NewWindow, CloseWindow, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout, ToggleProjectLayout, ShowBranchSwitcher, ShowProfileManager};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ReviewChanges, ShowHookLog, ShowLogConsole, NewProject, NewWindow, CloseWindow, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout, ToggleProjectLayout, ShowBranchSwitcher, ShowProfileManager, RestartDaemon};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
+use crate::views::overlays::pairing_dialog::PairingEndpoint;
 use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 use crate::ui::tokens::{ui_text_md, ui_text_xl};
 use gpui::*;
@@ -618,16 +619,26 @@ impl Render for WindowView {
                     let active_drag = active_drag.clone();
                     let terminals = self.terminals.clone();
                     let workspace = workspace.clone();
+                    let window_id = self.window_id;
+                    let focus_manager = self.focus_manager.clone();
+                    let remote_manager = self.remote_manager.clone();
                     move |_bounds, _prepaint, window, _cx| {
                         let active_drag = active_drag.clone();
                         let terminals = terminals.clone();
                         let workspace = workspace.clone();
+                        let focus_manager = focus_manager.clone();
+                        let remote_manager = remote_manager.clone();
                         window.on_mouse_event(move |e: &MouseUpEvent, phase, _window, cx| {
                             if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
-                                let was_split_drag = matches!(
-                                    *active_drag.borrow(),
-                                    Some(DragState::Split { .. })
-                                );
+                                // Snapshot the dragged split's coordinates before
+                                // clearing the drag, so we can commit its final
+                                // sizes to the daemon below.
+                                let split_drag = match &*active_drag.borrow() {
+                                    Some(DragState::Split { project_id, layout_path, .. }) => {
+                                        Some((project_id.clone(), layout_path.clone()))
+                                    }
+                                    _ => None,
+                                };
                                 let was_dragging = active_drag.borrow().is_some();
                                 *active_drag.borrow_mut() = None;
 
@@ -638,11 +649,41 @@ impl Render for WindowView {
                                     }
                                 }
 
-                                // Persist final split sizes (drag used ui_only notify)
-                                if was_split_drag {
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.notify_data(cx);
-                                    });
+                                // Commit the final split sizes to the daemon. The
+                                // drag only updated the local mirror (ui_only
+                                // notify); without this the dragged ratios persist
+                                // nowhere and revert on reconnect / restart /
+                                // second client.
+                                if let Some((project_id, layout_path)) = split_drag {
+                                    let final_sizes = workspace
+                                        .read(cx)
+                                        .project(&project_id)
+                                        .and_then(|p| p.layout.as_ref())
+                                        .and_then(|layout| layout.get_at_path(&layout_path))
+                                        .and_then(|node| match node {
+                                            okena_workspace::state::LayoutNode::Split { sizes, .. } => {
+                                                Some(sizes.clone())
+                                            }
+                                            _ => None,
+                                        });
+                                    if let Some(sizes) = final_sizes
+                                        && let Some(dispatcher) =
+                                            crate::action_dispatch::dispatcher_for_project(
+                                                &project_id,
+                                                window_id,
+                                                &workspace,
+                                                &focus_manager,
+                                                &remote_manager,
+                                                cx,
+                                            )
+                                    {
+                                        dispatcher.commit_split_sizes(
+                                            &project_id,
+                                            &layout_path,
+                                            sizes,
+                                            cx,
+                                        );
+                                    }
                                 }
                             }
                         });
@@ -839,11 +880,34 @@ impl Render for WindowView {
                     overlay_manager.update(cx, |om, cx| om.toggle_profile_manager(cx));
                 }
             }))
+            // Handle restart-daemon action (command palette only; destructive, so
+            // no default chord). Shows a confirmation toast before restarting —
+            // restarting the daemon ends every terminal session.
+            .on_action(cx.listener(|this, _: &RestartDaemon, _window, cx| {
+                this.request_restart_daemon(cx);
+            }))
             // Handle show pairing dialog action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
-                move |_this, _: &ShowPairingDialog, _window, cx| {
-                    overlay_manager.update(cx, |om, cx| om.toggle_pairing_dialog(cx));
+                move |this, _: &ShowPairingDialog, _window, cx| {
+                    let endpoint = this.remote_manager.as_ref().and_then(|rm| {
+                        let manager = rm.read(cx);
+                        manager
+                            .connections()
+                            .into_iter()
+                            .find(|(config, _, _)| {
+                                config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID
+                            })
+                            .and_then(|(config, _, _)| {
+                                config.saved_token.clone().map(|token| PairingEndpoint {
+                                    host: config.host.clone(),
+                                    port: config.port,
+                                    token,
+                                    local_endpoint: config.local_endpoint.clone(),
+                                })
+                            })
+                    });
+                    overlay_manager.update(cx, |om, cx| om.toggle_pairing_dialog(endpoint, cx));
                 }
             }))
             // Handle new project action
@@ -862,25 +926,16 @@ impl Render for WindowView {
             .on_action(cx.listener(|_this, _: &CheckForUpdates, _window, cx| {
                 if let Some(update_info) = cx.try_global::<okena_ext_updater::GlobalUpdateInfo>() {
                     let info = update_info.0.clone();
-
-                    // Prevent concurrent manual checks
-                    if !info.try_start_manual() {
-                        return;
-                    }
-
                     info.set_status(okena_ext_updater::UpdateStatus::Checking);
-                    let token = info.current_token();
                     cx.notify();
                     cx.spawn(async move |this, cx| {
-                        okena_ext_updater::orchestrator::run_manual_check(
-                            info,
-                            token,
-                            cx,
-                            move |cx| {
-                                let _ = this.update(cx, |_, cx| cx.notify());
-                            },
-                        )
-                        .await;
+                        match smol::unblock(okena_ext_updater::daemon_client::request_check).await {
+                            Ok(snapshot) => info.apply_snapshot(snapshot),
+                            Err(e) => info.set_status(okena_ext_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            }),
+                        }
+                        let _ = this.update(cx, |_, cx| cx.notify());
                     })
                     .detach();
                 }
@@ -889,24 +944,15 @@ impl Render for WindowView {
             .on_action(cx.listener(|_this, _: &InstallUpdate, _window, cx| {
                 if let Some(update_info) = cx.try_global::<okena_ext_updater::GlobalUpdateInfo>() {
                     let info = update_info.0.clone();
-                    if let okena_ext_updater::UpdateStatus::Ready { version, path } = info.status() {
-                        info.set_status(okena_ext_updater::UpdateStatus::Installing {
-                            version: version.clone(),
-                        });
-                        cx.notify();
-                        cx.spawn(async move |this, cx| {
-                            okena_ext_updater::orchestrator::run_install(
-                                info,
-                                version,
-                                path,
-                                cx,
-                                move |cx| {
-                                    let _ = this.update(cx, |_, cx| cx.notify());
-                                },
-                            )
-                            .await;
-                        }).detach();
-                    }
+                    cx.spawn(async move |this, cx| {
+                        match smol::unblock(okena_ext_updater::daemon_client::request_install).await {
+                            Ok(snapshot) => info.apply_snapshot(snapshot),
+                            Err(e) => info.set_status(okena_ext_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            }),
+                        }
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    }).detach();
                 }
             }))
             // Handle toggle pane switcher action
@@ -1037,19 +1083,26 @@ impl Render for WindowView {
                                 .map(|p| p.id.clone())
                         });
                     project_id.and_then(|pid| {
+                        let review_base = ws
+                            .remote_snapshot(&pid)
+                            .and_then(|s| s.git_status.as_ref())
+                            .and_then(|g| g.review_base.clone());
                         ws.projects()
                             .iter()
                             .find(|p| p.id == pid)
-                            .map(move |p| (pid, p.path.clone(), p.is_remote))
+                            .map(move |p| (pid, p.path.clone(), p.is_remote, review_base))
                     })
                 };
 
-                let Some((project_id, project_path, is_remote)) = target else {
+                let Some((project_id, project_path, is_remote, review_base)) = target else {
                     return;
                 };
 
                 let mode = if is_remote {
-                    None
+                    review_base.map(|base| crate::git::DiffMode::BranchCompare {
+                        base,
+                        head: "HEAD".to_string(),
+                    })
                 } else {
                     crate::git::resolve_review_base(std::path::Path::new(&project_path))
                         .map(|base| crate::git::DiffMode::BranchCompare {

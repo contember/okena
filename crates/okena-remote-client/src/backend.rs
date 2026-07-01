@@ -94,7 +94,10 @@ impl TerminalBackend for RemoteBackend {
     }
 
     fn supports_buffer_capture(&self) -> bool {
-        false
+        // The daemon performs the actual `capture-pane`; the GUI routes the
+        // export through the action dispatcher (server-side op over HTTP), so
+        // the button stays visible for remote terminals.
+        true
     }
 
     fn is_remote(&self) -> bool {

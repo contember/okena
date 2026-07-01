@@ -1,4 +1,4 @@
-use okena_transport::client::{ConnectionStatus, RemoteConnectionConfig};
+use okena_transport::client::{ConnectionStatus, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_sm, ui_text_xl};
 use okena_workspace::requests::OverlayRequest;
@@ -23,12 +23,18 @@ impl Sidebar {
             return div().into_any_element();
         }
 
-        // Snapshot connection data via callback
+        // Snapshot connection data via callback. The implicit loopback
+        // connection to the local daemon (`--daemon-client` mode) is not a
+        // user-managed remote — its projects already render as ordinary
+        // workspace projects — so it is hidden from this REMOTE management
+        // section. Real remote daemons still appear here.
         let snapshots: Vec<ConnectionSnapshot> = if let Some(ref get_connections) = self.get_remote_connections {
-            (get_connections)(cx).into_iter().map(|s| ConnectionSnapshot {
-                config: s.config,
-                status: s.status,
-            }).collect()
+            (get_connections)(cx).into_iter()
+                .filter(|s| s.config.id != LOCAL_DAEMON_CONNECTION_ID)
+                .map(|s| ConnectionSnapshot {
+                    config: s.config,
+                    status: s.status,
+                }).collect()
         } else {
             Vec::new()
         };

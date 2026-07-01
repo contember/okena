@@ -345,7 +345,7 @@ impl UrlDetector {
 }
 
 /// Strip `:line` or `:line:col` suffix from a path string.
-fn strip_line_col_suffix(path: &str) -> &str {
+pub(crate) fn strip_line_col_suffix(path: &str) -> &str {
     if let Some(colon_pos) = path.rfind(':') {
         let after = &path[colon_pos + 1..];
         if after.chars().all(|c| c.is_ascii_digit()) && !after.is_empty() {

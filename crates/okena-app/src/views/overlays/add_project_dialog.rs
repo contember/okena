@@ -2,7 +2,6 @@
 
 use crate::keybindings::Cancel;
 use crate::remote_client::manager::RemoteConnectionManager;
-use crate::settings::settings;
 use crate::theme::theme;
 use crate::views::components::{
     button, input_container, labeled_input, modal_backdrop, modal_content,
@@ -15,7 +14,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_flex;
 use okena_core::api::ActionRequest;
-use okena_transport::client::ConnectionStatus;
+use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
 
 enum AddProjectTarget {
     Local,
@@ -59,11 +58,17 @@ impl AddProjectDialog {
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter project name..."));
         let path_input = cx.new(PathAutoCompleteState::new);
 
-        // Build targets list: Local + connected remote connections
+        // Build targets list: Local (the implicit loopback local-daemon
+        // connection) + connected remote connections. The local-daemon
+        // connection itself is hidden from the remote list — "Local" already
+        // represents it.
         let mut targets = vec![AddProjectTarget::Local];
         if let Some(ref rm) = remote_manager {
             let rm = rm.read(cx);
             for (config, status, _state) in rm.connections() {
+                if config.id == LOCAL_DAEMON_CONNECTION_ID {
+                    continue;
+                }
                 if matches!(status, ConnectionStatus::Connected) {
                     targets.push(AddProjectTarget::Remote {
                         connection_id: config.id.clone(),
@@ -107,42 +112,38 @@ impl AddProjectDialog {
             return;
         }
 
-        match self.targets.get(self.selected_target) {
-            Some(AddProjectTarget::Local) | None => {
+        // Resolve the target connection. "Local" is just the implicit loopback
+        // local-daemon connection; every project (local or remote) is added by
+        // dispatching `AddProject` to a daemon over the same mechanism — the GUI
+        // never mutates its read-only mirror directly.
+        let connection_id = match self.targets.get(self.selected_target) {
+            Some(AddProjectTarget::Local) | None => LOCAL_DAEMON_CONNECTION_ID.to_string(),
+            Some(AddProjectTarget::Remote { connection_id, .. }) => connection_id.clone(),
+        };
+
+        if let Some(ref rm) = self.remote_manager {
+            let connection_available = rm
+                .read(cx)
+                .connections()
+                .iter()
+                .any(|(config, _, _)| config.id == connection_id);
+            if connection_available {
                 let window_id = self.window_id;
-                self.workspace.update(cx, |ws, cx| {
-                    ws.add_project(name, path, true, &settings(cx).hooks, window_id, cx);
+                self.workspace.update(cx, |ws, _cx| {
+                    ws.queue_pending_remote_project_visibility(
+                        window_id,
+                        &connection_id,
+                        &name,
+                        Some(&path),
+                    );
                 });
-            }
-            Some(AddProjectTarget::Remote {
-                connection_id, ..
-            }) => {
-                if let Some(ref rm) = self.remote_manager {
-                    let cid = connection_id.clone();
-                    let connection_available = rm
-                        .read(cx)
-                        .connections()
-                        .iter()
-                        .any(|(config, _, _)| config.id == cid);
-                    if connection_available {
-                        let window_id = self.window_id;
-                        self.workspace.update(cx, |ws, _cx| {
-                            ws.queue_pending_remote_project_visibility(
-                                window_id,
-                                &cid,
-                                &name,
-                                Some(&path),
-                            );
-                        });
-                        rm.update(cx, |rm, cx| {
-                            rm.send_action(
-                                &cid,
-                                ActionRequest::AddProject { name, path },
-                                cx,
-                            );
-                        });
-                    }
-                }
+                rm.update(cx, |rm, cx| {
+                    rm.send_action(
+                        &connection_id,
+                        ActionRequest::AddProject { name, path },
+                        cx,
+                    );
+                });
             }
         }
 

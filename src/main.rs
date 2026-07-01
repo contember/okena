@@ -99,9 +99,8 @@ use okena_app::logging;
 use okena_app::settings::GlobalSettings;
 use okena_app::terminal::pty_manager::PtyManager;
 use okena_app::theme::{AppTheme, GlobalTheme, ThemeMode};
-use okena_app::views::panels::toast::{Toast, ToastManager};
+use okena_app::views::panels::toast::ToastManager;
 use okena_app::workspace::persistence;
-use okena_app::workspace::state::GlobalWorkspace;
 use okena_core::profiles;
 
 /// Quit action handler - flushes pending saves before exiting
@@ -111,11 +110,12 @@ fn quit(_: &Quit, cx: &mut App) {
         gs.0.read(cx).flush_pending_save();
     }
 
-    // Flush pending workspace save
-    if let Some(gw) = cx.try_global::<GlobalWorkspace>()
-        && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
-            log::error!("Failed to flush workspace on quit: {}", e);
-        }
+    // NOTE: do NOT save workspace.json here. The GUI is a daemon client and its
+    // Workspace is a read-only MIRROR (project/folder ids are prefixed
+    // `remote:local-daemon:…`). The daemon is the single writer (§5) and owns
+    // workspace.json; writing the mirror here clobbered it with prefixed-id /
+    // empty-extra_windows garbage (corrupting projects + wiping multi-window
+    // state on the next launch).
 
     cx.quit();
 }
@@ -291,7 +291,7 @@ struct GlobalHeadless(#[allow(dead_code)] Entity<HeadlessApp>);
 impl Global for GlobalHeadless {}
 
 /// Run the application in headless mode (no GUI, remote server only).
-fn run_headless(listen_addr: IpAddr) {
+fn run_headless(listen_addr: Option<IpAddr>) {
     println!("Starting Okena in headless mode...");
 
     Application::with_platform(gpui_platform::current_platform(true)).run(move |cx: &mut App| {
@@ -311,6 +311,10 @@ fn run_headless(listen_addr: IpAddr) {
         let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
         let pty_manager = Arc::new(pty_manager);
 
+        let listen_addrs = resolve_daemon_listen_addrs(listen_addr, &app_settings);
+        let tls_enabled = listen_addrs.iter().any(|addr| !addr.is_loopback())
+            && app_settings.remote_tls_enabled;
+
         // Create the headless app entity (starts PTY loop, command loop, and remote server)
         // Must be stored in a global to keep the entity alive — dropping the handle
         // would release the entity and cancel all spawned tasks + drop RemoteServer.
@@ -319,13 +323,47 @@ fn run_headless(listen_addr: IpAddr) {
                 workspace_data,
                 pty_manager,
                 pty_events,
-                listen_addr,
-                app_settings.remote_tls_enabled,
+                listen_addrs,
+                tls_enabled,
                 cx,
             )
         });
         cx.set_global(GlobalHeadless(headless));
     });
+}
+
+fn resolve_daemon_listen_addrs(
+    listen_override: Option<IpAddr>,
+    settings: &persistence::AppSettings,
+) -> Vec<IpAddr> {
+    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    if let Some(addr) = listen_override {
+        return daemon_bind_addrs_with_loopback(addr);
+    }
+    if !settings.remote_server_enabled {
+        return vec![loopback];
+    }
+    let configured = settings.remote_listen_address.trim();
+    match configured.parse::<IpAddr>() {
+        Ok(addr) => daemon_bind_addrs_with_loopback(addr),
+        Err(_) => {
+            if !configured.is_empty() {
+                log::warn!(
+                    "Invalid remote_listen_address in settings ({configured:?}); falling back to 127.0.0.1"
+                );
+            }
+            vec![loopback]
+        }
+    }
+}
+
+fn daemon_bind_addrs_with_loopback(addr: IpAddr) -> Vec<IpAddr> {
+    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    if addr == loopback || addr.is_unspecified() {
+        vec![addr]
+    } else {
+        vec![loopback, addr]
+    }
 }
 
 fn main() {
@@ -414,6 +452,26 @@ fn main() {
         eprintln!("Warning: profile migration failed: {e}");
     }
 
+    // Snapshot the existing config BEFORE anything loads/migrates it, so an
+    // upgrade can be reverted to an old-format config the previous binary reads.
+    // Must run before load_settings()/load_workspace().
+    {
+        use okena_workspace::persistence::{SETTINGS_VERSION, WINDOW_LAYOUT_VERSION, WORKSPACE_VERSION};
+        let schema_versions = [
+            profiles::SchemaVersion { file: "workspace.json", current: WORKSPACE_VERSION },
+            profiles::SchemaVersion { file: "settings.json", current: SETTINGS_VERSION },
+            profiles::SchemaVersion { file: "window-layout.json", current: WINDOW_LAYOUT_VERSION },
+        ];
+        if let Err(e) = profiles::snapshot_configs_before_upgrade(
+            profiles::current(),
+            env!("CARGO_PKG_VERSION"),
+            &schema_versions,
+        ) {
+            eprintln!("Warning: config snapshot failed: {e}");
+        }
+        profiles::record_app_version(profiles::current(), env!("CARGO_PKG_VERSION"));
+    }
+
     // Handle CLI subcommands after profile is initialized so that helpers like
     // discover_server() read the right profile's remote.json.
     if let Some(exit_code) = okena_cli::try_handle_cli() {
@@ -492,28 +550,41 @@ fn main() {
     let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
     let headless = explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
 
-    // Acquire instance lock to prevent multiple Okena processes from
-    // clobbering each other's workspace.json.
-    let _instance_lock = match persistence::acquire_instance_lock() {
-        Ok(guard) => guard,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
-
     if headless {
-        let Some(addr) = listen_addr else {
-            eprintln!("Headless mode requires --listen <addr>, e.g. --headless --listen 0.0.0.0");
-            std::process::exit(1);
+        // Self-restart handoff (transitional `okena --headless` daemon): a
+        // daemon restarting itself spawns this process with `--await-pid <old>`
+        // (see okena_remote_server::routes::restart). Wait for the outgoing
+        // daemon to exit before acquiring the lock (fail-fast against a live PID)
+        // and binding a port. Bounded; on timeout we proceed and let the lock
+        // surface the real error.
+        if let Some(old_pid) =
+            okena_remote_server::local::parse_await_pid(std::env::args())
+        {
+            log::info!("restart: waiting for outgoing daemon (pid {old_pid}) to exit");
+            let _ = okena_remote_server::local::wait_for_pid_exit(
+                old_pid,
+                std::time::Duration::from_secs(10),
+            );
+        }
+
+        // The headless path IS the daemon — the single writer (§5). It owns the
+        // instance lock + workspace.json. (The GUI path below never locks: it is
+        // always a thin daemon-client and the daemon it spawns/attaches holds
+        // the lock.) Held for run_headless's lifetime.
+        let _instance_lock = match persistence::acquire_instance_lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
         };
-        run_headless(addr);
+        run_headless(listen_addr);
         return;
     }
 
     if !has_display && cfg!(target_os = "linux") {
         eprintln!("No display server found (DISPLAY/WAYLAND_DISPLAY not set).");
-        eprintln!("Use --headless --listen <addr> to run without a GUI.");
+        eprintln!("Use --headless [--listen <addr>] to run without a GUI.");
         std::process::exit(1);
     }
 
@@ -646,22 +717,22 @@ fn main() {
         let app_settings = settings_entity.read(cx).get().clone();
 
 
-        // Load or create workspace
-        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
-            log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
-            let backup_path = persistence::get_workspace_path().with_extension("json.bak");
-            ToastManager::post(
-                Toast::error(format!(
-                    "Workspace file was corrupted. A backup was saved to {}. \
-                     Starting with default workspace. Auto-save is disabled to protect your data — \
-                     restart the app after fixing the file.",
-                    backup_path.display()
-                ))
-                    .with_ttl(std::time::Duration::from_secs(30)),
-                cx,
-            );
-            persistence::default_workspace()
-        });
+        // The daemon owns the real workspace (it holds the instance lock +
+        // workspace.json); the GUI is always a thin client and starts empty —
+        // projects arrive via the mirror snapshot (apply_remote_snapshot) from
+        // the loopback daemon connection registered in Okena::new.
+        let mut workspace_data = workspace::state::WorkspaceData::empty();
+        // Restore CLIENT-OWNED window layout (which windows are open + their OS
+        // bounds + per-window viewport). This is presentation the GUI owns
+        // locally — separate from the daemon's workspace.json. Populating it
+        // before the main window opens restores main bounds (read below) and
+        // lets the startup extras-observer in `Okena::new` reopen every extra
+        // window the user had. Snapshots don't clobber it (apply_remote_snapshot
+        // never overwrites main_window/extra_windows).
+        if let Some(layout) = persistence::load_window_layout() {
+            workspace_data.main_window = layout.main_window;
+            workspace_data.extra_windows = layout.extra_windows;
+        }
 
         // Create theme entity from settings, restoring custom theme if applicable
         let theme_entity = cx.new(|_cx| {
@@ -698,9 +769,18 @@ fn main() {
         // NOTE: Terminal and git view settings are now served through
         // ExtensionSettingsStore (registered above) — no separate globals needed.
 
-        // Create PTY manager with session backend from settings
-        let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
-        let pty_manager = Arc::new(pty_manager);
+        // Discover-or-spawn the local headless daemon and mint a loopback token.
+        // The desktop is always a thin client of this daemon, so a failure here
+        // is fatal. Blocking (up to ~10s on a cold spawn). `Okena::new` registers
+        // the loopback connection and (if we spawned it) owns the daemon's
+        // lifecycle.
+        let local_daemon = match okena_remote_server::local::ensure_local_daemon() {
+            Ok(ensured) => ensured,
+            Err(e) => {
+                eprintln!("Failed to start local daemon: {e}");
+                std::process::exit(1);
+            }
+        };
 
         // Create the main window
         #[allow(
@@ -810,7 +890,7 @@ fn main() {
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
-                    Okena::new(workspace_data, pty_manager.clone(), pty_events, listen_addr, window, cx)
+                    Okena::new(workspace_data, local_daemon, window, cx)
                 });
                 cx.new(|cx| Root::new(okena, window, cx))
             },
@@ -830,11 +910,9 @@ fn main() {
                 gs.0.read(cx).flush_pending_save();
             }
 
-            // Flush pending workspace save
-            if let Some(gw) = cx.try_global::<GlobalWorkspace>()
-                && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
-                    log::error!("Failed to flush workspace on quit: {}", e);
-                }
+            // NOTE: do NOT save workspace.json here — the daemon is the single
+            // writer (§5) and the GUI's Workspace is a read-only mirror. See the
+            // `quit` handler above for why writing it here corrupts the profile.
             async {}
         });
     });

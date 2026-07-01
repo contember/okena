@@ -1,16 +1,24 @@
 [package]
 name = "okena-remote-server"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 license = "MIT"
+
+[features]
+default = ["gpui"]
+# Forward gpui to okena-workspace so the GUI consumer keeps the gpui-backed
+# items (e.g. GlobalRemoteInfo); with the feature off the crate compiles
+# gpui-free so the headless daemon can link it.
+gpui = ["dep:gpui", "okena-workspace/gpui"]
 
 [dependencies]
 okena-core = { path = "../okena-core" }
 okena-transport = { path = "../okena-transport", features = ["client"] }
 okena-terminal = { path = "../okena-terminal" }
-okena-workspace = { path = "../okena-workspace" }
+okena-workspace = { path = "../okena-workspace", default-features = false }
+okena-ext-updater = { path = "../okena-ext-updater", default-features = false }
 
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
 
 # Async runtime + channels
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "fs"] }
@@ -19,6 +27,7 @@ futures = "0.3"
 parking_lot = "0.12"
 
 # HTTP/WS server stack
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 axum = { version = "0.8", features = ["ws"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
@@ -53,5 +62,5 @@ rust-embed = { version = "8.5", features = ["interpolate-folder-path"] }
 libc = "0.2"
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 tempfile = "3"

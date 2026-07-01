@@ -1,12 +1,11 @@
 use crate::action_dispatch::ActionDispatcher;
-use crate::settings::{settings, GlobalSettings};
+use crate::settings::GlobalSettings;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
-use crate::workspace::persistence;
 use crate::workspace::requests::{
     FolderOverlay, FolderOverlayKind, OverlayRequest, ProjectOverlay, ProjectOverlayKind,
     SidebarRequest,
 };
-use crate::workspace::state::{GlobalWorkspace, LayoutNode, Workspace};
+use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
 
 use okena_core::api::ActionRequest;
@@ -14,29 +13,37 @@ use okena_core::api::ActionRequest;
 use super::WindowView;
 
 impl WindowView {
-    /// Build an ActionDispatcher for the given project.
-    /// Returns Remote variant if the project is a remote project,
-    /// otherwise returns Local variant.
-    fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> ActionDispatcher {
-        let backend = Some(self.backend.clone());
+    /// Build an ActionDispatcher for the given project. Returns `None` if the
+    /// project is unknown or its daemon connection is unavailable.
+    pub(super) fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> Option<ActionDispatcher> {
         crate::action_dispatch::dispatcher_for_project(
             project_id,
             self.window_id,
             &self.workspace,
             &self.focus_manager,
-            &backend,
-            &self.terminals,
-            &self.service_manager,
             &self.remote_manager,
             cx,
-        ).unwrap_or_else(|| ActionDispatcher::Local {
-            workspace: self.workspace.clone(),
-            focus_manager: self.focus_manager.clone(),
-            backend: self.backend.clone(),
-            terminals: self.terminals.clone(),
-            service_manager: self.service_manager.clone(),
-            window_id: self.window_id,
-        })
+        )
+    }
+
+    /// Build an ActionDispatcher for a folder. Folders carry no project to
+    /// resolve a connection from, so extract the connection id from the folder
+    /// id (`remote:<conn>:<id>` → `<conn>`, falling back to the local daemon for
+    /// an unprefixed id) and target that connection directly. The dispatcher's
+    /// `dispatch` strips the prefixed folder id automatically. Returns `None` if
+    /// the remote manager is unavailable.
+    pub(super) fn dispatcher_for_folder(&self, folder_id: &str, _cx: &Context<Self>) -> Option<ActionDispatcher> {
+        let conn_id = folder_id
+            .strip_prefix("remote:")
+            .and_then(|r| r.split(':').next())
+            .unwrap_or(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID);
+        crate::action_dispatch::dispatcher_for_connection(
+            conn_id,
+            self.window_id,
+            &self.workspace,
+            &self.focus_manager,
+            &self.remote_manager,
+        )
     }
 
     /// Resolve remote connection parameters for a remote project.
@@ -46,31 +53,33 @@ impl WindowView {
         project_id: &str,
         connection_id: &str,
         cx: &Context<Self>,
-    ) -> Option<(String, u16, String, String)> {
+    ) -> Option<(
+        String,
+        u16,
+        String,
+        Option<okena_transport::client::LocalEndpoint>,
+        String,
+    )> {
         let rm = self.remote_manager.as_ref()?.read(cx);
         let connections = rm.connections();
         let (config, _, _) = connections.iter().find(|(c, _, _)| c.id == connection_id)?;
         let token = config.saved_token.as_ref()?.clone();
         let actual_id = okena_transport::client::strip_prefix(project_id, connection_id);
-        Some((config.host.clone(), config.port, token, actual_id))
+        Some((config.host.clone(), config.port, token, config.local_endpoint.clone(), actual_id))
     }
 
-    /// Build a GitProvider for the given project (local or remote).
+    /// Build a GitProvider for the given project (served by the local daemon).
     pub(super) fn build_git_provider(
         &self,
         project_id: &str,
         cx: &Context<Self>,
     ) -> Option<std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::GitProvider>> {
-        use crate::views::overlays::diff_viewer::provider::{LocalGitProvider, RemoteGitProvider};
+        use crate::views::overlays::diff_viewer::provider::RemoteGitProvider;
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
-        if project.is_remote {
-            let conn_id = project.connection_id.as_ref()?;
-            let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-            Some(std::sync::Arc::new(RemoteGitProvider::new(host, port, token, actual_id)))
-        } else {
-            Some(std::sync::Arc::new(LocalGitProvider::new(project.path.clone())))
-        }
+        let conn_id = project.connection_id.as_ref()?;
+        let (host, port, token, local_endpoint, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        Some(std::sync::Arc::new(RemoteGitProvider::new(host, port, token, local_endpoint, actual_id, project.path.clone())))
     }
 
     /// Resolve the focused terminal_id from this window's focus_manager and the
@@ -120,7 +129,7 @@ impl WindowView {
         }
     }
 
-    /// Build a ProjectFs provider for the given project (local or remote).
+    /// Build a ProjectFs provider for the given project (served by the local daemon).
     fn build_project_fs(
         &self,
         project_id: &str,
@@ -128,17 +137,11 @@ impl WindowView {
     ) -> Option<std::sync::Arc<dyn okena_files::project_fs::ProjectFs>> {
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
-        if project.is_remote {
-            let conn_id = project.connection_id.as_ref()?;
-            let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-            Some(std::sync::Arc::new(okena_files::project_fs::RemoteProjectFs::new(
-                host, port, token, actual_id, project.name.clone(),
-            )))
-        } else {
-            Some(std::sync::Arc::new(okena_files::project_fs::LocalProjectFs::new(
-                project.path.clone(),
-            )))
-        }
+        let conn_id = project.connection_id.as_ref()?;
+        let (host, port, token, local_endpoint, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        Some(std::sync::Arc::new(okena_files::project_fs::RemoteProjectFs::new(
+            host, port, token, local_endpoint, actual_id, project.name.clone(), project.path.clone(),
+        )))
     }
 
     /// Evict cached file viewers for projects that no longer exist.
@@ -165,9 +168,9 @@ impl WindowView {
         });
     }
 
-    /// Build a BlameProvider for the given project (local or remote). Returns
-    /// `None` only when project lookup fails — the provider itself surfaces
-    /// non-git / not-tracked errors at call time.
+    /// Build a BlameProvider for the given project (served by the local daemon).
+    /// Returns `None` only when project lookup fails — the provider itself
+    /// surfaces non-git / not-tracked errors at call time.
     pub(super) fn build_blame_provider(
         &self,
         project_id: &str,
@@ -175,17 +178,11 @@ impl WindowView {
     ) -> Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>> {
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
-        if project.is_remote {
-            let conn_id = project.connection_id.as_ref()?;
-            let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-            Some(std::sync::Arc::new(okena_views_git::blame::RemoteBlameProvider::new(
-                host, port, token, actual_id,
-            )))
-        } else {
-            Some(std::sync::Arc::new(okena_views_git::blame::LocalBlameProvider::new(
-                project.path.clone(),
-            )))
-        }
+        let conn_id = project.connection_id.as_ref()?;
+        let (host, port, token, local_endpoint, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        Some(std::sync::Arc::new(okena_views_git::blame::RemoteBlameProvider::new(
+            host, port, token, local_endpoint, actual_id,
+        )))
     }
 }
 
@@ -198,30 +195,41 @@ impl WindowView {
         event: &crate::views::panels::toast::ToastActionEvent,
         cx: &mut Context<Self>,
     ) {
-        use crate::soft_close::{decode_action, KILL_PREFIX, UNDO_PREFIX};
+        use crate::soft_close::{
+            decode_action, KILL_PREFIX, RESTART_DAEMON_CANCEL_PREFIX,
+            RESTART_DAEMON_CONFIRM_PREFIX, UNDO_PREFIX,
+        };
         use crate::workspace::toast::ToastManager;
 
-        if let Some((_project_id, terminal_id)) = decode_action(&event.action_id, UNDO_PREFIX) {
-            // The PTY is only restorable if it's still in the registry — if the
-            // shell exited on its own during the grace window there's nothing to
-            // bring back, and `undo_soft_close` just drops the pending record.
-            let alive = self.terminals.lock().contains_key(terminal_id.as_str());
-            let ws = self.workspace.clone();
-            let fm = self.focus_manager.clone();
-            fm.update(cx, |fm, cx| {
-                ws.update(cx, |ws, cx| {
-                    ws.undo_soft_close(fm, &terminal_id, alive, cx);
-                });
-                cx.notify();
-            });
+        // Restart-daemon confirmation toast: dismiss either way, and run the
+        // restart only on confirm. Checked first since these action ids carry no
+        // `:project:terminal` payload (so the soft-close decoders skip them).
+        if event.action_id == RESTART_DAEMON_CONFIRM_PREFIX {
             ToastManager::dismiss(&event.toast_id, cx);
-        } else if let Some((_project_id, terminal_id)) =
+            self.perform_restart_daemon(cx);
+            return;
+        }
+        if event.action_id == RESTART_DAEMON_CANCEL_PREFIX {
+            ToastManager::dismiss(&event.toast_id, cx);
+            return;
+        }
+
+        // The daemon owns the grace deadlines + kept-alive PTYs, so dispatch the
+        // undo/finalize to it (the project_id from `decode_action` is the
+        // connection-prefixed id, so `dispatcher_for_project` resolves it; the
+        // daemon does the alive-check + kill). The GUI mirror must not mutate
+        // these directly.
+        if let Some((project_id, terminal_id)) = decode_action(&event.action_id, UNDO_PREFIX) {
+            if let Some(dispatcher) = self.dispatcher_for_project(&project_id, cx) {
+                dispatcher.dispatch(ActionRequest::UndoSoftClose { terminal_id }, cx);
+            }
+            ToastManager::dismiss(&event.toast_id, cx);
+        } else if let Some((project_id, terminal_id)) =
             decode_action(&event.action_id, KILL_PREFIX)
         {
-            let ws = self.workspace.clone();
-            ws.update(cx, |ws, cx| {
-                ws.finalize_soft_close(&terminal_id, cx);
-            });
+            if let Some(dispatcher) = self.dispatcher_for_project(&project_id, cx) {
+                dispatcher.dispatch(ActionRequest::CloseTerminalNow { terminal_id }, cx);
+            }
             ToastManager::dismiss(&event.toast_id, cx);
         }
     }
@@ -233,20 +241,43 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            OverlayManagerEvent::SwitchWorkspace(data) => {
-                self.handle_switch_workspace((**data).clone(), cx);
+            OverlayManagerEvent::SessionAction(action) => {
+                // Sessions are workspace-global and the daemon owns the session
+                // files + authoritative state, so route to the local daemon
+                // connection directly (no project to resolve a dispatcher from).
+                self.dispatch_to_local_daemon(action.clone(), cx);
             }
-            OverlayManagerEvent::WorktreeCreated(new_project_id) => {
-                self.spawn_terminals_for_project(new_project_id.clone(), cx);
+            OverlayManagerEvent::ProjectHooksChanged { project_id, hooks } => {
+                // The settings panel edited a project's hooks. Route through the
+                // project's dispatcher so the remote id prefix is stripped before
+                // the daemon (the authoritative owner) applies them.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::UpdateProjectHooks {
+                        project_id: project_id.clone(),
+                        hooks: Box::new(hooks.clone()),
+                    }, cx);
+                }
+            }
+            OverlayManagerEvent::WorktreeCreateRequested { project_id, branch, create_branch } => {
+                // The daemon creates the worktree, its project and its terminals;
+                // they mirror back. No local mirror mutation or PTY spawn here.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::CreateWorktree {
+                        project_id: project_id.clone(),
+                        branch: branch.clone(),
+                        create_branch: *create_branch,
+                    }, cx);
+                }
             }
             OverlayManagerEvent::ShellSelected { shell_type, project_id, terminal_id } => {
                 self.switch_terminal_shell(project_id, terminal_id, shell_type.clone(), cx);
             }
             OverlayManagerEvent::AddTerminal { project_id } => {
-                let dispatcher = self.dispatcher_for_project(project_id, cx);
-                dispatcher.dispatch(ActionRequest::CreateTerminal {
-                    project_id: project_id.clone(),
-                }, cx);
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::CreateTerminal {
+                        project_id: project_id.clone(),
+                    }, cx);
+                }
             }
             OverlayManagerEvent::CreateWorktree { project_id, project_path } => {
                 self.overlay_manager.update(cx, |om, cx| {
@@ -267,23 +298,60 @@ impl WindowView {
                 });
             }
             OverlayManagerEvent::CloseWorktree { project_id } => {
+                let params = self.workspace.read(cx).project(project_id)
+                    .and_then(|p| p.connection_id.clone())
+                    .and_then(|cid| self.remote_params(project_id, &cid, cx));
                 self.overlay_manager.update(cx, |om, cx| {
-                    om.show_close_worktree_dialog(project_id.clone(), cx);
+                    om.show_close_worktree_dialog(project_id.clone(), params, cx);
                 });
             }
             OverlayManagerEvent::DeleteProject { project_id } => {
-                // Collect hook terminal IDs before deleting so we can clean them from the registry
-                let hook_tids = self.workspace.read(cx).hook_terminal_ids_for_project(project_id);
-                let workspace = self.workspace.clone();
-                let pid = project_id.clone();
-                self.focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.delete_project(fm, &pid, &settings(cx).hooks, cx);
-                    });
-                    cx.notify();
-                });
-                for tid in hook_tids {
-                    self.terminals.lock().remove(&tid);
+                // The daemon owns the project: dispatch DeleteProject and let the
+                // removal (incl. hook terminals) mirror back. The GUI must not
+                // mutate its read-only mirror directly.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::DeleteProject {
+                        project_id: project_id.clone(),
+                    }, cx);
+                }
+            }
+            OverlayManagerEvent::ToggleProjectPinned { project_id } => {
+                // The daemon owns the authoritative `pinned` flag: dispatch and
+                // let the new state mirror back.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::ToggleProjectPinned {
+                        project_id: project_id.clone(),
+                    }, cx);
+                }
+            }
+            OverlayManagerEvent::DeleteFolder { folder_id } => {
+                // Folders are owned by the daemon; resolve the connection from
+                // the folder id and dispatch DeleteFolder. The removal mirrors
+                // back.
+                if let Some(dispatcher) = self.dispatcher_for_folder(folder_id, cx) {
+                    dispatcher.dispatch(ActionRequest::DeleteFolder {
+                        folder_id: folder_id.clone(),
+                    }, cx);
+                }
+            }
+            OverlayManagerEvent::RenameDirectoryConfirmed { project_id, new_name } => {
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::RenameProjectDirectory {
+                        project_id: project_id.clone(),
+                        new_name: new_name.clone(),
+                    }, cx);
+                }
+            }
+            OverlayManagerEvent::AddDiscoveredWorktree { parent_project_id, worktree_path, branch } => {
+                // The daemon owns the project list: dispatch
+                // AddDiscoveredWorktree (resolving the connection from the
+                // parent project) and let the new worktree project mirror back.
+                if let Some(dispatcher) = self.dispatcher_for_project(parent_project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::AddDiscoveredWorktree {
+                        parent_project_id: parent_project_id.clone(),
+                        worktree_path: worktree_path.clone(),
+                        branch: branch.clone(),
+                    }, cx);
                 }
             }
             OverlayManagerEvent::ConfigureHooks { project_id } => {
@@ -292,10 +360,11 @@ impl WindowView {
                 });
             }
             OverlayManagerEvent::ReloadServices { project_id } => {
-                let dispatcher = self.dispatcher_for_project(project_id, cx);
-                dispatcher.dispatch(okena_core::api::ActionRequest::ReloadServices {
-                    project_id: project_id.clone(),
-                }, cx);
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(okena_core::api::ActionRequest::ReloadServices {
+                        project_id: project_id.clone(),
+                    }, cx);
+                }
             }
             OverlayManagerEvent::QuickCreateWorktree { project_id } => {
                 self.request_broker.update(cx, |broker, cx| {
@@ -308,6 +377,26 @@ impl WindowView {
                 self.sidebar.update(cx, |sidebar, cx| {
                     sidebar.sync_remote_color(project_id, *color, cx);
                 });
+            }
+            OverlayManagerEvent::WorktreeColorReset { project_id } => {
+                // The daemon owns the worktree color override: dispatch a clear
+                // and let the reset mirror back.
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::SetWorktreeColorOverride {
+                        project_id: project_id.clone(),
+                        color: None,
+                    }, cx);
+                }
+            }
+            OverlayManagerEvent::FolderColorChanged { folder_id, color } => {
+                // The daemon owns the folder color: resolve the connection from
+                // the folder id and dispatch SetFolderColor.
+                if let Some(dispatcher) = self.dispatcher_for_folder(folder_id, cx) {
+                    dispatcher.dispatch(ActionRequest::SetFolderColor {
+                        folder_id: folder_id.clone(),
+                        color: *color,
+                    }, cx);
+                }
             }
             OverlayManagerEvent::FocusParent { project_id } => {
                 let parent_id = self.workspace.read(cx)
@@ -423,24 +512,26 @@ impl WindowView {
                 cx.notify();
             }
             OverlayManagerEvent::TerminalSplit { project_id, layout_path, direction } => {
-                let dispatcher = self.dispatcher_for_project(project_id, cx);
-                dispatcher.dispatch(ActionRequest::SplitTerminal {
-                    project_id: project_id.clone(),
-                    path: layout_path.clone(),
-                    direction: *direction,
-                }, cx);
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::SplitTerminal {
+                        project_id: project_id.clone(),
+                        path: layout_path.clone(),
+                        direction: *direction,
+                    }, cx);
+                }
             }
             OverlayManagerEvent::TerminalClose { project_id, terminal_id } => {
-                let dispatcher = self.dispatcher_for_project(project_id, cx);
-                dispatcher.dispatch(ActionRequest::CloseTerminal {
-                    project_id: project_id.clone(),
-                    terminal_id: terminal_id.clone(),
-                }, cx);
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(ActionRequest::CloseTerminal {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                    }, cx);
+                }
             }
             OverlayManagerEvent::TabClose { project_id, layout_path, tab_index } => {
                 let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
-                if let Some(tid) = terminal_ids.get(*tab_index).cloned() {
-                    let dispatcher = self.dispatcher_for_project(project_id, cx);
+                if let Some(tid) = terminal_ids.get(*tab_index).cloned()
+                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
                     dispatcher.dispatch(ActionRequest::CloseTerminal {
                         project_id: project_id.clone(),
                         terminal_id: tid,
@@ -453,8 +544,8 @@ impl WindowView {
                     .filter(|(i, _)| *i != *tab_index)
                     .map(|(_, id)| id)
                     .collect();
-                if !to_close.is_empty() {
-                    let dispatcher = self.dispatcher_for_project(project_id, cx);
+                if !to_close.is_empty()
+                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
                     dispatcher.dispatch(ActionRequest::CloseTerminals {
                         project_id: project_id.clone(),
                         terminal_ids: to_close,
@@ -464,8 +555,8 @@ impl WindowView {
             OverlayManagerEvent::TabCloseToRight { project_id, layout_path, tab_index } => {
                 let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
                 let to_close: Vec<String> = terminal_ids.into_iter().skip(tab_index + 1).collect();
-                if !to_close.is_empty() {
-                    let dispatcher = self.dispatcher_for_project(project_id, cx);
+                if !to_close.is_empty()
+                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
                     dispatcher.dispatch(ActionRequest::CloseTerminals {
                         project_id: project_id.clone(),
                         terminal_ids: to_close,
@@ -512,33 +603,146 @@ impl WindowView {
         }
     }
 
-    /// Handle workspace switch from session manager.
-    pub(super) fn handle_switch_workspace(&mut self, data: crate::workspace::state::WorkspaceData, cx: &mut Context<Self>) {
-        // Kill all existing terminals
-        {
-            let terminals = self.terminals.lock();
-            for terminal in terminals.values() {
-                self.backend.kill(&terminal.terminal_id);
-            }
-        }
-        self.terminals.lock().clear();
-
-        // Clear project columns (will be recreated)
-        self.project_columns.clear();
-
-        // Update workspace with new data
-        let workspace = self.workspace.clone();
-        self.focus_manager.update(cx, |fm, cx| {
-            workspace.update(cx, |ws, cx| {
-                ws.replace_data(fm, data, cx);
+    /// Dispatch a workspace-global action (e.g. a session load/save/import/export)
+    /// to the local daemon connection. Unlike project actions there's no project
+    /// to resolve a dispatcher from, so it targets `LOCAL_DAEMON_CONNECTION_ID`
+    /// directly. The daemon owns session files + the authoritative workspace; for
+    /// load/import the swapped state mirrors back via the next snapshot.
+    pub(super) fn dispatch_to_local_daemon(&self, action: ActionRequest, cx: &mut Context<Self>) {
+        if let Some(ref rm) = self.remote_manager {
+            rm.update(cx, |rm, cx| {
+                rm.send_action(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID, action, cx);
             });
-            cx.notify();
-        });
+        }
+    }
 
-        // Sync project columns for new data
-        self.sync_project_columns(cx);
+    /// Show a confirmation toast before restarting the local daemon. Restarting
+    /// the daemon ends EVERY terminal session (the daemon owns all PTYs), so this
+    /// is gated behind an explicit, unmissable confirm rather than firing
+    /// immediately. The actual restart runs in [`Self::perform_restart_daemon`]
+    /// when the user clicks "Restart" (routed via [`Self::handle_toast_action`]).
+    pub(super) fn request_restart_daemon(&self, cx: &mut Context<Self>) {
+        use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastManager};
 
-        cx.notify();
+        let actions = vec![
+            ToastAction::new(
+                crate::soft_close::RESTART_DAEMON_CONFIRM_PREFIX,
+                "Restart",
+                ToastActionStyle::Danger,
+            ),
+            ToastAction::new(
+                crate::soft_close::RESTART_DAEMON_CANCEL_PREFIX,
+                "Cancel",
+                ToastActionStyle::Default,
+            ),
+        ];
+        let toast = Toast::warning("Restart the daemon?")
+            .with_id(crate::soft_close::RESTART_DAEMON_TOAST_ID)
+            .with_detail("This ends all terminal sessions in every window.")
+            .with_ttl(std::time::Duration::from_secs(30))
+            .with_actions(actions);
+        ToastManager::post(toast, cx);
+    }
+
+    /// Restart the local daemon and reconnect to it (possibly on a new port).
+    ///
+    /// 1. POST `/v1/restart` to the current local-daemon endpoint (blocking
+    ///    reqwest, off the GPUI thread). The daemon spawns a replacement (which
+    ///    waits for this one to exit) and exits itself.
+    /// 2. Wait for the OLD daemon's pid to die, then poll `remote.json` until a
+    ///    LIVE daemon advertises — this is the replacement, which may have bound
+    ///    a DIFFERENT port (the old one can linger in TIME_WAIT).
+    /// 3. Back on the GPUI thread, re-point the local connection at the new port
+    ///    (keeping the existing token — the daemon reloads `remote_tokens.json`
+    ///    at startup) and reconnect.
+    ///
+    /// Failure at any step toasts an error and leaves the connection alone (its
+    /// own reconnect/backoff still applies), so the GUI is never left wedged.
+    pub(super) fn perform_restart_daemon(&self, cx: &mut Context<Self>) {
+        use crate::workspace::toast::ToastManager;
+        use okena_transport::client::LOCAL_DAEMON_CONNECTION_ID;
+
+        let Some(rm) = self.remote_manager.clone() else {
+            ToastManager::error("No local daemon connection to restart", cx);
+            return;
+        };
+
+        // Resolve the current local-daemon endpoint (host, port, token) so the
+        // background task can POST the restart and keep the token for reconnect.
+        let endpoint = {
+            let manager = rm.read(cx);
+            manager
+                .connections()
+                .into_iter()
+                .find(|(c, _, _)| c.id == LOCAL_DAEMON_CONNECTION_ID)
+                .map(|(c, _, _)| {
+                    (
+                        c.host.clone(),
+                        c.port,
+                        c.saved_token.clone(),
+                        c.local_endpoint.clone(),
+                    )
+                })
+        };
+        let Some((host, old_port, token, local_endpoint)) = endpoint else {
+            ToastManager::error("Local daemon connection not found", cx);
+            return;
+        };
+
+        ToastManager::info("Restarting daemon…", cx);
+
+        let rm = rm.downgrade();
+        cx.spawn(async move |_this, cx| {
+            // The restart POST and the pid/discovery polling are blocking I/O,
+            // so run them on the blocking pool.
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    okena_remote_server::local::restart_local_daemon(
+                        &host,
+                        old_port,
+                        local_endpoint.as_ref(),
+                    )
+                })
+                .await;
+
+            match outcome {
+                Ok(daemon) => {
+                    let _ = rm.update(cx, |rm, cx| {
+                        let next_config = okena_transport::client::RemoteConnectionConfig {
+                            id: LOCAL_DAEMON_CONNECTION_ID.to_string(),
+                            name: "Local".to_string(),
+                            host: daemon.host().to_string(),
+                            port: daemon.port,
+                            saved_token: token.clone(),
+                            token_obtained_at: None,
+                            tls: daemon.tls,
+                            pinned_cert_sha256: None,
+                            local_endpoint: daemon.local_endpoint,
+                        };
+                        rm.redirect_and_reconnect(
+                            LOCAL_DAEMON_CONNECTION_ID,
+                            next_config,
+                            token,
+                            cx,
+                        );
+                        crate::workspace::toast::ToastManager::success(
+                            "Daemon restarted; reconnecting…",
+                            cx,
+                        );
+                    });
+                }
+                Err(msg) => {
+                    let _ = rm.update(cx, |_rm, cx| {
+                        crate::workspace::toast::ToastManager::error(
+                            format!("Daemon restart failed: {msg}"),
+                            cx,
+                        );
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     /// Flush pending saves, spawn a new Okena process for `id`, then quit.
@@ -550,13 +754,14 @@ impl WindowView {
             gs.0.read(cx).flush_pending_save();
         }
 
-        // 2. Flush workspace
-        if let Some(gw) = cx.try_global::<GlobalWorkspace>()
-            && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
-                log::error!("Failed to flush workspace before profile switch: {e}");
-            }
+        // NOTE: do NOT flush workspace.json here. The GUI is a daemon client and
+        // its Workspace is a read-only mirror (prefixed ids) — the daemon is the
+        // single writer (§5). Writing it would clobber the daemon's file with
+        // mirror garbage (see the quit handlers in src/main.rs). The current
+        // profile's daemon owns its own persistence; the relaunch below starts
+        // the new profile's daemon.
 
-        // 3. Spawn current_exe with --profile <id>. Strip any existing --profile arg
+        // 2. Spawn current_exe with --profile <id>. Strip any existing --profile arg
         //    so we don't double-pass it.
         match std::env::current_exe() {
             Ok(exe) => {
@@ -656,6 +861,14 @@ impl WindowView {
                             });
                         }
                     }
+                    ProjectOverlayKind::FileViewer { relative_path } => {
+                        if let Some(fs) = self.build_project_fs(&project_id, cx) {
+                            let blame = self.build_blame_provider(&project_id, cx);
+                            self.overlay_manager.update(cx, |om, cx| {
+                                om.show_file_viewer(relative_path, fs, blame, cx);
+                            });
+                        }
+                    }
                     ProjectOverlayKind::ColorPicker { position } => {
                         self.overlay_manager.update(cx, |om, cx| {
                             om.show_color_picker(
@@ -666,8 +879,11 @@ impl WindowView {
                         });
                     }
                     ProjectOverlayKind::WorktreeList { position } => {
+                        let params = self.workspace.read(cx).project(&project_id)
+                            .and_then(|p| p.connection_id.clone())
+                            .and_then(|cid| self.remote_params(&project_id, &cid, cx));
                         self.overlay_manager.update(cx, |om, cx| {
-                            om.show_worktree_list(project_id, position, cx);
+                            om.show_worktree_list(project_id, position, params, cx);
                         });
                     }
                 },

@@ -1,8 +1,10 @@
 //! Start / stop / restart individual services, plus PTY-exit handling.
 
-use super::{MAX_RESTART_COUNT, ServiceKind, ServiceManager, ServiceStatus, is_process_alive};
+use super::{
+    MAX_RESTART_COUNT, ServiceAsyncCx, ServiceCx, ServiceHandle, ServiceKind, ServiceManager,
+    ServiceStatus, is_process_alive,
+};
 use crate::port_detect;
-use gpui::{Context, WeakEntity};
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::path::Path;
@@ -16,7 +18,7 @@ impl ServiceManager {
         project_id: &str,
         service_name: &str,
         project_path: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
@@ -46,11 +48,18 @@ impl ServiceManager {
 
                 // Fire-and-forget: status poller will pick up the change
                 let log_name = name.clone();
-                cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
-                    let result = cx.background_executor()
-                        .spawn(async move {
+                cx.spawn_main(async move |this, cx| {
+                    let result = cx
+                        .spawn_blocking(async move {
                             let mut cmd = okena_core::process::command("docker");
-                            cmd.args(["compose", "-f", &compose_file, "start", &name])
+                            // `up -d`, not `start`: `start` only (re)starts an
+                            // already-created container and does NOT resolve
+                            // `depends_on`, so a service like contember-engine
+                            // fails with "missing dependency postgres" when its
+                            // deps aren't already up. `up -d <svc>` creates +
+                            // starts the service and its dependency graph
+                            // (postgres first); it's idempotent for shared deps.
+                            cmd.args(["compose", "-f", &compose_file, "up", "-d", &name])
                                 .current_dir(&path);
                             okena_core::process::safe_output(&mut cmd)
                         })
@@ -62,7 +71,7 @@ impl ServiceManager {
                         }
                     // Trigger an immediate status poll
                     let _ = this.update(cx, |_this, cx| cx.notify());
-                }).detach();
+                });
             }
             ServiceKind::Okena => {
                 self.start_okena_service(project_id, service_name, project_path, cx);
@@ -76,7 +85,7 @@ impl ServiceManager {
         project_id: &str,
         service_name: &str,
         project_path: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
@@ -152,7 +161,7 @@ impl ServiceManager {
         &mut self,
         project_id: &str,
         service_name: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
@@ -177,9 +186,9 @@ impl ServiceManager {
                 cx.notify();
 
                 let log_name = name.clone();
-                cx.spawn(async move |_this: WeakEntity<ServiceManager>, cx| {
-                    let result = cx.background_executor()
-                        .spawn(async move {
+                cx.spawn_main(async move |_this, cx| {
+                    let result = cx
+                        .spawn_blocking(async move {
                             let mut cmd = okena_core::process::command("docker");
                             cmd.args(["compose", "-f", &compose_file, "stop", &name])
                                 .current_dir(&path);
@@ -194,7 +203,7 @@ impl ServiceManager {
                         Err(e) => log::error!("docker compose stop failed to run for '{}': {}", log_name, e),
                         _ => {}
                     }
-                }).detach();
+                });
             }
             ServiceKind::Okena => {
                 instance.status = ServiceStatus::Stopped;
@@ -211,7 +220,7 @@ impl ServiceManager {
         project_id: &str,
         service_name: &str,
         project_path: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
@@ -237,9 +246,9 @@ impl ServiceManager {
                 cx.notify();
 
                 let log_name = name.clone();
-                cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
-                    let result = cx.background_executor()
-                        .spawn(async move {
+                cx.spawn_main(async move |this, cx| {
+                    let result = cx
+                        .spawn_blocking(async move {
                             let mut cmd = okena_core::process::command("docker");
                             cmd.args(["compose", "-f", &compose_file, "restart", &name])
                                 .current_dir(&path);
@@ -255,7 +264,7 @@ impl ServiceManager {
                         _ => {}
                     }
                     let _ = this.update(cx, |_this, cx| cx.notify());
-                }).detach();
+                });
             }
             ServiceKind::Okena => {
                 // Take terminal_id now to prevent concurrent access.
@@ -273,15 +282,14 @@ impl ServiceManager {
                 let backend = self.backend.clone();
                 let terminals = self.terminals.clone();
 
-                cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
+                cx.spawn_main(async move |this, cx| {
                     // Collect descendant PIDs on background executor.
                     // get_service_pids() may spawn subprocesses (lsof/tmux)
                     // and get_descendant_pids() may call pgrep/wmic.
                     let old_pids: Vec<u32> = if let Some(ref tid) = terminal_id {
                         let tid = tid.clone();
                         let backend_ref = backend.clone();
-                        cx.background_executor()
-                            .spawn(async move {
+                        cx.spawn_blocking(async move {
                                 backend_ref.get_service_pids(&tid)
                                     .into_iter()
                                     .flat_map(port_detect::get_descendant_pids)
@@ -308,7 +316,7 @@ impl ServiceManager {
                             if old_pids.iter().all(|&p| !is_process_alive(p)) {
                                 break;
                             }
-                            cx.background_executor().timer(Duration::from_millis(50)).await;
+                            cx.timer(Duration::from_millis(50)).await;
                         }
                     }
 
@@ -319,8 +327,7 @@ impl ServiceManager {
                                 this.start_service(&pid, &name, &path, cx);
                             }
                     });
-                })
-                .detach();
+                });
             }
         }
     }
@@ -330,7 +337,7 @@ impl ServiceManager {
         &mut self,
         project_id: &str,
         project_path: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let names: Vec<String> = self
             .instances
@@ -345,7 +352,7 @@ impl ServiceManager {
     }
 
     /// Stop all services for a project.
-    pub fn stop_all(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn stop_all(&mut self, project_id: &str, cx: &mut impl ServiceCx) {
         let names: Vec<String> = self
             .instances
             .keys()
@@ -364,7 +371,7 @@ impl ServiceManager {
         &mut self,
         terminal_id: &str,
         exit_code: Option<u32>,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) -> bool {
         let key = match self.terminal_to_service.remove(terminal_id) {
             Some(key) => key,
@@ -399,15 +406,14 @@ impl ServiceManager {
 
             let delay = Duration::from_millis(instance.definition.restart_delay_ms);
 
-            cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
-                cx.background_executor().timer(delay).await;
+            cx.spawn_main(async move |this, cx| {
+                cx.timer(delay).await;
                 let _ = this.update(cx, |this, cx| {
                     if let Some(project_path) = this.project_paths.get(&project_id).cloned() {
                         this.start_service(&project_id, &service_name, &project_path, cx);
                     }
                 });
-            })
-            .detach();
+            });
         } else {
             // Crash without restart: keep terminal_id and Terminal in registry
             // so the user can see the crash output until they manually restart.

@@ -1,9 +1,10 @@
 //! Centralized port discovery poller: builds the process tree once per cycle
 //! and distributes listening ports to all services awaiting detection.
 
-use super::{PortDetectionState, ServiceManager, ServiceStatus};
+use super::{
+    PortDetectionState, ServiceAsyncCx, ServiceCx, ServiceHandle, ServiceManager, ServiceStatus,
+};
 use crate::port_detect;
-use gpui::{Context, WeakEntity};
 use std::time::Duration;
 
 impl ServiceManager {
@@ -14,7 +15,7 @@ impl ServiceManager {
         &mut self,
         project_id: &str,
         service_name: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
         if self.instances.get(&key).and_then(|i| i.terminal_id.as_ref()).is_none() {
@@ -34,16 +35,16 @@ impl ServiceManager {
     /// Ensure the centralized port detection poller is running.
     /// One poller handles all services: builds the process tree once,
     /// calls the port scanner once, then distributes results.
-    fn ensure_port_detection_poller(&mut self, cx: &mut Context<Self>) {
+    fn ensure_port_detection_poller(&mut self, cx: &mut impl ServiceCx) {
         if self.port_detection_running {
             return;
         }
         self.port_detection_running = true;
         let backend = self.backend.clone();
 
-        cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
+        cx.spawn_main(async move |this, cx| {
             // Initial delay — let newly started services bind their ports
-            cx.background_executor().timer(Duration::from_secs(2)).await;
+            cx.timer(Duration::from_secs(2)).await;
 
             loop {
                 // Collect all services that need port detection + their terminal IDs
@@ -75,8 +76,7 @@ impl ServiceManager {
                 // scan ports ONCE, distribute results.
                 let backend_ref = backend.clone();
                 let results: Vec<((String, String), Vec<u16>)> = cx
-                    .background_executor()
-                    .spawn(async move {
+                    .spawn_blocking(async move {
                         // Get root PIDs for all services in one batch.
                         // On Linux+dtach this reads /proc once instead of spawning lsof per terminal.
                         let terminal_ids: Vec<&str> =
@@ -201,9 +201,8 @@ impl ServiceManager {
                     return;
                 }
 
-                cx.background_executor().timer(Duration::from_secs(5)).await;
+                cx.timer(Duration::from_secs(5)).await;
             }
-        })
-        .detach();
+        });
     }
 }

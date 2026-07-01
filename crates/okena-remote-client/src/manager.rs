@@ -1,19 +1,39 @@
 use crate::connection::RemoteConnection;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::Terminal;
-use okena_workspace::toast::ToastManager;
+use okena_workspace::toast::{Toast, ToastManager};
 use okena_terminal::TerminalsRegistry;
 use okena_workspace::settings::{load_settings, update_remote_connections};
 
 use okena_core::api::{ActionRequest, StateResponse};
+use okena_core::soft_close::{
+    decode_action, encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX,
+};
+use okena_transport::client::LocalEndpoint;
 use okena_transport::client::{
-    ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
+    make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
 };
 use okena_transport::client::connection::try_refresh_token;
 
 use gpui::*;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+fn http_client_and_url(config: &RemoteConnectionConfig, path: &str) -> (reqwest::Client, String) {
+    #[cfg(unix)]
+    if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = &config.local_endpoint {
+        let client = reqwest::Client::builder()
+            .unix_socket(socket_path.as_str())
+            .build()
+            .unwrap_or_else(|e| {
+                log::error!("Failed to build Unix socket HTTP client for {socket_path}: {e}");
+                reqwest::Client::new()
+            });
+        return (client, config.http_url(path));
+    }
+
+    (reqwest::Client::new(), config.http_url(path))
+}
 
 /// Lightweight events emitted by [`RemoteConnectionManager`] that must NOT go
 /// through `cx.notify()`.
@@ -27,7 +47,16 @@ use std::sync::Arc;
 pub enum RemoteManagerEvent {
     /// A remote terminal produced output / changed derived state (bell, idle).
     /// Subscribers should repaint indicators but must not re-sync project state.
-    TerminalActivity,
+    ///
+    /// Carries the ids of the remote terminals whose `content_generation`
+    /// advanced this wake. The sidebar ignores the payload (it re-reads every
+    /// terminal's flags), but `Okena` uses it to drain OSC 9/777/99 + bell
+    /// notifications for exactly those terminals — the daemon-client equivalent
+    /// of the local PTY loop's `process_terminal_notifications` pass. Remote
+    /// PTY output never goes through that loop (it arrives over the WS and is
+    /// only buffered via `enqueue_output`), so without this the per-terminal
+    /// notification queues would be parsed here but never fire an OS bubble.
+    TerminalActivity(Vec<String>),
 }
 
 /// GPUI Entity managing all remote connections.
@@ -148,12 +177,23 @@ impl RemoteConnectionManager {
                     };
 
                     let mut next_generations = HashMap::with_capacity(terminals.len());
+                    // Terminals whose generation advanced this wake — i.e. ones
+                    // that actually parsed new output. `Okena` drains their
+                    // notification/bell queues; an OSC alert or bell always
+                    // bumps the generation (via `drain_pending_output`), so this
+                    // set is a superset of the terminals that have something to
+                    // fire.
+                    let mut advanced: Vec<String> = Vec::new();
                     for (id, terminal) in &terminals {
                         // Parse on the GPUI thread so bell/idle flags are
                         // current even for terminals with no mounted pane.
                         // No-op when the pending buffer is empty.
                         terminal.process_pending_output();
-                        next_generations.insert(id.clone(), terminal.content_generation());
+                        let generation = terminal.content_generation();
+                        if last_generations.get(id) != Some(&generation) {
+                            advanced.push(id.clone());
+                        }
+                        next_generations.insert(id.clone(), generation);
                     }
                     let changed = activity_changed(&last_generations, &next_generations);
                     last_generations = next_generations;
@@ -161,8 +201,9 @@ impl RemoteConnectionManager {
                     if changed {
                         // Emit (not notify): repaint the sidebar's bell/idle
                         // indicators without dragging in the heavy project-sync
-                        // observer that fires on `cx.notify()`.
-                        cx.emit(RemoteManagerEvent::TerminalActivity);
+                        // observer that fires on `cx.notify()`, and let `Okena`
+                        // fire OS notifications for the advanced terminals.
+                        cx.emit(RemoteManagerEvent::TerminalActivity(advanced));
                     }
                 });
                 if result.is_err() {
@@ -211,6 +252,35 @@ impl RemoteConnectionManager {
     /// Reconnect an existing connection (disconnect then connect again).
     pub fn reconnect(&mut self, connection_id: &str, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.get_mut(connection_id) {
+            conn.disconnect();
+            conn.connect();
+            cx.notify();
+        }
+    }
+
+    /// Re-point an existing connection at a (possibly new) local daemon + token, then
+    /// reconnect. Used after a local-daemon restart: the replacement daemon may
+    /// bind a DIFFERENT port (the old one can linger in TIME_WAIT), so a plain
+    /// `reconnect` — which reuses the old config — could dial a dead endpoint.
+    /// The caller re-reads `remote.json` and passes the full fresh config here.
+    ///
+    /// `connect()` clones the config at call time, so replacing it first and
+    /// reconnecting picks up the new endpoint. The token usually survives a
+    /// restart (the daemon reloads `remote_tokens.json` at startup), so `token`
+    /// is normally the existing one; it is refreshed here for completeness. Does
+    /// nothing if the connection id is unknown.
+    pub fn redirect_and_reconnect(
+        &mut self,
+        connection_id: &str,
+        next_config: RemoteConnectionConfig,
+        token: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.get_mut(connection_id) {
+            *conn.config_mut() = next_config;
+            if let Some(token) = token {
+                conn.config_mut().saved_token = Some(token);
+            }
             conn.disconnect();
             conn.connect();
             cx.notify();
@@ -300,7 +370,10 @@ impl RemoteConnectionManager {
     pub fn auto_connect_all(&mut self, cx: &mut Context<Self>) {
         let settings = load_settings();
         for config in settings.remote_connections {
-            if config.saved_token.is_some() && !self.connections.contains_key(&config.id) {
+            if config.saved_token.is_some()
+                && !self.connections.contains_key(&config.id)
+                && self.find_by_host_port(&config.host, config.port).is_none()
+            {
                 let id = config.id.clone();
                 let mut conn = RemoteConnection::new(
                     config,
@@ -341,14 +414,11 @@ impl RemoteConnectionManager {
             }
         };
 
-        let host = config.host.clone();
-        let port = config.port;
         let name = config.name.clone();
         let event_tx = self.event_tx.clone();
 
         self.runtime.spawn(async move {
-            let url = format!("http://{}:{}/v1/actions", host, port);
-            let client = reqwest::Client::new();
+            let (client, url) = http_client_and_url(&config, "/v1/actions");
             let result = client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", token))
@@ -416,19 +486,16 @@ impl RemoteConnectionManager {
             }
         };
 
-        let host = config.host.clone();
-        let port = config.port;
         let name = config.name.clone();
         let event_tx = self.event_tx.clone();
         let terminal_id = terminal_id.to_string();
         let mime = mime.to_string();
 
         self.runtime.spawn(async move {
-            let url = format!(
-                "http://{}:{}/v1/terminals/{}/paste-image",
-                host, port, terminal_id
+            let (client, url) = http_client_and_url(
+                &config,
+                &format!("/v1/terminals/{terminal_id}/paste-image"),
             );
-            let client = reqwest::Client::new();
             let result = client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", token))
@@ -474,6 +541,7 @@ impl RemoteConnectionManager {
             ConnectionEvent::StateReceived { .. } => "StateReceived",
             ConnectionEvent::SubscriptionMappings { .. } => "SubscriptionMappings",
             ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
+            ConnectionEvent::Toast { .. } => "Toast",
             ConnectionEvent::ServerWarning { .. } => "ServerWarning",
             ConnectionEvent::TokenRefreshed { .. } => "TokenRefreshed",
         };
@@ -592,6 +660,31 @@ impl RemoteConnectionManager {
                         }
                     }
                 cx.notify();
+            }
+            ConnectionEvent::Toast {
+                connection_id,
+                mut toast,
+            } => {
+                // A daemon-originated toast: reconstruct the local `Toast` (fresh
+                // `created` timestamp, ttl from `ttl_ms`) and show it the same way
+                // local toasts are shown.
+                //
+                // Daemon toasts carry daemon-side project/terminal ids in their
+                // soft-close action ids; prefix them with this connection so the
+                // GUI's dispatcher routing + prefix-strip-on-dispatch line up.
+                for action in &mut toast.actions {
+                    for prefix in [SOFT_CLOSE_UNDO_PREFIX, SOFT_CLOSE_KILL_PREFIX] {
+                        if let Some((p, t)) = decode_action(&action.id, prefix) {
+                            action.id = encode_action(
+                                prefix,
+                                &make_prefixed_id(&connection_id, &p),
+                                &make_prefixed_id(&connection_id, &t),
+                            );
+                            break;
+                        }
+                    }
+                }
+                ToastManager::post(Toast::from_api(&toast), cx);
             }
             ConnectionEvent::ServerWarning {
                 connection_id,
@@ -748,6 +841,7 @@ mod tests {
             token_obtained_at: None,
             tls: false,
             pinned_cert_sha256: None,
+            local_endpoint: None,
         }
     }
 

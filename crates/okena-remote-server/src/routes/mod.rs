@@ -4,22 +4,25 @@ pub mod health;
 pub mod pair;
 pub mod paste_image;
 pub mod refresh;
+pub mod restart;
 pub mod state;
 pub mod stream;
 pub mod tokens;
+pub mod update;
 
 use crate::auth::AuthStore;
 use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
-use axum::extract::DefaultBodyLimit;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use okena_core::api::ApiGitStatus;
+use okena_core::api::{ApiGitStatus, ApiToast};
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -39,10 +42,38 @@ pub struct AppState {
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
     pub start_time: Instant,
     pub git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Broadcast of daemon-originated toasts. Each WS connection subscribes a
+    /// receiver and forwards [`WsOutbound::Toast`] frames; events sent with no
+    /// receivers are simply dropped (fire-and-forget, like git status).
+    pub toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     /// Per-connection set of subscribed terminal IDs (connection_id → terminal_ids).
     /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     pub next_connection_id: Arc<AtomicU64>,
+    pub update_info: okena_ext_updater::UpdateInfo,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PeerInfo {
+    Tcp(SocketAddr),
+    Local,
+}
+
+impl PeerInfo {
+    pub fn is_local_trusted(self) -> bool {
+        match self {
+            Self::Local => true,
+            Self::Tcp(addr) => match addr.ip() {
+                IpAddr::V4(v4) => v4.is_loopback(),
+                // Dual-stack binds can surface an IPv4 loopback peer as the
+                // mapped form `::ffff:127.0.0.1`.
+                IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                    Some(v4) => v4.is_loopback(),
+                    None => v6.is_loopback(),
+                },
+            },
+        }
+    }
 }
 
 /// Build the complete axum router.
@@ -55,8 +86,10 @@ pub fn build_router(
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     next_connection_id: Arc<AtomicU64>,
+    update_info: okena_ext_updater::UpdateInfo,
 ) -> Router {
     let state = AppState {
         bridge_tx,
@@ -65,8 +98,10 @@ pub fn build_router(
         state_version,
         start_time,
         git_status,
+        toast_tx,
         remote_subscribed_terminals,
         next_connection_id,
+        update_info,
     };
 
     // Routes that require auth
@@ -81,7 +116,14 @@ pub fn build_router(
         .route("/v1/stream", axum::routing::get(stream::ws_handler))
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
-        .route("/v1/tokens/{id}", axum::routing::delete(tokens::revoke_token))
+        .route(
+            "/v1/tokens/{id}",
+            axum::routing::delete(tokens::revoke_token),
+        )
+        .route(
+            "/v1/pair-code",
+            axum::routing::post(pair::post_pair_code).delete(pair::delete_pair_code),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -91,12 +133,26 @@ pub fn build_router(
     // `/v1/auth/reload` is loopback-gated in its handler: the CLI register
     // flow calls it before the new token is visible in-memory, so bearer auth
     // would deadlock, but exposed listeners must not accept network callers.
+    // `/v1/restart` is loopback-gated in the same way: a same-host UI restarts
+    // the daemon; it is bearer-free so the restart works even if the caller's
+    // token is in an awkward state, and off-host callers are refused.
     let public = Router::new()
         .route("/health", axum::routing::get(health::get_health))
         .route("/v1/pair", axum::routing::post(pair::post_pair))
         .route(
             "/v1/auth/reload",
             axum::routing::post(auth_reload::post_reload),
+        )
+        .route("/v1/restart", axum::routing::post(restart::post_restart))
+        .route("/v1/update/status", axum::routing::get(update::get_status))
+        .route("/v1/update/check", axum::routing::post(update::post_check))
+        .route(
+            "/v1/update/install",
+            axum::routing::post(update::post_install),
+        )
+        .route(
+            "/v1/update/dismiss",
+            axum::routing::post(update::post_dismiss),
         );
 
     public

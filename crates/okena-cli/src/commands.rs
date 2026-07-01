@@ -52,7 +52,7 @@ pub fn cli_pair() -> i32 {
 }
 
 pub fn cli_health(json_mode: bool) -> i32 {
-    let (host, port) = match discover_server() {
+    let server = match discover_server() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
@@ -60,8 +60,14 @@ pub fn cli_health(json_mode: bool) -> i32 {
         }
     };
 
-    let url = format!("http://{}:{}/health", host, port);
-    let resp = match reqwest::blocking::Client::new()
+    let (client, url) = match server.client_and_url("/health") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let resp = match client
         .get(&url)
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -1938,6 +1944,16 @@ pub fn cli_command_list(json_mode: bool) -> i32 {
     }
     let v: serde_json::Value = serde_json::from_str(&resp).unwrap_or(serde_json::Value::Null);
     if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
+        if arr.is_empty() {
+            // The headless daemon (okena-daemon) has no GUI action registry, so
+            // it returns an empty list. Explain it on stderr (stdout stays empty
+            // for clean parsing) so an empty result isn't mistaken for an error
+            // or a parse failure — mirrors `command run`'s explicit rejection.
+            eprintln!(
+                "No actions available — the command palette requires a running GUI window and is unavailable when connected to a headless daemon."
+            );
+            return 0;
+        }
         for a in arr {
             let g = |k: &str| a.get(k).and_then(|x| x.as_str()).unwrap_or("");
             // category \t name \t description

@@ -62,6 +62,7 @@ pub async fn serve_dual_stack(
                 async move {
                     let mut req = req.map(Body::new);
                     req.extensions_mut().insert(ConnectInfo(peer));
+                    req.extensions_mut().insert(crate::routes::PeerInfo::Tcp(peer));
                     app.call(req).await
                 }
             });
@@ -84,6 +85,105 @@ pub async fn serve_dual_stack(
                 .await
             {
                 log::debug!("HTTP connection from {peer} ended: {e}");
+            }
+        });
+    }
+}
+
+pub async fn serve_plain(
+    listener: TcpListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    tokio::pin!(shutdown);
+
+    loop {
+        let (stream, peer) = tokio::select! {
+            res = listener.accept() => match res {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("Remote server accept error: {e}");
+                    continue;
+                }
+            },
+            _ = &mut shutdown => return Ok(()),
+        };
+
+        let app = app.clone();
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
+                let mut app = app.clone();
+                async move {
+                    let mut req = req.map(Body::new);
+                    req.extensions_mut().insert(ConnectInfo(peer));
+                    req.extensions_mut().insert(crate::routes::PeerInfo::Tcp(peer));
+                    app.call(req).await
+                }
+            });
+
+            if let Err(e) = Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(TokioIo::new(stream), svc)
+                .await
+            {
+                log::debug!("HTTP connection from {peer} ended: {e}");
+            }
+        });
+    }
+}
+
+#[cfg(unix)]
+pub fn bind_unix_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+
+    tokio::net::UnixListener::bind(path)
+}
+
+#[cfg(unix)]
+pub async fn serve_unix_listener(
+    path: std::path::PathBuf,
+    listener: tokio::net::UnixListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    log::info!("Local daemon socket listening on {}", path.display());
+    tokio::pin!(shutdown);
+
+    loop {
+        let (stream, _peer) = tokio::select! {
+            res = listener.accept() => match res {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("Local socket accept error: {e}");
+                    continue;
+                }
+            },
+            _ = &mut shutdown => {
+                let _ = tokio::fs::remove_file(&path).await;
+                return Ok(());
+            },
+        };
+
+        let app = app.clone();
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
+                let mut app = app.clone();
+                async move {
+                    let mut req = req.map(Body::new);
+                    req.extensions_mut().insert(crate::routes::PeerInfo::Local);
+                    app.call(req).await
+                }
+            });
+
+            if let Err(e) = Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(TokioIo::new(stream), svc)
+                .await
+            {
+                log::debug!("Local socket connection ended: {e}");
             }
         });
     }

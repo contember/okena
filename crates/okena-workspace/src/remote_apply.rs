@@ -15,7 +15,10 @@ use std::collections::{HashMap, HashSet};
 use okena_core::api::StateResponse;
 use okena_transport::client::RemoteConnectionConfig;
 use okena_layout::LayoutNode;
-use okena_state::{FolderData, HooksConfig, ProjectData, WindowId, WorkspaceData, WorktreeMetadata};
+use okena_state::{
+    FolderData, HookTerminalEntry, HooksConfig, ProjectData, WindowId, WorkspaceData,
+    WorktreeMetadata,
+};
 
 use crate::remote_sync::RemoteSyncState;
 
@@ -127,6 +130,19 @@ pub fn apply_remote_snapshot(
                 let remote_host = Some(snap.config.host.clone());
                 let remote_git_status = api_project.git_status.clone();
 
+                // Daemon-owned per-project data surfaced for rendering: pin
+                // marker, activity-sort timestamp, shell-picker selection, and
+                // the hook terminals shown in the service panel (keys prefixed
+                // like terminal_names so they match the prefixed layout ids).
+                let remote_hook_terminals: HashMap<String, HookTerminalEntry> = api_project
+                    .hook_terminals
+                    .iter()
+                    .map(|api| {
+                        let (tid, entry) = HookTerminalEntry::from_api(api);
+                        (format!("remote:{}:{}", conn_id, tid), entry)
+                    })
+                    .collect();
+
                 if let Some(existing) = data.projects.iter_mut().find(|p| p.id == prefixed_id) {
                     existing.name = api_project.name.clone();
                     existing.path = api_project.path.clone();
@@ -152,6 +168,15 @@ pub fn apply_remote_snapshot(
                     existing.worktree_ids = api_project.worktree_ids.iter()
                         .map(|id| format!("remote:{}:{}", conn_id, id))
                         .collect();
+                    existing.pinned = api_project.pinned;
+                    existing.last_activity_at = api_project.last_activity_at;
+                    existing.default_shell = api_project.default_shell.clone();
+                    existing.hook_terminals = remote_hook_terminals;
+                    // Per-project hooks are daemon-authoritative (it applies them on
+                    // PTY spawn). The settings panel edits a separate input buffer and
+                    // dispatches UpdateProjectHooks on close, so syncing here won't
+                    // clobber an in-progress edit.
+                    existing.hooks = HooksConfig::from_api(&api_project.hooks);
                     // Don't overwrite show_in_overview — it's client-side state
                     // (the user may have toggled visibility locally).
                 } else {
@@ -174,7 +199,6 @@ pub fn apply_remote_snapshot(
                         &prefixed_id,
                         &api_project.name,
                         &api_project.path,
-                        api_project.show_in_overview,
                     );
                     data.projects.push(ProjectData {
                         id: prefixed_id.clone(),
@@ -186,14 +210,14 @@ pub fn apply_remote_snapshot(
                         worktree_info,
                         worktree_ids,
                         folder_color: project_color,
-                        hooks: HooksConfig::default(),
+                        hooks: HooksConfig::from_api(&api_project.hooks),
                         is_remote: true,
                         connection_id: Some(conn_id_owned),
                         service_terminals: HashMap::new(),
-                        default_shell: None,
-                        hook_terminals: HashMap::new(),
-                        pinned: false,
-                        last_activity_at: None,
+                        default_shell: api_project.default_shell.clone(),
+                        hook_terminals: remote_hook_terminals,
+                        pinned: api_project.pinned,
+                        last_activity_at: api_project.last_activity_at,
                     });
                 }
                 // Update the transient remote snapshot regardless of create/update path.
@@ -228,22 +252,14 @@ pub fn apply_remote_snapshot(
             // Add new remote project_order entries
             data.project_order.extend(remote_order);
         } else {
-            // No state (disconnected/connecting) — remove materialized projects and folders
+            // No state (disconnected/connecting) — remove materialized projects
+            // and folders, but keep per-window presentation state. The same
+            // connection may reconnect with the same prefixed ids; scrubbing
+            // hidden_project_ids here would make every project visible again.
+            // Permanent removals still scrub below when a connection disappears
+            // from `snapshots`, and server-side deletions scrub via the stale
+            // project pass after a successful state snapshot.
             let prefix = format!("remote:{}:", conn_id);
-            let removed_project_ids: Vec<String> = data.projects.iter()
-                .filter(|p| p.id.starts_with(&prefix))
-                .map(|p| p.id.clone())
-                .collect();
-            let removed_folder_ids: Vec<String> = data.folders.iter()
-                .filter(|f| f.id.starts_with(&prefix))
-                .map(|f| f.id.clone())
-                .collect();
-            for project_id in removed_project_ids {
-                data.delete_project_scrub_all_windows(&project_id);
-            }
-            for folder_id in removed_folder_ids {
-                data.delete_folder_scrub_all_windows(&folder_id);
-            }
             data.projects.retain(|p| !p.id.starts_with(&prefix));
             data.folders.retain(|f| !f.id.starts_with(&prefix));
             data.project_order.retain(|id| !id.starts_with(&prefix));
@@ -326,9 +342,16 @@ pub fn apply_remote_snapshot(
 
 /// Apply one-shot per-window visibility for a freshly materialized remote
 /// project. When a local window issued the create, the spawn intent ("visible
-/// in this window, hidden everywhere else") wins over the wire
-/// `show_in_overview` flag; otherwise the wire flag is translated into
-/// per-window hidden state on this first sync.
+/// in this window, hidden everywhere else") is applied. Otherwise the project is
+/// left visible in every window.
+///
+/// Per-window project visibility is CLIENT-owned: each window's
+/// `hidden_project_ids` is toggled locally (`toggle_project_overview_visibility`)
+/// and persisted in window-layout.json. The daemon has a single synthetic main
+/// window, so its wire `show_in_overview` must NOT drive client visibility —
+/// re-applying the daemon's (frozen, single-window) hidden set on every
+/// reconnect compounded across restarts until every project was hidden and the
+/// main window came up empty.
 fn apply_initial_remote_project_visibility(
     data: &mut WorkspaceData,
     remote_sync: &mut RemoteSyncState,
@@ -336,21 +359,19 @@ fn apply_initial_remote_project_visibility(
     prefixed_id: &str,
     name: &str,
     path: &str,
-    show_in_overview: bool,
 ) {
     if let Some(spawning_window) = remote_sync.take_project_visibility(connection_id, name, path) {
         data.add_project_hide_in_other_windows(prefixed_id, spawning_window);
-        return;
-    }
-    if !show_in_overview {
-        data.hide_project_in_all_windows(prefixed_id);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okena_core::api::{ApiFolder, ApiLayoutNode, ApiProject, StateResponse};
+    use okena_core::api::{
+        ApiFolder, ApiHookTerminalEntry, ApiHookTerminalStatus, ApiLayoutNode, ApiProject,
+        StateResponse,
+    };
     use okena_core::theme::FolderColor;
 
     fn empty_data() -> WorkspaceData {
@@ -376,6 +397,7 @@ mod tests {
             token_obtained_at: None,
             tls: false,
             pinned_cert_sha256: None,
+            local_endpoint: None,
         }
     }
 
@@ -392,6 +414,11 @@ mod tests {
             services: Vec::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: Vec::new(),
+            hooks: Default::default(),
         }
     }
 
@@ -447,6 +474,42 @@ mod tests {
         );
         // Transient snapshot host recorded.
         assert_eq!(rs.snapshot("remote:c1:a").unwrap().host.as_deref(), Some("c1.example.com"));
+    }
+
+    #[test]
+    fn applies_pinned_activity_shell_and_prefixed_hook_terminals() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let mut p = api_project("a", Some(terminal("ta")));
+        p.pinned = true;
+        p.last_activity_at = Some(1_700_000_000_000);
+        p.default_shell = Some(okena_core::shell::ShellType::Default);
+        p.hook_terminals = vec![ApiHookTerminalEntry {
+            terminal_id: "h1".into(),
+            label: "on_project_open".into(),
+            status: ApiHookTerminalStatus::Failed { exit_code: 3 },
+            hook_type: "on_project_open".into(),
+            command: "make".into(),
+            cwd: "/srv/a".into(),
+        }];
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![p], vec!["a".into()], vec![])),
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+
+        let proj = &data.projects[0];
+        assert!(proj.pinned);
+        assert_eq!(proj.last_activity_at, Some(1_700_000_000_000));
+        assert_eq!(proj.default_shell, Some(okena_core::shell::ShellType::Default));
+        // Hook-terminal map key is prefixed like the layout terminal ids.
+        let entry = proj.hook_terminals.get("remote:c1:h1").expect("prefixed hook terminal");
+        assert_eq!(entry.command, "make");
+        assert!(matches!(
+            entry.status,
+            okena_state::HookTerminalStatus::Failed { exit_code: 3 }
+        ));
     }
 
     #[test]
@@ -563,6 +626,50 @@ mod tests {
     }
 
     #[test]
+    fn transient_disconnect_preserves_per_window_visibility_for_reconnect() {
+        let mut data = empty_data();
+        let extra = okena_state::WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+        let mut rs = RemoteSyncState::new();
+
+        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![api_project("a", None)], vec!["a".into()], vec![])),
+        }], WindowId::Main);
+        data.main_window.hidden_project_ids.insert("remote:c1:a".to_string());
+        data.window_mut(WindowId::Extra(extra_id)).unwrap()
+            .hidden_project_ids
+            .insert("remote:c1:a".to_string());
+
+        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
+            config: config("c1"),
+            state: None,
+        }], WindowId::Main);
+
+        assert!(data.projects.is_empty());
+        assert!(data.main_window.hidden_project_ids.contains("remote:c1:a"));
+        assert!(
+            data.window(WindowId::Extra(extra_id)).unwrap()
+                .hidden_project_ids
+                .contains("remote:c1:a")
+        );
+
+        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![api_project("a", None)], vec!["a".into()], vec![])),
+        }], WindowId::Main);
+
+        assert_eq!(data.projects.len(), 1);
+        assert!(data.main_window.hidden_project_ids.contains("remote:c1:a"));
+        assert!(
+            data.window(WindowId::Extra(extra_id)).unwrap()
+                .hidden_project_ids
+                .contains("remote:c1:a")
+        );
+    }
+
+    #[test]
     fn pending_focus_detects_new_terminal() {
         let mut data = empty_data();
         let mut rs = RemoteSyncState::new();
@@ -640,7 +747,6 @@ mod tests {
             "remote:conn:p1",
             "Project",
             "/repo/project",
-            true,
         );
 
         assert!(data.main_window.hidden_project_ids.contains("remote:conn:p1"));
@@ -657,7 +763,11 @@ mod tests {
     }
 
     #[test]
-    fn initial_visibility_without_pending_uses_wire_hidden_flag() {
+    fn initial_visibility_without_pending_leaves_project_visible() {
+        // Per-window visibility is client-owned: without a spawn intent a freshly
+        // synced project is left visible in every window. The daemon's
+        // single-window `show_in_overview` must NOT hide it (that compounded into
+        // an all-hidden main window across restarts).
         let mut data = empty_data();
         let extra = okena_state::WindowState::default();
         let extra_id = extra.id;
@@ -671,12 +781,11 @@ mod tests {
             "remote:conn:p1",
             "Project",
             "/repo/project",
-            false,
         );
 
-        assert!(data.main_window.hidden_project_ids.contains("remote:conn:p1"));
+        assert!(!data.main_window.hidden_project_ids.contains("remote:conn:p1"));
         assert!(
-            data.window(WindowId::Extra(extra_id)).unwrap()
+            !data.window(WindowId::Extra(extra_id)).unwrap()
                 .hidden_project_ids.contains("remote:conn:p1")
         );
     }
