@@ -36,18 +36,18 @@
 //! lock first, then the service-manager lock (consistent order), and both drop
 //! before looping.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use okena_app_core::workspace::actions::execute::{
     ensure_terminal, execute_action, spawn_uninitialized_terminals,
 };
+use okena_app_core::remote_snapshot::build_state_response;
 use okena_core::api::{
-    ActionRequest, ApiFolder, ApiFullscreen, ApiGitStatus, ApiProject, ApiServiceInfo, ApiWindow,
-    ApiWorktreeMetadata, CommandResult, StateResponse,
+    ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult,
 };
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
-use okena_services::manager::{ServiceKind, ServiceManager, ServiceStatus};
+use okena_services::manager::ServiceManager;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
 use okena_workspace::actions::soft_close::{
@@ -55,7 +55,7 @@ use okena_workspace::actions::soft_close::{
 };
 use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
-use okena_workspace::state::{ProjectData, WindowId, Workspace};
+use okena_workspace::state::{WindowId, Workspace};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
@@ -77,14 +77,6 @@ fn parse_window_id(s: &str) -> Option<WindowId> {
     } else {
         uuid::Uuid::parse_str(s).ok().map(WindowId::Extra)
     }
-}
-
-/// Pure visibility projection for the remote `ApiProject.show_in_overview` wire
-/// flag. GPUI-free copy of the GUI's `remote_commands::api_project_visibility`:
-/// a project is "shown in overview" iff it is absent from the per-window hidden
-/// set (today: `main_window.hidden_project_ids`).
-fn api_project_visibility(project_id: &str, hidden: &HashSet<String>) -> bool {
-    !hidden.contains(project_id)
 }
 
 /// GPUI-free remote command loop for the headless daemon.
@@ -136,54 +128,32 @@ pub async fn daemon_command_loop(
                 ActionRequest::StartService { project_id, service_name } => {
                     let mut sm = service_manager.lock();
                     let mut cx = service_reactor.cx();
-                    if let Some(path) = sm.project_path(&project_id).cloned() {
-                        sm.start_service(&project_id, &service_name, &path, &mut cx);
-                        CommandResult::Ok(None)
-                    } else {
-                        CommandResult::Err(format!("project not found: {project_id}"))
-                    }
+                    sm.start_service_action(&project_id, &service_name, &mut cx)
                 }
                 ActionRequest::StopService { project_id, service_name } => {
                     let mut sm = service_manager.lock();
                     let mut cx = service_reactor.cx();
-                    sm.stop_service(&project_id, &service_name, &mut cx);
-                    CommandResult::Ok(None)
+                    sm.stop_service_action(&project_id, &service_name, &mut cx)
                 }
                 ActionRequest::RestartService { project_id, service_name } => {
                     let mut sm = service_manager.lock();
                     let mut cx = service_reactor.cx();
-                    if let Some(path) = sm.project_path(&project_id).cloned() {
-                        sm.restart_service(&project_id, &service_name, &path, &mut cx);
-                        CommandResult::Ok(None)
-                    } else {
-                        CommandResult::Err(format!("project not found: {project_id}"))
-                    }
+                    sm.restart_service_action(&project_id, &service_name, &mut cx)
                 }
                 ActionRequest::StartAllServices { project_id } => {
                     let mut sm = service_manager.lock();
                     let mut cx = service_reactor.cx();
-                    if let Some(path) = sm.project_path(&project_id).cloned() {
-                        sm.start_all(&project_id, &path, &mut cx);
-                        CommandResult::Ok(None)
-                    } else {
-                        CommandResult::Err(format!("project not found: {project_id}"))
-                    }
+                    sm.start_all_action(&project_id, &mut cx)
                 }
                 ActionRequest::StopAllServices { project_id } => {
                     let mut sm = service_manager.lock();
                     let mut cx = service_reactor.cx();
-                    sm.stop_all(&project_id, &mut cx);
-                    CommandResult::Ok(None)
+                    sm.stop_all_action(&project_id, &mut cx)
                 }
                 ActionRequest::ReloadServices { project_id } => {
                     let mut sm = service_manager.lock();
                     let mut cx = service_reactor.cx();
-                    if let Some(path) = sm.project_path(&project_id).cloned() {
-                        sm.reload_project_services(&project_id, &path, &mut cx);
-                        CommandResult::Ok(None)
-                    } else {
-                        CommandResult::Err(format!("project not found: {project_id}"))
-                    }
+                    sm.reload_services_action(&project_id, &mut cx)
                 }
 
                 // ── App-scoped: settings / theme ─────────────────────────────
@@ -418,105 +388,24 @@ pub async fn daemon_command_loop(
                         .collect()
                 };
 
-                // Lookup map for projects.
-                let project_map: HashMap<&str, &ProjectData> =
-                    data.projects.iter().map(|p| (p.id.as_str(), p)).collect();
-
                 // Source of truth for runtime visibility (per-window viewport).
                 let hidden_project_ids = &data.main_window.hidden_project_ids;
 
-                // Build ordered projects following project_order + folder
-                // expansion.
-                let mut projects: Vec<ApiProject> = Vec::new();
-                let mut seen: HashSet<String> = HashSet::new();
-
-                let build_api_project = |p: &ProjectData| -> ApiProject {
-                    let git_status = git_statuses.get(&p.id).cloned();
-                    let services: Vec<ApiServiceInfo> = sm
-                        .services_for_project(&p.id)
-                        .into_iter()
-                        .map(|inst| {
-                            let (status, exit_code) = match &inst.status {
-                                ServiceStatus::Stopped => ("stopped", None),
-                                ServiceStatus::Starting => ("starting", None),
-                                ServiceStatus::Running => ("running", None),
-                                ServiceStatus::Crashed { exit_code } => ("crashed", *exit_code),
-                                ServiceStatus::Restarting => ("restarting", None),
-                            };
-                            let kind = match &inst.kind {
-                                ServiceKind::Okena => "okena",
-                                ServiceKind::DockerCompose { .. } => "docker_compose",
-                            };
-                            ApiServiceInfo {
-                                name: inst.definition.name.clone(),
-                                status: status.to_string(),
-                                terminal_id: inst.terminal_id.clone(),
-                                ports: inst.detected_ports.clone(),
-                                exit_code,
-                                kind: kind.to_string(),
-                                is_extra: inst.is_extra,
-                            }
-                        })
-                        .collect();
-                    ApiProject {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        path: p.path.clone(),
-                        show_in_overview: api_project_visibility(&p.id, hidden_project_ids),
-                        layout: p.layout.as_ref().map(|l| l.to_api_with_sizes(&size_map)),
-                        terminal_names: p.terminal_names.clone(),
-                        git_status,
-                        folder_color: p.folder_color,
-                        services,
-                        worktree_info: p.worktree_info.as_ref().map(|wt| ApiWorktreeMetadata {
-                            parent_project_id: wt.parent_project_id.clone(),
-                            color_override: wt.color_override,
-                        }),
-                        worktree_ids: p.worktree_ids.clone(),
-                        pinned: p.pinned,
-                        last_activity_at: p.last_activity_at,
-                        default_shell: p.default_shell.clone(),
-                        hook_terminals: p
-                            .hook_terminals
-                            .iter()
-                            .map(|(tid, e)| e.to_api(tid.clone()))
-                            .collect(),
-                        hooks: p.hooks.to_api(),
-                    }
-                };
-
-                for id in &data.project_order {
-                    if let Some(folder) = data.folders.iter().find(|f| &f.id == id) {
-                        for pid in &folder.project_ids {
-                            if seen.insert(pid.clone())
-                                && let Some(p) = project_map.get(pid.as_str())
-                            {
-                                projects.push(build_api_project(p));
-                            }
-                        }
-                    } else if seen.insert(id.clone())
-                        && let Some(p) = project_map.get(id.as_str())
-                    {
-                        projects.push(build_api_project(p));
-                    }
-                }
-
-                // Append orphan projects not in any order.
-                for p in &data.projects {
-                    if seen.insert(p.id.clone()) {
-                        projects.push(build_api_project(p));
-                    }
-                }
-
-                // Build folders for response.
-                let folders: Vec<ApiFolder> = data
-                    .folders
+                // Pre-build the per-project wire service lists from THIS caller's
+                // `ServiceManager` (keeps the `okena-services` dependency in the
+                // daemon; the shared builder in `okena-app-core` never sees it).
+                // The `ServiceInstance -> ApiServiceInfo` mapping is
+                // `ServiceInstance::to_api`, shared with the GUI loop.
+                let services_by_project: HashMap<String, Vec<ApiServiceInfo>> = data
+                    .projects
                     .iter()
-                    .map(|f| ApiFolder {
-                        id: f.id.clone(),
-                        name: f.name.clone(),
-                        project_ids: f.project_ids.clone(),
-                        folder_color: f.folder_color,
+                    .map(|p| {
+                        let services = sm
+                            .services_for_project(&p.id)
+                            .into_iter()
+                            .map(|inst| inst.to_api())
+                            .collect();
+                        (p.id.clone(), services)
                     })
                     .collect();
 
@@ -542,26 +431,17 @@ pub async fn daemon_command_loop(
                     sidebar_open: None,
                 }];
 
-                // Back-compat flat fields derived from the active window (both
-                // None here — the synthetic main window has no focus/fullscreen).
-                let focused_project_id: Option<String> = windows
-                    .iter()
-                    .find(|w| w.active)
-                    .and_then(|w| w.focused_project_id.clone());
-                let fullscreen: Option<ApiFullscreen> = windows
-                    .iter()
-                    .find(|w| w.active)
-                    .and_then(|w| w.fullscreen.clone());
-
-                let resp = StateResponse {
-                    state_version: sv,
-                    projects,
-                    focused_project_id,
-                    fullscreen_terminal: fullscreen,
-                    project_order: data.project_order.clone(),
-                    folders,
+                // Shared projection: ordered projects + folders + flat back-compat
+                // fields → `StateResponse` (identical to the GUI loop).
+                let resp = build_state_response(
+                    sv,
+                    data,
+                    &git_statuses,
+                    &services_by_project,
+                    hidden_project_ids,
+                    &size_map,
                     windows,
-                };
+                );
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
                 // under `clippy::expect_used` had it been enabled — the serialize
@@ -742,6 +622,8 @@ fn run_main_workspace_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okena_core::api::StateResponse;
+    use std::collections::HashSet;
 
     use okena_remote_server::bridge::bridge_channel;
     use okena_state::WorkspaceData;
@@ -886,6 +768,7 @@ mod tests {
 
     #[test]
     fn api_project_visibility_reads_from_hidden_set() {
+        use okena_app_core::remote_snapshot::api_project_visibility;
         let hidden: HashSet<String> = ["p1".to_string()].into_iter().collect();
         assert!(!api_project_visibility("p1", &hidden));
         assert!(api_project_visibility("p2", &hidden));
@@ -893,6 +776,7 @@ mod tests {
 
     #[test]
     fn api_project_visibility_empty_hidden_set_is_visible() {
+        use okena_app_core::remote_snapshot::api_project_visibility;
         let hidden: HashSet<String> = HashSet::new();
         assert!(api_project_visibility("p1", &hidden));
     }
