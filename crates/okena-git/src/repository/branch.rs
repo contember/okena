@@ -71,15 +71,31 @@ pub fn resolve_review_base(repo_path: &Path) -> Option<String> {
         return None;
     }
 
-    let repo = crate::gix_helpers::open(repo_path)?;
+    resolve_base_ref(repo_path, &default)
+}
 
-    // Prefer the pushed ref so the review matches what a PR would diff against.
-    if repo.find_reference(&format!("refs/remotes/origin/{}", default)).is_ok() {
-        return Some(format!("origin/{}", default));
+/// Resolve the best local ref to compare against for a target branch `name`,
+/// preferring the pushed copy so counts match what a PR would diff against:
+/// `upstream/<name>` → `origin/<name>` → local `<name>`. Returns `None` when
+/// none resolve.
+///
+/// `upstream` wins over `origin` for the fork workflow: when `origin` is the
+/// user's fork and `upstream` is the canonical repo the PR actually targets,
+/// the fork's copy lags, so comparing against it inflates "ahead" and hides
+/// "behind". Ordinary single-remote repos have no `upstream` and fall through
+/// to `origin/<name>` exactly as before.
+pub fn resolve_base_ref(repo_path: &Path, name: &str) -> Option<String> {
+    let repo = crate::gix_helpers::open(repo_path)?;
+    for remote in ["upstream", "origin"] {
+        if repo
+            .find_reference(&format!("refs/remotes/{remote}/{name}"))
+            .is_ok()
+        {
+            return Some(format!("{remote}/{name}"));
+        }
     }
-    // Fall back to the local default branch.
-    if repo.find_reference(&format!("refs/heads/{}", default)).is_ok() {
-        return Some(default);
+    if repo.find_reference(&format!("refs/heads/{name}")).is_ok() {
+        return Some(name.to_string());
     }
     None
 }
@@ -455,5 +471,37 @@ mod tests {
     fn resolve_review_base_returns_none_for_invalid_path() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
         assert!(resolve_review_base(&path).is_none());
+    }
+
+    #[test]
+    fn resolve_base_ref_prefers_upstream_then_origin_then_local() {
+        let (_tmp, repo) = init_temp_repo();
+        // Local branch only.
+        assert_eq!(resolve_base_ref(&repo, "main").as_deref(), Some("main"));
+
+        // Add an origin remote-tracking ref: now preferred over local.
+        git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        assert_eq!(resolve_base_ref(&repo, "main").as_deref(), Some("origin/main"));
+
+        // Add an upstream remote-tracking ref: fork workflow — upstream wins.
+        git_in(&repo, &["update-ref", "refs/remotes/upstream/main", "HEAD"]);
+        assert_eq!(resolve_base_ref(&repo, "main").as_deref(), Some("upstream/main"));
+    }
+
+    #[test]
+    fn resolve_base_ref_is_none_when_branch_missing() {
+        let (_tmp, repo) = init_temp_repo();
+        assert_eq!(resolve_base_ref(&repo, "does-not-exist"), None);
+    }
+
+    #[test]
+    fn resolve_review_base_prefers_upstream_on_feature_branch() {
+        let (_tmp, repo) = init_temp_repo();
+        // Fork: origin (the fork) and upstream (canonical) both have main.
+        git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git_in(&repo, &["update-ref", "refs/remotes/upstream/main", "HEAD"]);
+        create_and_checkout_branch(&repo, "feat/x", None).expect("create branch");
+        // Review base is the upstream copy the PR really targets, not the fork's.
+        assert_eq!(resolve_review_base(&repo).as_deref(), Some("upstream/main"));
     }
 }

@@ -148,9 +148,19 @@ impl GitStatusWatcher {
             .map(|p| p.path.clone());
         let Some(path) = path else { return };
 
+        // Reuse the cached PR base so an immediate post-action refresh measures
+        // ahead/behind against the PR's real target, matching the poll loop.
+        let pr_base = self
+            .pr_infos
+            .get(&project_id)
+            .and_then(|p| p.as_ref())
+            .and_then(|p| p.base.clone());
+
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let new_status = smol::unblock(move || {
-                with_lane(Lane::Poll, || git::refresh_git_status(Path::new(&path)))
+                with_lane(Lane::Poll, || {
+                    git::refresh_git_status_with_pr_base(Path::new(&path), pr_base.as_deref())
+                })
             })
             .await;
 
@@ -249,13 +259,30 @@ impl GitStatusWatcher {
                 let check_prs = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(PR_POLL_EVERY_N_CYCLES));
                 let check_ci = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(ci_poll_interval));
 
+                // Snapshot each project's known PR base branch (from the cached
+                // PR info fetched on prior `check_prs` cycles). Passing it into
+                // the status fetch below re-points ahead/behind at what the PR
+                // actually targets (e.g. `develop`) instead of the repo default
+                // — recomputed every cycle from local refs, so no extra `gh`.
+                let pr_bases: HashMap<String, String> = this.update(cx, |this, _| {
+                    this.pr_infos
+                        .iter()
+                        .filter_map(|(id, pr)| {
+                            pr.as_ref().and_then(|p| p.base.clone()).map(|b| (id.clone(), b))
+                        })
+                        .collect()
+                }).unwrap_or_default();
+
                 // Phase 1: Fetch git status for all projects in parallel
                 let status_futures: Vec<_> = projects.iter().map(|(id, path)| {
                     let id = id.clone();
                     let path = path.clone();
+                    let pr_base = pr_bases.get(&id).cloned();
                     async move {
                         let status = smol::unblock(move || {
-                            with_lane(Lane::Poll, || git::refresh_git_status(Path::new(&path)))
+                            with_lane(Lane::Poll, || {
+                                git::refresh_git_status_with_pr_base(Path::new(&path), pr_base.as_deref())
+                            })
                         }).await;
                         (id, status)
                     }

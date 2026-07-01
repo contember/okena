@@ -26,7 +26,7 @@ pub use branch::{
     delete_local_branch, delete_remote_branch, discard_file_changes, fetch_all,
     get_available_branches_for_worktree, get_default_branch, list_branches,
     list_branches_classified, merge_branch, push_branch, rebase_onto,
-    resolve_review_base, stage_file,
+    resolve_base_ref, resolve_review_base, stage_file,
     stash_changes, stash_pop, unstage_file, BranchList,
 };
 pub use ci::{get_ci_checks, get_pr_info, has_github_remote};
@@ -35,8 +35,8 @@ pub use paths::{
     resolve_git_root_and_subdir,
 };
 pub use status::{
-    count_ahead_behind, count_ahead_behind_vs, count_unpushed_commits, get_current_branch,
-    get_head_sha, get_status, has_uncommitted_changes, StatusFetch,
+    apply_pr_base, count_ahead_behind, count_ahead_behind_vs, count_unpushed_commits,
+    get_current_branch, get_head_sha, get_status, has_uncommitted_changes, StatusFetch,
 };
 pub(crate) use status::worktree_diff;
 pub use worktree::{

@@ -81,10 +81,15 @@ pub(crate) fn tint(color: u32, alpha: f32) -> Rgba {
 
 // ── Standalone badges ───────────────────────────────────────────────────────
 
-/// Strip a leading `origin/` so a base ref reads as a plain branch name
-/// (`origin/main` → `main`) in the comparison chip.
+/// Strip a leading remote prefix so a base ref reads as a plain branch name
+/// (`origin/main` → `main`, `upstream/main` → `main`) in the comparison chip.
+/// Stripping `upstream/` too means a fork's base (compared against the upstream
+/// copy) collapses to the same label as the default and stays hidden when it
+/// matches, instead of reading as a noisy `upstream/main`.
 pub(crate) fn base_short_name(base: &str) -> &str {
-    base.strip_prefix("origin/").unwrap_or(base)
+    base.strip_prefix("origin/")
+        .or_else(|| base.strip_prefix("upstream/"))
+        .unwrap_or(base)
 }
 
 fn plural(n: usize) -> &'static str {
@@ -176,6 +181,16 @@ pub fn render_base_compare_badge(
                 d.child(
                     div()
                         .text_color(rgb(t.text_muted))
+                        // Cap + single-line ellipsis so a long base branch name
+                        // (e.g. a stacked-PR base like `feature/really-long-name`)
+                        // truncates with a trailing "…" instead of overflowing
+                        // the header row. `whitespace_nowrap` is what makes the
+                        // dots appear: without it a name with a `/` wraps and
+                        // `overflow_hidden` just clips the second line.
+                        .max_w(px(100.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .child(base_label.clone()),
                 )
             })

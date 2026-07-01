@@ -41,6 +41,8 @@ export interface PrInfo {
   url: string;
   state: PrState;
   number: number;
+  /** The PR's base (target) branch, e.g. "main" or "develop". Omitted when unknown. */
+  base?: string | null;
 }
 
 export type CiStatus = "Success" | "Failure" | "Pending";
