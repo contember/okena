@@ -102,7 +102,7 @@ pub async fn daemon_command_loop(
     service_tick: watch::Sender<u64>,
     runtime: tokio::runtime::Handle,
     settings: Arc<Mutex<AppSettings>>,
-    daemon_config: DaemonConfig,
+    mut daemon_config: DaemonConfig,
     deadlines: SoftCloseDeadlines,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
