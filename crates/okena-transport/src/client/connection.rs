@@ -1,5 +1,5 @@
 use okena_core::api::StateResponse;
-use crate::client::config::{LocalEndpoint, RemoteConnectionConfig};
+use crate::client::config::{LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
 use crate::client::id::make_prefixed_id;
 use crate::client::state::{collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states};
 use crate::client::types::{
@@ -101,6 +101,25 @@ fn local_unix_path(config: &RemoteConnectionConfig) -> Option<&str> {
         let _ = config;
         None
     }
+}
+
+fn initial_connect_attempts(config: &RemoteConnectionConfig) -> u32 {
+    if config.id == LOCAL_DAEMON_CONNECTION_ID || config.local_endpoint.is_some() {
+        6
+    } else {
+        1
+    }
+}
+
+fn initial_connect_retry_delay(attempt: u32) -> std::time::Duration {
+    let millis = match attempt {
+        1 => 100,
+        2 => 200,
+        3 => 400,
+        4 => 800,
+        _ => 1_200,
+    };
+    std::time::Duration::from_millis(millis)
 }
 
 /// Platform-specific operations that the generic client delegates to.
@@ -276,28 +295,46 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 &[true, false]
             };
             let mut chosen: Option<(bool, reqwest::Client, String)> = None;
-            for &tls in schemes {
-                let (client, base_url) = if let Some(path) = local_unix.as_deref() {
-                    (unix_http_client(path), config.http_origin())
-                } else {
-                    let client = crate::client::tls::build_reqwest_client(
-                        tls,
-                        config.pinned_cert_sha256.clone(),
-                        observed.clone(),
+            let attempts = initial_connect_attempts(&config);
+            for attempt in 1..=attempts {
+                if attempt > 1 {
+                    let delay = initial_connect_retry_delay(attempt - 1);
+                    log::warn!(
+                        "Initial connection to {} failed. Retrying in {}ms (attempt {}/{})",
+                        config.display_endpoint(),
+                        delay.as_millis(),
+                        attempt,
+                        attempts
                     );
-                    let scheme = if tls { "https" } else { "http" };
-                    (client, format!("{}://{}:{}", scheme, config.host, config.port))
-                };
-                let ok = matches!(
-                    client
-                        .get(format!("{}/health", base_url))
-                        .timeout(std::time::Duration::from_secs(5))
-                        .send()
-                        .await,
-                    Ok(resp) if resp.status().is_success()
-                );
-                if ok {
-                    chosen = Some((tls, client, base_url));
+                    tokio::time::sleep(delay).await;
+                }
+
+                for &tls in schemes {
+                    let (client, base_url) = if let Some(path) = local_unix.as_deref() {
+                        (unix_http_client(path), config.http_origin())
+                    } else {
+                        let client = crate::client::tls::build_reqwest_client(
+                            tls,
+                            config.pinned_cert_sha256.clone(),
+                            observed.clone(),
+                        );
+                        let scheme = if tls { "https" } else { "http" };
+                        (client, format!("{}://{}:{}", scheme, config.host, config.port))
+                    };
+                    let ok = matches!(
+                        client
+                            .get(format!("{}/health", base_url))
+                            .timeout(std::time::Duration::from_secs(5))
+                            .send()
+                            .await,
+                        Ok(resp) if resp.status().is_success()
+                    );
+                    if ok {
+                        chosen = Some((tls, client, base_url));
+                        break;
+                    }
+                }
+                if chosen.is_some() {
                     break;
                 }
             }
@@ -305,7 +342,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             let (detected_tls, client, base_url) = match chosen {
                 Some(v) => v,
                 None => {
-                    let msg = format!("Cannot reach server {}:{}", config.host, config.port);
+                    let msg = format!("Cannot reach server {}", config.display_endpoint());
                     log::warn!("{}", msg);
                     let _ = event_tx
                         .send(ConnectionEvent::StatusChanged {
@@ -353,16 +390,15 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     .await
                 {
                     Ok(resp) if resp.status().is_success() => {
-                        log::info!("Token valid for {}:{}", config.host, config.port);
+                        log::info!("Token valid for {}", config.display_endpoint());
                         // Token is valid - start WebSocket
                         Self::run_ws_loop(config, token, event_tx, ws_tx, ws_rx, handler, shared_token).await;
                         return;
                     }
                     Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
                         log::info!(
-                            "Token expired for {}:{}, need re-pairing",
-                            config.host,
-                            config.port
+                            "Token expired for {}, need re-pairing",
+                            config.display_endpoint()
                         );
                         // Only 401 means the token is actually invalid → need pairing
                         let _ = event_tx

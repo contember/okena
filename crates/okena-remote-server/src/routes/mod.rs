@@ -76,6 +76,10 @@ impl PeerInfo {
     }
 }
 
+fn request_is_unix_socket(req: &Request) -> bool {
+    matches!(req.extensions().get::<PeerInfo>(), Some(PeerInfo::Local))
+}
+
 /// Build the complete axum router.
 // Each param is a distinct piece of shared router state.
 #[allow(clippy::too_many_arguments)]
@@ -202,12 +206,17 @@ fn serve_embedded_file(path: &str, file: rust_embed::EmbeddedFile) -> axum::resp
 }
 
 /// Auth middleware: validates Bearer token on protected routes.
+/// Unix socket traffic is already same-user scoped by the local transport.
 /// Skips validation for WebSocket upgrade requests (WS has its own auth flow).
 async fn auth_middleware(
     axum::extract::State(state): axum::extract::State<AppState>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    if request_is_unix_socket(&req) {
+        return Ok(next.run(req).await);
+    }
+
     // Allow WebSocket upgrades through — they handle auth via query param or first message
     let is_websocket = req
         .headers()
@@ -234,4 +243,25 @@ async fn auth_middleware(
     }
 
     Ok(next.run(req).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_socket_requests_skip_bearer_auth() {
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut().insert(PeerInfo::Local);
+
+        assert!(request_is_unix_socket(&req));
+    }
+
+    #[test]
+    fn tcp_loopback_requests_still_require_bearer_auth() {
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut().insert(PeerInfo::Tcp(SocketAddr::from(([127, 0, 0, 1], 19100))));
+
+        assert!(!request_is_unix_socket(&req));
+    }
 }

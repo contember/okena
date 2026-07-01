@@ -3,13 +3,13 @@
 #![allow(clippy::expect_used)]
 
 use crate::bridge::{BridgeMessage, CommandResult, RemoteCommand};
-use crate::routes::AppState;
+use crate::routes::{AppState, PeerInfo};
 use crate::types::{
     ActionRequest, WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
     FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT,
 };
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Query, State, WebSocketUpgrade};
+use axum::extract::{Extension, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -24,14 +24,23 @@ pub struct WsQuery {
 pub async fn ws_handler(
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
+    Extension(peer): Extension<PeerInfo>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, query.token))
+    ws.on_upgrade(move |socket| handle_ws(socket, state, query.token, peer))
 }
 
-async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<String>) {
+async fn handle_ws(
+    mut socket: WebSocket,
+    state: AppState,
+    query_token: Option<String>,
+    peer: PeerInfo,
+) {
     // ── Auth phase ──────────────────────────────────────────────────────
-    let authenticated = if let Some(token) = query_token {
+    // Unix socket clients are same-user local clients; bearer auth is for TCP.
+    let authenticated = if matches!(peer, PeerInfo::Local) {
+        true
+    } else if let Some(token) = query_token {
         state.auth_store.validate_token(&token)
     } else {
         // Wait for first-message auth (2 second timeout)
