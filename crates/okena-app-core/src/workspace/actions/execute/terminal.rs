@@ -156,7 +156,6 @@ pub(super) fn send_text(
 ) -> ActionResult {
     match ensure_terminal(&terminal_id, terminals, backend, ws) {
         Some(term) => {
-            term.claim_resize_remote();
             term.send_input(&text);
             ActionResult::Ok(None)
         }
@@ -173,7 +172,6 @@ pub(super) fn run_command(
 ) -> ActionResult {
     match ensure_terminal(&terminal_id, terminals, backend, ws) {
         Some(term) => {
-            term.claim_resize_remote();
             term.send_input(&format!("{}\r", command));
             ActionResult::Ok(None)
         }
@@ -190,7 +188,6 @@ pub(super) fn send_special_key(
 ) -> ActionResult {
     match ensure_terminal(&terminal_id, terminals, backend, ws) {
         Some(term) => {
-            term.claim_resize_remote();
             term.send_bytes(&key.to_bytes());
             ActionResult::Ok(None)
         }
@@ -208,7 +205,6 @@ pub(super) fn resize(
 ) -> ActionResult {
     match ensure_terminal(&terminal_id, terminals, backend, ws) {
         Some(term) => {
-            term.claim_resize_remote();
             let size = TerminalSize {
                 cols,
                 rows,

@@ -1,5 +1,7 @@
 use super::super::Terminal;
-use super::super::resize_authority::reset_resize_authority;
+use super::super::resize_authority::{
+    claim_remote_resize_if_allowed, reset_resize_authority, resize_authority_snapshot,
+};
 use super::super::transport::TerminalTransport;
 use super::super::types::TerminalSize;
 use super::NullTransport;
@@ -33,20 +35,35 @@ fn resize_owner_transitions() {
 }
 
 #[test]
-fn resize_owner_is_process_global() {
+fn resize_owner_is_per_terminal() {
     let _g = RESIZE_AUTH_TEST_LOCK.lock();
     reset_resize_authority();
     let transport = Arc::new(NullTransport);
     let term_a = Terminal::new("a".into(), TerminalSize::default(), transport.clone(), String::new());
     let term_b = Terminal::new("b".into(), TerminalSize::default(), transport, String::new());
 
-    // Claiming remote on A flips authority for B as well.
     term_a.claim_resize_remote();
-    assert!(!term_b.is_resize_owner_local());
+    assert!(!term_a.is_resize_owner_local());
+    assert!(term_b.is_resize_owner_local());
 
-    // Claiming local on B flips authority back for A.
     term_b.claim_resize_local();
-    assert!(term_a.is_resize_owner_local());
+    assert!(!term_a.is_resize_owner_local());
+    assert!(term_b.is_resize_owner_local());
+}
+
+#[test]
+fn remote_resize_is_limited_to_current_owner() {
+    let _g = RESIZE_AUTH_TEST_LOCK.lock();
+    reset_resize_authority();
+
+    assert!(claim_remote_resize_if_allowed("t", "conn-a"));
+    assert_eq!(
+        resize_authority_snapshot("t").remote_owner_id.as_deref(),
+        Some("conn-a")
+    );
+
+    assert!(claim_remote_resize_if_allowed("t", "conn-a"));
+    assert!(!claim_remote_resize_if_allowed("t", "conn-b"));
 }
 
 #[test]

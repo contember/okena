@@ -18,6 +18,18 @@ pub struct BridgeMessage {
 pub enum RemoteCommand {
     /// All client-facing actions (workspace + I/O).
     Action(ActionRequest),
+    /// Client-facing action carrying the WebSocket connection that produced it.
+    ActionFromConnection {
+        action: ActionRequest,
+        connection_id: String,
+    },
+    /// Resize from a WebSocket client. Only the current owner may resize.
+    ResizeFromConnection {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+        connection_id: String,
+    },
     /// Get the full workspace state snapshot.
     GetState,
     /// Render a terminal's visible content as ANSI bytes (for snapshots).

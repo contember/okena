@@ -85,6 +85,7 @@ async fn handle_ws(
     let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
     let mut next_stream_id: u32 = 1;
     let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
+    let connection_owner_id = connection_id.to_string();
 
     // Subscribe to state_version and git status changes
     let mut state_rx = state.state_version.subscribe();
@@ -179,6 +180,7 @@ async fn handle_ws(
                                     &mut pty_rx,
                                     &subscribed_ids,
                                     &pre_existing,
+                                    &connection_owner_id,
                                 )
                                 .await
                                 .is_err()
@@ -203,19 +205,30 @@ async fn handle_ws(
                             }
                             Ok(WsInbound::SendText { terminal_id, text }) => {
                                 let _ = state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::Action(ActionRequest::SendText { terminal_id, text }),
+                                    command: RemoteCommand::ActionFromConnection {
+                                        action: ActionRequest::SendText { terminal_id, text },
+                                        connection_id: connection_owner_id.clone(),
+                                    },
                                     reply: None,
                                 }).await;
                             }
                             Ok(WsInbound::SendSpecialKey { terminal_id, key }) => {
                                 let _ = state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::Action(ActionRequest::SendSpecialKey { terminal_id, key }),
+                                    command: RemoteCommand::ActionFromConnection {
+                                        action: ActionRequest::SendSpecialKey { terminal_id, key },
+                                        connection_id: connection_owner_id.clone(),
+                                    },
                                     reply: None,
                                 }).await;
                             }
                             Ok(WsInbound::Resize { terminal_id, cols, rows }) => {
                                 let _ = state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::Action(ActionRequest::Resize { terminal_id, cols, rows }),
+                                    command: RemoteCommand::ResizeFromConnection {
+                                        terminal_id,
+                                        cols,
+                                        rows,
+                                        connection_id: connection_owner_id.clone(),
+                                    },
                                     reply: None,
                                 }).await;
                             }
@@ -242,10 +255,13 @@ async fn handle_ws(
                             && let Some(terminal_id) = reverse_stream_map.get(&stream_id) {
                                 let text = String::from_utf8_lossy(payload).to_string();
                                 let _ = state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::Action(ActionRequest::SendText {
-                                        terminal_id: terminal_id.clone(),
-                                        text,
-                                    }),
+                                    command: RemoteCommand::ActionFromConnection {
+                                        action: ActionRequest::SendText {
+                                            terminal_id: terminal_id.clone(),
+                                            text,
+                                        },
+                                        connection_id: connection_owner_id.clone(),
+                                    },
                                     reply: None,
                                 }).await;
                             }
@@ -269,14 +285,22 @@ async fn handle_ws(
                                     batch.entry(stream_id).or_default().extend_from_slice(data);
                                 }
                             }
-                            crate::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows, server_owns } => {
+                            crate::pty_broadcaster::PtyBroadcastEvent::Resized {
+                                terminal_id,
+                                cols,
+                                rows,
+                                server_owns,
+                                owner_connection_id,
+                            } => {
                                 if subscribed_ids.contains_key(terminal_id) {
-                                    resize_msgs.push(WsOutbound::TerminalResized {
-                                        terminal_id: terminal_id.clone(),
-                                        cols: *cols,
-                                        rows: *rows,
-                                        server_owns: *server_owns,
-                                    });
+                                    resize_msgs.push(terminal_resized_for_recipient(
+                                        terminal_id.clone(),
+                                        *cols,
+                                        *rows,
+                                        *server_owns,
+                                        owner_connection_id.as_deref(),
+                                        &connection_owner_id,
+                                    ));
                                 }
                             }
                         }
@@ -291,16 +315,24 @@ async fn handle_ws(
                                             batch.entry(sid).or_default().extend_from_slice(data);
                                         }
                                     }
-                                    crate::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows, server_owns } => {
+                                    crate::pty_broadcaster::PtyBroadcastEvent::Resized {
+                                        terminal_id,
+                                        cols,
+                                        rows,
+                                        server_owns,
+                                        owner_connection_id,
+                                    } => {
                                         if subscribed_ids.contains_key(terminal_id) {
                                             // Keep only the latest resize per terminal
                                             resize_msgs.retain(|m| !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if id == terminal_id));
-                                            resize_msgs.push(WsOutbound::TerminalResized {
-                                                terminal_id: terminal_id.clone(),
-                                                cols: *cols,
-                                                rows: *rows,
-                                                server_owns: *server_owns,
-                                            });
+                                            resize_msgs.push(terminal_resized_for_recipient(
+                                                terminal_id.clone(),
+                                                *cols,
+                                                *rows,
+                                                *server_owns,
+                                                owner_connection_id.as_deref(),
+                                                &connection_owner_id,
+                                            ));
                                         }
                                     }
                                 },
@@ -456,6 +488,67 @@ async fn ws_writer(
     }
 }
 
+fn terminal_resized_for_recipient(
+    terminal_id: String,
+    cols: u16,
+    rows: u16,
+    server_owns: bool,
+    owner_connection_id: Option<&str>,
+    recipient_connection_id: &str,
+) -> WsOutbound {
+    let server_owns = server_owns
+        || owner_connection_id.is_some_and(|owner| owner != recipient_connection_id);
+    WsOutbound::TerminalResized {
+        terminal_id,
+        cols,
+        rows,
+        server_owns,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resized_server_owns(
+        server_owns: bool,
+        owner_connection_id: Option<&str>,
+        recipient_connection_id: &str,
+    ) -> bool {
+        match terminal_resized_for_recipient(
+            "t".to_string(),
+            120,
+            40,
+            server_owns,
+            owner_connection_id,
+            recipient_connection_id,
+        ) {
+            WsOutbound::TerminalResized { server_owns, .. } => server_owns,
+            _ => unreachable!("helper always returns TerminalResized"),
+        }
+    }
+
+    #[test]
+    fn resize_echo_stays_client_owned_for_origin_connection() {
+        assert!(!resized_server_owns(false, Some("conn-a"), "conn-a"));
+    }
+
+    #[test]
+    fn resize_from_other_connection_makes_recipient_defer() {
+        assert!(resized_server_owns(false, Some("conn-a"), "conn-b"));
+    }
+
+    #[test]
+    fn server_owned_resize_makes_every_remote_defer() {
+        assert!(resized_server_owns(true, None, "conn-a"));
+    }
+
+    #[test]
+    fn legacy_unknown_remote_owner_keeps_prior_client_behavior() {
+        assert!(!resized_server_owns(false, None, "conn-a"));
+    }
+}
+
 /// Drain the PTY events that accumulated before/during snapshot generation at
 /// subscribe time, discarding those already reflected in a terminal's snapshot
 /// and forwarding those that are not.
@@ -481,6 +574,7 @@ async fn drain_or_forward_post_snapshot(
     pty_rx: &mut broadcast::Receiver<crate::pty_broadcaster::PtyBroadcastEvent>,
     subscribed_ids: &HashMap<String, u32>,
     pre_existing: &std::collections::HashSet<String>,
+    connection_owner_id: &str,
 ) -> Result<(), ()> {
     use crate::pty_broadcaster::PtyBroadcastEvent;
 
@@ -505,6 +599,7 @@ async fn drain_or_forward_post_snapshot(
                 cols,
                 rows,
                 server_owns,
+                owner_connection_id,
             } => {
                 if !pre_existing.contains(&terminal_id)
                     && subscribed_ids.contains_key(&terminal_id)
@@ -512,12 +607,14 @@ async fn drain_or_forward_post_snapshot(
                     resize_msgs.retain(|m| {
                         !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if *id == terminal_id)
                     });
-                    resize_msgs.push(WsOutbound::TerminalResized {
+                    resize_msgs.push(terminal_resized_for_recipient(
                         terminal_id,
                         cols,
                         rows,
                         server_owns,
-                    });
+                        owner_connection_id.as_deref(),
+                        connection_owner_id,
+                    ));
                 }
             }
         }

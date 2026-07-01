@@ -21,7 +21,15 @@ pub trait PtyOutputSink: Send + Sync {
     /// `server_owns` is true when the origin's local user currently holds resize
     /// authority. Clients use it to stop re-asserting their own window size and
     /// defer to the origin instead of fighting it back over the next round-trip.
-    fn publish_resize(&self, _terminal_id: String, _cols: u16, _rows: u16, _server_owns: bool) {}
+    fn publish_resize(
+        &self,
+        _terminal_id: String,
+        _cols: u16,
+        _rows: u16,
+        _server_owns: bool,
+        _owner_connection_id: Option<String>,
+    ) {
+    }
 }
 
 /// Events from PTY processes
@@ -702,8 +710,14 @@ impl PtyManager {
         // resize comes from the origin's local user reclaiming control — in
         // which case the client must stop re-asserting its own size.
         if let Some(sink) = self.output_sink.lock().as_ref() {
-            let server_owns = crate::terminal::is_resize_authority_local();
-            sink.publish_resize(terminal_id.to_string(), cols, rows, server_owns);
+            let authority = crate::terminal::resize_authority_snapshot(terminal_id);
+            sink.publish_resize(
+                terminal_id.to_string(),
+                cols,
+                rows,
+                authority.local,
+                authority.remote_owner_id,
+            );
         }
     }
 

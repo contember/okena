@@ -3,7 +3,8 @@ use std::sync::atomic::Ordering;
 
 use super::Terminal;
 use super::resize_authority::{
-    claim_resize_authority_local, claim_resize_authority_remote, is_resize_authority_local,
+    claim_resize_authority_local, claim_resize_authority_remote,
+    claim_resize_authority_remote_owner, is_resize_authority_local,
 };
 use super::types::TerminalSize;
 
@@ -104,24 +105,26 @@ impl Terminal {
         self.content_generation.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Mark the local side (origin) as resize authority. Process-global:
-    /// any local keyboard/mouse input in any terminal claims authority for all
-    /// terminals.
+    /// Mark this process as the terminal's resize authority.
     pub fn claim_resize_local(&self) {
-        claim_resize_authority_local();
+        claim_resize_authority_local(&self.terminal_id);
     }
 
-    /// Mark the remote side as resize authority. Called on the server when a
-    /// remote client sends input to any terminal.
+    /// Mark the remote side as this terminal's resize authority.
     pub fn claim_resize_remote(&self) {
-        claim_resize_authority_remote();
+        claim_resize_authority_remote(&self.terminal_id);
+    }
+
+    /// Mark a specific remote connection as this terminal's resize authority.
+    pub fn claim_resize_remote_owner(&self, owner_id: &str) {
+        claim_resize_authority_remote_owner(&self.terminal_id, owner_id);
     }
 
     /// Returns true if the local (origin) side currently has resize authority.
     /// The server's UI uses this to decide whether to push resize events to
     /// the PTY.
     pub fn is_resize_owner_local(&self) -> bool {
-        is_resize_authority_local()
+        is_resize_authority_local(&self.terminal_id)
     }
 
     /// Flush any pending PTY resize (call this when resize operations complete)

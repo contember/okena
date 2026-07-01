@@ -8,7 +8,13 @@ pub enum PtyBroadcastEvent {
     Output { terminal_id: String, data: Vec<u8> },
     /// Terminal was resized (server-side). `server_owns` is true when the
     /// origin's local user currently holds resize authority.
-    Resized { terminal_id: String, cols: u16, rows: u16, server_owns: bool },
+    Resized {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+        server_owns: bool,
+        owner_connection_id: Option<String>,
+    },
 }
 
 /// Fan-out PTY events to WebSocket subscribers.
@@ -38,8 +44,21 @@ impl PtyBroadcaster {
     }
 
     /// Publish a terminal resize event. Non-blocking; drops if no subscribers.
-    pub fn publish_resize(&self, terminal_id: String, cols: u16, rows: u16, server_owns: bool) {
-        let _ = self.tx.send(PtyBroadcastEvent::Resized { terminal_id, cols, rows, server_owns });
+    pub fn publish_resize(
+        &self,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+        server_owns: bool,
+        owner_connection_id: Option<String>,
+    ) {
+        let _ = self.tx.send(PtyBroadcastEvent::Resized {
+            terminal_id,
+            cols,
+            rows,
+            server_owns,
+            owner_connection_id,
+        });
     }
 
     /// Create a new subscriber receiver.
@@ -53,7 +72,14 @@ impl PtyOutputSink for PtyBroadcaster {
         self.publish(terminal_id, data);
     }
 
-    fn publish_resize(&self, terminal_id: String, cols: u16, rows: u16, server_owns: bool) {
-        self.publish_resize(terminal_id, cols, rows, server_owns);
+    fn publish_resize(
+        &self,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+        server_owns: bool,
+        owner_connection_id: Option<String>,
+    ) {
+        self.publish_resize(terminal_id, cols, rows, server_owns, owner_connection_id);
     }
 }

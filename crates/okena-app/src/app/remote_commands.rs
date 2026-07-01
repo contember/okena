@@ -34,6 +34,27 @@ pub(crate) fn parse_window_id(s: &str) -> Option<WindowId> {
     }
 }
 
+fn claim_input_resize_owner(action: &ActionRequest, owner_id: Option<&str>) {
+    let terminal_id = match action {
+        ActionRequest::SendText { terminal_id, .. }
+        | ActionRequest::RunCommand { terminal_id, .. }
+        | ActionRequest::SendSpecialKey { terminal_id, .. } => Some(terminal_id.as_str()),
+        _ => None,
+    };
+
+    if let Some(terminal_id) = terminal_id {
+        match owner_id {
+            Some(owner_id) => {
+                crate::terminal::terminal::claim_resize_authority_remote_owner(
+                    terminal_id,
+                    owner_id,
+                );
+            }
+            None => crate::terminal::terminal::claim_resize_authority_remote(terminal_id),
+        }
+    }
+}
+
 /// Resolver returning a window's `(WindowId, FocusManager)` for a
 /// remote-bridge action.
 ///
@@ -104,7 +125,22 @@ pub(crate) async fn remote_command_loop(
 
         let _slow = okena_core::timing::SlowGuard::new("remote_command_loop::iter");
 
-        let result = match msg.command {
+        let command = match msg.command {
+            RemoteCommand::Action(action) => {
+                claim_input_resize_owner(&action, None);
+                RemoteCommand::Action(action)
+            }
+            RemoteCommand::ActionFromConnection {
+                action,
+                connection_id,
+            } => {
+                claim_input_resize_owner(&action, Some(&connection_id));
+                RemoteCommand::Action(action)
+            }
+            command => command,
+        };
+
+        let result = match command {
             RemoteCommand::Action(action) => {
                 match action {
                     ActionRequest::StartService { project_id, service_name } => {
@@ -371,6 +407,52 @@ pub(crate) async fn remote_command_loop(
                         })
                     }
                 }
+            }
+            RemoteCommand::ResizeFromConnection {
+                terminal_id,
+                cols,
+                rows,
+                connection_id,
+            } => {
+                cx.update(|cx| {
+                    if !crate::terminal::terminal::claim_remote_resize_if_allowed(
+                        &terminal_id,
+                        &connection_id,
+                    ) {
+                        return CommandResult::Ok(None);
+                    }
+
+                    let app_settings = crate::settings::settings(cx);
+                    match focus_manager_resolver(cx, None) {
+                        None => CommandResult::Err("window not found: main".to_string()),
+                        Some((window_id, focus_manager)) => {
+                            focus_manager.update(cx, |fm, cx| {
+                                let result = workspace.update(cx, |ws, cx| {
+                                    execute_action(
+                                        ActionRequest::Resize {
+                                            terminal_id,
+                                            cols,
+                                            rows,
+                                        },
+                                        ws,
+                                        window_id,
+                                        fm,
+                                        &*backend,
+                                        &terminals,
+                                        &app_settings,
+                                        cx,
+                                    )
+                                    .into_command_result()
+                                });
+                                cx.notify();
+                                result
+                            })
+                        }
+                    }
+                })
+            }
+            RemoteCommand::ActionFromConnection { .. } => {
+                CommandResult::Err("internal action normalization error".to_string())
             }
             RemoteCommand::GetState => {
                 cx.update(|cx| {

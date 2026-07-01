@@ -79,6 +79,27 @@ fn parse_window_id(s: &str) -> Option<WindowId> {
     }
 }
 
+fn claim_input_resize_owner(action: &ActionRequest, owner_id: Option<&str>) {
+    let terminal_id = match action {
+        ActionRequest::SendText { terminal_id, .. }
+        | ActionRequest::RunCommand { terminal_id, .. }
+        | ActionRequest::SendSpecialKey { terminal_id, .. } => Some(terminal_id.as_str()),
+        _ => None,
+    };
+
+    if let Some(terminal_id) = terminal_id {
+        match owner_id {
+            Some(owner_id) => {
+                okena_terminal::terminal::claim_resize_authority_remote_owner(
+                    terminal_id,
+                    owner_id,
+                );
+            }
+            None => okena_terminal::terminal::claim_resize_authority_remote(terminal_id),
+        }
+    }
+}
+
 /// GPUI-free remote command loop for the headless daemon.
 ///
 /// Processes [`RemoteCommand`]s off the [`BridgeReceiver`] until every bridge
@@ -122,7 +143,22 @@ pub async fn daemon_command_loop(
             Err(_) => break,
         };
 
-        let result: CommandResult = match msg.command {
+        let command = match msg.command {
+            RemoteCommand::Action(action) => {
+                claim_input_resize_owner(&action, None);
+                RemoteCommand::Action(action)
+            }
+            RemoteCommand::ActionFromConnection {
+                action,
+                connection_id,
+            } => {
+                claim_input_resize_owner(&action, Some(&connection_id));
+                RemoteCommand::Action(action)
+            }
+            command => command,
+        };
+
+        let result: CommandResult = match command {
             RemoteCommand::Action(action) => match action {
                 // ── Service actions ──────────────────────────────────────────
                 ActionRequest::StartService { project_id, service_name } => {
@@ -364,6 +400,41 @@ pub async fn daemon_command_loop(
                     }
                 }
             },
+
+            RemoteCommand::ResizeFromConnection {
+                terminal_id,
+                cols,
+                rows,
+                connection_id,
+            } => {
+                if !okena_terminal::terminal::claim_remote_resize_if_allowed(
+                    &terminal_id,
+                    &connection_id,
+                ) {
+                    CommandResult::Ok(None)
+                } else {
+                    let app_settings = settings.lock().clone();
+                    let mut ws = workspace.lock();
+                    run_main_workspace_action(
+                        ActionRequest::Resize {
+                            terminal_id,
+                            cols,
+                            rows,
+                        },
+                        &mut ws,
+                        &mut focus_manager,
+                        &backend,
+                        &terminals,
+                        &app_settings,
+                        &workspace_tick,
+                        &hook_runner,
+                        &hook_monitor,
+                    )
+                }
+            }
+            RemoteCommand::ActionFromConnection { .. } => {
+                CommandResult::Err("internal action normalization error".to_string())
+            }
 
             // ── GetState: full workspace snapshot ────────────────────────────
             RemoteCommand::GetState => {

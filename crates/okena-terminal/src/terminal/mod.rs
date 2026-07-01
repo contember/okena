@@ -35,7 +35,9 @@ mod tests;
 pub use app_version::set_app_version;
 pub use child_processes::{foreground_command, has_child_processes};
 pub use resize_authority::{
-    claim_resize_authority_local, claim_resize_authority_remote, is_resize_authority_local,
+    claim_remote_resize_if_allowed, claim_resize_authority_local,
+    claim_resize_authority_remote, claim_resize_authority_remote_owner,
+    is_resize_authority_local, resize_authority_snapshot,
 };
 pub use transport::TerminalTransport;
 pub use types::{
