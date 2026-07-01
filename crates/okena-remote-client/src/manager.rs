@@ -405,8 +405,8 @@ impl RemoteConnectionManager {
                 return;
             }
         };
-        let token = match config.saved_token {
-            Some(ref t) => t.clone(),
+        let token = match config.effective_auth_token() {
+            Some(t) => t,
             None => {
                 log::error!("send_action: no auth token for connection {}", connection_id);
                 ToastManager::error("No auth token for remote connection".to_string(), cx);
@@ -474,8 +474,8 @@ impl RemoteConnectionManager {
                 return;
             }
         };
-        let token = match config.saved_token {
-            Some(ref t) => t.clone(),
+        let token = match config.effective_auth_token() {
+            Some(t) => t,
             None => {
                 log::error!(
                     "upload_paste_image: no auth token for connection {}",

@@ -63,7 +63,7 @@ impl WindowView {
         let rm = self.remote_manager.as_ref()?.read(cx);
         let connections = rm.connections();
         let (config, _, _) = connections.iter().find(|(c, _, _)| c.id == connection_id)?;
-        let token = config.saved_token.as_ref()?.clone();
+        let token = config.effective_auth_token()?;
         let actual_id = okena_transport::client::strip_prefix(project_id, connection_id);
         Some((config.host.clone(), config.port, token, config.local_endpoint.clone(), actual_id))
     }
@@ -653,8 +653,7 @@ impl WindowView {
     ///    LIVE daemon advertises — this is the replacement, which may have bound
     ///    a DIFFERENT port (the old one can linger in TIME_WAIT).
     /// 3. Back on the GPUI thread, re-point the local connection at the new port
-    ///    (keeping the existing token — the daemon reloads `remote_tokens.json`
-    ///    at startup) and reconnect.
+    ///    (keeping the existing token when TCP auth is needed) and reconnect.
     ///
     /// Failure at any step toasts an error and leaves the connection alone (its
     /// own reconnect/backoff still applies), so the GUI is never left wedged.

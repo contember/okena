@@ -79,4 +79,17 @@ impl RemoteConnectionConfig {
             None => format!("{}:{}", self.host, self.port),
         }
     }
+
+    pub fn is_trusted_local_transport(&self) -> bool {
+        matches!(self.local_endpoint, Some(LocalEndpoint::UnixSocket { .. }))
+    }
+
+    /// Bearer token to send on requests. Same-user Unix socket connections are
+    /// trusted by transport and use an empty token only to satisfy client flows
+    /// that carry a token string alongside remote actions.
+    pub fn effective_auth_token(&self) -> Option<String> {
+        self.saved_token
+            .clone()
+            .or_else(|| self.is_trusted_local_transport().then(String::new))
+    }
 }

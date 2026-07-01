@@ -156,16 +156,14 @@ pub struct MintedToken {
 
 /// Mint a local bearer token in an explicit config dir (testable core).
 ///
-/// Reads `remote_secret`, generates a random token in the same format as
-/// `AuthStore::try_pair`, and appends its HMAC to `remote_tokens.json` (`0600`).
+/// Loads or creates `remote_secret`, generates a random token in the same format
+/// as `AuthStore::try_pair`, and appends its HMAC to `remote_tokens.json`
+/// (`0600`).
 /// An already-running daemon must be told to reload (`POST /v1/auth/reload`,
 /// loopback-only); a freshly spawned daemon picks it up at startup.
 pub fn mint_local_token_in(dir: &Path) -> Result<MintedToken, String> {
-    let secret = std::fs::read(dir.join("remote_secret"))
-        .map_err(|_| "No Okena config found. Has Okena been started at least once?".to_string())?;
-    if secret.len() != 32 {
-        return Err("Invalid remote_secret (wrong size).".into());
-    }
+    let secret = auth::load_or_create_secret_in(dir)
+        .map_err(|e| format!("Failed to initialize remote_secret: {e}"))?;
 
     // Random 32-byte token, base64url (no pad) — matches AuthStore::try_pair.
     let mut token_bytes = [0u8; 32];
@@ -250,8 +248,8 @@ pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
             let exe = std::env::current_exe()?;
             log::info!(
                 "okena-daemon binary not found; falling back to `okena --headless`. \
-                 The dedicated okena-daemon is preferred (build it with `cargo build --release \
-                 -p okena-daemon`); both now support soft-close."
+                 The dedicated okena-daemon is preferred when available; continuing in \
+                 single-binary headless mode."
             );
             std::process::Command::new(exe).arg("--headless").spawn()
         }
@@ -313,8 +311,9 @@ fn daemon_responds_to_health(daemon: &LocalDaemon, timeout: Duration) -> bool {
 /// Result of ensuring a local daemon is available.
 pub struct EnsuredDaemon {
     pub daemon: LocalDaemon,
-    /// Plaintext bearer token to authenticate the client connection.
-    pub token: String,
+    /// Plaintext bearer token to authenticate the client connection. `None`
+    /// means the client connects over a trusted local transport.
+    pub token: Option<String>,
     /// `Some` ONLY when we spawned the daemon in this call. UI-owned lifecycle:
     /// the caller kills only what it spawned; never kill a daemon we merely attached to.
     pub spawned: Option<std::process::Child>,
@@ -491,38 +490,69 @@ fn strip_await_pid_args(args: &mut Vec<String>) {
     }
 }
 
+fn daemon_needs_bearer_token(daemon: &LocalDaemon) -> bool {
+    !matches!(daemon.local_endpoint, Some(LocalEndpoint::UnixSocket { .. }))
+}
+
+fn auth_token_for_daemon(dir: &Path, daemon: &LocalDaemon) -> Result<Option<String>, String> {
+    if !daemon_needs_bearer_token(daemon) {
+        return Ok(None);
+    }
+    let token = mint_local_token_in(dir)?.token;
+    notify_auth_reload(daemon);
+    Ok(Some(token))
+}
+
 /// Ensure a local daemon is reachable from an explicit config dir (testable
-/// core), returning a token to authenticate against it.
+/// core), returning an auth token only when the transport needs bearer auth.
 ///
-/// ATTACH path — a live daemon already runs: mint a token and tell it to reload,
-/// leaving `spawned = None` (we don't own its lifecycle). SPAWN path — none runs:
-/// mint the token *first* so the fresh daemon loads it at startup, spawn it, and
-/// wait for it to advertise. We own the spawned [`std::process::Child`]
-/// (`spawned = Some`), killing it on timeout.
+/// ATTACH path — a live daemon already runs: wait until it answers `/health`,
+/// then mint/reload a token only for TCP fallback. SPAWN path — none runs:
+/// spawn it, wait for the advertised transport, then mint/reload only when that
+/// transport needs bearer auth. We own the spawned [`std::process::Child`]
+/// (`spawned = Some`), killing it on timeout or token setup failure.
 pub fn ensure_local_daemon_in(
     dir: &Path,
     spawn_timeout: Duration,
 ) -> Result<EnsuredDaemon, String> {
-    if let Some(daemon) = running_daemon_in(dir) {
-        // Attach: an already-running daemon must be told to reload the new token.
-        let token = mint_local_token_in(dir)?.token;
-        notify_auth_reload(&daemon);
-        return Ok(EnsuredDaemon {
-            daemon,
-            token,
-            spawned: None,
-        });
+    if running_daemon_in(dir).is_some() {
+        // Attach: a live pid is not enough. The daemon may still be binding
+        // after a restart; do not hand an unreachable endpoint to the UI.
+        if let Some(daemon) = wait_until_reachable_in(dir, spawn_timeout) {
+            let token = auth_token_for_daemon(dir, &daemon)?;
+            return Ok(EnsuredDaemon {
+                daemon,
+                token,
+                spawned: None,
+            });
+        }
+
+        if let Some(daemon) = discover_in(dir)
+            && (daemon.pid == 0 || is_process_alive(daemon.pid))
+        {
+            return Err(format!(
+                "Local daemon pid {} did not respond to /health in time.",
+                daemon.pid
+            ));
+        }
+
+        // It died while we were waiting; fall through and spawn a fresh daemon.
+        log::info!("Existing local daemon disappeared before it became reachable");
     }
 
-    // Spawn: mint before spawning so the fresh daemon loads the token at startup.
-    let token = mint_local_token_in(dir)?.token;
     let mut child = spawn_daemon().map_err(|e| format!("Failed to spawn daemon: {e}"))?;
     match wait_until_reachable_in(dir, spawn_timeout) {
-        Some(daemon) => Ok(EnsuredDaemon {
-            daemon,
-            token,
-            spawned: Some(child),
-        }),
+        Some(daemon) => match auth_token_for_daemon(dir, &daemon) {
+            Ok(token) => Ok(EnsuredDaemon {
+                daemon,
+                token,
+                spawned: Some(child),
+            }),
+            Err(e) => {
+                let _ = child.kill();
+                Err(e)
+            }
+        },
         None => {
             let _ = child.kill();
             Err("Daemon did not become ready in time.".into())
@@ -530,10 +560,9 @@ pub fn ensure_local_daemon_in(
     }
 }
 
-/// Ensure a local daemon is reachable from the user's config dir, returning a
-/// token to authenticate against it.
+/// Ensure a local daemon is reachable from the user's config dir.
 pub fn ensure_local_daemon() -> Result<EnsuredDaemon, String> {
-    ensure_local_daemon_in(&config_dir(), Duration::from_secs(10))
+    ensure_local_daemon_in(&config_dir(), Duration::from_secs(30))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -627,6 +656,30 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    fn spawn_health_server() -> u16 {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind((LOCAL_HOST, 0)).expect("bind health server");
+        let port = listener.local_addr().expect("health server addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    break;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"status":"ok","version":"test","uptime_secs":0}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
     }
 
     #[test]
@@ -731,30 +784,70 @@ mod tests {
     #[test]
     fn ensure_attaches_to_running_daemon() {
         let dir = temp_dir();
+        let port = spawn_health_server();
         let secret = vec![3u8; 32];
         std::fs::write(dir.join("remote_secret"), &secret).unwrap();
-        // pid = this process so the liveness check treats the daemon as alive;
-        // the port is fake, so the reload POST just fails silently.
+        // pid = this process so the liveness check treats the daemon as alive.
         std::fs::write(
             dir.join("remote.json"),
-            format!(r#"{{"port": 19199, "pid": {}, "tls": false}}"#, std::process::id()),
+            format!(r#"{{"port": {port}, "pid": {}, "tls": false}}"#, std::process::id()),
         )
         .unwrap();
 
         let ensured = ensure_local_daemon_in(&dir, Duration::from_millis(200))
             .expect("attach should succeed");
         assert!(ensured.spawned.is_none(), "must not spawn when one is running");
-        assert_eq!(ensured.daemon.port, 19199);
+        assert_eq!(ensured.daemon.port, port);
 
         // The returned token must validate against the secret — its HMAC has to
         // appear in remote_tokens.json (mirrors mint_writes_validatable_token).
+        let token = ensured.token.as_ref().expect("TCP transport needs a token");
         let raw = std::fs::read_to_string(dir.join("remote_tokens.json")).unwrap();
         let persisted: Vec<PersistedToken> = serde_json::from_str(&raw).unwrap();
         let expected = base64::engine::general_purpose::STANDARD
-            .encode(auth::compute_hmac(&secret, ensured.token.as_bytes()));
+            .encode(auth::compute_hmac(&secret, token.as_bytes()));
         assert!(
             persisted.iter().any(|t| t.token_hmac == expected),
             "minted token's HMAC must be persisted"
+        );
+    }
+
+    #[test]
+    fn unix_socket_daemon_does_not_need_token() {
+        let dir = temp_dir();
+        let daemon = LocalDaemon {
+            port: 19100,
+            host: LOCAL_HOST.to_string(),
+            pid: std::process::id(),
+            tls: false,
+            local_endpoint: Some(LocalEndpoint::UnixSocket {
+                path: "/tmp/okena-test.sock".to_string(),
+            }),
+        };
+
+        let token = auth_token_for_daemon(&dir, &daemon).expect("trusted local transport");
+        assert!(token.is_none());
+        assert!(!dir.join("remote_secret").exists());
+        assert!(!dir.join("remote_tokens.json").exists());
+    }
+
+    #[test]
+    fn ensure_rejects_unreachable_live_daemon() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("remote_secret"), vec![3u8; 32]).unwrap();
+        std::fs::write(
+            dir.join("remote.json"),
+            format!(r#"{{"port": 9, "pid": {}, "tls": false}}"#, std::process::id()),
+        )
+        .unwrap();
+
+        let err = match ensure_local_daemon_in(&dir, Duration::from_millis(120)) {
+            Ok(_) => panic!("live but unreachable daemon must not be accepted"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("did not respond to /health"),
+            "unexpected error: {err}"
         );
     }
 
@@ -772,16 +865,26 @@ mod tests {
     }
 
     #[test]
-    fn mint_errors_without_secret() {
+    fn mint_creates_secret_when_absent() {
         let dir = temp_dir();
-        assert!(mint_local_token_in(&dir).is_err());
+        let minted = mint_local_token_in(&dir).expect("mint should create secret");
+        let secret = std::fs::read(dir.join("remote_secret")).unwrap();
+        assert_eq!(secret.len(), 32);
+
+        let raw = std::fs::read_to_string(dir.join("remote_tokens.json")).unwrap();
+        let persisted: Vec<PersistedToken> = serde_json::from_str(&raw).unwrap();
+        let expected = base64::engine::general_purpose::STANDARD
+            .encode(auth::compute_hmac(&secret, minted.token.as_bytes()));
+        assert_eq!(persisted[0].token_hmac, expected);
     }
 
     #[test]
-    fn mint_errors_on_wrong_secret_size() {
+    fn mint_regenerates_wrong_secret_size() {
         let dir = temp_dir();
         std::fs::write(dir.join("remote_secret"), vec![1u8; 16]).unwrap();
-        assert!(mint_local_token_in(&dir).is_err());
+        mint_local_token_in(&dir).expect("mint should regenerate invalid secret");
+        let secret = std::fs::read(dir.join("remote_secret")).unwrap();
+        assert_eq!(secret.len(), 32);
     }
 
     #[test]

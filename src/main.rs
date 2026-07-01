@@ -771,7 +771,7 @@ fn main() {
 
         // Discover-or-spawn the local headless daemon and mint a loopback token.
         // The desktop is always a thin client of this daemon, so a failure here
-        // is fatal. Blocking (up to ~10s on a cold spawn). `Okena::new` registers
+        // is fatal. Blocking (up to ~30s on a cold spawn). `Okena::new` registers
         // the loopback connection and (if we spawned it) owns the daemon's
         // lifecycle.
         let local_daemon = match okena_remote_server::local::ensure_local_daemon() {

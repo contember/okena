@@ -7,8 +7,9 @@
 //! [`okena_workspace::settings::load_settings`] instead of GPUI's
 //! `settings::init_settings(cx)`.
 //!
-//! Wiring the desktop app's `spawn_daemon` to launch THIS binary (instead of
-//! `okena --headless`) is a follow-up — the desktop-as-client phase.
+//! The desktop app's `spawn_daemon` prefers this binary when it exists next to
+//! `okena`; the `okena --headless` fallback remains supported for single-binary
+//! installs.
 
 use std::io::Write;
 use std::net::IpAddr;

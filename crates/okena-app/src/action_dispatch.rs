@@ -375,7 +375,7 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
                 .connections()
                 .into_iter()
                 .find(|(c, _, _)| &c.id == connection_id)?;
-            (config.clone(), config.saved_token.clone()?)
+            (config.clone(), config.effective_auth_token()?)
         };
         let action = okena_core::api::ActionRequest::ExportBuffer {
             terminal_id: remote_terminal_id,

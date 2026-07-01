@@ -512,40 +512,50 @@ pub fn secret_path() -> std::path::PathBuf {
     okena_workspace::persistence::config_dir().join("remote_secret")
 }
 
-/// Load existing app secret or generate a new one.
-fn load_or_create_secret() -> Vec<u8> {
-    let path = secret_path();
+fn generate_secret() -> Vec<u8> {
+    let mut secret = vec![0u8; 32];
+    rand::thread_rng().fill(&mut secret[..]);
+    secret
+}
 
-    // Try to load existing secret
+fn load_or_create_secret_at(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     if let Ok(data) = std::fs::read(&path) {
         if data.len() == 32 {
-            return data;
+            return Ok(data);
         }
         log::warn!("Invalid remote_secret file (wrong size), regenerating");
     }
 
-    // Generate new secret
-    let mut secret = vec![0u8; 32];
-    rand::thread_rng().fill(&mut secret[..]);
-
-    // Persist it
+    let secret = generate_secret();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    if let Err(e) = std::fs::write(&path, &secret) {
-        log::error!("Failed to write remote_secret: {}", e);
-    } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            if let Err(e) = std::fs::set_permissions(&path, perms) {
-                log::warn!("Failed to set remote_secret permissions: {}", e);
-            }
+    std::fs::write(path, &secret)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(path, perms) {
+            log::warn!("Failed to set remote_secret permissions: {}", e);
         }
     }
 
-    secret
+    Ok(secret)
+}
+
+pub(crate) fn load_or_create_secret_in(dir: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    load_or_create_secret_at(&dir.join("remote_secret"))
+}
+
+/// Load existing app secret or generate a new one.
+fn load_or_create_secret() -> Vec<u8> {
+    match load_or_create_secret_at(&secret_path()) {
+        Ok(secret) => secret,
+        Err(e) => {
+            log::error!("Failed to write remote_secret: {}", e);
+            generate_secret()
+        }
+    }
 }
 
 /// Serializable representation of a token record for disk persistence.

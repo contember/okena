@@ -184,7 +184,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         handler: Arc<H>,
         event_tx: async_channel::Sender<ConnectionEvent>,
     ) -> Self {
-        let shared_token = Arc::new(std::sync::RwLock::new(config.saved_token.clone()));
+        let shared_token = Arc::new(std::sync::RwLock::new(config.effective_auth_token()));
         Self {
             config,
             status: ConnectionStatus::Disconnected,
@@ -255,10 +255,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     /// Start the connection process.
     ///
     /// 1. GET /health to verify server is alive
-    /// 2. If saved_token: GET /v1/state to validate token
+    /// 2. If auth token or trusted local transport: GET /v1/state to validate/reach state
     ///    - 200: token valid, proceed to start_ws()
     ///    - 401: token expired, set Pairing status
-    /// 3. No saved_token: set Pairing status
+    /// 3. No auth token: set Pairing status
     pub fn connect(&mut self) {
         // Tear down any prior connection so we don't orphan its WS task.
         self.abort_ws_task();
@@ -271,7 +271,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
         // Update shared token from config
         if let Ok(mut guard) = self.shared_token.write() {
-            *guard = config.saved_token.clone();
+            *guard = config.effective_auth_token();
         }
 
         // Create fresh WS message channel
@@ -399,8 +399,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     .await;
             }
 
-            // Step 2: Validate saved token (if any)
-            if let Some(token) = config.saved_token.clone() {
+            // Step 2: Validate saved token, or trust same-user Unix socket transport.
+            if let Some(token) = config.effective_auth_token() {
+                let trusted_local_transport =
+                    config.saved_token.is_none() && config.is_trusted_local_transport();
                 match client
                     .get(format!("{}/v1/state", base_url))
                     .header("Authorization", format!("Bearer {}", token))
@@ -409,7 +411,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     .await
                 {
                     Ok(resp) if resp.status().is_success() => {
-                        log::info!("Token valid for {}", config.display_endpoint());
+                        if trusted_local_transport {
+                            log::info!(
+                                "Trusted local transport accepted for {}",
+                                config.display_endpoint()
+                            );
+                        } else {
+                            log::info!("Token valid for {}", config.display_endpoint());
+                        }
                         // Token is valid - start WebSocket
                         Self::run_ws_loop(config, token, event_tx, ws_tx, ws_rx, handler, shared_token).await;
                         return;

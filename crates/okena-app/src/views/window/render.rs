@@ -899,7 +899,7 @@ impl Render for WindowView {
                                 config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID
                             })
                             .and_then(|(config, _, _)| {
-                                config.saved_token.clone().map(|token| PairingEndpoint {
+                                config.effective_auth_token().map(|token| PairingEndpoint {
                                     host: config.host.clone(),
                                     port: config.port,
                                     token,

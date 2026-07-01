@@ -191,7 +191,7 @@ impl Okena {
                 name: "Local".to_string(),
                 host: ensured.daemon.host().to_string(),
                 port: ensured.daemon.port,
-                saved_token: Some(ensured.token.clone()),
+                saved_token: ensured.token.clone(),
                 token_obtained_at: None,
                 tls: false,
                 pinned_cert_sha256: None,
