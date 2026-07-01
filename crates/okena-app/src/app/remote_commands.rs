@@ -8,9 +8,13 @@ use crate::services::manager::{ServiceManager, ServiceStatus};
 use crate::terminal::backend::TerminalBackend;
 use crate::views::window::TerminalsRegistry;
 use crate::workspace::actions::execute::{ensure_terminal, execute_action};
+use crate::workspace::hook_monitor::HookMonitor;
 use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
 use okena_core::api::ApiGitStatus;
+use okena_workspace::actions::soft_close::{
+    begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow, SoftCloseDeadlines,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::watch as tokio_watch;
@@ -88,6 +92,8 @@ pub(crate) async fn remote_command_loop(
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
     service_manager: Entity<ServiceManager>,
     action_dispatcher: ActionDispatcher,
+    hook_monitor: HookMonitor,
+    deadlines: SoftCloseDeadlines,
     cx: &mut AsyncApp,
 ) {
     loop {
@@ -211,6 +217,121 @@ pub(crate) async fn remote_command_loop(
                                 Err(e) => CommandResult::Err(e),
                             }
                         })
+                    }
+
+                    // ── Soft-close: undo (restore the ejected pane) ──────────
+                    ActionRequest::UndoSoftClose { terminal_id } => {
+                        // Resolve the dormant main FocusManager (headless has a
+                        // single synthetic window). Then clear the deadline +
+                        // restore the pane through the shared flow.
+                        cx.update(|cx| {
+                            match focus_manager_resolver(cx, None) {
+                                None => CommandResult::Err("window not found: main".to_string()),
+                                Some((_window_id, focus_manager)) => {
+                                    focus_manager.update(cx, |fm, cx| {
+                                        workspace.update(cx, |ws, cx| {
+                                            undo_soft_close_flow(
+                                                &deadlines, ws, fm, &terminals, &terminal_id, cx,
+                                            );
+                                        });
+                                        cx.notify();
+                                    });
+                                    CommandResult::Ok(None)
+                                }
+                            }
+                        })
+                    }
+
+                    // ── Soft-close: finalize now ("Close now") ───────────────
+                    ActionRequest::CloseTerminalNow { terminal_id } => {
+                        cx.update(|cx| {
+                            workspace.update(cx, |ws, cx| {
+                                close_now_flow(
+                                    &deadlines, ws, &*backend, &terminals, &terminal_id, cx,
+                                );
+                            });
+                            CommandResult::Ok(None)
+                        })
+                    }
+
+                    // ── Close terminal: grace-aware soft close ───────────────
+                    // Mirrors the daemon-core loop: a busy terminal is ejected
+                    // from the layout but its PTY is kept alive for the grace
+                    // period (the finalizer tick kills it on expiry); idle
+                    // terminals and `grace == 0` keep the immediate close.
+                    ActionRequest::CloseTerminal { project_id, terminal_id } => {
+                        let grace = cx.update(|cx| crate::settings::settings(cx).terminal_close_grace_secs);
+
+                        if grace == 0 {
+                            // Feature off → immediate close (unchanged behavior).
+                            cx.update(|cx| {
+                                let app_settings = crate::settings::settings(cx);
+                                match focus_manager_resolver(cx, None) {
+                                    None => CommandResult::Err("window not found: main".to_string()),
+                                    Some((window_id, focus_manager)) => {
+                                        focus_manager.update(cx, |fm, cx| {
+                                            let result = workspace.update(cx, |ws, cx| {
+                                                execute_action(
+                                                    ActionRequest::CloseTerminal { project_id, terminal_id },
+                                                    ws, window_id, fm, &*backend, &terminals, &app_settings, cx,
+                                                )
+                                                .into_command_result()
+                                            });
+                                            cx.notify();
+                                            result
+                                        })
+                                    }
+                                }
+                            })
+                        } else {
+                            // Probe busy-ness OFF the gpui thread (forks
+                            // tmux/lsof/pgrep). Hold NO gpui lock across it.
+                            let (busy, command) = smol::unblock({
+                                let backend = backend.clone();
+                                let tid = terminal_id.clone();
+                                move || probe_busy(&*backend, &tid)
+                            })
+                            .await;
+
+                            cx.update(|cx| {
+                                let app_settings = crate::settings::settings(cx);
+                                match focus_manager_resolver(cx, None) {
+                                    None => CommandResult::Err("window not found: main".to_string()),
+                                    Some((window_id, focus_manager)) => {
+                                        focus_manager.update(cx, |fm, cx| {
+                                            // Try the soft close first when busy;
+                                            // `None` means the terminal wasn't in
+                                            // the layout, so fall through to the
+                                            // immediate close (same as idle).
+                                            if busy {
+                                                let toast = workspace.update(cx, |ws, cx| {
+                                                    begin_soft_close_flow(
+                                                        &deadlines, ws, fm, &terminals,
+                                                        &project_id, &terminal_id, grace, command, cx,
+                                                    )
+                                                });
+                                                if let Some(toast) = toast {
+                                                    hook_monitor.push_toast(toast);
+                                                    cx.notify();
+                                                    return CommandResult::Ok(None);
+                                                }
+                                            }
+                                            // Idle, or busy-but-not-in-layout →
+                                            // immediate close.
+                                            let result = workspace.update(cx, |ws, cx| {
+                                                execute_action(
+                                                    ActionRequest::CloseTerminal { project_id, terminal_id },
+                                                    ws, window_id, fm, &*backend, &terminals, &app_settings, cx,
+                                                )
+                                                .into_command_result()
+                                            });
+                                            cx.notify();
+                                            result
+                                        })
+                                    }
+                                }
+                            })
+                        }
                     }
 
                     action => {
