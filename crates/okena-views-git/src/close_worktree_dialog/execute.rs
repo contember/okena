@@ -19,6 +19,7 @@ impl CloseWorktreeDialog {
         }
 
         self.error_message = None;
+        self.show_force_remove = false;
 
         let project_id = self.project_id.clone();
         let project_name = self.project_name.clone();
@@ -548,6 +549,10 @@ impl CloseWorktreeDialog {
                         Err(e) => {
                             let _ = this.update(cx, |this, cx| {
                                 this.error_message = Some(format!("Failed to remove worktree: {}", e));
+                                // Removal failed (e.g. the worktree is orphaned —
+                                // its directory exists but git no longer tracks
+                                // it). Offer the destructive force-delete path.
+                                this.show_force_remove = true;
                                 this.processing = ProcessingState::Idle;
                                 cx.notify();
                             });
@@ -555,6 +560,53 @@ impl CloseWorktreeDialog {
                     }
                 });
             }
+        })
+        .detach();
+    }
+
+    /// Destructive fallback shown after a removal failure: delete the worktree's
+    /// on-disk directory and prune the main repo's metadata, then de-register
+    /// the project. Used for orphaned worktrees that git refuses to remove.
+    pub(super) fn force_remove(&mut self, cx: &mut Context<Self>) {
+        if self.processing != ProcessingState::Idle {
+            return;
+        }
+
+        self.error_message = None;
+
+        let project_id = self.project_id.clone();
+        let global_hooks = self.hooks_config.clone();
+        let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
+
+        self.processing = ProcessingState::Removing;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.update(|cx| {
+                let result = focus_manager.update(cx, |fm, cx| {
+                    let result = workspace.update(cx, |ws, cx| {
+                        ws.force_remove_worktree_project(fm, &project_id, &global_hooks, cx)
+                    });
+                    cx.notify();
+                    result
+                });
+
+                match result {
+                    Ok(()) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.close(cx);
+                        });
+                    }
+                    Err(e) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.error_message = Some(format!("Force delete failed: {}", e));
+                            this.processing = ProcessingState::Idle;
+                            cx.notify();
+                        });
+                    }
+                }
+            });
         })
         .detach();
     }

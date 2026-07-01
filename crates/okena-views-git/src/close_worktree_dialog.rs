@@ -64,6 +64,10 @@ pub struct CloseWorktreeDialog {
     pub(super) error_message: Option<String>,
     pub(super) processing: ProcessingState,
     pub(super) hooks_config: HooksConfig,
+    /// Set when the final worktree removal failed (e.g. the worktree is
+    /// orphaned and git refuses to remove it). Unlocks the destructive
+    /// force-delete button in the footer.
+    pub(super) show_force_remove: bool,
 }
 
 impl CloseWorktreeDialog {
@@ -110,6 +114,7 @@ impl CloseWorktreeDialog {
             error_message: None,
             processing: ProcessingState::Idle,
             hooks_config,
+            show_force_remove: false,
         }
     }
 

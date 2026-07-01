@@ -12,6 +12,26 @@ pub fn get_repo_root(path: &Path) -> Option<PathBuf> {
     repo.workdir().map(|p| p.to_path_buf())
 }
 
+/// Resolve the worktree (or repo) root by walking up to the nearest `.git`
+/// entry, without opening the repo.
+///
+/// Unlike [`get_repo_root`], this does not go through gix, so it still works
+/// when the `.git` pointer file dangles — e.g. an orphaned worktree whose
+/// metadata entry was pruned from the main repo. For an orphan the `.git`
+/// pointer *file* still exists at the worktree root, so this returns that root.
+/// For a monorepo subdir project it walks up to the checkout root.
+///
+/// Returns None if no `.git` entry is found before reaching the filesystem root.
+pub fn resolve_worktree_root_fs(path: &Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        if current.join(".git").exists() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
 pub fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
