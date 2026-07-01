@@ -152,7 +152,7 @@ pub(crate) async fn remote_command_loop(
 
                     // ── App-scoped: settings / theme / command palette ────
                     ActionRequest::GetSettings => {
-                        cx.update(|cx| super::remote_config::get_settings(cx))
+                        cx.update(super::remote_config::get_settings)
                     }
                     ActionRequest::GetSettingsSchema => {
                         cx.update(|_cx| super::remote_config::get_settings_schema())
@@ -161,7 +161,7 @@ pub(crate) async fn remote_command_loop(
                         cx.update(|cx| super::remote_config::set_settings(cx, patch))
                     }
                     ActionRequest::GetThemes => {
-                        cx.update(|cx| super::remote_config::get_themes(cx))
+                        cx.update(super::remote_config::get_themes)
                     }
                     ActionRequest::GetTheme { id } => {
                         cx.update(|cx| super::remote_config::get_theme(cx, id))
