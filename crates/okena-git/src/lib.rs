@@ -198,10 +198,23 @@ pub fn get_git_status(path: &Path) -> Option<GitStatus> {
 /// previous cached value is returned, so a single bad poll cycle doesn't
 /// blank the +/- badge in the project header.
 pub fn refresh_git_status(path: &Path) -> Option<GitStatus> {
+    refresh_git_status_with_pr_base(path, None)
+}
+
+/// Like [`refresh_git_status`], but when `pr_base` is `Some(name)` the
+/// ahead/behind counts (and `review_base`) are measured against the branch's
+/// open-PR base instead of the repo default — so a PR onto `develop`/a stacked
+/// branch shows the right numbers and diff base. `pr_base` is the PR's base
+/// branch name (from `gh`); the watcher passes the value it already caches, so
+/// no extra network happens on this hot path.
+pub fn refresh_git_status_with_pr_base(path: &Path, pr_base: Option<&str>) -> Option<GitStatus> {
     let path_buf = path.to_path_buf();
     match repository::get_status(path) {
         repository::StatusFetch::Status(s) => {
-            let s = *s;
+            let mut s = *s;
+            if let Some(base) = pr_base {
+                repository::apply_pr_base(&mut s, path, base);
+            }
             with_cache(|cache| { cache.insert(path_buf, Some(s.clone())); });
             Some(s)
         }

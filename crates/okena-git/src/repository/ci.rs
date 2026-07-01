@@ -60,8 +60,8 @@ pub fn get_pr_info(path: &Path) -> Option<crate::PrInfo> {
         command("gh")
             .args([
                 "pr", "list", "--head", &branch, "--state", "all", "--limit", "1",
-                "--json", "url,state,isDraft,number",
-                "--jq", ".[0] | [.url, .state, .isDraft, .number] | @tsv",
+                "--json", "url,state,isDraft,number,baseRefName",
+                "--jq", ".[0] | [.url, .state, .isDraft, .number, .baseRefName] | @tsv",
             ])
             .current_dir(path_str),
         GH_TIMEOUT,
@@ -70,30 +70,44 @@ pub fn get_pr_info(path: &Path) -> Option<crate::PrInfo> {
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout.trim();
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 4 && parts[0].starts_with("http") {
-            let url = parts[0].to_string();
-            let is_draft = parts[2] == "true";
-            let number = parts[3].parse::<u32>().unwrap_or(0);
-            let state = if is_draft {
-                crate::PrState::Draft
-            } else {
-                match parts[1] {
-                    "OPEN" => crate::PrState::Open,
-                    "MERGED" => crate::PrState::Merged,
-                    "CLOSED" => crate::PrState::Closed,
-                    other => {
-                        log::warn!("Unknown PR state '{}', defaulting to Open", other);
-                        crate::PrState::Open
-                    }
-                }
-            };
-            return Some(crate::PrInfo { url, state, number });
-        }
+        return parse_pr_list_tsv(stdout.trim());
     }
 
     None
+}
+
+/// Parse the single TSV line our `gh pr list --jq ... | @tsv` query emits into a
+/// [`PrInfo`]. Fields, in order: url, state, isDraft, number, baseRefName (the
+/// last may be absent on older `gh`). Returns `None` for an empty line or one
+/// that doesn't start with a URL (i.e. no PR found for the branch).
+fn parse_pr_list_tsv(line: &str) -> Option<crate::PrInfo> {
+    let parts: Vec<&str> = line.split('\t').collect();
+    if parts.len() < 4 || !parts[0].starts_with("http") {
+        return None;
+    }
+    let url = parts[0].to_string();
+    let is_draft = parts[2] == "true";
+    let number = parts[3].parse::<u32>().unwrap_or(0);
+    let state = if is_draft {
+        crate::PrState::Draft
+    } else {
+        match parts[1] {
+            "OPEN" => crate::PrState::Open,
+            "MERGED" => crate::PrState::Merged,
+            "CLOSED" => crate::PrState::Closed,
+            other => {
+                log::warn!("Unknown PR state '{}', defaulting to Open", other);
+                crate::PrState::Open
+            }
+        }
+    };
+    // baseRefName: the PR's target branch. Absent/empty -> None.
+    let base = parts
+        .get(4)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Some(crate::PrInfo { url, state, number, base })
 }
 
 /// Compute elapsed milliseconds between two ISO-8601 timestamps (those
@@ -453,6 +467,43 @@ pub(crate) fn parse_branch_ci(
 
 #[cfg(test)]
 mod tests {
+    // ─── PR list TSV parsing tests ─────────────────────────────────────
+
+    #[test]
+    fn parse_pr_list_tsv_captures_base_branch() {
+        let line = "https://github.com/o/r/pull/9\tOPEN\tfalse\t9\tdevelop";
+        let pr = super::parse_pr_list_tsv(line).expect("should parse");
+        assert_eq!(pr.url, "https://github.com/o/r/pull/9");
+        assert_eq!(pr.state, crate::PrState::Open);
+        assert_eq!(pr.number, 9);
+        assert_eq!(pr.base.as_deref(), Some("develop"));
+    }
+
+    #[test]
+    fn parse_pr_list_tsv_base_absent_is_none() {
+        // Older `gh` without baseRefName: only four fields.
+        let line = "https://github.com/o/r/pull/3\tMERGED\tfalse\t3";
+        let pr = super::parse_pr_list_tsv(line).expect("should parse");
+        assert_eq!(pr.state, crate::PrState::Merged);
+        assert_eq!(pr.number, 3);
+        assert_eq!(pr.base, None);
+    }
+
+    #[test]
+    fn parse_pr_list_tsv_draft_overrides_state() {
+        let line = "https://github.com/o/r/pull/5\tOPEN\ttrue\t5\tmain";
+        let pr = super::parse_pr_list_tsv(line).expect("should parse");
+        assert_eq!(pr.state, crate::PrState::Draft);
+        assert_eq!(pr.base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn parse_pr_list_tsv_empty_or_no_pr_is_none() {
+        assert!(super::parse_pr_list_tsv("").is_none());
+        // A jq null/empty result — no leading URL.
+        assert!(super::parse_pr_list_tsv("\t\t\t").is_none());
+    }
+
     // ─── CI check parsing tests ────────────────────────────────────────
 
     #[test]

@@ -361,6 +361,31 @@ pub fn count_ahead_behind_vs(path: &Path, base_ref: &str) -> Option<(usize, usiz
     Some((ahead, behind))
 }
 
+/// Re-point a status's ahead/behind (and `review_base`) at the branch's open-PR
+/// base when it differs from the repo default. Without this, the header always
+/// measures against the default branch (e.g. `main`) even when the PR actually
+/// targets `develop` or a stacked branch — so the counts, the base label, and
+/// the click-to-review diff would all be wrong.
+///
+/// `pr_base` is the PR's base branch *name* (from `gh`, e.g. `develop`); it is
+/// resolved to a concrete ref via [`resolve_base_ref`] (preferring
+/// `upstream`/`origin`). `default_branch` is left untouched so the label chip
+/// surfaces the non-default base instead of staying hidden. No-op when the PR
+/// targets the ref we already compare against, or when nothing resolves.
+pub fn apply_pr_base(status: &mut GitStatus, path: &Path, pr_base: &str) {
+    let Some(base_ref) = super::branch::resolve_base_ref(path, pr_base) else {
+        return;
+    };
+    if status.review_base.as_deref() == Some(base_ref.as_str()) {
+        return;
+    }
+    if let Some((ahead, behind)) = count_ahead_behind_vs(path, &base_ref) {
+        status.ahead = Some(ahead);
+        status.behind = Some(behind);
+        status.review_base = Some(base_ref);
+    }
+}
+
 /// Count commits that haven't been pushed to the branch's own remote.
 /// Compares against `origin/<branch>` rather than `@{u}` because worktree
 /// branches created from `origin/main` auto-track main, which would
@@ -674,6 +699,38 @@ mod tests {
         // contributes nothing to the +/- totals.
         std::fs::write(repo.join("file.txt"), [0u8, 1, 2, 0, 5]).unwrap();
         assert_eq!(get_diff_stats(&repo), Some((0, 0)));
+    }
+
+    #[test]
+    fn apply_pr_base_repoints_ahead_behind_at_pr_target() {
+        let (_tmp, repo) = init_temp_repo();
+        let commit = |name: &str| {
+            std::fs::write(repo.join(name), "x").unwrap();
+            git_in(&repo, &["add", "."]);
+            git_in(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", name]);
+        };
+        // main -> develop (+1 commit) -> feature (+2 commits), HEAD on feature.
+        git_in(&repo, &["checkout", "-b", "develop"]);
+        commit("d0.txt");
+        git_in(&repo, &["checkout", "-b", "feature"]);
+        commit("f0.txt");
+        commit("f1.txt");
+
+        let StatusFetch::Status(mut s) = get_status(&repo) else {
+            panic!("expected a fresh status");
+        };
+        // Default base is main: feature carries develop's commit plus its own two.
+        assert_eq!(s.review_base.as_deref(), Some("main"));
+        assert_eq!((s.ahead, s.behind), (Some(3), Some(0)));
+
+        // The PR actually targets develop: only the two feature commits are ahead.
+        apply_pr_base(&mut s, &repo, "develop");
+        assert_eq!(s.review_base.as_deref(), Some("develop"));
+        assert_eq!((s.ahead, s.behind), (Some(2), Some(0)));
+
+        // No-op when the PR targets the base we already compare against.
+        apply_pr_base(&mut s, &repo, "develop");
+        assert_eq!((s.ahead, s.behind), (Some(2), Some(0)));
     }
 }
 

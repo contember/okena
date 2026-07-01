@@ -185,6 +185,11 @@ pub struct PrInfo {
     pub url: String,
     pub state: PrState,
     pub number: u32,
+    /// The PR's base (target) branch, e.g. `main` or `develop`. Used to measure
+    /// ahead/behind against what the PR actually diffs against rather than the
+    /// repo default. `None` when unknown (older hosts, or `gh` didn't report it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -838,6 +843,7 @@ mod tests {
                 url: "https://github.com/o/r/pull/7".into(),
                 state: PrState::Open,
                 number: 7,
+                base: Some("main".into()),
             }),
             ci_checks: Some(CiCheckSummary {
                 status: CiStatus::Failure,
