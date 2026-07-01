@@ -5,8 +5,8 @@
 use crate::bridge::{BridgeMessage, CommandResult, RemoteCommand};
 use crate::routes::{AppState, PeerInfo};
 use crate::types::{
-    ActionRequest, WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
-    FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT,
+    ActionRequest, FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT, WsInbound, WsOutbound,
+    build_binary_frame, build_pty_frame, parse_binary_frame,
 };
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, Query, State, WebSocketUpgrade};
@@ -157,8 +157,18 @@ async fn handle_ws(
                                 // NOT be dropped.
                                 let pre_existing: std::collections::HashSet<String> =
                                     sizes.keys().cloned().collect();
-                                let resp = serde_json::to_string(&WsOutbound::Subscribed { mappings, sizes }).expect("BUG: WsOutbound must serialize");
+                                let resp = serde_json::to_string(&WsOutbound::Subscribed { mappings, sizes: sizes.clone() }).expect("BUG: WsOutbound must serialize");
                                 if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                                    break;
+                                }
+                                if send_authority_resizes(
+                                    &out_tx,
+                                    &sizes,
+                                    &connection_owner_id,
+                                )
+                                .await
+                                .is_err()
+                                {
                                     break;
                                 }
 
@@ -496,14 +506,40 @@ fn terminal_resized_for_recipient(
     owner_connection_id: Option<&str>,
     recipient_connection_id: &str,
 ) -> WsOutbound {
-    let server_owns = server_owns
-        || owner_connection_id.is_some_and(|owner| owner != recipient_connection_id);
+    let server_owns =
+        server_owns || owner_connection_id.is_some_and(|owner| owner != recipient_connection_id);
     WsOutbound::TerminalResized {
         terminal_id,
         cols,
         rows,
         server_owns,
     }
+}
+
+async fn send_authority_resizes(
+    out_tx: &mpsc::Sender<Message>,
+    sizes: &HashMap<String, (u16, u16)>,
+    recipient_connection_id: &str,
+) -> Result<(), ()> {
+    let authority = okena_terminal::terminal::resize_authority_snapshot("");
+    if !authority.claimed {
+        return Ok(());
+    }
+    for (terminal_id, (cols, rows)) in sizes {
+        let msg = terminal_resized_for_recipient(
+            terminal_id.clone(),
+            *cols,
+            *rows,
+            authority.local,
+            authority.remote_owner_id.as_deref(),
+            recipient_connection_id,
+        );
+        let resp = serde_json::to_string(&msg).expect("BUG: WsOutbound must serialize");
+        if out_tx.send(Message::Text(resp.into())).await.is_err() {
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -601,8 +637,7 @@ async fn drain_or_forward_post_snapshot(
                 server_owns,
                 owner_connection_id,
             } => {
-                if !pre_existing.contains(&terminal_id)
-                    && subscribed_ids.contains_key(&terminal_id)
+                if !pre_existing.contains(&terminal_id) && subscribed_ids.contains_key(&terminal_id)
                 {
                     resize_msgs.retain(|m| {
                         !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if *id == terminal_id)
@@ -658,12 +693,13 @@ async fn send_snapshots(
                 })
                 .await
                 .is_ok()
-                && let Ok(CommandResult::OkBytes(snapshot)) = reply_rx.await {
-                    let frame = build_binary_frame(FRAME_TYPE_SNAPSHOT, stream_id, &snapshot);
-                    if out_tx.send(Message::Binary(frame.into())).await.is_err() {
-                        return Err(());
-                    }
+                && let Ok(CommandResult::OkBytes(snapshot)) = reply_rx.await
+            {
+                let frame = build_binary_frame(FRAME_TYPE_SNAPSHOT, stream_id, &snapshot);
+                if out_tx.send(Message::Binary(frame.into())).await.is_err() {
+                    return Err(());
                 }
+            }
         }
     }
     Ok(())
