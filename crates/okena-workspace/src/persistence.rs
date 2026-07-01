@@ -575,7 +575,7 @@ fn merge_missing_window_layout_state(target: &mut ClientWindowLayout, source: Cl
             .find(|extra| extra.id == source_extra.id)
         {
             merge_missing_window_state(target_extra, source_extra);
-        } else if window_state_has_presentation(&source_extra) {
+        } else if target.extra_windows.is_empty() && window_state_has_presentation(&source_extra) {
             target.extra_windows.push(source_extra);
         }
     }
@@ -1097,6 +1097,41 @@ mod tests {
             .main_window
             .hidden_project_ids
             .contains("remote:local-daemon:workspace-hidden"));
+    }
+
+    #[test]
+    fn merge_missing_window_layout_state_does_not_append_stale_workspace_extras() {
+        let client_extra_id =
+            uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let workspace_extra_id =
+            uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let mut target_extra = WindowState::default();
+        target_extra.id = client_extra_id;
+        target_extra.os_bounds = Some(crate::state::WindowBounds {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            width: 1200.0,
+            height: 800.0,
+        });
+        let mut source_extra = WindowState::default();
+        source_extra.id = workspace_extra_id;
+        source_extra.os_bounds = target_extra.os_bounds;
+
+        let mut target = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: WindowState::default(),
+            extra_windows: vec![target_extra],
+        };
+        let source = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: WindowState::default(),
+            extra_windows: vec![source_extra],
+        };
+
+        merge_missing_window_layout_state(&mut target, source);
+
+        assert_eq!(target.extra_windows.len(), 1);
+        assert_eq!(target.extra_windows[0].id, client_extra_id);
     }
 
     fn make_project(id: &str) -> ProjectData {
