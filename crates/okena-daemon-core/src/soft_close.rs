@@ -1,10 +1,14 @@
 //! Daemon-side grace-period finalizer. The command loop ejects a busy terminal
-//! and records a deadline here; this loop kills the PTY once the grace elapses.
+//! and records a deadline; this loop kills the PTY once the grace elapses.
 //! Undo / Close-now (handled in the command loop) remove the deadline first.
+//!
+//! The finalize logic itself lives in the shared, runtime-agnostic engine
+//! ([`okena_workspace::actions::soft_close`]); this module only owns the tokio
+//! timer that ticks it. The headless loop drives the same engine off a gpui
+//! timer instead.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::watch;
@@ -12,12 +16,16 @@ use tokio::sync::watch;
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
+use okena_workspace::actions::soft_close::finalize_expired;
 use okena_workspace::state::Workspace;
 
 use crate::workspace_cx::DaemonWorkspaceCx;
 
 /// Shared `terminal_id -> grace deadline` map for in-flight soft-closes.
-pub type SoftCloseDeadlines = Arc<Mutex<HashMap<String, Instant>>>;
+///
+/// Re-exported from the shared engine so daemon-core callers (`daemon.rs`) stay
+/// unchanged now that the type lives in `okena-workspace`.
+pub use okena_workspace::actions::soft_close::SoftCloseDeadlines;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -36,33 +44,8 @@ pub async fn run_soft_close_poll(
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
 
-        // Collect + remove expired ids under the deadline lock only.
-        let expired: Vec<String> = {
-            let now = Instant::now();
-            let mut d = deadlines.lock();
-            let exp: Vec<String> =
-                d.iter().filter(|(_, dl)| **dl <= now).map(|(t, _)| t.clone()).collect();
-            for t in &exp {
-                d.remove(t);
-            }
-            exp
-        };
-        if expired.is_empty() {
-            continue;
-        }
-
-        // Finalize on the workspace (queues kills), then drain the kill queue.
-        let kills = {
-            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-            let mut ws = workspace.lock();
-            for tid in &expired {
-                ws.finalize_soft_close(tid, &mut cx);
-            }
-            ws.drain_pending_terminal_kills()
-        };
-        for id in kills {
-            backend.kill(&id);
-            terminals.lock().remove(&id);
-        }
+        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+        let mut ws = workspace.lock();
+        finalize_expired(&deadlines, &mut ws, &*backend, &terminals, &mut cx);
     }
 }

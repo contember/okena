@@ -248,6 +248,11 @@ pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
         Some(daemon) => std::process::Command::new(daemon).spawn(),
         None => {
             let exe = std::env::current_exe()?;
+            log::info!(
+                "okena-daemon binary not found; falling back to `okena --headless`. \
+                 The dedicated okena-daemon is preferred (build it with `cargo build --release \
+                 -p okena-daemon`); both now support soft-close."
+            );
             std::process::Command::new(exe).arg("--headless").spawn()
         }
     }

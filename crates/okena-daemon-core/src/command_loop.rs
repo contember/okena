@@ -38,7 +38,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use okena_app_core::workspace::actions::execute::{
     ensure_terminal, execute_action, spawn_uninitialized_terminals,
@@ -47,12 +46,13 @@ use okena_core::api::{
     ActionRequest, ApiFolder, ApiFullscreen, ApiGitStatus, ApiProject, ApiServiceInfo, ApiWindow,
     ApiWorktreeMetadata, CommandResult, StateResponse,
 };
-use okena_core::soft_close::{encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX};
-use okena_state::{Toast, ToastAction, ToastActionStyle};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
 use okena_services::manager::{ServiceKind, ServiceManager, ServiceStatus};
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
+use okena_workspace::actions::soft_close::{
+    begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow,
+};
 use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
 use okena_workspace::state::{ProjectData, WindowId, Workspace};
@@ -210,29 +210,31 @@ pub async fn daemon_command_loop(
 
                 // ── Soft-close: undo (restore the ejected pane) ──────────────
                 ActionRequest::UndoSoftClose { terminal_id } => {
-                    deadlines.lock().remove(&terminal_id);
-                    // The PTY is restorable only if still in the registry; the
-                    // daemon owns it, so the alive-check happens here.
-                    let alive = terminals.lock().contains_key(&terminal_id);
                     let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
                     let mut ws = workspace.lock();
-                    ws.undo_soft_close(&mut focus_manager, &terminal_id, alive, &mut cx);
+                    undo_soft_close_flow(
+                        &deadlines,
+                        &mut ws,
+                        &mut focus_manager,
+                        &terminals,
+                        &terminal_id,
+                        &mut cx,
+                    );
                     CommandResult::Ok(None)
                 }
 
                 // ── Soft-close: finalize now ("Close now") ───────────────────
                 ActionRequest::CloseTerminalNow { terminal_id } => {
-                    deadlines.lock().remove(&terminal_id);
-                    let kills = {
-                        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                        let mut ws = workspace.lock();
-                        ws.finalize_soft_close(&terminal_id, &mut cx);
-                        ws.drain_pending_terminal_kills()
-                    };
-                    for id in kills {
-                        backend.kill(&id);
-                        terminals.lock().remove(&id);
-                    }
+                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                    let mut ws = workspace.lock();
+                    close_now_flow(
+                        &deadlines,
+                        &mut ws,
+                        &*backend,
+                        &terminals,
+                        &terminal_id,
+                        &mut cx,
+                    );
                     CommandResult::Ok(None)
                 }
 
@@ -270,15 +272,7 @@ pub async fn daemon_command_loop(
                         let probe = {
                             let backend = backend.clone();
                             let tid = terminal_id.clone();
-                            runtime.spawn_blocking(move || {
-                                let fg = backend.get_foreground_shell_pid(&tid);
-                                let busy = fg
-                                    .map(okena_terminal::terminal::has_child_processes)
-                                    .unwrap_or(false);
-                                let command =
-                                    fg.and_then(okena_terminal::terminal::foreground_command);
-                                (busy, command)
-                            })
+                            runtime.spawn_blocking(move || probe_busy(&*backend, &tid))
                         };
                         let (busy, command) = probe.await.unwrap_or((false, None));
 
@@ -300,21 +294,37 @@ pub async fn daemon_command_loop(
                         } else {
                             // Soft close: eject the pane (mirrors back), keep the
                             // PTY, surface an Undo/Close-now toast, and arm the
-                            // grace deadline for the finalizer loop.
-                            let mut cx = DaemonWorkspaceCx::new(
-                                &workspace_tick,
-                                &hook_runner,
-                                &hook_monitor,
-                            );
-                            let mut ws = workspace.lock();
-                            let path = ws
-                                .project(&project_id)
-                                .and_then(|p| p.layout.as_ref())
-                                .and_then(|l| l.find_terminal_path(&terminal_id));
-                            match path {
+                            // grace deadline for the finalizer loop. `None` from
+                            // the flow means the terminal wasn't in the layout —
+                            // fall back to an immediate close.
+                            let toast = {
+                                let mut cx = DaemonWorkspaceCx::new(
+                                    &workspace_tick,
+                                    &hook_runner,
+                                    &hook_monitor,
+                                );
+                                let mut ws = workspace.lock();
+                                begin_soft_close_flow(
+                                    &deadlines,
+                                    &mut ws,
+                                    &mut focus_manager,
+                                    &terminals,
+                                    &project_id,
+                                    &terminal_id,
+                                    grace,
+                                    command,
+                                    &mut cx,
+                                )
+                            };
+                            match toast {
+                                Some(toast) => {
+                                    if let Some(hm) = &hook_monitor {
+                                        hm.push_toast(toast);
+                                    }
+                                    CommandResult::Ok(None)
+                                }
                                 None => {
                                     // Not in the layout — immediate close.
-                                    drop(ws);
                                     let app_settings = settings.lock().clone();
                                     let mut ws = workspace.lock();
                                     run_main_workspace_action(
@@ -331,35 +341,6 @@ pub async fn daemon_command_loop(
                                         &hook_runner,
                                         &hook_monitor,
                                     )
-                                }
-                                Some(path) => {
-                                    let toast_id = format!("soft-close:{terminal_id}");
-                                    let toast = build_soft_close_toast(
-                                        &ws,
-                                        &terminals,
-                                        &project_id,
-                                        &terminal_id,
-                                        command,
-                                        &toast_id,
-                                        grace,
-                                    );
-                                    ws.begin_soft_close(
-                                        &mut focus_manager,
-                                        &project_id,
-                                        &path,
-                                        &terminal_id,
-                                        &toast_id,
-                                        &mut cx,
-                                    );
-                                    drop(ws);
-                                    deadlines.lock().insert(
-                                        terminal_id.clone(),
-                                        Instant::now() + Duration::from_secs(grace as u64),
-                                    );
-                                    if let Some(hm) = &hook_monitor {
-                                        hm.push_toast(toast);
-                                    }
-                                    CommandResult::Ok(None)
                                 }
                             }
                         }
@@ -756,109 +737,6 @@ fn run_main_workspace_action(
     }
 
     result
-}
-
-/// Build the two-line Undo / Close-now toast for a busy soft-close (GPUI-free):
-///
-///   title:  Closed "make"             — what's closing
-///   detail: okena · ~/projects/okena  — project · working directory (muted)
-///
-/// `command` is the live foreground command (probed off-thread by the caller),
-/// used as the title fallback when the terminal has no meaningful display name.
-fn build_soft_close_toast(
-    ws: &Workspace,
-    terminals: &TerminalsRegistry,
-    project_id: &str,
-    terminal_id: &str,
-    command: Option<String>,
-    toast_id: &str,
-    grace: u32,
-) -> Toast {
-    // Read the live OSC title + cwd under a single registry lock.
-    let (osc_title, cwd) = {
-        let reg = terminals.lock();
-        let term = reg.get(terminal_id);
-        (term.and_then(|t| t.title()), term.map(|t| t.current_cwd()))
-    };
-
-    let (title, detail) = ws
-        .project(project_id)
-        .map(|p| {
-            // Title label precedence: a meaningful display name (user-set custom
-            // name or non-prompt OSC title) wins; else the live foreground
-            // command; else a generic "Terminal closed".
-            let display = p.terminal_display_name(terminal_id, osc_title);
-            let label = if display == p.directory_name() { command } else { Some(display) };
-            let title = match label {
-                Some(l) => format!("Closed \u{201c}{}\u{201d}", truncate_label(&l)),
-                None => "Terminal closed".to_string(),
-            };
-            // Detail line: project name, plus the cwd when we have one.
-            let mut detail = p.name.clone();
-            if let Some(cwd) = &cwd {
-                detail.push_str(" \u{00b7} ");
-                detail.push_str(&shorten_cwd(cwd));
-            }
-            (title, detail)
-        })
-        .unwrap_or_else(|| ("Terminal closed".to_string(), String::new()));
-
-    let actions = vec![
-        ToastAction::new(
-            encode_action(SOFT_CLOSE_UNDO_PREFIX, project_id, terminal_id),
-            "Undo",
-            ToastActionStyle::Primary,
-        ),
-        ToastAction::new(
-            encode_action(SOFT_CLOSE_KILL_PREFIX, project_id, terminal_id),
-            "Close now",
-            ToastActionStyle::Danger,
-        ),
-    ];
-    let base = Toast::info(title)
-        .with_id(toast_id)
-        .with_ttl(Duration::from_secs(grace as u64))
-        .with_actions(actions);
-    if detail.is_empty() { base } else { base.with_detail(detail) }
-}
-
-/// Cap a terminal label so the toast stays tidy. OSC titles can be arbitrarily
-/// long; truncate on a char boundary with an ellipsis. Pure port of the GUI
-/// helper.
-fn truncate_label(label: &str) -> String {
-    const MAX_CHARS: usize = 42;
-    if label.chars().count() <= MAX_CHARS {
-        return label.to_string();
-    }
-    let mut out: String = label.chars().take(MAX_CHARS - 1).collect();
-    out.push('\u{2026}');
-    out
-}
-
-/// Home-relative, tail-preserving working directory for the toast detail line.
-/// `~`-collapses the home dir and keeps the *end* of long paths. Pure port of
-/// the GUI helper.
-fn shorten_cwd(path: &str) -> String {
-    let shown = match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && path == home => return "~".to_string(),
-        Ok(home) if !home.is_empty() && path.starts_with(&format!("{home}/")) => {
-            format!("~{}", &path[home.len()..])
-        }
-        _ => path.to_string(),
-    };
-    const MAX_CHARS: usize = 30;
-    if shown.chars().count() <= MAX_CHARS {
-        return shown;
-    }
-    let tail: String = shown
-        .chars()
-        .rev()
-        .take(MAX_CHARS - 1)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("\u{2026}{tail}")
 }
 
 #[cfg(test)]
