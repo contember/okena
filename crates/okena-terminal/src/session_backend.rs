@@ -164,6 +164,12 @@ pub enum ResolvedBackend {
     Psmux,
 }
 
+/// Session-name prefix for Okena-managed persistent sessions (tmux/screen/dtach).
+/// Shared by the session-name builder and the dtach socket-GC filter so cleanup
+/// only ever considers our own `tm-*.sock` files — never the local daemon socket
+/// (`<16hex>.sock`) that lives in the same runtime dir.
+pub const SESSION_NAME_PREFIX: &str = "tm-";
+
 impl ResolvedBackend {
     /// Check if this backend supports session persistence
     pub fn supports_persistence(&self) -> bool {
@@ -179,7 +185,7 @@ impl ResolvedBackend {
         } else {
             terminal_id
         };
-        format!("tm-{}", short_id)
+        format!("{SESSION_NAME_PREFIX}{short_id}")
     }
 
     /// Get the socket path for dtach sessions
@@ -451,8 +457,43 @@ impl ResolvedBackend {
     }
 }
 
+/// Minimum age before a `tm-*.sock` file is a GC candidate. A socket created
+/// just before this scan may not yet appear in the `/proc` snapshot, so treat
+/// recent files as live (TOCTOU defense-in-depth on top of the name filter).
+#[cfg(unix)]
+const DTACH_SOCKET_GC_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a filename matches the dtach/tmux socket naming scheme (`tm-*.sock`).
+/// Pure so it's unit-testable. The dtach GC runs in the daemon's own process and
+/// scans the shared runtime dir, which also holds the daemon's control socket
+/// (`<16hex>.sock`) — this filter keeps GC from ever considering those.
+#[cfg(unix)]
+fn is_stale_gc_candidate(name: &str) -> bool {
+    name.starts_with(SESSION_NAME_PREFIX) && name.ends_with(".sock")
+}
+
+/// Whether a socket that old is too fresh to GC (see `DTACH_SOCKET_GC_MIN_AGE`).
+/// Pure so the age threshold is unit-testable independent of filesystem mtime.
+#[cfg(unix)]
+fn is_too_fresh_to_gc(age: std::time::Duration) -> bool {
+    age < DTACH_SOCKET_GC_MIN_AGE
+}
+
+/// Age of a socket file from its mtime. `None` when the file is gone/unreadable;
+/// a future mtime (clock skew) reads as "just now" so it's treated as fresh.
+#[cfg(unix)]
+fn socket_age(path: &std::path::Path) -> Option<std::time::Duration> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.elapsed().unwrap_or(std::time::Duration::ZERO))
+}
+
 /// Remove dtach socket files whose dtach process is no longer running.
 /// Called once at startup to clean up after crashes or ungraceful exits.
+///
+/// Only `tm-*.sock` files (our own session sockets) are ever candidates — the
+/// daemon control socket living in the same dir is off-limits (see
+/// `is_stale_gc_candidate`) — and recently-created sockets are skipped to avoid
+/// a TOCTOU delete of a socket not yet in the `/proc` snapshot.
 #[cfg(unix)]
 pub fn cleanup_stale_dtach_sockets() {
     let dir = get_dtach_socket_dir();
@@ -464,7 +505,14 @@ pub fn cleanup_stale_dtach_sockets() {
     let socket_paths: Vec<std::path::PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("sock"))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_stale_gc_candidate)
+        })
+        // TOCTOU guard: skip freshly-created sockets that may not be in the
+        // upcoming /proc snapshot yet.
+        .filter(|p| !socket_age(p).is_some_and(is_too_fresh_to_gc))
         .collect();
 
     // One /proc socket scan for every socket at once, instead of an `lsof -t`
@@ -1022,6 +1070,31 @@ mod tests {
         let dtach_backend = ResolvedBackend::Dtach;
         let dtach_name = dtach_backend.session_name("12345678-1234-1234-1234-123456789012");
         assert_eq!(dtach_name, "tm-12345678");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_gc_candidate_matches_only_dtach_sockets() {
+        // Our own session sockets: candidates.
+        assert!(is_stale_gc_candidate("tm-01736dcb.sock"));
+        assert!(is_stale_gc_candidate("tm-12345678.sock"));
+        // Daemon control socket (`<16hex>.sock`): must NEVER be a candidate.
+        assert!(!is_stale_gc_candidate("b7253cd8ed7892af.sock"));
+        // Wrong extension / unrelated files.
+        assert!(!is_stale_gc_candidate("tm-x.txt"));
+        assert!(!is_stale_gc_candidate("okena.lock"));
+        assert!(!is_stale_gc_candidate("remote.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn too_fresh_to_gc_respects_min_age() {
+        use std::time::Duration;
+        assert!(is_too_fresh_to_gc(Duration::from_secs(0)));
+        assert!(is_too_fresh_to_gc(Duration::from_secs(30)));
+        // At or beyond the threshold the file is old enough to GC.
+        assert!(!is_too_fresh_to_gc(DTACH_SOCKET_GC_MIN_AGE));
+        assert!(!is_too_fresh_to_gc(Duration::from_secs(120)));
     }
 
     #[test]
