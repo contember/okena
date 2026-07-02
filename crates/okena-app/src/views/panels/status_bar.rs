@@ -330,7 +330,10 @@ impl Render for StatusBar {
                             .gap(px(6.0))
                             .child(
                                 div()
-                                    .text_color(rgb(t.term_cyan))
+                                    // Neutral footer chrome (matches version/time),
+                                    // not a terminal ANSI accent — the accent read
+                                    // inconsistent in themes like Pastel.
+                                    .text_color(rgb(t.text_secondary))
                                     .child(format!("REMOTE :{}", port))
                             )
                             .child(
@@ -340,7 +343,9 @@ impl Render for StatusBar {
                                     .px(px(6.0))
                                     .py(px(1.0))
                                     .rounded(px(3.0))
-                                    .text_color(rgb(t.term_yellow))
+                                    // White label + hover bg for the clickable
+                                    // affordance, instead of the ANSI yellow accent.
+                                    .text_color(rgb(t.text_primary))
                                     .text_size(ui_text_sm(cx))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
