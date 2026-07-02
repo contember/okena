@@ -500,10 +500,16 @@ impl WindowView {
                 }));
             });
 
+            self.status_bar.update(cx, |status_bar, cx| {
+                status_bar.set_remote_manager(manager.clone(), cx);
+            });
+
             // Observe remote manager for sidebar updates
             let sidebar_for_observe = self.sidebar.clone();
+            let status_bar_for_observe = self.status_bar.clone();
             cx.observe(&manager, move |_this, _rm, cx| {
                 sidebar_for_observe.update(cx, |_, cx| cx.notify());
+                status_bar_for_observe.update(cx, |_, cx| cx.notify());
             }).detach();
 
             // Repaint the sidebar on remote terminal activity (bell / idle).

@@ -1,12 +1,15 @@
 use crate::keybindings::ToggleSidebar;
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::workspace::state::Workspace;
 use crate::ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::h_flex;
+use gpui_component::{h_flex, v_flex};
+use okena_core::api::ApiLayoutNode;
 use okena_extensions::{ExtensionInstance, ExtensionRegistry};
+use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -23,6 +26,19 @@ struct SystemStats {
     cpu_usage: f32,
     memory_used_gb: f32,
     memory_total_gb: f32,
+}
+
+#[derive(Clone)]
+struct RemoteStatusSnapshot {
+    id: String,
+    name: String,
+    endpoint: String,
+    status: ConnectionStatus,
+    tls: bool,
+    project_count: usize,
+    window_count: usize,
+    terminal_count: usize,
+    has_state: bool,
 }
 
 /// Global system info cache
@@ -78,6 +94,9 @@ pub struct StatusBar {
     /// (cancels background tasks, releases views).
     active_extensions: HashMap<String, ExtensionInstance>,
     sidebar_open: bool,
+    remote_manager: Option<Entity<RemoteConnectionManager>>,
+    remote_status_bounds: Bounds<Pixels>,
+    remote_popover_visible: bool,
 }
 
 impl StatusBar {
@@ -133,7 +152,15 @@ impl StatusBar {
         cx.observe(&focus_manager, |_, _, cx| cx.notify()).detach();
 
         Self {
-            workspace, focus_manager, cache, activate_fns, active_extensions, sidebar_open: true,
+            workspace,
+            focus_manager,
+            cache,
+            activate_fns,
+            active_extensions,
+            sidebar_open: true,
+            remote_manager: None,
+            remote_status_bounds: Bounds::default(),
+            remote_popover_visible: false,
         }
     }
 
@@ -173,6 +200,11 @@ impl StatusBar {
         }
     }
 
+    pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
+        self.remote_manager = Some(manager);
+        cx.notify();
+    }
+
     fn format_time() -> String {
         match OffsetDateTime::now_local() {
             Ok(now) => format!("{:02}:{:02}", now.hour(), now.minute()),
@@ -183,12 +215,253 @@ impl StatusBar {
             }
         }
     }
+
+    fn remote_snapshots(&self, cx: &App) -> Vec<RemoteStatusSnapshot> {
+        let Some(manager) = &self.remote_manager else {
+            return Vec::new();
+        };
+
+        manager.read(cx).connections().into_iter()
+            .filter(|(config, _, _)| config.id != LOCAL_DAEMON_CONNECTION_ID)
+            .map(|(config, status, state)| {
+                let (project_count, window_count, terminal_count) = match state {
+                    Some(state) => {
+                        let terminals = state.projects.iter()
+                            .map(|project| Self::layout_terminal_count(project.layout.as_ref()))
+                            .sum();
+                        (state.projects.len(), state.windows.len(), terminals)
+                    }
+                    None => (0, 0, 0),
+                };
+
+                RemoteStatusSnapshot {
+                    id: config.id.clone(),
+                    name: config.name.clone(),
+                    endpoint: config.display_endpoint(),
+                    status: status.clone(),
+                    tls: config.tls,
+                    project_count,
+                    window_count,
+                    terminal_count,
+                    has_state: state.is_some(),
+                }
+            })
+            .collect()
+    }
+
+    fn layout_terminal_count(node: Option<&ApiLayoutNode>) -> usize {
+        match node {
+            Some(ApiLayoutNode::Terminal { terminal_id, .. }) => {
+                if terminal_id.is_some() { 1 } else { 0 }
+            }
+            Some(ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. }) => {
+                children.iter()
+                    .map(|child| Self::layout_terminal_count(Some(child)))
+                    .sum()
+            }
+            None => 0,
+        }
+    }
+
+    fn count_label(count: usize, singular: &str) -> String {
+        if count == 1 {
+            format!("1 {singular}")
+        } else {
+            format!("{count} {singular}s")
+        }
+    }
+
+    fn status_label(status: &ConnectionStatus) -> String {
+        match status {
+            ConnectionStatus::Disconnected => "Disconnected".to_string(),
+            ConnectionStatus::Connecting => "Connecting".to_string(),
+            ConnectionStatus::Pairing => "Pairing".to_string(),
+            ConnectionStatus::Connected => "Connected".to_string(),
+            ConnectionStatus::Reconnecting { attempt } => format!("Reconnecting #{attempt}"),
+            ConnectionStatus::Error(message) => {
+                if message.is_empty() {
+                    "Error".to_string()
+                } else {
+                    format!("Error: {message}")
+                }
+            }
+        }
+    }
+
+    fn status_color(status: &ConnectionStatus, t: &okena_core::theme::ThemeColors) -> u32 {
+        match status {
+            ConnectionStatus::Connected => t.term_green,
+            ConnectionStatus::Connecting
+            | ConnectionStatus::Pairing
+            | ConnectionStatus::Reconnecting { .. } => t.term_yellow,
+            ConnectionStatus::Disconnected => t.text_muted,
+            ConnectionStatus::Error(_) => t.term_red,
+        }
+    }
+
+    fn aggregate_remote_color(snapshots: &[RemoteStatusSnapshot], t: &okena_core::theme::ThemeColors) -> u32 {
+        if snapshots.iter().any(|snap| matches!(snap.status, ConnectionStatus::Error(_))) {
+            return t.term_red;
+        }
+        if snapshots.iter().any(|snap| {
+            matches!(
+                snap.status,
+                ConnectionStatus::Connecting
+                    | ConnectionStatus::Pairing
+                    | ConnectionStatus::Reconnecting { .. }
+            )
+        }) {
+            return t.term_yellow;
+        }
+        if snapshots.iter().all(|snap| matches!(snap.status, ConnectionStatus::Connected)) {
+            return t.term_green;
+        }
+        t.text_muted
+    }
+
+    fn render_remote_status_popover(
+        &self,
+        snapshots: &[RemoteStatusSnapshot],
+        t: &okena_core::theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !self.remote_popover_visible || snapshots.is_empty() {
+            return div().size_0().into_any_element();
+        }
+
+        let bounds = self.remote_status_bounds;
+        let position = point(bounds.origin.x + bounds.size.width, bounds.origin.y - px(6.0));
+
+        let mut rows = Vec::new();
+        for snapshot in snapshots {
+            let status_label = Self::status_label(&snapshot.status);
+            let detail = if snapshot.has_state {
+                format!(
+                    "{} / {} / {}",
+                    Self::count_label(snapshot.project_count, "project"),
+                    Self::count_label(snapshot.terminal_count, "terminal"),
+                    Self::count_label(snapshot.window_count, "window"),
+                )
+            } else {
+                "Waiting for state".to_string()
+            };
+            let security = if snapshot.tls { "TLS" } else { "no TLS" };
+            let status_color = Self::status_color(&snapshot.status, t);
+
+            rows.push(
+                div()
+                    .id(ElementId::Name(format!("remote-status-row-{}", snapshot.id).into()))
+                    .py(px(6.0))
+                    .border_t_1()
+                    .border_color(rgb(t.border))
+                    .flex()
+                    .items_start()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .mt(px(5.0))
+                            .w(px(7.0))
+                            .h(px(7.0))
+                            .rounded_full()
+                            .bg(rgb(status_color))
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        v_flex()
+                            .gap(px(2.0))
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                h_flex()
+                                    .gap(px(6.0))
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .text_size(ui_text_ms(cx))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(t.text_primary))
+                                            .child(snapshot.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(ui_text_sm(cx))
+                                            .text_color(rgb(if snapshot.tls { t.text_muted } else { t.term_yellow }))
+                                            .child(security),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(snapshot.endpoint.clone()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(status_color))
+                                    .child(status_label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child(detail),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        deferred(
+            anchored()
+                .position(position)
+                .anchor(Anchor::BottomRight)
+                .snap_to_window()
+                .child(
+                    okena_ui::popover::popover_panel("remote-status-popover", t)
+                        .w(px(360.0))
+                        .max_h(px(280.0))
+                        .overflow_y_scroll()
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .pb(px(6.0))
+                                .child(
+                                    div()
+                                        .text_size(ui_text_sm(cx))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(t.text_secondary))
+                                        .child("REMOTE CONNECTIONS"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(ui_text_sm(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(format!("{}", snapshots.len())),
+                                ),
+                        )
+                        .children(rows),
+                ),
+        )
+        .into_any_element()
+    }
 }
 
 impl Render for StatusBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let stats = self.cache.lock().stats();
+        let remote_snapshots = self.remote_snapshots(cx);
 
         // Get current time using chrono-free approach
         let time_str = Self::format_time();
@@ -360,6 +633,65 @@ impl Render for StatusBar {
                     );
                 }
 
+                if !remote_snapshots.is_empty() {
+                    let connected = remote_snapshots
+                        .iter()
+                        .filter(|snap| matches!(snap.status, ConnectionStatus::Connected))
+                        .count();
+                    let status_color = Self::aggregate_remote_color(&remote_snapshots, &t);
+                    let entity_for_bounds = cx.entity().clone();
+
+                    right = right.child(
+                        div()
+                            .id("remote-status-pill")
+                            .relative()
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.remote_popover_visible = !this.remote_popover_visible;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .w(px(7.0))
+                                    .h(px(7.0))
+                                    .rounded_full()
+                                    .bg(rgb(status_color)),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(t.text_secondary))
+                                    .child("REMOTES"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(status_color))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format!("{}/{}", connected, remote_snapshots.len())),
+                            )
+                            .child(
+                                canvas(
+                                    move |bounds, _window, app| {
+                                        entity_for_bounds.update(app, |this: &mut StatusBar, _cx| {
+                                            this.remote_status_bounds = bounds;
+                                        });
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full(),
+                            ),
+                    );
+                } else if self.remote_popover_visible {
+                    self.remote_popover_visible = false;
+                }
+
                 // Focused project indicator
                 let focused_project = {
                     let ws = self.workspace.read(cx);
@@ -426,6 +758,7 @@ impl Render for StatusBar {
                             .text_color(rgb(t.text_secondary))
                             .child(time_str)
                     )
+                    .child(self.render_remote_status_popover(&remote_snapshots, &t, cx))
             })
     }
 }
