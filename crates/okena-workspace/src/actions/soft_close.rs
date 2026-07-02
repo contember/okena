@@ -506,7 +506,7 @@ mod tests {
     use gpui::AppContext as _;
 
     use super::{
-        begin_soft_close_flow, close_now_flow, finalize_expired, undo_soft_close_flow,
+        begin_soft_close_flow, build_soft_close_toast, close_now_flow, finalize_expired, undo_soft_close_flow,
         PendingDecision, SoftCloseDeadlines,
     };
     use crate::focus::FocusManager;
@@ -515,7 +515,7 @@ mod tests {
     use okena_core::theme::FolderColor;
     use okena_terminal::backend::TerminalBackend;
     use okena_terminal::shell_config::ShellType;
-    use okena_terminal::terminal::TerminalTransport;
+    use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
     use okena_terminal::TerminalsRegistry;
     use parking_lot::Mutex;
     use std::collections::HashMap;
@@ -887,6 +887,7 @@ mod tests {
 
             let toast = toast.expect("terminal in layout → toast returned");
             assert_eq!(toast.id, "soft-close:a");
+            assert_eq!(toast.message, "Closed \u{201c}make\u{201d}");
             assert_eq!(toast.actions.len(), 2, "Undo + Close now");
             assert!(ws.has_pending_close("a"), "pending close recorded");
             assert!(deadlines.lock().contains_key("a"), "deadline armed");
@@ -896,6 +897,33 @@ mod tests {
                 "pane ejected from layout"
             );
         });
+    }
+
+    #[test]
+    fn soft_close_toast_ignores_codex_main_thread_title_for_command_label() {
+        let ws = Workspace::new(workspace_data(term("a")));
+        let terminal = Arc::new(Terminal::new(
+            "a".to_string(),
+            TerminalSize::default(),
+            Arc::new(StubTransport),
+            "/tmp/test".to_string(),
+        ));
+        terminal.process_output(b"\x1b]0;MainThread\x07");
+
+        let terminals = empty_registry();
+        terminals.lock().insert("a".to_string(), terminal);
+
+        let toast = build_soft_close_toast(
+            &ws,
+            &terminals,
+            "p1",
+            "a",
+            Some("codex".to_string()),
+            "soft-close:a",
+            5,
+        );
+
+        assert_eq!(toast.message, "Closed \u{201c}codex\u{201d}");
     }
 
     #[gpui::test]

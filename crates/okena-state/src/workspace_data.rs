@@ -261,15 +261,14 @@ pub struct ProjectData {
 
 impl ProjectData {
     /// Get the display name for a terminal.
-    /// Priority: user-set custom name > non-prompt OSC title > directory-based fallback.
-    /// OSC titles matching bash prompt format (user@host:...) are ignored in favor
-    /// of the directory name. Explicit titles (e.g. from printf) are shown.
+    /// Priority: user-set custom name > useful OSC title > directory-based fallback.
+    /// Shell/runtime-generated titles are ignored in favor of the directory name.
     pub fn terminal_display_name(&self, terminal_id: &str, osc_title: Option<String>) -> String {
         if let Some(custom_name) = self.terminal_names.get(terminal_id) {
             return custom_name.clone();
         }
         if let Some(ref title) = osc_title
-            && !is_bash_prompt_title(title) {
+            && !is_generated_terminal_title(title) {
                 return title.clone();
             }
         self.directory_name()
@@ -302,6 +301,10 @@ pub fn is_bash_prompt_title(title: &str) -> bool {
         i += 1;
     }
     i > 1 && i < bytes.len() && bytes[i] == b':'
+}
+
+fn is_generated_terminal_title(title: &str) -> bool {
+    is_bash_prompt_title(title) || title == "MainThread"
 }
 
 fn default_workspace_version() -> u32 {
@@ -379,6 +382,15 @@ mod tests {
         );
         assert_eq!(
             project.terminal_display_name("t1", Some("root@server:/var/log".to_string())),
+            "myproject"
+        );
+    }
+
+    #[test]
+    fn terminal_display_name_ignores_codex_main_thread_title() {
+        let project = make_project("/home/user/myproject");
+        assert_eq!(
+            project.terminal_display_name("t1", Some("MainThread".to_string())),
             "myproject"
         );
     }
