@@ -18,11 +18,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+/// Identity guard for [`kill_process_by_pid`]: OS pids recycle, so a pid taken
+/// from a possibly-stale `remote.json` may now belong to an unrelated process.
+/// Only a process whose name or executable file name starts with "okena" (the
+/// `okena`/`okena-daemon` binaries) may be killed. Pure so it's unit-testable.
+fn is_okena_process(name: Option<&str>, exe_file_name: Option<&str>) -> bool {
+    let is_okena = |s: &str| s.starts_with("okena");
+    name.is_some_and(is_okena) || exe_file_name.is_some_and(is_okena)
+}
+
 /// Best-effort kill a process by pid — SIGKILL on Unix, `TerminateProcess` on
 /// Windows, matching `std::process::Child::kill`. Used by the UI-owned daemon
 /// lifecycle to reap a daemon we own but hold no `Child` for: a restart spawns a
 /// *detached* successor, known to us only by the pid it advertises in
 /// `remote.json`. A pid of 0 (unknown) or an already-dead process is a no-op.
+/// Refuses (warn + skip) when the process at that pid doesn't look like an okena
+/// binary — see [`is_okena_process`].
 fn kill_process_by_pid(pid: u32) {
     if pid == 0 {
         return;
@@ -32,6 +43,17 @@ fn kill_process_by_pid(pid: u32) {
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[spid]), true);
     if let Some(proc) = sys.process(spid) {
+        let name = proc.name().to_str();
+        let exe_file_name = proc
+            .exe()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str());
+        if !is_okena_process(name, exe_file_name) {
+            log::warn!(
+                "Refusing to kill pid {pid}: process {name:?} (exe {exe_file_name:?}) is not an okena binary — the pid was likely recycled"
+            );
+            return;
+        }
         proc.kill();
     }
 }
@@ -518,6 +540,36 @@ impl Render for Okena {
 /// [`recovery_backoff_delay`]) and toast only once, so we never spam.
 const RECOVERY_TOAST_AFTER_ATTEMPTS: u32 = 5;
 
+/// Attach patience for the recovery path's `ensure` calls. Shorter than the 30s
+/// startup default so a live-but-unreachable daemon (which makes `ensure` error
+/// only after the attach timeout) is escalated on sooner.
+const RECOVERY_ATTACH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Spawn budget for the recovery path — the full startup patience, NOT the short
+/// attach patience: daemon boot loads the workspace before the server binds and
+/// can take many seconds under load, and `ensure` SIGKILLs its own child on this
+/// deadline — a short one would kill every mid-boot respawn forever.
+const RECOVERY_SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// After this many consecutive failed recovery attempts, escalate: if a live but
+/// unreachable local daemon is what's blocking us, kill it so the next attempt
+/// takes the spawn path instead of forever re-hitting the attach timeout.
+const RECOVERY_ESCALATE_AFTER_ATTEMPTS: u32 = 2;
+
+/// Confirm-probe timeout before an escalation kill. Deliberately much longer
+/// than the 300ms probe `ensure` uses internally: under a system-wide stall a
+/// slow-but-healthy daemon must not be misread as dead and killed, while a truly
+/// dead socket still fails the connect instantly, so the extra patience is free.
+const RECOVERY_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Whether recovery should escalate to killing the local daemon. Escalate only
+/// once we've failed enough consecutive times AND a live-but-unreachable daemon
+/// is the thing blocking us (so we never kill a daemon that's merely absent, nor
+/// one that's actually healthy). Pure so the decision is unit-testable.
+fn should_escalate_recovery(failed_attempts: u32, live_unreachable_daemon: bool) -> bool {
+    failed_attempts >= RECOVERY_ESCALATE_AFTER_ATTEMPTS && live_unreachable_daemon
+}
+
 /// Backoff before the next local-daemon recovery attempt, given how many have
 /// already failed. Ramps 1 → 2 → 5 → 10s then caps at 30s: quick enough to heal
 /// a brief daemon gap (the common fast-restart race) yet without a spawn storm
@@ -559,11 +611,17 @@ impl Okena {
                     break;
                 }
 
-                // `ensure_local_daemon` blocks up to 30s; run it on the blocking
-                // pool like `perform_restart_daemon` does with restart.
+                // `ensure_local_daemon_with_timeouts` blocks (short attach
+                // patience, full spawn budget); run it on the blocking pool
+                // like `perform_restart_daemon` does with restart.
                 let outcome = cx
                     .background_executor()
-                    .spawn(async move { okena_remote_server::local::ensure_local_daemon() })
+                    .spawn(async move {
+                        okena_remote_server::local::ensure_local_daemon_with_timeouts(
+                            RECOVERY_ATTACH_TIMEOUT,
+                            RECOVERY_SPAWN_TIMEOUT,
+                        )
+                    })
                     .await;
 
                 match outcome {
@@ -589,6 +647,49 @@ impl Okena {
                     Err(msg) => {
                         failed_attempts += 1;
                         log::warn!("Local daemon recovery attempt {failed_attempts} failed: {msg}");
+
+                        // Escalation: a live-but-unreachable daemon makes every
+                        // `ensure` error at the attach timeout, forever. Once we've
+                        // failed enough times, kill that wedged daemon so the next
+                        // `ensure` takes the spawn path. Never while quitting; this
+                        // loop only ever handles the local daemon.
+                        if failed_attempts >= RECOVERY_ESCALATE_AFTER_ATTEMPTS
+                            && !quitting.load(Ordering::SeqCst)
+                        {
+                            let stuck_daemon = cx
+                                .background_executor()
+                                .spawn(async {
+                                    okena_remote_server::local::running_daemon().filter(|d| {
+                                        !okena_remote_server::local::daemon_endpoint_responds(
+                                            d,
+                                            RECOVERY_HEALTH_PROBE_TIMEOUT,
+                                        )
+                                    })
+                                })
+                                .await;
+                            if should_escalate_recovery(failed_attempts, stuck_daemon.is_some())
+                                && let Some(daemon) = stuck_daemon
+                            {
+                                log::warn!(
+                                    "Local daemon pid {} is live but unreachable after {failed_attempts} failed recovery attempts; killing it so the next attempt respawns",
+                                    daemon.pid
+                                );
+                                kill_process_by_pid(daemon.pid);
+                                // If the killed daemon was our own spawned child,
+                                // wait() it now — otherwise the zombie would linger
+                                // for the app lifetime if the next ensure ATTACHES
+                                // (which never adopts a new Child handle).
+                                let _ = this.update(cx, |this, _cx| {
+                                    if let Some(child) = this.spawned_daemon.as_mut()
+                                        && child.id() == daemon.pid
+                                    {
+                                        let _ = child.wait();
+                                        this.spawned_daemon = None;
+                                    }
+                                });
+                            }
+                        }
+
                         // Update every attempt so a dropped entity ends the loop
                         // (and the app isn't left spawning daemons post-quit).
                         let should_toast = failed_attempts == RECOVERY_TOAST_AFTER_ATTEMPTS;
@@ -657,12 +758,25 @@ impl Okena {
 
         // If we spawned a fresh daemon, we now own it. Reap the old (dead) child
         // handle first so we don't leak a zombie, then take over the new one.
-        if let Some(child) = ensured.spawned {
-            if let Some(mut old) = self.spawned_daemon.take() {
-                let _ = old.kill();
-                let _ = old.wait();
+        match ensured.spawned {
+            Some(child) => {
+                if let Some(mut old) = self.spawned_daemon.take() {
+                    let _ = old.kill();
+                    let _ = old.wait();
+                }
+                self.spawned_daemon = Some(child);
             }
-            self.spawned_daemon = Some(child);
+            None => {
+                // Attach path: reap our previous child only if it ALREADY exited
+                // (e.g. after an escalation kill) so no zombie outlives recovery.
+                // try_wait never touches a live child — the daemon we attached to
+                // may well BE that child.
+                if let Some(child) = self.spawned_daemon.as_mut()
+                    && matches!(child.try_wait(), Ok(Some(_)))
+                {
+                    self.spawned_daemon = None;
+                }
+            }
         }
 
         crate::workspace::toast::ToastManager::info("Local daemon reconnected".to_string(), cx);
@@ -671,8 +785,37 @@ impl Okena {
 
 #[cfg(test)]
 mod tests {
-    use super::{recovery_backoff_delay, RECOVERY_TOAST_AFTER_ATTEMPTS};
+    use super::{
+        is_okena_process, recovery_backoff_delay, should_escalate_recovery,
+        RECOVERY_ESCALATE_AFTER_ATTEMPTS, RECOVERY_TOAST_AFTER_ATTEMPTS,
+    };
     use std::time::Duration;
+
+    #[test]
+    fn okena_process_identity_guard() {
+        // Our binaries — killable.
+        assert!(is_okena_process(Some("okena"), None));
+        assert!(is_okena_process(Some("okena-daemon"), None));
+        assert!(is_okena_process(None, Some("okena-daemon")));
+        // Exe name matches even when the reported name doesn't (truncation etc.).
+        assert!(is_okena_process(Some("some-thread"), Some("okena")));
+        // Recycled pid pointing at an unrelated process — never kill.
+        assert!(!is_okena_process(Some("cargo"), Some("cargo")));
+        assert!(!is_okena_process(Some("firefox"), None));
+        assert!(!is_okena_process(None, None));
+    }
+
+    #[test]
+    fn escalates_only_after_threshold_and_when_stuck() {
+        // Below the threshold: never escalate, even if a daemon is stuck.
+        assert!(!should_escalate_recovery(0, true));
+        assert!(!should_escalate_recovery(RECOVERY_ESCALATE_AFTER_ATTEMPTS - 1, true));
+        // At/after the threshold WITH a live-unreachable daemon: escalate.
+        assert!(should_escalate_recovery(RECOVERY_ESCALATE_AFTER_ATTEMPTS, true));
+        assert!(should_escalate_recovery(RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5, true));
+        // No live-unreachable daemon (absent or healthy): never kill.
+        assert!(!should_escalate_recovery(RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5, false));
+    }
 
     #[test]
     fn backoff_ramps_then_caps_at_30s() {

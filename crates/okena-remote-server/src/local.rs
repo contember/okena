@@ -295,6 +295,14 @@ fn wait_until_reachable_in(dir: &Path, timeout: Duration) -> Option<LocalDaemon>
     }
 }
 
+/// Probe a discovered local daemon's `/health` over its advertised transport
+/// (Unix socket when present, else loopback TCP). Exposed so callers such as the
+/// GUI's self-heal loop can distinguish a live-but-unreachable daemon from a
+/// dead one without duplicating the transport-selection logic.
+pub fn daemon_endpoint_responds(daemon: &LocalDaemon, timeout: Duration) -> bool {
+    daemon_responds_to_health(daemon, timeout)
+}
+
 fn daemon_responds_to_health(daemon: &LocalDaemon, timeout: Duration) -> bool {
     let (client, url) = blocking_client_and_url(
         daemon.host(),
@@ -584,6 +592,13 @@ fn auth_token_for_daemon(dir: &Path, daemon: &LocalDaemon) -> Result<Option<Stri
 /// Ensure a local daemon is reachable from an explicit config dir (testable
 /// core), returning an auth token only when the transport needs bearer auth.
 ///
+/// The patience is split by path: `attach_timeout` bounds how long an
+/// already-advertised daemon may take to answer `/health`; `spawn_timeout`
+/// budgets a child we just spawned to boot (workspace load happens before the
+/// server binds, so boot can take several seconds under load). Keeping them
+/// separate lets a caller give up on a wedged daemon quickly WITHOUT ever
+/// SIGKILLing its own mid-boot child on that same short deadline.
+///
 /// ATTACH path — a live daemon already runs: wait until it answers `/health`,
 /// then mint/reload a token only for TCP fallback. SPAWN path — none runs:
 /// spawn it, wait for the advertised transport, then mint/reload only when that
@@ -591,12 +606,13 @@ fn auth_token_for_daemon(dir: &Path, daemon: &LocalDaemon) -> Result<Option<Stri
 /// (`spawned = Some`), killing it on timeout or token setup failure.
 pub fn ensure_local_daemon_in(
     dir: &Path,
+    attach_timeout: Duration,
     spawn_timeout: Duration,
 ) -> Result<EnsuredDaemon, String> {
     if running_daemon_in(dir).is_some() {
         // Attach: a live pid is not enough. The daemon may still be binding
         // after a restart; do not hand an unreachable endpoint to the UI.
-        if let Some(daemon) = wait_until_reachable_in(dir, spawn_timeout) {
+        if let Some(daemon) = wait_until_reachable_in(dir, attach_timeout) {
             let token = auth_token_for_daemon(dir, &daemon)?;
             return Ok(EnsuredDaemon {
                 daemon,
@@ -638,9 +654,21 @@ pub fn ensure_local_daemon_in(
     }
 }
 
+/// Ensure a local daemon is reachable from the user's config dir, with caller-
+/// chosen patience split by path (see [`ensure_local_daemon_in`]). The self-heal
+/// recovery loop uses a short attach patience — so a wedged daemon is detected
+/// (and escalated on) sooner — but the full spawn budget, so it never kills its
+/// own freshly spawned child that is merely slow to boot.
+pub fn ensure_local_daemon_with_timeouts(
+    attach_timeout: Duration,
+    spawn_timeout: Duration,
+) -> Result<EnsuredDaemon, String> {
+    ensure_local_daemon_in(&config_dir(), attach_timeout, spawn_timeout)
+}
+
 /// Ensure a local daemon is reachable from the user's config dir.
 pub fn ensure_local_daemon() -> Result<EnsuredDaemon, String> {
-    ensure_local_daemon_in(&config_dir(), Duration::from_secs(30))
+    ensure_local_daemon_with_timeouts(Duration::from_secs(30), Duration::from_secs(30))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -937,8 +965,9 @@ mod tests {
         )
         .unwrap();
 
-        let ensured = ensure_local_daemon_in(&dir, Duration::from_millis(200))
-            .expect("attach should succeed");
+        let ensured =
+            ensure_local_daemon_in(&dir, Duration::from_millis(200), Duration::from_millis(200))
+                .expect("attach should succeed");
         assert!(ensured.spawned.is_none(), "must not spawn when one is running");
         assert_eq!(ensured.daemon.port, port);
 
@@ -984,7 +1013,15 @@ mod tests {
         )
         .unwrap();
 
-        let err = match ensure_local_daemon_in(&dir, Duration::from_millis(120)) {
+        // Attach patience is short but the spawn budget is long: the error must
+        // arrive on the ATTACH deadline, proving the branches use their own
+        // timeouts (a live-but-unreachable daemon never enters the spawn path).
+        let start = Instant::now();
+        let err = match ensure_local_daemon_in(
+            &dir,
+            Duration::from_millis(120),
+            Duration::from_secs(30),
+        ) {
             Ok(_) => panic!("live but unreachable daemon must not be accepted"),
             Err(err) => err,
         };
@@ -992,6 +1029,33 @@ mod tests {
             err.contains("did not respond to /health"),
             "unexpected error: {err}"
         );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "attach branch must give up on attach_timeout, not spawn_timeout"
+        );
+    }
+
+    #[test]
+    fn ensure_attach_succeeds_within_attach_timeout_even_with_short_spawn_budget() {
+        let dir = temp_dir();
+        let port = spawn_health_server();
+        std::fs::write(dir.join("remote_secret"), vec![3u8; 32]).unwrap();
+        std::fs::write(
+            dir.join("remote.json"),
+            format!(r#"{{"port": {port}, "pid": {}, "tls": false}}"#, std::process::id()),
+        )
+        .unwrap();
+
+        // A healthy advertised daemon attaches under attach_timeout regardless
+        // of the spawn budget (which only applies to a child we spawn).
+        let ensured = ensure_local_daemon_in(
+            &dir,
+            Duration::from_millis(500),
+            Duration::from_millis(1),
+        )
+        .expect("attach should succeed");
+        assert!(ensured.spawned.is_none());
+        assert_eq!(ensured.daemon.port, port);
     }
 
     #[test]
