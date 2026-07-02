@@ -183,19 +183,16 @@ impl Render for ToastOverlay {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    // Grace countdown: a subtle accent wash across the whole card
-                    // that depletes left-to-right as the window elapses (drawn
-                    // behind the content, not a thin bottom line).
+                    // Grace countdown: a plain bottom line, not a background wash.
                     .when(has_countdown, |el| {
                         el.child(
                             div()
                                 .absolute()
-                                .top_0()
                                 .bottom_0()
                                 .left_0()
+                                .h(px(2.0))
                                 .w(relative(remaining))
                                 .bg(rgb(accent_color))
-                                .opacity(0.20),
                         )
                     })
                     // Content: level icon + column (title row / subtitle / actions).
