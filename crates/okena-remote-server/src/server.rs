@@ -37,6 +37,8 @@ impl RemoteServer {
         toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
         next_connection_id: Arc<AtomicU64>,
+        active_connections: Arc<AtomicU64>,
+        process_shutdown: Option<Arc<tokio::sync::Notify>>,
         tls_enabled: bool,
         app_version: &'static str,
     ) -> anyhow::Result<Self> {
@@ -165,6 +167,8 @@ impl RemoteServer {
                 toast_tx,
                 remote_subscribed_terminals,
                 next_connection_id,
+                active_connections,
+                process_shutdown,
                 update_info,
             );
             #[cfg(unix)]
@@ -380,10 +384,20 @@ fn local_tcp_host(bind_addrs: &[IpAddr]) -> &'static str {
     crate::local::LOCAL_HOST
 }
 
-/// Remove remote.json on shutdown.
-fn remove_remote_json() {
+/// Remove remote.json on shutdown, but ONLY when it still advertises THIS
+/// process. A restart handoff exits via `std::process::exit` (skipping this) and
+/// the successor rewrites remote.json with its own pid; pid-guarding here keeps
+/// a late/racy teardown from clobbering that successor's discovery file.
+pub(crate) fn remove_remote_json() {
     let path = remote_json_path();
-    if path.exists() {
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let owned_by_us = serde_json::from_str::<serde_json::Value>(&data)
+        .ok()
+        .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
+        .is_some_and(|pid| pid == u64::from(std::process::id()));
+    if owned_by_us {
         let _ = std::fs::remove_file(&path);
     }
 }

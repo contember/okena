@@ -368,6 +368,12 @@ impl HeadlessApp {
             self.toast_tx.clone(),
             self.remote_subscribed_terminals.clone(),
             self.next_remote_connection_id.clone(),
+            // Live-WS-connection count for `/v1/shutdown`; headless has no other
+            // reader so it's created inline. `None` shutdown signal: the
+            // transitional `okena --headless` path has no graceful run-loop to
+            // wake, so the endpoint hard-exits instead (see routes/shutdown.rs).
+            Arc::new(AtomicU64::new(0)),
+            None,
             tls_enabled,
             env!("CARGO_PKG_VERSION"),
         ) {

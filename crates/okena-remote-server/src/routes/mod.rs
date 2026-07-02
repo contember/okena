@@ -5,6 +5,7 @@ pub mod pair;
 pub mod paste_image;
 pub mod refresh;
 pub mod restart;
+pub mod shutdown;
 pub mod state;
 pub mod stream;
 pub mod tokens;
@@ -50,6 +51,17 @@ pub struct AppState {
     /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     pub next_connection_id: Arc<AtomicU64>,
+    /// Count of currently-live authenticated WS connections. The stream route
+    /// increments it on accept and decrements it on close; `/v1/shutdown` reads
+    /// it to refuse while any client is still connected. (`remote_subscribed_terminals`
+    /// only tracks connections that have subscribed to a terminal, so it can't
+    /// stand in for a live-connection registry.)
+    pub active_connections: Arc<AtomicU64>,
+    /// Graceful process-shutdown trigger for `/v1/shutdown`. `Some` on the
+    /// dedicated daemon, whose `run()` awaits it and then tears down cleanly
+    /// (socket unlink + remote.json removal + instance-lock release on drop);
+    /// `None` on the transitional `okena --headless` fallback, which hard-exits.
+    pub process_shutdown: Option<Arc<tokio::sync::Notify>>,
     pub update_info: okena_ext_updater::UpdateInfo,
 }
 
@@ -93,6 +105,8 @@ pub fn build_router(
     toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     next_connection_id: Arc<AtomicU64>,
+    active_connections: Arc<AtomicU64>,
+    process_shutdown: Option<Arc<tokio::sync::Notify>>,
     update_info: okena_ext_updater::UpdateInfo,
 ) -> Router {
     let state = AppState {
@@ -105,6 +119,8 @@ pub fn build_router(
         toast_tx,
         remote_subscribed_terminals,
         next_connection_id,
+        active_connections,
+        process_shutdown,
         update_info,
     };
 
@@ -140,6 +156,8 @@ pub fn build_router(
     // `/v1/restart` is loopback-gated in the same way: a same-host UI restarts
     // the daemon; it is bearer-free so the restart works even if the caller's
     // token is in an awkward state, and off-host callers are refused.
+    // `/v1/shutdown` is loopback-gated identically: a same-host UI asks the
+    // daemon to stop on quit, but the daemon refuses while other clients remain.
     let public = Router::new()
         .route("/health", axum::routing::get(health::get_health))
         .route("/v1/pair", axum::routing::post(pair::post_pair))
@@ -148,6 +166,7 @@ pub fn build_router(
             axum::routing::post(auth_reload::post_reload),
         )
         .route("/v1/restart", axum::routing::post(restart::post_restart))
+        .route("/v1/shutdown", axum::routing::post(shutdown::post_shutdown))
         .route("/v1/update/status", axum::routing::get(update::get_status))
         .route("/v1/update/check", axum::routing::post(update::post_check))
         .route(

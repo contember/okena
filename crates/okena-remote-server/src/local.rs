@@ -336,6 +336,84 @@ pub fn notify_auth_reload(daemon: &LocalDaemon) {
         .send();
 }
 
+/// Outcome of asking the local daemon to shut down (`POST /v1/shutdown`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownOutcome {
+    /// The daemon accepted and is tearing itself down. `false` means it refused
+    /// because other clients are still connected — the caller must NOT kill it.
+    pub accepted: bool,
+    /// Live client connections the daemon counted (excluding the caller, which
+    /// disconnects its own loopback WS before asking).
+    pub active_clients: u64,
+}
+
+/// How many times to (re)ask for shutdown, and the pause between tries. The
+/// caller has just closed its own WS; a bounded retry lets the daemon notice the
+/// close and decrement its live count before we conclude "another client is here".
+const SHUTDOWN_MAX_ATTEMPTS: u32 = 4;
+const SHUTDOWN_RETRY_DELAY: Duration = Duration::from_millis(150);
+
+/// Ask the local daemon to shut down (`POST /v1/shutdown`). Returns whether it
+/// accepted plus the live-client count it saw.
+///
+/// The daemon REFUSES while any *other* client is connected, so this is safe to
+/// call on quit even if a second GUI attached during a fast restart — it will
+/// simply report `accepted: false` and stay up.
+///
+/// Self-exclusion (option **a**): the caller must disconnect its OWN loopback WS
+/// before calling; the daemon just counts live WS connections. The bounded retry
+/// here absorbs the lag between the caller's socket close and the daemon
+/// deregistering it, so "only us" reliably reads as zero. Option (b) — passing
+/// the caller's own connection id to exclude — isn't available: the WS protocol
+/// never tells a client its server-assigned id (see okena-core `WsOutbound`), so
+/// (a) avoids inventing a new protocol message.
+///
+/// A transport error on the FIRST attempt is a hard error (the daemon is
+/// unreachable — the caller falls back to killing it); a transport error on a
+/// later attempt, after we already got a "refused" answer, is swallowed and the
+/// last answer returned, so a flaky retry can never escalate into killing a
+/// daemon that another client is using.
+pub fn request_local_shutdown(daemon: &LocalDaemon) -> Result<ShutdownOutcome, String> {
+    let (client, url) = blocking_client_and_url(
+        daemon.host(),
+        daemon.port,
+        "/v1/shutdown",
+        daemon.local_endpoint.as_ref(),
+    );
+
+    let mut outcome = ShutdownOutcome {
+        accepted: false,
+        active_clients: 0,
+    };
+    for attempt in 0..SHUTDOWN_MAX_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(SHUTDOWN_RETRY_DELAY);
+        }
+        match client.post(&url).timeout(Duration::from_secs(5)).send() {
+            Ok(resp) if resp.status().is_success() => {
+                let body = resp
+                    .json::<crate::routes::shutdown::ShutdownResponse>()
+                    .map_err(|e| format!("failed to parse shutdown response: {e}"))?;
+                outcome = ShutdownOutcome {
+                    accepted: body.shutting_down,
+                    active_clients: body.active_clients,
+                };
+                if outcome.accepted {
+                    break;
+                }
+            }
+            Ok(resp) => return Err(format!("shutdown endpoint returned {}", resp.status())),
+            Err(_) if attempt > 0 => {
+                // Already had a (refused) answer; don't let a flaky retry turn
+                // into a kill. Report what we last saw.
+                break;
+            }
+            Err(e) => return Err(format!("shutdown request failed: {e}")),
+        }
+    }
+    Ok(outcome)
+}
+
 /// Ask the local daemon at `host:port` to restart itself (`POST /v1/restart`),
 /// then block until the replacement daemon advertises a live endpoint.
 ///
@@ -680,6 +758,71 @@ mod tests {
             }
         });
         port
+    }
+
+    /// Stub server that answers every request with a fixed `/v1/shutdown` JSON
+    /// body. Used to exercise `request_local_shutdown`'s accept/refuse handling
+    /// without a live daemon (mirrors `spawn_health_server`).
+    fn spawn_shutdown_server(shutting_down: bool, active_clients: u64) -> u16 {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind((LOCAL_HOST, 0)).expect("bind shutdown server");
+        let port = listener.local_addr().expect("shutdown server addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    break;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = format!(
+                    r#"{{"shutting_down":{shutting_down},"active_clients":{active_clients}}}"#
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    fn tcp_daemon(port: u16) -> LocalDaemon {
+        LocalDaemon {
+            port,
+            host: LOCAL_HOST.to_string(),
+            pid: std::process::id(),
+            tls: false,
+            local_endpoint: None,
+        }
+    }
+
+    #[test]
+    fn request_shutdown_accepts_when_no_clients() {
+        let port = spawn_shutdown_server(true, 0);
+        let outcome = request_local_shutdown(&tcp_daemon(port)).expect("request should succeed");
+        assert!(outcome.accepted);
+        assert_eq!(outcome.active_clients, 0);
+    }
+
+    #[test]
+    fn request_shutdown_refuses_when_clients_connected() {
+        // The daemon reports a live client on every retry, so the bounded loop
+        // gives up and reports the refusal instead of ever accepting.
+        let port = spawn_shutdown_server(false, 2);
+        let outcome = request_local_shutdown(&tcp_daemon(port)).expect("request should succeed");
+        assert!(!outcome.accepted, "must not accept while a client is connected");
+        assert_eq!(outcome.active_clients, 2);
+    }
+
+    #[test]
+    fn request_shutdown_errors_when_unreachable() {
+        // Port 9 (discard) refuses fast — the caller treats an unreachable daemon
+        // as an error and falls back to its own kill path.
+        let err = request_local_shutdown(&tcp_daemon(9)).expect_err("unreachable must error");
+        assert!(err.contains("shutdown request failed"), "unexpected error: {err}");
     }
 
     #[test]

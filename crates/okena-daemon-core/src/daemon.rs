@@ -145,6 +145,11 @@ pub struct DaemonCore {
     /// second instance (or a classic in-process GUI) cannot clobber the profile.
     /// Released on drop at the end of [`run`](DaemonCore::run).
     _instance_lock: LockGuard,
+    /// Graceful-shutdown trigger fired by `POST /v1/shutdown` (via the remote
+    /// server's `AppState`). [`run`](DaemonCore::run) awaits it and returns,
+    /// which drops the server (socket unlink + remote.json removal) and releases
+    /// the instance lock on drop — a clean teardown, no SIGKILL.
+    shutdown_requested: Arc<tokio::sync::Notify>,
 }
 
 impl DaemonCore {
@@ -241,6 +246,9 @@ impl DaemonCore {
         let auth_store = Arc::new(AuthStore::new());
         let remote_subscribed_terminals = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let next_connection_id = Arc::new(AtomicU64::new(0));
+        // Live-WS-connection count + graceful-shutdown trigger for `/v1/shutdown`.
+        let active_connections = Arc::new(AtomicU64::new(0));
+        let shutdown_requested = Arc::new(tokio::sync::Notify::new());
         let (bridge_tx, bridge_rx) = bridge::bridge_channel();
 
         // ── 6. Start the remote server ───────────────────────────────────────
@@ -256,6 +264,8 @@ impl DaemonCore {
             toast_tx.clone(),
             remote_subscribed_terminals.clone(),
             next_connection_id,
+            active_connections,
+            Some(shutdown_requested.clone()),
             params.tls_enabled,
             env!("CARGO_PKG_VERSION"),
         )?;
@@ -292,6 +302,7 @@ impl DaemonCore {
             settings,
             daemon_config,
             _instance_lock: instance_lock,
+            shutdown_requested,
         })
     }
 
@@ -321,6 +332,7 @@ impl DaemonCore {
             // Bound (not `..`) so the lock is held until the end of `run`, then
             // released on drop after the server is stopped.
             _instance_lock,
+            shutdown_requested,
         } = self;
         let handle = runtime.handle().clone();
         let local = tokio::task::LocalSet::new();
@@ -429,6 +441,11 @@ impl DaemonCore {
                         log::warn!("ctrl-c handler error: {e}");
                     }
                     log::info!("daemon received ctrl-c, shutting down");
+                }
+                // A client-aware `POST /v1/shutdown` accepted: return so the
+                // teardown below runs cleanly (no successor to hand off to).
+                _ = shutdown_requested.notified() => {
+                    log::info!("daemon received shutdown request, shutting down");
                 }
             }
         });

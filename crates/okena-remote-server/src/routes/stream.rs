@@ -86,6 +86,10 @@ async fn handle_ws(
     let mut next_stream_id: u32 = 1;
     let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
     let connection_owner_id = connection_id.to_string();
+    // Register this live connection (deregistered in the cleanup block below).
+    // `/v1/shutdown` counts these to refuse while any client is still connected.
+    // We register only after auth so unauthenticated dial attempts don't count.
+    state.active_connections.fetch_add(1, Ordering::Relaxed);
 
     // Subscribe to state_version and git status changes
     let mut state_rx = state.state_version.subscribe();
@@ -506,6 +510,9 @@ async fn handle_ws(
     if let Ok(mut map) = state.remote_subscribed_terminals.write() {
         map.remove(&connection_id);
     }
+
+    // Deregister the live connection (paired with the fetch_add above).
+    state.active_connections.fetch_sub(1, Ordering::Relaxed);
 
     // Release resize ownership so a reconnecting client isn't denied by a
     // dead owner; the next resize from any connection adopts it.
