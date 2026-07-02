@@ -87,6 +87,11 @@ pub enum ConnectionEvent {
         connection_id: String,
         statuses: HashMap<String, okena_core::api::ApiGitStatus>,
     },
+    /// System metrics changed on the remote host.
+    SystemStatsChanged {
+        connection_id: String,
+        stats: okena_core::api::ApiSystemStats,
+    },
     /// A daemon-originated toast to display on this client (e.g. a remote
     /// lifecycle-hook failure). The daemon has no surface, so it forwards these
     /// over the WebSocket and the client renders them via its `ToastManager`.

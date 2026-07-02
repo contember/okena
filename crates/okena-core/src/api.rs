@@ -14,6 +14,14 @@ pub struct HealthResponse {
     pub uptime_secs: u64,
 }
 
+/// Lightweight system metrics for remote status surfaces.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiSystemStats {
+    pub cpu_usage: f32,
+    pub memory_used_bytes: u64,
+    pub memory_total_bytes: u64,
+}
+
 /// GET /v1/state response
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StateResponse {

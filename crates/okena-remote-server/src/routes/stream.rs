@@ -5,7 +5,7 @@
 use crate::bridge::{BridgeMessage, CommandResult, RemoteCommand};
 use crate::routes::{AppState, PeerInfo};
 use crate::types::{
-    ActionRequest, FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT, WsInbound, WsOutbound,
+    ActionRequest, ApiSystemStats, FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT, WsInbound, WsOutbound,
     build_binary_frame, build_pty_frame, parse_binary_frame,
 };
 use axum::extract::ws::{Message, WebSocket};
@@ -14,7 +14,55 @@ use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use sysinfo::System;
 use tokio::sync::{broadcast, mpsc};
+
+const SYSTEM_STATS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+struct SystemStatsCache {
+    system: System,
+    stats: ApiSystemStats,
+}
+
+impl SystemStatsCache {
+    fn new() -> Self {
+        let mut system = System::new();
+        system.refresh_cpu_usage();
+        system.refresh_memory();
+
+        Self {
+            system,
+            stats: ApiSystemStats::default(),
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.system.refresh_cpu_usage();
+        self.system.refresh_memory();
+
+        let mut total_cpu = 0.0;
+        let mut cpu_count = 0.0;
+        for cpu in self.system.cpus() {
+            total_cpu += cpu.cpu_usage();
+            cpu_count += 1.0;
+        }
+
+        self.stats = ApiSystemStats {
+            cpu_usage: if cpu_count > 0.0 {
+                total_cpu / cpu_count
+            } else {
+                0.0
+            },
+            memory_used_bytes: self.system.used_memory(),
+            memory_total_bytes: self.system.total_memory(),
+        };
+    }
+
+    fn stats(&self) -> ApiSystemStats {
+        self.stats.clone()
+    }
+}
 
 #[derive(serde::Deserialize)]
 pub struct WsQuery {
@@ -99,6 +147,9 @@ async fn handle_ws(
     // Once the toast sender is gone we disable that select arm, otherwise its
     // `recv()` would resolve `Err(Closed)` instantly and busy-spin the loop.
     let mut toast_open = true;
+    let mut system_stats = SystemStatsCache::new();
+    let mut system_stats_interval = tokio::time::interval(SYSTEM_STATS_REFRESH_INTERVAL);
+    system_stats_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Pin the writer handle for use in select!
     tokio::pin!(writer_handle);
@@ -473,6 +524,18 @@ async fn handle_ws(
                     if out_tx.send(Message::Text(resp.into())).await.is_err() {
                         break;
                     }
+                }
+            }
+
+            // Periodic host metrics for remote status UI. Kept separate from
+            // `state_version` so status refreshes do not force workspace resync.
+            _ = system_stats_interval.tick() => {
+                system_stats.refresh();
+                let resp = serde_json::to_string(&WsOutbound::SystemStatsChanged {
+                    stats: system_stats.stats(),
+                }).expect("BUG: WsOutbound must serialize");
+                if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                    break;
                 }
             }
 

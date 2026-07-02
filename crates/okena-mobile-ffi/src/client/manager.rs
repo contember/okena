@@ -400,6 +400,7 @@ impl ConnectionManager {
                         }
                     }
                 }
+                ConnectionEvent::SystemStatsChanged { .. } => {}
                 ConnectionEvent::ServerWarning { message, .. } => {
                     log::warn!("Server warning for {}: {}", conn_id, message);
                 }

@@ -1,4 +1,4 @@
-use crate::api::{ApiGitStatus, ApiToast};
+use crate::api::{ApiGitStatus, ApiSystemStats, ApiToast};
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +58,9 @@ pub enum WsOutbound {
     },
     GitStatusChanged {
         projects: std::collections::HashMap<String, ApiGitStatus>,
+    },
+    SystemStatsChanged {
+        stats: ApiSystemStats,
     },
     /// A daemon-originated toast to display on the client. Fire-and-forget event
     /// (mirrors `GitStatusChanged`): the daemon has no surface of its own, so
@@ -187,6 +190,13 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
+            },
+            WsOutbound::SystemStatsChanged {
+                stats: ApiSystemStats {
+                    cpu_usage: 42.5,
+                    memory_used_bytes: 4_294_967_296,
+                    memory_total_bytes: 17_179_869_184,
+                },
             },
             WsOutbound::Toast(ApiToast {
                 id: "toast-1".into(),

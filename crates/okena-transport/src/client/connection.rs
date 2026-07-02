@@ -1,4 +1,4 @@
-use okena_core::api::StateResponse;
+use okena_core::api::{ApiSystemStats, StateResponse};
 use crate::client::config::{LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
 use crate::client::id::make_prefixed_id;
 use crate::client::state::{collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states};
@@ -190,6 +190,7 @@ pub struct RemoteClient<H: ConnectionHandler> {
     runtime: Arc<tokio::runtime::Runtime>,
     ws_tx: Option<async_channel::Sender<WsClientMessage>>,
     remote_state: Option<StateResponse>,
+    system_stats: Option<ApiSystemStats>,
     stream_map: HashMap<String, u32>,
     reverse_stream_map: HashMap<u32, String>,
     handler: Arc<H>,
@@ -213,6 +214,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             runtime,
             ws_tx: None,
             remote_state: None,
+            system_stats: None,
             stream_map: HashMap::new(),
             reverse_stream_map: HashMap::new(),
             handler,
@@ -252,6 +254,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
     pub fn set_remote_state(&mut self, state: Option<StateResponse>) {
         self.remote_state = state;
+    }
+
+    pub fn system_stats(&self) -> Option<&ApiSystemStats> {
+        self.system_stats.as_ref()
+    }
+
+    pub fn set_system_stats(&mut self, stats: Option<ApiSystemStats>) {
+        self.system_stats = stats;
     }
 
     /// Update the shared token so WS reconnect loop uses the latest token.
@@ -646,6 +656,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.stream_map.clear();
         self.reverse_stream_map.clear();
         self.remote_state = None;
+        self.system_stats = None;
         self.status = ConnectionStatus::Disconnected;
     }
 
@@ -1262,6 +1273,19 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 .send(ConnectionEvent::GitStatusChanged {
                                                     connection_id: config_id.clone(),
                                                     statuses,
+                                                })
+                                                .await;
+                                        }
+                                }
+                                "system_stats_changed" => {
+                                    if let Some(stats) = value.get("stats")
+                                        && let Ok(stats) = serde_json::from_value::<
+                                            okena_core::api::ApiSystemStats,
+                                        >(stats.clone()) {
+                                            let _ = event_tx_clone
+                                                .send(ConnectionEvent::SystemStatsChanged {
+                                                    connection_id: config_id.clone(),
+                                                    stats,
                                                 })
                                                 .await;
                                         }

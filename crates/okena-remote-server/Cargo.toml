@@ -52,6 +52,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 log = "0.4"
 uuid = { version = "1.10", features = ["v4"] }
+sysinfo = "0.33"
 
 # Embed the built web client into the binary. `interpolate-folder-path` lets
 # the `#[folder]` attribute expand `$CARGO_MANIFEST_DIR` so we can point at the

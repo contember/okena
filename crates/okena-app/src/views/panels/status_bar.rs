@@ -7,7 +7,7 @@ use crate::ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use okena_core::api::ApiLayoutNode;
+use okena_core::api::{ApiLayoutNode, ApiSystemStats};
 use okena_extensions::{ExtensionInstance, ExtensionRegistry};
 use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
 use parking_lot::Mutex;
@@ -39,6 +39,7 @@ struct RemoteStatusSnapshot {
     window_count: usize,
     terminal_count: usize,
     has_state: bool,
+    system_stats: Option<ApiSystemStats>,
 }
 
 /// Global system info cache
@@ -221,9 +222,9 @@ impl StatusBar {
             return Vec::new();
         };
 
-        manager.read(cx).connections().into_iter()
-            .filter(|(config, _, _)| config.id != LOCAL_DAEMON_CONNECTION_ID)
-            .map(|(config, status, state)| {
+        manager.read(cx).connections_with_system_stats().into_iter()
+            .filter(|(config, _, _, _)| config.id != LOCAL_DAEMON_CONNECTION_ID)
+            .map(|(config, status, state, system_stats)| {
                 let (project_count, window_count, terminal_count) = match state {
                     Some(state) => {
                         let terminals = state.projects.iter()
@@ -244,6 +245,7 @@ impl StatusBar {
                     window_count,
                     terminal_count,
                     has_state: state.is_some(),
+                    system_stats: system_stats.cloned(),
                 }
             })
             .collect()
@@ -298,6 +300,48 @@ impl StatusBar {
         }
     }
 
+    fn cpu_metric_color(cpu_usage: f32, t: &okena_core::theme::ThemeColors) -> u32 {
+        if cpu_usage > 80.0 {
+            t.metric_critical
+        } else if cpu_usage > 50.0 {
+            t.metric_warning
+        } else {
+            t.metric_normal
+        }
+    }
+
+    fn memory_metric_color(memory_percent: u64, t: &okena_core::theme::ThemeColors) -> u32 {
+        if memory_percent > 80 {
+            t.metric_critical
+        } else if memory_percent > 60 {
+            t.metric_warning
+        } else {
+            t.metric_normal
+        }
+    }
+
+    fn memory_percent_from_bytes(stats: &ApiSystemStats) -> u64 {
+        if stats.memory_total_bytes > 0 {
+            stats.memory_used_bytes.saturating_mul(100) / stats.memory_total_bytes
+        } else {
+            0
+        }
+    }
+
+    fn format_gib_tenths(bytes: u64) -> String {
+        const GIB: u64 = 1_073_741_824;
+        let tenths = bytes.saturating_mul(10).saturating_add(GIB / 2) / GIB;
+        format!("{}.{}", tenths / 10, tenths % 10)
+    }
+
+    fn format_memory_bytes(stats: &ApiSystemStats) -> String {
+        format!(
+            "{}/{} GB",
+            Self::format_gib_tenths(stats.memory_used_bytes),
+            Self::format_gib_tenths(stats.memory_total_bytes),
+        )
+    }
+
     fn aggregate_remote_color(snapshots: &[RemoteStatusSnapshot], t: &okena_core::theme::ThemeColors) -> u32 {
         if snapshots.iter().any(|snap| matches!(snap.status, ConnectionStatus::Error(_))) {
             return t.term_red;
@@ -346,6 +390,7 @@ impl StatusBar {
             };
             let security = if snapshot.tls { "TLS" } else { "no TLS" };
             let status_color = Self::status_color(&snapshot.status, t);
+            let system_stats = snapshot.system_stats.clone();
 
             rows.push(
                 div()
@@ -415,7 +460,53 @@ impl StatusBar {
                                     .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.text_secondary))
                                     .child(detail),
-                            ),
+                            )
+                            .when_some(system_stats, |el, stats| {
+                                let memory_percent = Self::memory_percent_from_bytes(&stats);
+                                el.child(
+                                    h_flex()
+                                        .gap(px(10.0))
+                                        .text_size(ui_text_sm(cx))
+                                        .child(
+                                            h_flex()
+                                                .gap(px(4.0))
+                                                .child(
+                                                    div()
+                                                        .text_color(rgb(t.text_muted))
+                                                        .child("CPU"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_color(rgb(Self::cpu_metric_color(
+                                                            stats.cpu_usage,
+                                                            t,
+                                                        )))
+                                                        .child(format!("{:02.0}%", stats.cpu_usage)),
+                                                ),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap(px(4.0))
+                                                .min_w_0()
+                                                .child(
+                                                    div()
+                                                        .text_color(rgb(t.text_muted))
+                                                        .child("MEM"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .text_ellipsis()
+                                                        .text_color(rgb(Self::memory_metric_color(
+                                                            memory_percent,
+                                                            t,
+                                                        )))
+                                                        .child(Self::format_memory_bytes(&stats)),
+                                                ),
+                                        ),
+                                )
+                            }),
                     )
                     .into_any_element(),
             );

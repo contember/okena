@@ -3,7 +3,7 @@ use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_terminal::TerminalsRegistry;
 
-use okena_core::api::StateResponse;
+use okena_core::api::{ApiSystemStats, StateResponse};
 use okena_transport::client::{
     is_remote_terminal, ConnectionEvent, ConnectionHandler, ConnectionStatus,
     RemoteClient, RemoteConnectionConfig, WsClientMessage,
@@ -193,6 +193,14 @@ impl RemoteConnection {
 
     pub fn set_remote_state(&mut self, state: Option<StateResponse>) {
         self.client.set_remote_state(state);
+    }
+
+    pub fn system_stats(&self) -> Option<&ApiSystemStats> {
+        self.client.system_stats()
+    }
+
+    pub fn set_system_stats(&mut self, stats: Option<ApiSystemStats>) {
+        self.client.set_system_stats(stats);
     }
 
     pub fn update_stream_mappings(&mut self, mappings: HashMap<String, u32>) {

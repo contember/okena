@@ -5,7 +5,7 @@ use okena_workspace::toast::{Toast, ToastManager};
 use okena_terminal::TerminalsRegistry;
 use okena_workspace::settings::{load_settings, update_remote_connections};
 
-use okena_core::api::{ActionRequest, StateResponse};
+use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
 use okena_core::soft_close::{
     decode_action, encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX,
 };
@@ -359,6 +359,27 @@ impl RemoteConnectionManager {
             .collect()
     }
 
+    pub fn connections_with_system_stats(
+        &self,
+    ) -> Vec<(
+        &RemoteConnectionConfig,
+        &ConnectionStatus,
+        Option<&StateResponse>,
+        Option<&ApiSystemStats>,
+    )> {
+        self.connections
+            .values()
+            .map(|conn| {
+                (
+                    conn.config(),
+                    conn.status(),
+                    conn.remote_state(),
+                    conn.system_stats(),
+                )
+            })
+            .collect()
+    }
+
     /// Get the backend for a specific connection.
     pub fn backend_for(&self, connection_id: &str) -> Option<Arc<dyn TerminalBackend>> {
         self.connections
@@ -549,6 +570,7 @@ impl RemoteConnectionManager {
             ConnectionEvent::StateReceived { .. } => "StateReceived",
             ConnectionEvent::SubscriptionMappings { .. } => "SubscriptionMappings",
             ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
+            ConnectionEvent::SystemStatsChanged { .. } => "SystemStatsChanged",
             ConnectionEvent::Toast { .. } => "Toast",
             ConnectionEvent::ServerWarning { .. } => "ServerWarning",
             ConnectionEvent::TokenRefreshed { .. } => "TokenRefreshed",
@@ -673,6 +695,14 @@ impl RemoteConnectionManager {
                         }
                     }
                 cx.notify();
+            }
+            ConnectionEvent::SystemStatsChanged {
+                connection_id,
+                stats,
+            } => {
+                if let Some(conn) = self.connections.get_mut(&connection_id) {
+                    conn.set_system_stats(Some(stats));
+                }
             }
             ConnectionEvent::Toast {
                 connection_id,
