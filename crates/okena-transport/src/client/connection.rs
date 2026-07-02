@@ -104,7 +104,11 @@ fn local_unix_path(config: &RemoteConnectionConfig) -> Option<&str> {
 }
 
 fn initial_connect_attempts(config: &RemoteConnectionConfig) -> u32 {
-    if config.id == LOCAL_DAEMON_CONNECTION_ID || config.local_endpoint.is_some() {
+    if config.id == LOCAL_DAEMON_CONNECTION_ID {
+        // Fail fast: ensure_local_daemon() verified reachability right before
+        // this dial, and the app-layer self-heal re-runs it once Error fires.
+        5
+    } else if config.local_endpoint.is_some() {
         30
     } else {
         1
@@ -120,6 +124,24 @@ fn initial_connect_retry_delay(attempt: u32) -> std::time::Duration {
         _ => 1_200,
     };
     std::time::Duration::from_millis(millis)
+}
+
+/// Reconnect budget after an established WS drops. The local daemon connection
+/// dead-ends within a few seconds so the app-layer self-heal (re-running
+/// ensure_local_daemon, which can respawn the daemon) takes over quickly;
+/// user-managed remotes keep the patient schedule for flaky networks.
+fn ws_reconnect_max_attempts(config: &RemoteConnectionConfig) -> u32 {
+    if config.id == LOCAL_DAEMON_CONNECTION_ID { 3 } else { 10 }
+}
+
+/// Sleep before reconnect `attempt` (1-based). Local daemon: flat 1s (see
+/// [`ws_reconnect_max_attempts`]); remotes: exponential 1,2,4,… capped at 30s.
+fn ws_reconnect_backoff_secs(config: &RemoteConnectionConfig, attempt: u32) -> u64 {
+    if config.id == LOCAL_DAEMON_CONNECTION_ID {
+        1
+    } else {
+        std::cmp::min(2u64.saturating_pow(attempt.saturating_sub(1)), 30)
+    }
 }
 
 /// Platform-specific operations that the generic client delegates to.
@@ -638,8 +660,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         shared_token: Arc<std::sync::RwLock<Option<String>>>,
     ) {
         let mut reconnect_attempt: u32 = 0;
-        let max_backoff_secs: u64 = 30;
-        let max_reconnect_attempts: u32 = 10;
+        let max_reconnect_attempts = ws_reconnect_max_attempts(&config);
         let mut current_token = token;
 
         loop {
@@ -686,12 +707,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         break;
                     }
 
-                    let backoff = std::cmp::min(
-                        1u64.saturating_mul(
-                            2u64.saturating_pow(reconnect_attempt.saturating_sub(1)),
-                        ),
-                        max_backoff_secs,
-                    );
+                    let backoff = ws_reconnect_backoff_secs(&config, reconnect_attempt);
 
                     log::warn!(
                         "WebSocket connection to {}:{} lost: {}. Reconnecting in {}s (attempt {}/{})",
@@ -1405,5 +1421,79 @@ pub async fn try_refresh_token(
                 e
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(id: &str, local_endpoint: Option<LocalEndpoint>) -> RemoteConnectionConfig {
+        RemoteConnectionConfig {
+            id: id.to_string(),
+            name: "test".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 19100,
+            saved_token: None,
+            token_obtained_at: None,
+            tls: false,
+            pinned_cert_sha256: None,
+            local_endpoint,
+        }
+    }
+
+    fn unix_endpoint() -> Option<LocalEndpoint> {
+        Some(LocalEndpoint::UnixSocket {
+            path: "/tmp/okena-test.sock".to_string(),
+        })
+    }
+
+    #[test]
+    fn initial_attempts_local_daemon_fails_fast() {
+        // Small budget: the app-layer self-heal owns recovery once Error fires.
+        let cfg = config(LOCAL_DAEMON_CONNECTION_ID, unix_endpoint());
+        assert_eq!(initial_connect_attempts(&cfg), 5);
+    }
+
+    #[test]
+    fn initial_attempts_other_local_endpoint_keeps_patient_budget() {
+        // Only the implicit local-daemon id fails fast — a local_endpoint alone
+        // does not opt a connection into the small budget.
+        let cfg = config("some-other-connection", unix_endpoint());
+        assert_eq!(initial_connect_attempts(&cfg), 30);
+    }
+
+    #[test]
+    fn initial_attempts_user_remote_single_try() {
+        assert_eq!(initial_connect_attempts(&config("user-remote", None)), 1);
+    }
+
+    #[test]
+    fn ws_reconnect_budget_local_vs_remote() {
+        let local = config(LOCAL_DAEMON_CONNECTION_ID, unix_endpoint());
+        let remote = config("user-remote", None);
+        assert_eq!(ws_reconnect_max_attempts(&local), 3);
+        assert_eq!(ws_reconnect_max_attempts(&remote), 10);
+    }
+
+    #[test]
+    fn ws_reconnect_backoff_local_is_flat_and_short() {
+        // ~3s total to Error, so recovery kicks in within seconds of a WS drop.
+        let local = config(LOCAL_DAEMON_CONNECTION_ID, unix_endpoint());
+        let total: u64 = (1..=ws_reconnect_max_attempts(&local))
+            .map(|attempt| ws_reconnect_backoff_secs(&local, attempt))
+            .sum();
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn ws_reconnect_backoff_remote_is_exponential_capped() {
+        let remote = config("user-remote", None);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 1), 1);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 2), 2);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 3), 4);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 5), 16);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 6), 30);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 10), 30, "capped at 30s");
     }
 }

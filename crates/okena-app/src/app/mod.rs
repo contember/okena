@@ -133,7 +133,18 @@ pub struct Okena {
     notification_jump_tx: async_channel::Sender<notifications::NotificationJump>,
     /// Child of a daemon WE spawned in `--daemon-client` mode; killed on app
     /// quit. `None` if we attached to an existing daemon or in classic mode.
+    /// Replaced (old handle reaped) by `recover_local_daemon` when self-healing
+    /// spawns a fresh daemon.
     spawned_daemon: Option<std::process::Child>,
+    /// Single-flight guard for the local-daemon recovery task: set while a
+    /// recovery loop runs so repeat `LocalConnectionFailed` events don't stack
+    /// up parallel recoveries (each would re-run `ensure_local_daemon`).
+    recovering: Arc<AtomicBool>,
+    /// Set at the start of the quit handler so an in-flight (or newly triggered)
+    /// recovery bails instead of resurrecting the connection or spawning a
+    /// daemon we'd immediately orphan. Guards the part-B quit path's
+    /// `remove_connection` from being mistaken for a recoverable failure.
+    quitting: Arc<AtomicBool>,
 }
 
 impl Okena {
@@ -235,6 +246,8 @@ impl Okena {
             remote_manager: remote_manager.clone(),
             notification_jump_tx,
             spawned_daemon,
+            recovering: Arc::new(AtomicBool::new(false)),
+            quitting: Arc::new(AtomicBool::new(false)),
         };
 
         // Route clicked desktop notifications back to their originating pane.
@@ -264,6 +277,11 @@ impl Okena {
                         // leaving remote OSC 52 reads unanswered.
                         this.process_clipboard_reads(terminal_ids, cx);
                     }
+                }
+                // Local daemon connection dead-ended — re-run discovery/ensure so
+                // the GUI recovers instead of staying wedged on a dead socket.
+                RemoteManagerEvent::LocalConnectionFailed => {
+                    this.recover_local_daemon(cx);
                 }
             },
         )
@@ -299,26 +317,78 @@ impl Okena {
         })
         .detach();
 
-        // UI-owned daemon lifecycle: kill the daemon WE spawned in
-        // `--daemon-client` mode when the app quits. A daemon we merely attached
-        // to (`spawned_daemon == None`) is left running for any other UIs.
+        // UI-owned daemon lifecycle: when the app quits, ask the daemon WE
+        // spawned in `--daemon-client` mode to stop — gracefully, and only if no
+        // other client still depends on it. A daemon we merely attached to
+        // (`spawned_daemon == None`) is left running for other UIs.
         //
-        // A UI-triggered restart (`perform_restart_daemon`) replaces our daemon
-        // with a *detached* successor we hold no `Child` for — killing only the
-        // original `Child` would orphan it. So when we own the lifecycle, also
-        // reap the CURRENT daemon discovered from `remote.json`, whose pid
-        // reflects any restarts. No-op when no restart happened (the discovered
-        // process is the child we just killed, now dead) or when we attached.
-        cx.on_app_quit(move |this: &mut Self, _cx| {
-            let owned = this.spawned_daemon.is_some();
+        // This replaces the old SIGKILL-at-quit, which raced a quickly-restarted
+        // GUI: the new GUI attaches to our daemon just as our quit kills it,
+        // leaving it dialing a dead socket. Now we disconnect our own loopback
+        // connection first, then POST `/v1/shutdown` to the CURRENT daemon
+        // discovered from `remote.json` (its pid reflects any UI-triggered
+        // restart successor):
+        //   • accepted    → the daemon tears itself down cleanly; we briefly wait
+        //                    for its pid to exit and SIGKILL only as a last resort.
+        //   • refused      → another client is still attached; leave it running
+        //                    (the fix — never kill a daemon others are using).
+        //   • unreachable  → fall back to the old best-effort kill.
+        //
+        // Runs synchronously in this callback body (not the returned future):
+        // GPUI polls on_app_quit futures for only ~200ms (`SHUTDOWN_TIMEOUT`),
+        // but the body runs before that budget applies, so the bounded (a few
+        // seconds worst case) shutdown handshake completes reliably.
+        cx.on_app_quit(move |this: &mut Self, cx| {
+            // Stop any recovery from resurrecting the connection or spawning a
+            // daemon while we tear down (esp. the remove_connection just below).
+            this.quitting.store(true, Ordering::SeqCst);
             if let Some(mut child) = this.spawned_daemon.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            if owned
-                && let Some(daemon) = okena_remote_server::local::running_daemon()
-            {
-                kill_process_by_pid(daemon.pid);
+                // Disconnect our own loopback connection first so the daemon does
+                // not count us among the clients that would block its shutdown.
+                this.remote_manager.update(cx, |rm, cx| {
+                    rm.remove_connection(
+                        okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                        cx,
+                    );
+                });
+
+                match okena_remote_server::local::running_daemon() {
+                    Some(daemon) => {
+                        match okena_remote_server::local::request_local_shutdown(&daemon) {
+                            Ok(outcome) if outcome.accepted => {
+                                // Daemon is exiting cleanly; SIGKILL only if it wedges.
+                                if !okena_remote_server::local::wait_for_pid_exit(
+                                    daemon.pid,
+                                    Duration::from_secs(3),
+                                ) {
+                                    kill_process_by_pid(daemon.pid);
+                                }
+                                let _ = child.wait();
+                            }
+                            Ok(outcome) => {
+                                log::info!(
+                                    "Local daemon shutdown refused ({} other client(s)); leaving it running",
+                                    outcome.active_clients
+                                );
+                                // Do NOT kill: another client is using it. Dropping
+                                // the Child handle does not terminate it on Unix.
+                            }
+                            Err(e) => {
+                                log::info!(
+                                    "Local daemon shutdown request failed ({e}); falling back to kill"
+                                );
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                kill_process_by_pid(daemon.pid);
+                            }
+                        }
+                    }
+                    None => {
+                        // No live daemon advertised — it already exited. Reap our Child.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
             }
             async {}
         })
@@ -438,5 +508,193 @@ impl Okena {
 impl Render for Okena {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().child(self.main_window.clone())
+    }
+}
+
+/// After this many consecutive failed recovery attempts, surface one error
+/// toast. We do NOT stop retrying afterwards: the local daemon backs the whole
+/// GUI, so giving up would leave the app dead until a manual restart — exactly
+/// the bug this heals. Instead we keep retrying at the 30s cap (see
+/// [`recovery_backoff_delay`]) and toast only once, so we never spam.
+const RECOVERY_TOAST_AFTER_ATTEMPTS: u32 = 5;
+
+/// Backoff before the next local-daemon recovery attempt, given how many have
+/// already failed. Ramps 1 → 2 → 5 → 10s then caps at 30s: quick enough to heal
+/// a brief daemon gap (the common fast-restart race) yet without a spawn storm
+/// when the daemon stays down. Pure so the schedule is unit-testable.
+fn recovery_backoff_delay(failed_attempts: u32) -> Duration {
+    let secs = match failed_attempts {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 5,
+        4 => 10,
+        _ => 30,
+    };
+    Duration::from_secs(secs)
+}
+
+impl Okena {
+    /// Self-heal the implicit local-daemon loopback connection after it hit a
+    /// terminal failure (both dead-end client paths surface `Error`). Re-runs
+    /// `ensure_local_daemon` — attach to a live daemon or spawn a fresh one —
+    /// then re-points the loopback connection at the new endpoint/token.
+    /// Single-flight and quit-aware; mirrors `perform_restart_daemon`'s pattern
+    /// of running the blocking remote-server call on the background pool.
+    fn recover_local_daemon(&mut self, cx: &mut Context<Self>) {
+        if self.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        // Single-flight: a recovery already running will re-point the connection
+        // when it succeeds, so further failure events until then are redundant.
+        if self.recovering.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let recovering = self.recovering.clone();
+        let quitting = self.quitting.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let mut failed_attempts: u32 = 0;
+            loop {
+                if quitting.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                // `ensure_local_daemon` blocks up to 30s; run it on the blocking
+                // pool like `perform_restart_daemon` does with restart.
+                let outcome = cx
+                    .background_executor()
+                    .spawn(async move { okena_remote_server::local::ensure_local_daemon() })
+                    .await;
+
+                match outcome {
+                    Ok(ensured) => {
+                        // Hold `ensured` outside the closure: if the entity is
+                        // gone the closure never runs, and dropping a Child does
+                        // not kill it — we'd orphan a daemon we just spawned.
+                        let mut ensured = Some(ensured);
+                        let applied = this.update(cx, |this, cx| {
+                            if let Some(ensured) = ensured.take() {
+                                this.apply_recovered_daemon(ensured, cx);
+                            }
+                        });
+                        // Entity dropped mid-recovery: best-effort reap the child.
+                        if applied.is_err()
+                            && let Some(mut child) = ensured.and_then(|e| e.spawned)
+                        {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        break;
+                    }
+                    Err(msg) => {
+                        failed_attempts += 1;
+                        log::warn!("Local daemon recovery attempt {failed_attempts} failed: {msg}");
+                        // Update every attempt so a dropped entity ends the loop
+                        // (and the app isn't left spawning daemons post-quit).
+                        let should_toast = failed_attempts == RECOVERY_TOAST_AFTER_ATTEMPTS;
+                        let alive = this
+                            .update(cx, |_this, cx| {
+                                if should_toast {
+                                    crate::workspace::toast::ToastManager::error(
+                                        "Local daemon unreachable; still retrying in the background…"
+                                            .to_string(),
+                                        cx,
+                                    );
+                                }
+                            })
+                            .is_ok();
+                        if !alive {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(recovery_backoff_delay(failed_attempts))
+                            .await;
+                    }
+                }
+            }
+            recovering.store(false, Ordering::SeqCst);
+        })
+        .detach();
+    }
+
+    /// Apply a freshly-ensured daemon on the GPUI thread: re-point the loopback
+    /// connection at its endpoint/token and adopt any child we spawned. Bails
+    /// (reaping a just-spawned daemon) if a quit began while we were ensuring.
+    fn apply_recovered_daemon(
+        &mut self,
+        ensured: okena_remote_server::local::EnsuredDaemon,
+        cx: &mut Context<Self>,
+    ) {
+        // Raced a quit: don't resurrect the connection, and don't orphan a daemon
+        // we just spawned (dropping the Child doesn't kill it on Unix).
+        if self.quitting.load(Ordering::SeqCst) {
+            if let Some(mut child) = ensured.spawned {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return;
+        }
+
+        let cfg = okena_transport::client::RemoteConnectionConfig {
+            id: okena_transport::client::LOCAL_DAEMON_CONNECTION_ID.to_string(),
+            name: "Local".to_string(),
+            host: ensured.daemon.host().to_string(),
+            port: ensured.daemon.port,
+            saved_token: ensured.token.clone(),
+            token_obtained_at: None,
+            tls: ensured.daemon.tls,
+            pinned_cert_sha256: None,
+            local_endpoint: ensured.daemon.local_endpoint.clone(),
+        };
+        self.remote_manager.update(cx, |rm, cx| {
+            rm.redirect_and_reconnect(
+                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                cfg,
+                ensured.token.clone(),
+                cx,
+            );
+        });
+
+        // If we spawned a fresh daemon, we now own it. Reap the old (dead) child
+        // handle first so we don't leak a zombie, then take over the new one.
+        if let Some(child) = ensured.spawned {
+            if let Some(mut old) = self.spawned_daemon.take() {
+                let _ = old.kill();
+                let _ = old.wait();
+            }
+            self.spawned_daemon = Some(child);
+        }
+
+        crate::workspace::toast::ToastManager::info("Local daemon reconnected".to_string(), cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recovery_backoff_delay, RECOVERY_TOAST_AFTER_ATTEMPTS};
+    use std::time::Duration;
+
+    #[test]
+    fn backoff_ramps_then_caps_at_30s() {
+        assert_eq!(recovery_backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(recovery_backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(recovery_backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(recovery_backoff_delay(3), Duration::from_secs(5));
+        assert_eq!(recovery_backoff_delay(4), Duration::from_secs(10));
+        assert_eq!(recovery_backoff_delay(5), Duration::from_secs(30));
+        assert_eq!(recovery_backoff_delay(50), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn backoff_is_monotonic_nondecreasing() {
+        // Never speeds up as failures accumulate — guards against a spawn storm.
+        let mut prev = Duration::ZERO;
+        for n in 0..12 {
+            let d = recovery_backoff_delay(n);
+            assert!(d >= prev, "delay must not decrease at attempt {n}");
+            prev = d;
+        }
+        // The one-shot give-up toast fires during the ramp, not only at the cap.
+        assert!(RECOVERY_TOAST_AFTER_ATTEMPTS >= 4);
     }
 }

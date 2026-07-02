@@ -12,6 +12,7 @@ use okena_core::soft_close::{
 use okena_transport::client::LocalEndpoint;
 use okena_transport::client::{
     make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
+    LOCAL_DAEMON_CONNECTION_ID,
 };
 use okena_transport::client::connection::try_refresh_token;
 
@@ -57,6 +58,13 @@ pub enum RemoteManagerEvent {
     /// only buffered via `enqueue_output`), so without this the per-terminal
     /// notification queues would be parsed here but never fire an OS bubble.
     TerminalActivity(Vec<String>),
+
+    /// The implicit local-daemon loopback connection reached a terminal failed
+    /// state (its own connect/reconnect retries are exhausted against a dead
+    /// endpoint). The manager stays generic — it only reports; the app decides
+    /// to re-run daemon discovery/ensure and re-point the connection. Emitted
+    /// ONLY for `LOCAL_DAEMON_CONNECTION_ID`, never for user-managed remotes.
+    LocalConnectionFailed,
 }
 
 /// GPUI Entity managing all remote connections.
@@ -575,6 +583,11 @@ impl RemoteConnectionManager {
                         _ => {}
                     }
                 }
+                // The local daemon backs the whole GUI; when its connection
+                // dead-ends, ask the app to self-heal (re-run discovery/ensure).
+                if is_local_connection_terminal_failure(&connection_id, &status) {
+                    cx.emit(RemoteManagerEvent::LocalConnectionFailed);
+                }
                 cx.notify();
             }
             ConnectionEvent::TokenObtained {
@@ -780,6 +793,20 @@ fn activity_changed(last: &HashMap<String, u64>, current: &HashMap<String, u64>)
         .any(|(id, generation)| last.get(id) != Some(generation))
 }
 
+/// Whether a status change should trigger local-daemon recovery.
+///
+/// True only for the implicit local-daemon loopback connection reaching the
+/// terminal `Error` state — the two dead-end paths in the client engine
+/// (initial connect exhausting its attempts, and the WS reconnect loop
+/// exhausting its attempts) both land here. User-managed remotes and every
+/// non-terminal state (Connecting/Pairing/Reconnecting/Connected/Disconnected)
+/// return false, so a normal reconnect — or `remove_connection`, which sets
+/// Disconnected without emitting Error — never provokes recovery. Pure so the
+/// decision is testable without a live GPUI/tokio stack.
+fn is_local_connection_terminal_failure(connection_id: &str, status: &ConnectionStatus) -> bool {
+    connection_id == LOCAL_DAEMON_CONNECTION_ID && matches!(status, ConnectionStatus::Error(_))
+}
+
 fn now_unix_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -789,7 +816,45 @@ fn now_unix_timestamp() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{activity_changed, RemoteConnectionManager};
+    use super::{activity_changed, is_local_connection_terminal_failure, RemoteConnectionManager};
+    use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
+
+    #[test]
+    fn local_error_status_triggers_recovery() {
+        assert!(is_local_connection_terminal_failure(
+            LOCAL_DAEMON_CONNECTION_ID,
+            &ConnectionStatus::Error("dead socket".into()),
+        ));
+    }
+
+    #[test]
+    fn local_non_error_states_do_not_trigger_recovery() {
+        // Reconnecting/Connected/etc. are transient or healthy — not dead-ends.
+        // Disconnected is what `remove_connection` (on quit) leaves behind, so
+        // it must never look like a failure.
+        for status in [
+            ConnectionStatus::Disconnected,
+            ConnectionStatus::Connecting,
+            ConnectionStatus::Pairing,
+            ConnectionStatus::Connected,
+            ConnectionStatus::Reconnecting { attempt: 3 },
+        ] {
+            assert!(!is_local_connection_terminal_failure(
+                LOCAL_DAEMON_CONNECTION_ID,
+                &status
+            ));
+        }
+    }
+
+    #[test]
+    fn user_remote_error_does_not_trigger_recovery() {
+        // A user-managed remote failing is surfaced as a toast only; recovery is
+        // reserved for the daemon the GUI depends on.
+        assert!(!is_local_connection_terminal_failure(
+            "some-user-remote",
+            &ConnectionStatus::Error("gone".into()),
+        ));
+    }
 
     fn gens(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
         pairs.iter().map(|(id, g)| (id.to_string(), *g)).collect()
