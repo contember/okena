@@ -32,7 +32,7 @@ pub(super) fn add_project(
     // they just created without re-fetching state. `spawn_uninitialized_terminals`
     // returns `{ "terminal_ids": [...] }`; we merge `project_id` into that
     // object, leaving its terminal-spawning behavior unchanged.
-    match spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx) {
+    match spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, None, cx) {
         ActionResult::Ok(Some(serde_json::Value::Object(mut map))) => {
             map.insert(
                 "project_id".to_string(),
@@ -373,7 +373,7 @@ pub(super) fn create_worktree(
 
     match ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &wt_project_path, create_branch, &global_hooks, window_id, cx) {
         Ok(new_project_id) => {
-            let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, settings, cx);
+            let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, settings, None, cx);
             let terminal_id = ws.project(&new_project_id)
                 .and_then(|p| p.layout.as_ref())
                 .and_then(find_first_terminal_id);
@@ -422,7 +422,7 @@ pub(super) fn add_discovered_worktree(
     ws.add_to_worktree_ids(&parent_project_id, &new_id);
     // `add_discovered_worktree` deliberately doesn't notify (caller's job).
     ws.notify_data(cx);
-    let result = spawn_uninitialized_terminals(ws, &new_id, backend, terminals, settings, cx);
+    let result = spawn_uninitialized_terminals(ws, &new_id, backend, terminals, settings, None, cx);
     let terminal_id = ws
         .project(&new_id)
         .and_then(|p| p.layout.as_ref())

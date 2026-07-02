@@ -372,12 +372,40 @@ pub fn ensure_terminal(
 ///
 /// Used after `CreateTerminal` / `SplitTerminal` to eagerly create PTYs for
 /// remote clients that don't have a rendering layer to trigger lazy spawning.
+/// The cwd a *new* terminal should inherit when it's created next to an
+/// existing one (split / add-tab): the live working directory of the terminal
+/// the user acted on — the node at `path`, or the visible terminal under it
+/// when `path` is a group. Resolved from the action's `path` (client-independent,
+/// so it holds in the daemon model). Uses `Terminal::current_cwd` (the OSC 7
+/// shell cwd), so it follows wherever the source shell has `cd`-ed. `None` when
+/// there's no live source terminal — callers then fall back to the project path.
+pub(super) fn inherited_cwd(
+    ws: &Workspace,
+    terminals: &TerminalsRegistry,
+    project_id: &str,
+    path: &[usize],
+) -> Option<String> {
+    let layout = ws.project(project_id)?.layout.as_ref()?;
+    let node = layout.get_at_path(path)?;
+    let rel = node.find_visible_terminal_path();
+    let LayoutNode::Terminal { terminal_id: Some(terminal_id), .. } = node.get_at_path(&rel)?
+    else {
+        return None;
+    };
+    let cwd = terminals.lock().get(terminal_id)?.current_cwd();
+    (!cwd.is_empty()).then_some(cwd)
+}
+
 pub fn spawn_uninitialized_terminals(
     ws: &mut Workspace,
     project_id: &str,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
+    // When a new terminal is created next to an existing one (split / add-tab),
+    // the caller passes the source terminal's live cwd so the new one opens
+    // "here". `None` → the project path (fresh projects, worktrees, sessions).
+    inherit_cwd: Option<String>,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     // Don't spawn terminals for projects whose worktree is still being created
@@ -391,6 +419,9 @@ pub fn spawn_uninitialized_terminals(
     };
 
     let project_path = project.path.clone();
+    // The directory new PTYs actually spawn in: the inherited (source-terminal)
+    // cwd when provided, else the project path.
+    let spawn_cwd = inherit_cwd.unwrap_or_else(|| project_path.clone());
     let project_name = project.name.clone();
     let project_hooks = project.hooks.clone();
     let is_worktree = project.worktree_info.is_some();
@@ -434,14 +465,14 @@ pub fn spawn_uninitialized_terminals(
             shell = hooks::apply_on_create(&shell, cmd, &env);
         }
 
-        match backend.create_terminal(&project_path, Some(&shell)) {
+        match backend.create_terminal(&spawn_cwd, Some(&shell)) {
             Ok(terminal_id) => {
                 ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
                 let terminal = Arc::new(Terminal::new(
                     terminal_id.clone(),
                     TerminalSize::default(),
                     backend.transport(),
-                    project_path.clone(),
+                    spawn_cwd.clone(),
                 ));
 
                 terminals.lock().insert(terminal_id.clone(), terminal);

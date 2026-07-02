@@ -24,12 +24,15 @@ pub(super) fn add_tab(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    // Inherit the source group/terminal's live cwd (captured before the layout
+    // mutation) so the new tab opens in the same directory.
+    let inherit_cwd = super::inherited_cwd(ws, terminals, &project_id, &path);
     if in_group {
         ws.add_tab_to_group(focus_manager, &project_id, &path, cx);
     } else {
         ws.add_tab(focus_manager, &project_id, &path, cx);
     }
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx)
+    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, inherit_cwd, cx)
 }
 
 pub(super) fn set_active_tab(

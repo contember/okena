@@ -663,6 +663,7 @@ pub fn materialize_uninitialized_terminals(
             backend,
             terminals,
             &app_settings,
+            None,
             &mut cx,
         ) {
             okena_app_core::workspace::actions::execute::ActionResult::Err(e) => {

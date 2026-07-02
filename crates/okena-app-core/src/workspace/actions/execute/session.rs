@@ -50,7 +50,7 @@ fn replace_workspace_with(
     let project_ids: Vec<String> = ws.projects().iter().map(|p| p.id.clone()).collect();
     for pid in &project_ids {
         if let ActionResult::Err(e) =
-            spawn_uninitialized_terminals(ws, pid, backend, terminals, settings, cx)
+            spawn_uninitialized_terminals(ws, pid, backend, terminals, settings, None, cx)
         {
             return ActionResult::Err(e);
         }

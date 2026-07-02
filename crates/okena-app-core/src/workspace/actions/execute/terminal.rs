@@ -30,8 +30,14 @@ pub(super) fn create(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    // Open in the focused terminal's cwd (when one is focused in this project),
+    // else the project path.
+    let inherit_cwd = focus_manager
+        .focused_terminal_state()
+        .filter(|f| f.project_id == project_id)
+        .and_then(|f| super::inherited_cwd(ws, terminals, &project_id, &f.layout_path));
     ws.add_terminal(focus_manager, &project_id, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx)
+    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, inherit_cwd, cx)
 }
 
 pub(super) fn split(
@@ -45,8 +51,11 @@ pub(super) fn split(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    // Inherit the split source terminal's live cwd (captured before the layout
+    // mutation invalidates `path`) so the new pane opens in the same directory.
+    let inherit_cwd = super::inherited_cwd(ws, terminals, &project_id, &path);
     ws.split_terminal(focus_manager, &project_id, &path, direction, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx)
+    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, inherit_cwd, cx)
 }
 
 /// Switch a terminal's shell: kill the old PTY, reset the layout node to
@@ -77,7 +86,9 @@ pub(super) fn switch_shell(
     terminals.lock().remove(&terminal_id);
     ws.set_terminal_shell(&project_id, &path, shell, cx);
     ws.clear_terminal_id(&project_id, &path, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, cx)
+    // Shell-switch respawns the pane in place; keep the project path (the old
+    // terminal's cwd is gone with its PTY).
+    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, None, cx)
 }
 
 pub(super) fn close(
