@@ -266,7 +266,10 @@ fn extract_port_from_ss_line(line: &str) -> Option<u16> {
 }
 
 /// Parse `lsof -iTCP -sTCP:LISTEN -P -n` output into (pid, port) pairs.
-#[cfg(any(target_os = "macos", test))]
+///
+/// macOS now scans listening sockets via libproc (`get_listening_port_pairs_macos`)
+/// rather than spawning `lsof`, so this parser is retained only for its tests.
+#[cfg(test)]
 pub(crate) fn parse_lsof_output(stdout: &str) -> Vec<(u32, u16)> {
     let mut pairs = Vec::new();
     for line in stdout.lines().skip(1) {

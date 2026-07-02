@@ -519,7 +519,7 @@ fn generate_secret() -> Vec<u8> {
 }
 
 fn load_or_create_secret_at(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    if let Ok(data) = std::fs::read(&path) {
+    if let Ok(data) = std::fs::read(path) {
         if data.len() == 32 {
             return Ok(data);
         }

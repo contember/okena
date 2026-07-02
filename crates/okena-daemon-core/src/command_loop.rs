@@ -117,10 +117,10 @@ fn send_git_poll_trigger_after_success(
     trigger: Option<GitPollTrigger>,
     tx: &tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
 ) {
-    if matches!(result, CommandResult::Ok(_)) {
-        if let Some(trigger) = trigger {
-            let _ = tx.send(trigger);
-        }
+    if matches!(result, CommandResult::Ok(_))
+        && let Some(trigger) = trigger
+    {
+        let _ = tx.send(trigger);
     }
 }
 

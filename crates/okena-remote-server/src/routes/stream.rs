@@ -546,49 +546,6 @@ async fn send_authority_resizes(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn resized_server_owns(
-        server_owns: bool,
-        owner_connection_id: Option<&str>,
-        recipient_connection_id: &str,
-    ) -> bool {
-        match terminal_resized_for_recipient(
-            "t".to_string(),
-            120,
-            40,
-            server_owns,
-            owner_connection_id,
-            recipient_connection_id,
-        ) {
-            WsOutbound::TerminalResized { server_owns, .. } => server_owns,
-            _ => unreachable!("helper always returns TerminalResized"),
-        }
-    }
-
-    #[test]
-    fn resize_echo_stays_client_owned_for_origin_connection() {
-        assert!(!resized_server_owns(false, Some("conn-a"), "conn-a"));
-    }
-
-    #[test]
-    fn resize_from_other_connection_makes_recipient_defer() {
-        assert!(resized_server_owns(false, Some("conn-a"), "conn-b"));
-    }
-
-    #[test]
-    fn server_owned_resize_makes_every_remote_defer() {
-        assert!(resized_server_owns(true, None, "conn-a"));
-    }
-
-    #[test]
-    fn legacy_unknown_remote_owner_keeps_prior_client_behavior() {
-        assert!(!resized_server_owns(false, None, "conn-a"));
-    }
-}
-
 /// Drain the PTY events that accumulated before/during snapshot generation at
 /// subscribe time, discarding those already reflected in a terminal's snapshot
 /// and forwarding those that are not.
@@ -707,4 +664,47 @@ async fn send_snapshots(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resized_server_owns(
+        server_owns: bool,
+        owner_connection_id: Option<&str>,
+        recipient_connection_id: &str,
+    ) -> bool {
+        match terminal_resized_for_recipient(
+            "t".to_string(),
+            120,
+            40,
+            server_owns,
+            owner_connection_id,
+            recipient_connection_id,
+        ) {
+            WsOutbound::TerminalResized { server_owns, .. } => server_owns,
+            _ => unreachable!("helper always returns TerminalResized"),
+        }
+    }
+
+    #[test]
+    fn resize_echo_stays_client_owned_for_origin_connection() {
+        assert!(!resized_server_owns(false, Some("conn-a"), "conn-a"));
+    }
+
+    #[test]
+    fn resize_from_other_connection_makes_recipient_defer() {
+        assert!(resized_server_owns(false, Some("conn-a"), "conn-b"));
+    }
+
+    #[test]
+    fn server_owned_resize_makes_every_remote_defer() {
+        assert!(resized_server_owns(true, None, "conn-a"));
+    }
+
+    #[test]
+    fn legacy_unknown_remote_owner_keeps_prior_client_behavior() {
+        assert!(!resized_server_owns(false, None, "conn-a"));
+    }
 }

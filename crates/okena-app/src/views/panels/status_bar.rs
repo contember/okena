@@ -251,9 +251,8 @@ impl StatusBar {
 
     fn layout_terminal_count(node: Option<&ApiLayoutNode>) -> usize {
         match node {
-            Some(ApiLayoutNode::Terminal { terminal_id, .. }) => {
-                if terminal_id.is_some() { 1 } else { 0 }
-            }
+            Some(ApiLayoutNode::Terminal { terminal_id: Some(_), .. }) => 1,
+            Some(ApiLayoutNode::Terminal { .. }) => 0,
             Some(ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. }) => {
                 children.iter()
                     .map(|child| Self::layout_terminal_count(Some(child)))

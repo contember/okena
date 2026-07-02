@@ -1105,17 +1105,21 @@ mod tests {
             uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
         let workspace_extra_id =
             uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
-        let mut target_extra = WindowState::default();
-        target_extra.id = client_extra_id;
-        target_extra.os_bounds = Some(crate::state::WindowBounds {
-            origin_x: 0.0,
-            origin_y: 0.0,
-            width: 1200.0,
-            height: 800.0,
-        });
-        let mut source_extra = WindowState::default();
-        source_extra.id = workspace_extra_id;
-        source_extra.os_bounds = target_extra.os_bounds;
+        let target_extra = WindowState {
+            id: client_extra_id,
+            os_bounds: Some(crate::state::WindowBounds {
+                origin_x: 0.0,
+                origin_y: 0.0,
+                width: 1200.0,
+                height: 800.0,
+            }),
+            ..Default::default()
+        };
+        let source_extra = WindowState {
+            id: workspace_extra_id,
+            os_bounds: target_extra.os_bounds,
+            ..Default::default()
+        };
 
         let mut target = ClientWindowLayout {
             version: WINDOW_LAYOUT_VERSION,
