@@ -77,11 +77,13 @@ pub async fn post_shutdown(
         }
         None => {
             // Transitional `okena --headless` fallback: no graceful run-loop to
-            // signal, so remove our own remote.json (pid-guarded) and hard-exit,
-            // the same way the restart route exits.
+            // signal, so hard-exit like the restart route. Because `process::exit`
+            // skips Drop, clean up our own files first (pid-guarded): remove
+            // remote.json, unlink the local socket, and drop the instance lock —
+            // otherwise the leftover socket/lock race the next daemon start.
             tokio::spawn(async move {
                 tokio::time::sleep(EXIT_DELAY).await;
-                crate::server::remove_remote_json();
+                crate::server::cleanup_on_hard_exit();
                 log::info!("Headless daemon exiting for shutdown");
                 std::process::exit(0);
             });

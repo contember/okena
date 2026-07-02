@@ -69,14 +69,22 @@ pub fn get_workspace_path() -> PathBuf {
     }
 }
 
+/// Path to the instance lock file for the active profile (falling back to the
+/// legacy flat layout). Shared by `acquire_instance_lock` and any teardown that
+/// needs to remove the lock without holding a `LockGuard` (e.g. the hard-exit
+/// daemon shutdown path), so both agree on the location.
+pub fn instance_lock_path() -> PathBuf {
+    okena_core::profiles::try_current()
+        .map(|p| p.lock_path())
+        .unwrap_or_else(|| get_config_dir().join("okena.lock"))
+}
+
 /// Acquire a lock file to prevent multiple instances from running simultaneously.
 /// Returns a held `LockGuard` that releases the lock on drop.
 /// If another instance is already running, returns an error with its PID.
 pub fn acquire_instance_lock() -> Result<LockGuard> {
     let _slow = okena_core::timing::SlowGuard::new("acquire_instance_lock");
-    let lock_path = okena_core::profiles::try_current()
-        .map(|p| p.lock_path())
-        .unwrap_or_else(|| get_config_dir().join("okena.lock"));
+    let lock_path = instance_lock_path();
 
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;

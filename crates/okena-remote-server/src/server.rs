@@ -384,21 +384,76 @@ fn local_tcp_host(bind_addrs: &[IpAddr]) -> &'static str {
     crate::local::LOCAL_HOST
 }
 
-/// Remove remote.json on shutdown, but ONLY when it still advertises THIS
-/// process. A restart handoff exits via `std::process::exit` (skipping this) and
-/// the successor rewrites remote.json with its own pid; pid-guarding here keeps
-/// a late/racy teardown from clobbering that successor's discovery file.
-pub(crate) fn remove_remote_json() {
+/// Read remote.json and return its path + parsed contents ONLY when it still
+/// advertises THIS process. The shared pid-guard for every teardown path: a
+/// restart handoff exits via `std::process::exit` (skipping teardown) and the
+/// successor rewrites remote.json with its own pid, so a late/racy teardown must
+/// never clobber that successor's discovery file.
+fn read_remote_json_if_ours() -> Option<(std::path::PathBuf, serde_json::Value)> {
     let path = remote_json_path();
-    let Ok(data) = std::fs::read_to_string(&path) else {
+    let data = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let owned_by_us = json
+        .get("pid")
+        .and_then(|p| p.as_u64())
+        .is_some_and(|pid| pid == u64::from(std::process::id()));
+    owned_by_us.then_some((path, json))
+}
+
+/// Remove remote.json on shutdown, pid-guarded (see `read_remote_json_if_ours`).
+pub(crate) fn remove_remote_json() {
+    if let Some((path, _)) = read_remote_json_if_ours() {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Hard-exit cleanup for the transitional `okena --headless` `/v1/shutdown`
+/// fallback, which exits via `process::exit` and so SKIPS the Drop teardown the
+/// graceful daemon-core path relies on (`RemoteServer::stop` + `LockGuard::drop`).
+///
+/// Removes remote.json, unlinks the local unix socket it advertised, and drops
+/// the instance lock — each pid-guarded to THIS process so a racy/late teardown
+/// never clobbers a successor daemon's files. Without the socket unlink the
+/// stale socket file lingers, and the next daemon's dtach GC could delete it out
+/// from under a fresh listener; without the lock removal the next start would
+/// see a stale lock owned by a dead pid.
+pub(crate) fn cleanup_on_hard_exit() {
+    remove_remote_json_and_local_socket();
+    remove_instance_lock_if_ours();
+}
+
+/// Pid-guarded (see `read_remote_json_if_ours`): unlink the local unix socket
+/// remote.json advertises, then remove remote.json itself. Reading the endpoint
+/// from the file (rather than guessing the path) keeps this in sync with
+/// whatever the server actually bound.
+fn remove_remote_json_and_local_socket() {
+    let Some((path, json)) = read_remote_json_if_ours() else {
         return;
     };
-    let owned_by_us = serde_json::from_str::<serde_json::Value>(&data)
-        .ok()
-        .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
-        .is_some_and(|pid| pid == u64::from(std::process::id()));
-    if owned_by_us {
-        let _ = std::fs::remove_file(&path);
+
+    // Unlink the local socket first, while we still hold its path from the file.
+    // Only ever advertised on Unix; removing a nonexistent path elsewhere is a
+    // harmless ignored error.
+    if let Some(LocalEndpoint::UnixSocket { path: socket }) = json
+        .get("local_endpoint")
+        .and_then(|v| serde_json::from_value::<LocalEndpoint>(v.clone()).ok())
+    {
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Remove the instance lock file, but ONLY if it still records THIS process's
+/// pid (mirrors the remote.json pid-guard). The lock file holds a bare pid
+/// string (see `acquire_instance_lock`).
+fn remove_instance_lock_if_ours() {
+    let lock_path = okena_workspace::persistence::instance_lock_path();
+    let Ok(content) = std::fs::read_to_string(&lock_path) else {
+        return;
+    };
+    if content.trim().parse::<u32>().ok() == Some(std::process::id()) {
+        let _ = std::fs::remove_file(&lock_path);
     }
 }
 
