@@ -1,6 +1,7 @@
 use super::super::Terminal;
 use super::super::resize_authority::{
-    claim_remote_resize_if_allowed, reset_resize_authority, resize_authority_snapshot,
+    claim_remote_resize_if_allowed, release_remote_resize_owner, reset_resize_authority,
+    resize_authority_snapshot,
 };
 use super::super::transport::TerminalTransport;
 use super::super::types::TerminalSize;
@@ -92,6 +93,27 @@ fn remote_resize_owner_is_process_global() {
     assert!(claim_remote_resize_if_allowed("t1", "conn-a"));
     assert!(claim_remote_resize_if_allowed("t2", "conn-a"));
     assert!(!claim_remote_resize_if_allowed("t2", "conn-b"));
+}
+
+#[test]
+fn released_owner_lets_next_connection_adopt() {
+    let _g = RESIZE_AUTH_TEST_LOCK.lock();
+    reset_resize_authority();
+
+    assert!(claim_remote_resize_if_allowed("t", "conn-a"));
+    assert!(!claim_remote_resize_if_allowed("t", "conn-b"));
+
+    // Releasing a non-owner is a no-op.
+    release_remote_resize_owner("conn-b");
+    assert!(!claim_remote_resize_if_allowed("t", "conn-b"));
+
+    // Releasing the owner keeps remote authority but lets anyone adopt it.
+    release_remote_resize_owner("conn-a");
+    assert!(claim_remote_resize_if_allowed("t", "conn-b"));
+    assert_eq!(
+        resize_authority_snapshot("t").remote_owner_id.as_deref(),
+        Some("conn-b")
+    );
 }
 
 #[test]

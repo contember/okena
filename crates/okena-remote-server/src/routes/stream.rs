@@ -481,6 +481,10 @@ async fn handle_ws(
         map.remove(&connection_id);
     }
 
+    // Release resize ownership so a reconnecting client isn't denied by a
+    // dead owner; the next resize from any connection adopts it.
+    okena_terminal::terminal::release_remote_resize_owner(&connection_owner_id);
+
     // Shutdown: dropping out_tx closes the writer's channel → writer exits.
     drop(out_tx);
     let _ = writer_handle.await;

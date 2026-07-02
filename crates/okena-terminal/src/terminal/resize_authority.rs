@@ -67,6 +67,16 @@ pub fn claim_remote_resize_if_allowed(_terminal_id: &str, owner_id: &str) -> boo
     }
 }
 
+/// Release resize ownership held by a disconnecting connection. Keeps the
+/// remote side as authority but ownerless, so the next client's resize can
+/// adopt it instead of being denied by a dead owner.
+pub fn release_remote_resize_owner(owner_id: &str) {
+    let mut authority = resize_authority().lock();
+    if authority.remote_owner_id.as_deref() == Some(owner_id) {
+        authority.remote_owner_id = None;
+    }
+}
+
 pub fn is_resize_authority_local(_terminal_id: &str) -> bool {
     resize_authority_snapshot("").local
 }
