@@ -38,7 +38,7 @@ use okena_core::process::{with_lane, Lane};
 use okena_git::{self as git, GitStatus};
 use okena_workspace::state::Workspace;
 use parking_lot::Mutex;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 /// How often to poll git status. Mirrors the GUI watcher's `GIT_POLL_INTERVAL`.
 const GIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -51,6 +51,22 @@ const CI_PENDING_POLL_EVERY_N_CYCLES: u64 = 3;
 /// How many git poll cycles between CI check polls when checks are settled
 /// (~60s). Mirrors the GUI watcher's `CI_SETTLED_POLL_EVERY_N_CYCLES`.
 const CI_SETTLED_POLL_EVERY_N_CYCLES: u64 = 12;
+
+/// External wake-up request for the daemon git poller.
+#[derive(Clone, Debug)]
+pub struct GitPollTrigger {
+    pub project_id: String,
+    pub poll_github: bool,
+}
+
+impl GitPollTrigger {
+    pub fn branch_change(project_id: String) -> Self {
+        Self {
+            project_id,
+            poll_github: true,
+        }
+    }
+}
 
 /// Project the local [`GitStatus`] onto the slimmer wire type pushed to remote
 /// clients. GPUI-free reimplementation of `okena-views-git`'s `to_api`.
@@ -92,6 +108,7 @@ pub async fn run_git_poll(
     git_status_tx: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
     state_version: watch::Sender<u64>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    mut trigger_rx: mpsc::UnboundedReceiver<GitPollTrigger>,
 ) {
     // Last-published per-project statuses, kept across cycles so we only
     // re-broadcast + bump on real change. Keyed by the richer `GitStatus`
@@ -109,8 +126,21 @@ pub async fn run_git_poll(
     // Drives the adaptive CI cadence: faster polling while any check is pending.
     let mut any_pending_ci = false;
     let mut cycle: u64 = 0;
+    let mut forced_gh_ids: HashSet<String> = HashSet::new();
+    let mut trigger_rx_closed = false;
 
     loop {
+        drain_git_poll_triggers(&mut trigger_rx, &mut forced_gh_ids, &mut trigger_rx_closed);
+        if !forced_gh_ids.is_empty() {
+            for id in &forced_gh_ids {
+                pr_infos.remove(id);
+                ci_checks.remove(id);
+            }
+            any_pending_ci = ci_checks
+                .values()
+                .any(|c| c.as_ref().map(|s| s.status.is_pending()).unwrap_or(false));
+        }
+
         // ── 1. Snapshot the projects to poll under the workspace lock ────────
         // git status (gix, cheap, local-only) is polled for EVERY non-remote
         // project: the daemon's own window visibility is synthetic and must not
@@ -140,6 +170,7 @@ pub async fn run_git_poll(
                     }
                 }
             }
+            gh_ids.extend(forced_gh_ids.iter().cloned());
             (projects, gh_ids)
         };
 
@@ -152,8 +183,13 @@ pub async fn run_git_poll(
         } else {
             CI_SETTLED_POLL_EVERY_N_CYCLES
         };
-        let check_prs = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(PR_POLL_EVERY_N_CYCLES));
-        let check_ci = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(ci_poll_interval));
+        let pr_cadence = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(PR_POLL_EVERY_N_CYCLES));
+        let ci_cadence = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(ci_poll_interval));
+        let force_gh = !forced_gh_ids.is_empty();
+        let check_prs = force_gh || pr_cadence;
+        let check_ci = force_gh || ci_cadence;
+        let pr_poll_ids = gh_poll_ids(&gh_ids, &forced_gh_ids, force_gh, pr_cadence);
+        let ci_poll_ids = gh_poll_ids(&gh_ids, &forced_gh_ids, force_gh, ci_cadence);
 
         // ── 2. Refresh each project's git status on the blocking pool ────────
         let mut new_statuses: HashMap<String, GitStatus> = HashMap::new();
@@ -205,7 +241,7 @@ pub async fn run_git_poll(
         if check_prs {
             for (id, path) in &projects {
                 // Only fan out `gh` for projects a client is actually viewing.
-                if !gh_ids.contains(id) {
+                if !pr_poll_ids.contains(id) {
                     continue;
                 }
                 let id = id.clone();
@@ -234,7 +270,7 @@ pub async fn run_git_poll(
         if check_ci {
             for (id, path) in &projects {
                 // Only fan out `gh` for projects a client is actually viewing.
-                if !gh_ids.contains(id) {
+                if !ci_poll_ids.contains(id) {
                     continue;
                 }
                 let id = id.clone();
@@ -283,8 +319,74 @@ pub async fn run_git_poll(
             );
         }
 
+        forced_gh_ids.clear();
         cycle += 1;
+        wait_for_next_cycle(&mut trigger_rx, &mut forced_gh_ids, &mut trigger_rx_closed).await;
+    }
+}
+
+fn drain_git_poll_triggers(
+    trigger_rx: &mut mpsc::UnboundedReceiver<GitPollTrigger>,
+    forced_gh_ids: &mut HashSet<String>,
+    trigger_rx_closed: &mut bool,
+) {
+    if *trigger_rx_closed {
+        return;
+    }
+    loop {
+        match trigger_rx.try_recv() {
+            Ok(trigger) => {
+                if trigger.poll_github {
+                    forced_gh_ids.insert(trigger.project_id);
+                }
+            }
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                *trigger_rx_closed = true;
+                break;
+            }
+        }
+    }
+}
+
+fn gh_poll_ids(
+    gh_ids: &HashSet<String>,
+    forced_gh_ids: &HashSet<String>,
+    force_gh: bool,
+    cadence: bool,
+) -> HashSet<String> {
+    match (force_gh, cadence) {
+        (true, true) => gh_ids.clone(),
+        (true, false) => forced_gh_ids.clone(),
+        (false, true) => gh_ids.clone(),
+        (false, false) => HashSet::new(),
+    }
+}
+
+async fn wait_for_next_cycle(
+    trigger_rx: &mut mpsc::UnboundedReceiver<GitPollTrigger>,
+    forced_gh_ids: &mut HashSet<String>,
+    trigger_rx_closed: &mut bool,
+) {
+    if *trigger_rx_closed {
         tokio::time::sleep(GIT_POLL_INTERVAL).await;
+        return;
+    }
+
+    tokio::select! {
+        _ = tokio::time::sleep(GIT_POLL_INTERVAL) => {}
+        trigger = trigger_rx.recv() => {
+            match trigger {
+                Some(trigger) => {
+                    if trigger.poll_github {
+                        forced_gh_ids.insert(trigger.project_id);
+                    }
+                }
+                None => {
+                    *trigger_rx_closed = true;
+                }
+            }
+        }
     }
 }
 
@@ -344,9 +446,27 @@ mod tests {
         drop(rx);
 
         let subscribed = Arc::new(RwLock::new(HashMap::new()));
-        run_git_poll(workspace, git_status_tx.clone(), state_version, subscribed).await;
+        let (_trigger_tx, trigger_rx) = mpsc::unbounded_channel();
+        run_git_poll(
+            workspace,
+            git_status_tx.clone(),
+            state_version,
+            subscribed,
+            trigger_rx,
+        )
+        .await;
 
         // No projects → nothing was published; the channel holds the initial map.
         assert!(git_status_tx.borrow().is_empty());
+    }
+
+    #[test]
+    fn forced_gh_poll_ids_are_targeted_between_cadence_cycles() {
+        let gh_ids: HashSet<String> = ["visible-a".to_string(), "visible-b".to_string()]
+            .into_iter()
+            .collect();
+        let forced: HashSet<String> = ["switched".to_string()].into_iter().collect();
+
+        assert_eq!(gh_poll_ids(&gh_ids, &forced, true, false), forced);
     }
 }

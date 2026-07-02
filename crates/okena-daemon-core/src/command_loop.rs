@@ -60,6 +60,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 
 use crate::daemon_config::{get_settings_schema, DaemonConfig};
+use crate::git_poll::GitPollTrigger;
 use crate::service_cx::ServiceReactorRef;
 use crate::soft_close::SoftCloseDeadlines;
 use crate::workspace_cx::DaemonWorkspaceCx;
@@ -100,6 +101,29 @@ fn claim_input_resize_owner(action: &ActionRequest, owner_id: Option<&str>) {
     }
 }
 
+fn git_poll_trigger_for_action(action: &ActionRequest) -> Option<GitPollTrigger> {
+    match action {
+        ActionRequest::GitCheckoutLocalBranch { project_id, .. }
+        | ActionRequest::GitCheckoutRemoteBranch { project_id, .. }
+        | ActionRequest::GitCreateAndCheckoutBranch { project_id, .. } => {
+            Some(GitPollTrigger::branch_change(project_id.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn send_git_poll_trigger_after_success(
+    result: &CommandResult,
+    trigger: Option<GitPollTrigger>,
+    tx: &tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
+) {
+    if matches!(result, CommandResult::Ok(_)) {
+        if let Some(trigger) = trigger {
+            let _ = tx.send(trigger);
+        }
+    }
+}
+
 /// GPUI-free remote command loop for the headless daemon.
 ///
 /// Processes [`RemoteCommand`]s off the [`BridgeReceiver`] until every bridge
@@ -125,6 +149,7 @@ pub async fn daemon_command_loop(
     settings: Arc<Mutex<AppSettings>>,
     mut daemon_config: DaemonConfig,
     deadlines: SoftCloseDeadlines,
+    git_poll_trigger_tx: tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
     // owns the FM directly instead of resolving a per-window entity like the
@@ -355,6 +380,7 @@ pub async fn daemon_command_loop(
 
                 // ── Default: workspace-scoped action ─────────────────────────
                 action => {
+                    let git_poll_trigger = git_poll_trigger_for_action(&action);
                     // Resolve the action's explicit target window (if any)
                     // BEFORE moving `action` into `execute_action`. The daemon
                     // serves only the synthetic main window: `None` and
@@ -381,7 +407,7 @@ pub async fn daemon_command_loop(
                             // separate `cx.notify()` like the GUI's view-refresh.
                             let app_settings = settings.lock().clone();
                             let mut ws = workspace.lock();
-                            run_main_workspace_action(
+                            let result = run_main_workspace_action(
                                 action,
                                 &mut ws,
                                 &mut focus_manager,
@@ -391,7 +417,13 @@ pub async fn daemon_command_loop(
                                 &workspace_tick,
                                 &hook_runner,
                                 &hook_monitor,
-                            )
+                            );
+                            send_git_poll_trigger_after_success(
+                                &result,
+                                git_poll_trigger,
+                                &git_poll_trigger_tx,
+                            );
+                            result
                         }
                         Ok(Some(WindowId::Extra(uuid))) => {
                             // The daemon has only the synthetic main window.
@@ -852,6 +884,39 @@ mod tests {
         assert!(api_project_visibility("p1", &hidden));
     }
 
+    #[test]
+    fn branch_actions_create_git_poll_trigger() {
+        let trigger = git_poll_trigger_for_action(&ActionRequest::GitCheckoutLocalBranch {
+            project_id: "p1".to_string(),
+            branch: "feature".to_string(),
+        })
+        .expect("branch checkout creates trigger");
+
+        assert_eq!(trigger.project_id, "p1");
+        assert!(trigger.poll_github);
+    }
+
+    #[test]
+    fn git_poll_trigger_is_sent_only_after_success() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        send_git_poll_trigger_after_success(
+            &CommandResult::Err("nope".to_string()),
+            Some(GitPollTrigger::branch_change("p1".to_string())),
+            &tx,
+        );
+        assert!(rx.try_recv().is_err());
+
+        send_git_poll_trigger_after_success(
+            &CommandResult::Ok(None),
+            Some(GitPollTrigger::branch_change("p1".to_string())),
+            &tx,
+        );
+        let trigger = rx.try_recv().expect("success sends trigger");
+        assert_eq!(trigger.project_id, "p1");
+        assert!(trigger.poll_github);
+    }
+
     // ── Loop round-trip tests ─────────────────────────────────────────────────
 
     /// `GetState` returns `Ok(Some(v))` that deserializes into a `StateResponse`
@@ -880,6 +945,7 @@ mod tests {
                     h.settings,
                     h.daemon_config,
                     Arc::new(Mutex::new(HashMap::new())),
+                    tokio::sync::mpsc::unbounded_channel().0,
                 ));
 
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -935,6 +1001,7 @@ mod tests {
                     h.settings,
                     h.daemon_config,
                     Arc::new(Mutex::new(HashMap::new())),
+                    tokio::sync::mpsc::unbounded_channel().0,
                 ));
 
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -989,6 +1056,7 @@ mod tests {
                     h.settings,
                     h.daemon_config,
                     Arc::new(Mutex::new(HashMap::new())),
+                    tokio::sync::mpsc::unbounded_channel().0,
                 ));
 
                 let (reply_tx, reply_rx) = oneshot::channel();

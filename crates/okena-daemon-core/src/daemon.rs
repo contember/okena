@@ -312,6 +312,9 @@ impl DaemonCore {
         let handle = runtime.handle().clone();
         let local = tokio::task::LocalSet::new();
         local.block_on(&runtime, async move {
+            let (git_poll_trigger_tx, git_poll_trigger_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+
             // Observers MUST be spawned inside the LocalSet (they `spawn_local`).
             reactor.spawn_observers();
             tokio::task::spawn_local(crate::pty_loop::run_pty_loop(
@@ -338,6 +341,7 @@ impl DaemonCore {
                 git_status_tx.clone(),
                 reactor.state_version.clone(),
                 remote_subscribed_terminals,
+                git_poll_trigger_rx,
             ));
             // Forward the daemon's HookMonitor toasts to clients. The daemon has
             // no surface; this drains its pending toasts and broadcasts them over
@@ -403,6 +407,7 @@ impl DaemonCore {
                 settings,
                 daemon_config,
                 soft_close_deadlines,
+                git_poll_trigger_tx,
             );
             tokio::select! {
                 _ = cmd => log::info!("daemon command loop ended (remote server gone)"),
