@@ -177,7 +177,7 @@ impl EventListener for ZedEventListener {
                 if let Some((r, g, b)) = self.resolve_color(index) {
                     let reply =
                         response_fn(alacritty_terminal::vte::ansi::Rgb { r, g, b });
-                    self.transport.send_input(&self.terminal_id, reply.as_bytes());
+                    self.transport.send_response(&self.terminal_id, reply.as_bytes());
                 }
             }
             TermEvent::TextAreaSizeRequest(formatter) => {
@@ -193,12 +193,14 @@ impl EventListener for ZedEventListener {
                     cell_height: (size.cell_height.round() as u16).max(1),
                 };
                 let reply = formatter(window_size);
-                self.transport.send_input(&self.terminal_id, reply.as_bytes());
+                self.transport.send_response(&self.terminal_id, reply.as_bytes());
             }
             TermEvent::PtyWrite(data) => {
-                // Write response back to PTY (e.g., cursor position report)
+                // Terminal→program reply (Device Attributes, cursor position
+                // report, DSR, …). Sent on the synchronous fast-lane so it beats
+                // the querying program's exit back to the shell.
                 log::debug!("PtyWrite event: {:?}", data);
-                self.transport.send_input(&self.terminal_id, data.as_bytes());
+                self.transport.send_response(&self.terminal_id, data.as_bytes());
             }
             _ => {
                 // Ignore other events

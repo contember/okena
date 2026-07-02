@@ -25,6 +25,15 @@ impl TerminalTransport for RemoteTransport {
         });
     }
 
+    /// No-op: the daemon owns the PTY and is the sole responder to terminal
+    /// queries (Device Attributes, DSR, DECRQM, …). A remote client is a
+    /// render-only mirror of the daemon's grid — if it also answered, the reply
+    /// would be a duplicate that round-trips over the WebSocket and lands at the
+    /// PTY long after the querying program exited (the stray `6c` at the shell
+    /// prompt after closing nvim). The default `send_response` routes to
+    /// `send_input`, so we must explicitly suppress it here.
+    fn send_response(&self, _terminal_id: &str, _data: &[u8]) {}
+
     fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
         let remote_id = strip_prefix(terminal_id, &self.connection_id);
         let _ = self.ws_tx.try_send(WsClientMessage::Resize {

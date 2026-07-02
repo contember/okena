@@ -127,6 +127,9 @@ struct PtyHandle {
     /// `Option` so teardown and the `Drop` backstop can both `take()` it
     /// idempotently to close the channel and unblock the writer thread.
     input_tx: Option<mpsc::Sender<Vec<u8>>>,
+    /// Shared PTY writer, also held by the batched writer thread. Lets
+    /// `write_response` write query replies synchronously (see that method).
+    writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     reader_handle: Option<JoinHandle<()>>,
     writer_handle: Option<JoinHandle<()>>,
     shutdown: Arc<PtyShutdownState>,
@@ -374,9 +377,12 @@ impl PtyManager {
         // Spawn the process
         let child = pair.slave.spawn_command(cmd)?;
 
-        // Get reader and writer
+        // Get reader and writer. The writer is shared (`Arc<Mutex>`) so query
+        // replies can be written synchronously via `write_response`, ahead of the
+        // batched writer thread, without racing the querying program's exit.
         let reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(pair.master.take_writer()?));
 
         let shutdown = Arc::new(PtyShutdownState::new(terminal_id.to_string()));
         let child_pid = child.process_id();
@@ -409,6 +415,8 @@ impl PtyManager {
         let writer_shutdown = Arc::clone(&shutdown);
         let writer_event_tx = self.event_tx.clone();
         let writer_id = terminal_id.to_string();
+        // The batched writer thread shares the writer with `write_response`.
+        let writer_for_thread = Arc::clone(&writer);
         let writer_handle = std::thread::Builder::new()
             .name(format!("pty-writer-{}", &terminal_id[..8.min(terminal_id.len())]))
             .spawn(move || {
@@ -416,7 +424,7 @@ impl PtyManager {
                 let shutdown_panic = Arc::clone(&writer_shutdown);
                 let id_panic = writer_id.clone();
                 if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Self::write_loop(writer, input_rx, writer_shutdown, writer_event_tx, writer_id);
+                    Self::write_loop(writer_for_thread, input_rx, writer_shutdown, writer_event_tx, writer_id);
                 })) {
                     log::error!("PTY writer thread panicked: {}", format_panic(&*panic));
                     shutdown_panic.mark_broken();
@@ -434,6 +442,7 @@ impl PtyManager {
                 master: Some(pair.master),
                 child,
                 input_tx: Some(input_tx),
+                writer: Some(writer),
                 reader_handle: Some(reader_handle),
                 writer_handle: Some(writer_handle),
                 shutdown,
@@ -654,9 +663,11 @@ impl PtyManager {
         }
     }
 
-    /// Write loop for PTY input - batches writes for better performance
+    /// Write loop for PTY input - batches writes for better performance.
+    /// Shares the writer with `write_response` (query replies) via the `Mutex`;
+    /// the lock is held only for the duration of each `write_all`.
     fn write_loop(
-        mut writer: Box<dyn Write + Send>,
+        writer: Arc<Mutex<Box<dyn Write + Send>>>,
         rx: mpsc::Receiver<Vec<u8>>,
         shutdown: Arc<PtyShutdownState>,
         event_tx: Sender<PtyEvent>,
@@ -671,7 +682,7 @@ impl PtyManager {
             }
 
             // Write the batched data
-            if let Err(e) = writer.write_all(&batch) {
+            if let Err(e) = writer.lock().write_all(&batch) {
                 log::error!("Failed to write to PTY {}: {}", terminal_id, e);
                 shutdown.mark_broken();
                 let _ = event_tx.send_blocking(PtyEvent::Exit {
@@ -690,6 +701,26 @@ impl PtyManager {
         if let Some(handle) = self.terminals.lock().get(terminal_id)
             && let Some(input_tx) = handle.input_tx.as_ref() {
             let _ = input_tx.send(data.to_vec());
+        }
+    }
+
+    /// Write a query reply straight to the PTY master + flush, bypassing the
+    /// batched input channel and writer-thread scheduling. This shrinks the
+    /// window between a program's Device-Attributes/cursor query and its exit
+    /// back to the shell, so the reply reaches the program instead of leaking to
+    /// the shell prompt (e.g. a stray `6c` after closing nvim). The writer `Arc`
+    /// is cloned out under the registry lock, which is released before the
+    /// (potentially blocking) PTY write.
+    pub fn write_response(&self, terminal_id: &str, data: &[u8]) {
+        let writer = {
+            let terminals = self.terminals.lock();
+            terminals.get(terminal_id).and_then(|h| h.writer.clone())
+        };
+        if let Some(writer) = writer {
+            let mut w = writer.lock();
+            if let Err(e) = w.write_all(data).and_then(|_| w.flush()) {
+                log::debug!("write_response to PTY {} failed: {}", terminal_id, e);
+            }
         }
     }
 
@@ -1132,6 +1163,10 @@ impl PtyManager {
 impl crate::terminal::TerminalTransport for PtyManager {
     fn send_input(&self, terminal_id: &str, data: &[u8]) {
         self.send_input(terminal_id, data)
+    }
+
+    fn send_response(&self, terminal_id: &str, data: &[u8]) {
+        self.write_response(terminal_id, data)
     }
 
     fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
