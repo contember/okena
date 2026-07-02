@@ -136,6 +136,49 @@ fn local_input_blocks_remote_resize_until_remote_input() {
 }
 
 #[test]
+fn authority_is_scoped_per_connection_prefix() {
+    let _g = RESIZE_AUTH_TEST_LOCK.lock();
+    reset_resize_authority();
+    let transport = Arc::new(NullTransport);
+    // Client mirrors of two different servers: `remote:<connection>:<id>`.
+    let term_a = Terminal::new(
+        "remote:conn-a:t1".into(),
+        TerminalSize::default(),
+        transport.clone(),
+        String::new(),
+    );
+    let term_b = Terminal::new(
+        "remote:conn-b:t1".into(),
+        TerminalSize::default(),
+        transport,
+        String::new(),
+    );
+
+    // Server A's owner reclaiming must not stop this client from resizing
+    // server B's terminals (or vice versa).
+    term_a.claim_resize_remote();
+    assert!(!term_a.is_resize_owner_local());
+    assert!(term_b.is_resize_owner_local());
+
+    term_b.claim_resize_remote();
+    term_a.claim_resize_local();
+    assert!(term_a.is_resize_owner_local());
+    assert!(!term_b.is_resize_owner_local());
+}
+
+#[test]
+fn release_clears_owner_in_every_scope() {
+    let _g = RESIZE_AUTH_TEST_LOCK.lock();
+    reset_resize_authority();
+
+    assert!(claim_remote_resize_if_allowed("t", "conn-a"));
+    assert!(claim_remote_resize_if_allowed("scoped:t", "conn-a"));
+    release_remote_resize_owner("conn-a");
+    assert_eq!(resize_authority_snapshot("t").remote_owner_id, None);
+    assert_eq!(resize_authority_snapshot("scoped:t").remote_owner_id, None);
+}
+
+#[test]
 fn resize_grid_only_does_not_call_transport() {
     use std::sync::atomic::{AtomicBool, Ordering};
     struct SpyTransport {

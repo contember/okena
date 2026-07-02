@@ -34,7 +34,7 @@ pub(crate) fn parse_window_id(s: &str) -> Option<WindowId> {
     }
 }
 
-fn claim_input_resize_owner(action: &ActionRequest, owner_id: Option<&str>) {
+fn claim_input_resize_owner(action: &ActionRequest, owner_id: &str) {
     let terminal_id = match action {
         ActionRequest::SendText { terminal_id, .. }
         | ActionRequest::RunCommand { terminal_id, .. }
@@ -43,15 +43,7 @@ fn claim_input_resize_owner(action: &ActionRequest, owner_id: Option<&str>) {
     };
 
     if let Some(terminal_id) = terminal_id {
-        match owner_id {
-            Some(owner_id) => {
-                crate::terminal::terminal::claim_resize_authority_remote_owner(
-                    terminal_id,
-                    owner_id,
-                );
-            }
-            None => crate::terminal::terminal::claim_resize_authority_remote(terminal_id),
-        }
+        crate::terminal::terminal::claim_resize_authority_remote_owner(terminal_id, owner_id);
     }
 }
 
@@ -126,15 +118,16 @@ pub(crate) async fn remote_command_loop(
         let _slow = okena_core::timing::SlowGuard::new("remote_command_loop::iter");
 
         let command = match msg.command {
-            RemoteCommand::Action(action) => {
-                claim_input_resize_owner(&action, None);
-                RemoteCommand::Action(action)
-            }
+            // Identityless actions (HTTP /v1/actions: CLI, agents) do NOT
+            // touch resize authority — nulling the owner here handed the next
+            // arriving resize to a random client. Only input from an
+            // identified WS connection ("someone typed at that window")
+            // transfers ownership.
             RemoteCommand::ActionFromConnection {
                 action,
                 connection_id,
             } => {
-                claim_input_resize_owner(&action, Some(&connection_id));
+                claim_input_resize_owner(&action, &connection_id);
                 RemoteCommand::Action(action)
             }
             command => command,
@@ -419,7 +412,22 @@ pub(crate) async fn remote_command_loop(
                         &terminal_id,
                         &connection_id,
                     ) {
-                        return CommandResult::Ok(None);
+                        // Denied: reply with the authoritative size so the
+                        // stream handler corrects the client's optimistic grid
+                        // and makes it cede (server_owns) instead of leaving it
+                        // silently diverged from the PTY.
+                        let denied_size = terminals
+                            .lock()
+                            .get(&terminal_id)
+                            .map(|term| term.resize_state.lock().size);
+                        return match denied_size {
+                            Some(size) => CommandResult::Ok(Some(serde_json::json!({
+                                "denied": true,
+                                "cols": size.cols,
+                                "rows": size.rows,
+                            }))),
+                            None => CommandResult::Ok(None),
+                        };
                     }
 
                     let app_settings = crate::settings::settings(cx);

@@ -50,6 +50,13 @@ impl TerminalTransport for RemoteTransport {
     fn resize_debounce_ms(&self) -> u64 {
         150
     }
+
+    fn answers_terminal_queries(&self) -> bool {
+        // Mirror of a server-owned PTY: the server's emulator answers DSR/DA/
+        // OSC-color queries. Answering here too would duplicate every reply
+        // and let emulator chatter steal the server's resize ownership.
+        false
+    }
 }
 
 /// Backend implementation for remote terminals.

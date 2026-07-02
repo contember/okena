@@ -301,6 +301,13 @@ fn run_headless(listen_addr: Option<IpAddr>) {
         let settings_entity = settings::init_settings(cx);
         let app_settings = settings_entity.read(cx).get().clone();
 
+        // Seed the process palette so headless terminals answer OSC color
+        // queries themselves (client mirrors deliberately don't answer, and no
+        // views push per-terminal palettes here).
+        okena_app::terminal::terminal::set_process_palette(
+            AppTheme::new(app_settings.theme_mode, true).colors,
+        );
+
         // Load or create workspace
         let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
             log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));

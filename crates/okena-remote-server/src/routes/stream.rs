@@ -232,15 +232,41 @@ async fn handle_ws(
                                 }).await;
                             }
                             Ok(WsInbound::Resize { terminal_id, cols, rows }) => {
-                                let _ = state.bridge_tx.send(BridgeMessage {
+                                // Ask for a reply: a denied resize carries the
+                                // authoritative size, which we bounce back to
+                                // THIS client as a server-owned resize so it
+                                // reverts its optimistic grid and stops
+                                // re-asserting instead of silently diverging.
+                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                let sent = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::ResizeFromConnection {
-                                        terminal_id,
+                                        terminal_id: terminal_id.clone(),
                                         cols,
                                         rows,
                                         connection_id: connection_owner_id.clone(),
                                     },
-                                    reply: None,
-                                }).await;
+                                    reply: Some(reply_tx),
+                                }).await.is_ok();
+                                if sent
+                                    && let Ok(CommandResult::Ok(Some(value))) = reply_rx.await
+                                    && value.get("denied").and_then(|d| d.as_bool()) == Some(true)
+                                    && let (Some(cols), Some(rows)) = (
+                                        value.get("cols").and_then(|c| c.as_u64()),
+                                        value.get("rows").and_then(|r| r.as_u64()),
+                                    )
+                                {
+                                    let msg = WsOutbound::TerminalResized {
+                                        terminal_id,
+                                        cols: cols as u16,
+                                        rows: rows as u16,
+                                        server_owns: true,
+                                    };
+                                    let resp = serde_json::to_string(&msg)
+                                        .expect("BUG: WsOutbound must serialize");
+                                    if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
                             }
                             Ok(WsInbound::Ping) => {
                                 let resp = serde_json::to_string(&WsOutbound::Pong).expect("BUG: WsOutbound must serialize");

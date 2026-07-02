@@ -101,9 +101,15 @@ impl ConfigBackend for DaemonConfig {
         Ok(())
     }
 
-    fn apply_active_theme(&mut self, _mode: ThemeMode, _custom_colors: Option<ThemeColors>) {
-        // Headless: no live theme surface to update. The preference has already
-        // been persisted via `store_settings`.
+    fn apply_active_theme(&mut self, mode: ThemeMode, custom_colors: Option<ThemeColors>) {
+        // Headless: no live theme surface to update (the preference is already
+        // persisted), but the daemon's terminals answer OSC color queries from
+        // the process palette — keep it in sync with the active theme.
+        let colors = match custom_colors {
+            Some(colors) => colors,
+            None => self.active_theme_colors(mode, None),
+        };
+        okena_terminal::terminal::set_process_palette(colors);
     }
 
     fn active_theme_colors(&mut self, mode: ThemeMode, custom_id: Option<&str>) -> ThemeColors {

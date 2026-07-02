@@ -742,6 +742,11 @@ impl PtyManager {
         // which case the client must stop re-asserting its own size.
         if let Some(sink) = self.output_sink.lock().as_ref() {
             let authority = crate::terminal::resize_authority_snapshot(terminal_id);
+            log::debug!(
+                "pty resize publish: terminal={terminal_id} {cols}x{rows} local={} owner={:?}",
+                authority.local,
+                authority.remote_owner_id
+            );
             sink.publish_resize(
                 terminal_id.to_string(),
                 cols,

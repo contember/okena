@@ -15,4 +15,9 @@ pub trait TerminalTransport: Send + Sync {
     /// Local PTY uses 16ms (just enough to batch rapid resizes).
     /// Remote uses longer interval to avoid flooding the network.
     fn resize_debounce_ms(&self) -> u64 { 16 }
+    /// Whether this side's emulator answers terminal queries (DSR, DA, OSC
+    /// color, CSI 14/18 t). True only for the process that owns the PTY;
+    /// remote mirrors must not answer — duplicated replies corrupt the app's
+    /// input and the server would count them as user input (resize ownership).
+    fn answers_terminal_queries(&self) -> bool { true }
 }

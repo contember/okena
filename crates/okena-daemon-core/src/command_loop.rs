@@ -80,7 +80,7 @@ fn parse_window_id(s: &str) -> Option<WindowId> {
     }
 }
 
-fn claim_input_resize_owner(action: &ActionRequest, owner_id: Option<&str>) {
+fn claim_input_resize_owner(action: &ActionRequest, owner_id: &str) {
     let terminal_id = match action {
         ActionRequest::SendText { terminal_id, .. }
         | ActionRequest::RunCommand { terminal_id, .. }
@@ -89,15 +89,7 @@ fn claim_input_resize_owner(action: &ActionRequest, owner_id: Option<&str>) {
     };
 
     if let Some(terminal_id) = terminal_id {
-        match owner_id {
-            Some(owner_id) => {
-                okena_terminal::terminal::claim_resize_authority_remote_owner(
-                    terminal_id,
-                    owner_id,
-                );
-            }
-            None => okena_terminal::terminal::claim_resize_authority_remote(terminal_id),
-        }
+        okena_terminal::terminal::claim_resize_authority_remote_owner(terminal_id, owner_id);
     }
 }
 
@@ -169,15 +161,16 @@ pub async fn daemon_command_loop(
         };
 
         let command = match msg.command {
-            RemoteCommand::Action(action) => {
-                claim_input_resize_owner(&action, None);
-                RemoteCommand::Action(action)
-            }
+            // Identityless actions (HTTP /v1/actions: CLI, agents) do NOT
+            // touch resize authority — nulling the owner here handed the next
+            // arriving resize to a random client. Only input from an
+            // identified WS connection ("someone typed at that window")
+            // transfers ownership.
             RemoteCommand::ActionFromConnection {
                 action,
                 connection_id,
             } => {
-                claim_input_resize_owner(&action, Some(&connection_id));
+                claim_input_resize_owner(&action, &connection_id);
                 RemoteCommand::Action(action)
             }
             command => command,
@@ -443,7 +436,22 @@ pub async fn daemon_command_loop(
                     &terminal_id,
                     &connection_id,
                 ) {
-                    CommandResult::Ok(None)
+                    // Denied: reply with the authoritative size so the stream
+                    // handler can correct the client's optimistically-resized
+                    // grid and make it cede (server_owns), instead of leaving
+                    // it silently diverged from the PTY.
+                    let denied_size = terminals
+                        .lock()
+                        .get(&terminal_id)
+                        .map(|term| term.resize_state.lock().size);
+                    match denied_size {
+                        Some(size) => CommandResult::Ok(Some(serde_json::json!({
+                            "denied": true,
+                            "cols": size.cols,
+                            "rows": size.rows,
+                        }))),
+                        None => CommandResult::Ok(None),
+                    }
                 } else {
                     let app_settings = settings.lock().clone();
                     let mut ws = workspace.lock();

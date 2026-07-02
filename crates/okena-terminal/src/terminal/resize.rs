@@ -51,6 +51,10 @@ impl Terminal {
             rs.pending_pty_resize = None;
             rs.last_pty_resize = now;
             drop(rs);
+            log::debug!(
+                "terminal resize send: terminal={} {}x{}",
+                self.terminal_id, new_size.cols, new_size.rows
+            );
             self.transport.resize(&self.terminal_id, new_size.cols, new_size.rows);
         } else {
             // Store pending resize

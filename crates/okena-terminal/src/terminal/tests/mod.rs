@@ -7,4 +7,4 @@ mod resize_authority;
 mod url_detect;
 mod xterm_color;
 
-pub(crate) use helpers::{CapturingTransport, NullTransport};
+pub(crate) use helpers::{CapturingTransport, MirrorTransport, NullTransport};

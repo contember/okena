@@ -212,7 +212,20 @@ impl DaemonCore {
 
         // ── 4. Settings + config ─────────────────────────────────────────────
         let settings = Arc::new(Mutex::new(params.settings));
-        let daemon_config = DaemonConfig::new(settings.clone());
+        let mut daemon_config = DaemonConfig::new(settings.clone());
+        // Seed the process palette from the active theme so daemon terminals
+        // answer OSC color queries (no views push per-terminal palettes here;
+        // client mirrors deliberately don't answer). Kept in sync afterwards by
+        // `DaemonConfig::apply_active_theme` on theme changes.
+        {
+            use okena_app_core::remote_config::ConfigBackend as _;
+            let (mode, custom_id) = {
+                let s = settings.lock();
+                (s.theme_mode, s.custom_theme_id.clone())
+            };
+            let colors = daemon_config.active_theme_colors(mode, custom_id.as_deref());
+            okena_terminal::terminal::set_process_palette(colors);
+        }
 
         // ── 5. Server wiring channels ────────────────────────────────────────
         // Shared-watch trick: `tokio::sync::watch::Sender` is `Clone` and clones

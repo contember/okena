@@ -1043,3 +1043,61 @@ fn test_parse_osc133_kind() {
     );
     assert_eq!(parse_osc133_kind(b'Z', &[]), None);
 }
+
+#[test]
+fn test_mirror_transport_does_not_answer_queries() {
+    use super::MirrorTransport;
+
+    let size = TerminalSize {
+        cols: 80,
+        rows: 24,
+        cell_width: 8.0,
+        cell_height: 16.0,
+    };
+    let transport = Arc::new(MirrorTransport::new());
+    let terminal = Terminal::new(
+        "remote:conn:t".into(),
+        size,
+        transport.clone(),
+        "/tmp".into(),
+    );
+
+    // DSR cursor position, CSI 14/18 t size queries, DA1 — all answered by the
+    // PTY owner (daemon), never by a mirror: duplicated replies corrupt the
+    // app's input and count as user input for resize ownership on the server.
+    terminal.process_output(b"\x1b[6n");
+    terminal.process_output(b"\x1b[14t");
+    terminal.process_output(b"\x1b[18t");
+    terminal.process_output(b"\x1b[c");
+
+    assert!(
+        transport.inner.writes().is_empty(),
+        "mirror must not reply to terminal queries: {:?}",
+        transport.inner.writes(),
+    );
+}
+
+#[test]
+fn test_process_palette_answers_color_query_without_per_terminal_palette() {
+    use super::super::set_process_palette;
+
+    // Headless daemon: no view pushes a per-terminal palette, so OSC color
+    // queries fall back to the process palette set at boot.
+    set_process_palette(okena_core::theme::DARK_THEME);
+
+    let transport = Arc::new(CapturingTransport::new());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport.clone(),
+        "/tmp".into(),
+    );
+
+    // OSC 11 — query the background color.
+    terminal.process_output(b"\x1b]11;?\x07");
+
+    let writes = transport.writes();
+    assert_eq!(writes.len(), 1, "expected one OSC 11 reply: {writes:?}");
+    let reply = String::from_utf8_lossy(&writes[0]).into_owned();
+    assert!(reply.starts_with("\x1b]11;rgb:"), "unexpected reply: {reply:?}");
+}

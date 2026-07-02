@@ -31,3 +31,24 @@ impl TerminalTransport for CapturingTransport {
     fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
     fn uses_mouse_backend(&self) -> bool { false }
 }
+
+/// A remote-mirror transport: records writes like [`CapturingTransport`] but
+/// reports that the PTY owner (not this side) answers terminal queries.
+pub(crate) struct MirrorTransport {
+    pub(crate) inner: CapturingTransport,
+}
+
+impl MirrorTransport {
+    pub(crate) fn new() -> Self {
+        Self { inner: CapturingTransport::new() }
+    }
+}
+
+impl TerminalTransport for MirrorTransport {
+    fn send_input(&self, terminal_id: &str, data: &[u8]) {
+        self.inner.send_input(terminal_id, data);
+    }
+    fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+    fn uses_mouse_backend(&self) -> bool { false }
+    fn answers_terminal_queries(&self) -> bool { false }
+}

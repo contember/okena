@@ -78,6 +78,7 @@ impl ConnectionHandler for DesktopConnectionHandler {
     }
 
     fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16, server_owns: bool) {
+        log::debug!("client recv resize: terminal={prefixed_id} {cols}x{rows} server_owns={server_owns}");
         if let Some(terminal) = self.terminals.lock().get(prefixed_id) {
             // The origin's local user just reclaimed resize authority. Mark the
             // remote side as resize owner on this client so its TerminalElement
