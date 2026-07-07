@@ -525,7 +525,7 @@ fn main() {
     let headless = explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
 
     if headless {
-        // Self-restart handoff (transitional `okena --headless` daemon): a
+        // Self-restart handoff (single-binary `okena --headless` daemon): a
         // daemon restarting itself spawns this process with `--await-pid <old>`
         // (see okena_remote_server::routes::restart). Wait for the outgoing
         // daemon to exit before acquiring the lock (fail-fast against a live PID)

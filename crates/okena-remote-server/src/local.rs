@@ -257,13 +257,13 @@ fn daemon_binary_path() -> Option<std::path::PathBuf> {
 /// Spawn a local daemon and writes `remote.json`.
 ///
 /// Prefers the dedicated, GPUI-free `okena-daemon` binary (a sibling of the
-/// current exe — cargo and shipped installs place it alongside `okena`). The
-/// dedicated daemon reads settings itself: same-host access is always local
-/// (Unix socket + loopback), and remote bind addresses are added only when the
-/// remote server setting is enabled. Falls back to
-/// `current_exe --headless` when that binary isn't present, so the UI-owned
-/// lifecycle still works during development. Either way the child inherits
-/// `OKENA_PROFILE` from this process, so it uses the same config dir.
+/// current exe — cargo and shipped installs place it alongside `okena`) as the
+/// lighter variant. The dedicated daemon reads settings itself: same-host access
+/// is always local (Unix socket + loopback), and remote bind addresses are added
+/// only when the remote server setting is enabled. When that binary isn't
+/// present, the UI binary runs its own `current_exe --headless` daemon — the
+/// standard single-binary path. Either way the child inherits `OKENA_PROFILE`
+/// from this process, so it uses the same config dir.
 ///
 /// The caller owns the returned [`std::process::Child`]. In the UI-owned
 /// lifecycle the desktop kills it when the last window closes; mint the token
@@ -274,9 +274,9 @@ pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
         None => {
             let exe = std::env::current_exe()?;
             log::info!(
-                "okena-daemon binary not found; falling back to `okena --headless`. \
-                 The dedicated okena-daemon is preferred when available; continuing in \
-                 single-binary headless mode."
+                "No sibling okena-daemon binary; running the built-in `okena --headless` \
+                 daemon (the single-binary path). The dedicated GPUI-free okena-daemon is \
+                 the lighter variant and is used when present."
             );
             std::process::Command::new(exe).arg("--headless").spawn()
         }
@@ -565,7 +565,7 @@ where
 /// the caller to exit the current process.
 ///
 /// Re-launches the current executable with the same args (so a daemon launched
-/// as `okena-daemon --listen 127.0.0.1` or the transitional `okena --headless
+/// as `okena-daemon --listen 127.0.0.1` or the single-binary `okena --headless
 /// --listen 127.0.0.1` re-launches identically), with `OKENA_PROFILE` inherited
 /// from the environment so the replacement lands in the same config dir. Appends
 /// `--await-pid <current_pid>` so the replacement waits for THIS process to exit

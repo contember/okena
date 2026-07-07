@@ -410,9 +410,9 @@ pub(crate) fn remove_remote_json() {
     }
 }
 
-/// Hard-exit cleanup for the transitional `okena --headless` `/v1/shutdown`
-/// fallback, which exits via `process::exit` and so SKIPS the Drop teardown the
-/// graceful daemon-core path relies on (`RemoteServer::stop` + `LockGuard::drop`).
+/// Hard-exit cleanup for the single-binary `okena --headless` `/v1/shutdown`
+/// path, which exits via `process::exit` and so SKIPS the Drop teardown the
+/// dedicated daemon-core path relies on (`RemoteServer::stop` + `LockGuard::drop`).
 ///
 /// Removes remote.json, unlinks the local unix socket it advertised, and drops
 /// the instance lock — each pid-guarded to THIS process so a racy/late teardown

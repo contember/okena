@@ -64,7 +64,7 @@ pub struct AppState {
     /// Graceful process-shutdown trigger for `/v1/shutdown`. `Some` on the
     /// dedicated daemon, whose `run()` awaits it and then tears down cleanly
     /// (socket unlink + remote.json removal + instance-lock release on drop);
-    /// `None` on the transitional `okena --headless` fallback, which hard-exits.
+    /// `None` on the single-binary `okena --headless` daemon, which hard-exits.
     pub process_shutdown: Option<Arc<tokio::sync::Notify>>,
     pub update_info: okena_ext_updater::UpdateInfo,
 }
