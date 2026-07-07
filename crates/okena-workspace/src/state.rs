@@ -140,6 +140,11 @@ impl Workspace {
         cx.refresh_views();
     }
 
+    fn mutate_data(&mut self, cx: &mut impl WorkspaceCx, f: impl FnOnce(&mut WorkspaceData)) {
+        f(&mut self.data);
+        self.notify_data(cx);
+    }
+
     /// Replace workspace data wholesale (e.g. from disk reload).
     /// Does NOT bump data_version — the data came from disk, not a user edit.
     pub fn replace_data(&mut self, focus_manager: &mut FocusManager, data: WorkspaceData, cx: &mut impl WorkspaceCx) {
@@ -230,8 +235,7 @@ impl Workspace {
         folder_id: Option<String>,
         cx: &mut impl WorkspaceCx,
     ) {
-        self.data.set_folder_filter(window_id, folder_id);
-        self.notify_data(cx);
+        self.mutate_data(cx, |data| data.set_folder_filter(window_id, folder_id));
     }
 
     /// Toggle a project's hidden state in the targeted window.
@@ -249,8 +253,7 @@ impl Workspace {
         project_id: &str,
         cx: &mut impl WorkspaceCx,
     ) {
-        self.data.toggle_hidden(window_id, project_id);
-        self.notify_data(cx);
+        self.mutate_data(cx, |data| data.toggle_hidden(window_id, project_id));
     }
 
     /// Set a single project's column width on the targeted window.
@@ -269,8 +272,7 @@ impl Workspace {
         width: f32,
         cx: &mut impl WorkspaceCx,
     ) {
-        self.data.set_project_width(window_id, project_id, width);
-        self.notify_data(cx);
+        self.mutate_data(cx, |data| data.set_project_width(window_id, project_id, width));
     }
 
     /// Set a folder's collapsed state on the targeted window.
@@ -291,8 +293,9 @@ impl Workspace {
         collapsed: bool,
         cx: &mut impl WorkspaceCx,
     ) {
-        self.data.set_folder_collapsed(window_id, folder_id, collapsed);
-        self.notify_data(cx);
+        self.mutate_data(cx, |data| {
+            data.set_folder_collapsed(window_id, folder_id, collapsed);
+        });
     }
 
     /// Set the OS window bounds on the targeted window.
@@ -314,8 +317,7 @@ impl Workspace {
         bounds: Option<WindowBounds>,
         cx: &mut impl WorkspaceCx,
     ) {
-        self.data.set_os_bounds(window_id, bounds);
-        self.notify_data(cx);
+        self.mutate_data(cx, |data| data.set_os_bounds(window_id, bounds));
     }
 
     /// Set sidebar open/closed state for the targeted window. Persisted
@@ -326,8 +328,7 @@ impl Workspace {
         open: bool,
         cx: &mut impl WorkspaceCx,
     ) {
-        self.data.set_sidebar_open(window_id, open);
-        self.notify_data(cx);
+        self.mutate_data(cx, |data| data.set_sidebar_open(window_id, open));
     }
 
     /// Read the project-grid orientation for the targeted window. Falls back
