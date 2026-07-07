@@ -41,4 +41,7 @@ pub mod soft_close;
 pub mod toast_poll;
 pub mod workspace_cx;
 
+#[cfg(test)]
+mod test_support;
+
 pub use daemon::{DaemonCore, DaemonParams};

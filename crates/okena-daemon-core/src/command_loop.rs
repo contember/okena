@@ -734,85 +734,16 @@ fn run_main_workspace_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{StubBackend, StubTransport, default_settings, empty_workspace_data};
     use okena_core::api::StateResponse;
     use std::collections::HashSet;
 
-    use okena_remote_server::bridge::bridge_channel;
+    use okena_remote_server::bridge::{BridgeReceiver, BridgeSender, bridge_channel};
     use okena_state::WorkspaceData;
     use okena_terminal::backend::TerminalBackend;
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
     use tokio::sync::oneshot;
-
-    // ── Stub backend (copied from observers.rs tests) ────────────────────────
-
-    /// No-op transport for the test backend.
-    struct StubTransport;
-
-    impl TerminalTransport for StubTransport {
-        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
-        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
-        fn uses_mouse_backend(&self) -> bool {
-            false
-        }
-    }
-
-    /// Minimal `TerminalBackend` for constructing a `ServiceManager` /
-    /// `execute_action` in tests. The exercised paths (no service config, no PTY
-    /// spawn) never reach terminal creation, so these are no-ops / errors.
-    struct StubBackend;
-
-    impl TerminalBackend for StubBackend {
-        fn transport(&self) -> Arc<dyn TerminalTransport> {
-            Arc::new(StubTransport)
-        }
-        fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
-            anyhow::bail!("stub backend: create_terminal not supported")
-        }
-        fn reconnect_terminal(
-            &self,
-            _terminal_id: &str,
-            _cwd: &str,
-            _shell: Option<&ShellType>,
-        ) -> anyhow::Result<String> {
-            anyhow::bail!("stub backend: reconnect_terminal not supported")
-        }
-        fn kill(&self, _terminal_id: &str) {}
-        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
-            None
-        }
-        fn supports_buffer_capture(&self) -> bool {
-            false
-        }
-        fn is_remote(&self) -> bool {
-            false
-        }
-        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
-            None
-        }
-        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
-            Vec::new()
-        }
-    }
-
-    /// An empty `WorkspaceData` (no `Default` impl on the type itself).
-    fn empty_workspace_data() -> WorkspaceData {
-        WorkspaceData {
-            version: 1,
-            projects: Vec::new(),
-            project_order: Vec::new(),
-            folders: Vec::new(),
-            service_panel_heights: Default::default(),
-            hook_panel_heights: Default::default(),
-            main_window: Default::default(),
-            extra_windows: Vec::new(),
-        }
-    }
-
-    /// Default `AppSettings` (every field has a serde default).
-    fn default_settings() -> AppSettings {
-        serde_json::from_value::<AppSettings>(serde_json::json!({})).expect("defaults")
-    }
 
     /// Bundle of the shared state + channels the loop needs, so each test can
     /// spawn the loop and keep handles to inspect afterwards.
@@ -827,6 +758,29 @@ mod tests {
         service_tick: watch::Sender<u64>,
         settings: Arc<Mutex<AppSettings>>,
         daemon_config: DaemonConfig,
+    }
+
+    impl Harness {
+        fn spawn_loop(self, bridge_rx: BridgeReceiver) -> tokio::task::JoinHandle<()> {
+            tokio::task::spawn_local(daemon_command_loop(
+                bridge_rx,
+                self.backend,
+                self.workspace,
+                self.workspace_tick,
+                None,
+                None,
+                self.terminals,
+                self.state_version,
+                self.git_status_tx,
+                self.service_manager,
+                self.service_tick,
+                tokio::runtime::Handle::current(),
+                self.settings,
+                self.daemon_config,
+                Arc::new(Mutex::new(HashMap::new())),
+                tokio::sync::mpsc::unbounded_channel().0,
+            ))
+        }
     }
 
     fn harness() -> Harness {
@@ -855,6 +809,22 @@ mod tests {
             settings,
             daemon_config,
         }
+    }
+
+    async fn request(
+        bridge_tx: &BridgeSender,
+        command: RemoteCommand,
+        label: &str,
+    ) -> CommandResult {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        bridge_tx
+            .send(BridgeMessage {
+                command,
+                reply: Some(reply_tx),
+            })
+            .await
+            .unwrap_or_else(|_| panic!("send {label}"));
+        reply_rx.await.unwrap_or_else(|_| panic!("{label} reply"))
     }
 
     // ── Pure unit tests ──────────────────────────────────────────────────────
@@ -938,35 +908,8 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async move {
-                let handle = tokio::task::spawn_local(daemon_command_loop(
-                    bridge_rx,
-                    h.backend,
-                    h.workspace,
-                    h.workspace_tick,
-                    None,
-                    None,
-                    h.terminals,
-                    h.state_version,
-                    h.git_status_tx,
-                    h.service_manager,
-                    h.service_tick,
-                    tokio::runtime::Handle::current(),
-                    h.settings,
-                    h.daemon_config,
-                    Arc::new(Mutex::new(HashMap::new())),
-                    tokio::sync::mpsc::unbounded_channel().0,
-                ));
-
-                let (reply_tx, reply_rx) = oneshot::channel();
-                bridge_tx
-                    .send(BridgeMessage {
-                        command: RemoteCommand::GetState,
-                        reply: Some(reply_tx),
-                    })
-                    .await
-                    .expect("send GetState");
-
-                let result = reply_rx.await.expect("GetState reply");
+                let handle = h.spawn_loop(bridge_rx);
+                let result = request(&bridge_tx, RemoteCommand::GetState, "GetState").await;
                 let value = match result {
                     CommandResult::Ok(Some(v)) => v,
                     other => panic!("expected Ok(Some), got {other:?}"),
@@ -994,35 +937,13 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async move {
-                let handle = tokio::task::spawn_local(daemon_command_loop(
-                    bridge_rx,
-                    h.backend,
-                    h.workspace,
-                    h.workspace_tick,
-                    None,
-                    None,
-                    h.terminals,
-                    h.state_version,
-                    h.git_status_tx,
-                    h.service_manager,
-                    h.service_tick,
-                    tokio::runtime::Handle::current(),
-                    h.settings,
-                    h.daemon_config,
-                    Arc::new(Mutex::new(HashMap::new())),
-                    tokio::sync::mpsc::unbounded_channel().0,
-                ));
-
-                let (reply_tx, reply_rx) = oneshot::channel();
-                bridge_tx
-                    .send(BridgeMessage {
-                        command: RemoteCommand::Action(ActionRequest::GetSettingsSchema),
-                        reply: Some(reply_tx),
-                    })
-                    .await
-                    .expect("send GetSettingsSchema");
-
-                let result = reply_rx.await.expect("schema reply");
+                let handle = h.spawn_loop(bridge_rx);
+                let result = request(
+                    &bridge_tx,
+                    RemoteCommand::Action(ActionRequest::GetSettingsSchema),
+                    "GetSettingsSchema",
+                )
+                .await;
                 match result {
                     CommandResult::Ok(Some(v)) => {
                         let obj = v.as_object().expect("schema is an object");
@@ -1049,37 +970,13 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async move {
-                let handle = tokio::task::spawn_local(daemon_command_loop(
-                    bridge_rx,
-                    h.backend,
-                    h.workspace,
-                    h.workspace_tick,
-                    None,
-                    None,
-                    h.terminals,
-                    h.state_version,
-                    h.git_status_tx,
-                    h.service_manager,
-                    h.service_tick,
-                    tokio::runtime::Handle::current(),
-                    h.settings,
-                    h.daemon_config,
-                    Arc::new(Mutex::new(HashMap::new())),
-                    tokio::sync::mpsc::unbounded_channel().0,
-                ));
-
-                let (reply_tx, reply_rx) = oneshot::channel();
-                bridge_tx
-                    .send(BridgeMessage {
-                        command: RemoteCommand::Action(ActionRequest::CreateFolder {
-                            name: "f".into(),
-                        }),
-                        reply: Some(reply_tx),
-                    })
-                    .await
-                    .expect("send CreateFolder");
-
-                let result = reply_rx.await.expect("CreateFolder reply");
+                let handle = h.spawn_loop(bridge_rx);
+                let result = request(
+                    &bridge_tx,
+                    RemoteCommand::Action(ActionRequest::CreateFolder { name: "f".into() }),
+                    "CreateFolder",
+                )
+                .await;
                 assert!(
                     matches!(result, CommandResult::Ok(_)),
                     "expected Ok, got {result:?}"

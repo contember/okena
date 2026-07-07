@@ -413,21 +413,7 @@ fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use okena_state::WorkspaceData;
-
-    fn empty_workspace_data() -> WorkspaceData {
-        WorkspaceData {
-            version: 1,
-            projects: Vec::new(),
-            project_order: Vec::new(),
-            folders: Vec::new(),
-            service_panel_heights: Default::default(),
-            hook_panel_heights: Default::default(),
-            main_window: Default::default(),
-            extra_windows: Vec::new(),
-        }
-    }
+    use crate::test_support::empty_workspace_data;
 
     /// With no projects and no external `watch` receiver, the first cycle does
     /// its empty snapshot, publishes nothing (unchanged), detects the closed

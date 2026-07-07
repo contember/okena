@@ -323,64 +323,7 @@ fn sync_services(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use okena_state::WorkspaceData;
-    use okena_terminal::backend::TerminalBackend;
-    use okena_terminal::shell_config::ShellType;
-    use okena_terminal::terminal::TerminalTransport;
-
-    /// No-op transport for the test backend. Never actually exercised by the
-    /// `sync_services` tests (projects carry no saved terminal ids and the crate
-    /// dir has no `okena.yaml` / docker-compose), but required to satisfy the
-    /// `TerminalBackend::transport` return type.
-    struct StubTransport;
-
-    impl TerminalTransport for StubTransport {
-        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
-        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
-        fn uses_mouse_backend(&self) -> bool {
-            false
-        }
-    }
-
-    /// Minimal `TerminalBackend` for constructing a `ServiceManager` in tests.
-    /// The `sync_services` test path (no `okena.yaml`, no docker-compose, empty
-    /// `service_terminals`) never reaches terminal creation, so these methods are
-    /// no-ops / errors.
-    struct StubBackend;
-
-    impl TerminalBackend for StubBackend {
-        fn transport(&self) -> Arc<dyn TerminalTransport> {
-            Arc::new(StubTransport)
-        }
-        fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
-            anyhow::bail!("stub backend: create_terminal not supported")
-        }
-        fn reconnect_terminal(
-            &self,
-            _terminal_id: &str,
-            _cwd: &str,
-            _shell: Option<&ShellType>,
-        ) -> anyhow::Result<String> {
-            anyhow::bail!("stub backend: reconnect_terminal not supported")
-        }
-        fn kill(&self, _terminal_id: &str) {}
-        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
-            None
-        }
-        fn supports_buffer_capture(&self) -> bool {
-            false
-        }
-        fn is_remote(&self) -> bool {
-            false
-        }
-        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
-            None
-        }
-        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
-            Vec::new()
-        }
-    }
+    use crate::test_support::{StubBackend, empty_workspace_data};
 
     /// A `known`-set + project snapshot fixture for the diff logic.
     fn project(id: &str, path: &str, is_remote: bool) -> ProjectSnapshot {
@@ -405,21 +348,6 @@ mod tests {
         let backend = Arc::new(StubBackend);
         let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
         ServiceManager::new(backend, terminals)
-    }
-
-    /// An empty `WorkspaceData` for the integration-style observer test
-    /// (`WorkspaceData` has no `Default`).
-    fn empty_workspace_data() -> WorkspaceData {
-        WorkspaceData {
-            version: 1,
-            projects: Vec::new(),
-            project_order: Vec::new(),
-            folders: Vec::new(),
-            service_panel_heights: Default::default(),
-            hook_panel_heights: Default::default(),
-            main_window: Default::default(),
-            extra_windows: Vec::new(),
-        }
     }
 
     /// Build a top-level `DaemonServiceCx` over a throwaway reactor for tests

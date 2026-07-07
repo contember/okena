@@ -145,16 +145,11 @@ pub fn get_settings_schema() -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::default_settings;
     use serde_json::json;
 
     fn config_with(settings: AppSettings) -> DaemonConfig {
         DaemonConfig::new(Arc::new(Mutex::new(settings)))
-    }
-
-    fn default_settings() -> AppSettings {
-        // Every field has a serde default, so an empty object yields all
-        // defaults — the same instance the schema endpoint produces.
-        serde_json::from_value::<AppSettings>(json!({})).expect("defaults")
     }
 
     #[test]
