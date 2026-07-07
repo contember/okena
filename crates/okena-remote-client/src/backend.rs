@@ -1,8 +1,12 @@
+use anyhow::Result;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::TerminalTransport;
-use anyhow::Result;
-use okena_transport::client::{make_prefixed_id, strip_prefix, WsClientMessage};
+use okena_transport::client::{
+    close_remote_terminal, make_prefixed_id, resize_remote_terminal, send_remote_terminal_input,
+    WsClientMessage, REMOTE_TERMINAL_ANSWERS_QUERIES, REMOTE_TERMINAL_RESIZE_DEBOUNCE_MS,
+    REMOTE_TERMINAL_USES_MOUSE_BACKEND,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,11 +22,7 @@ pub struct RemoteTransport {
 
 impl TerminalTransport for RemoteTransport {
     fn send_input(&self, terminal_id: &str, data: &[u8]) {
-        let remote_id = strip_prefix(terminal_id, &self.connection_id);
-        let _ = self.ws_tx.try_send(WsClientMessage::SendText {
-            terminal_id: remote_id,
-            text: String::from_utf8_lossy(data).to_string(),
-        });
+        send_remote_terminal_input(&self.ws_tx, &self.connection_id, terminal_id, data);
     }
 
     /// No-op: the daemon owns the PTY and is the sole responder to terminal
@@ -35,27 +35,22 @@ impl TerminalTransport for RemoteTransport {
     fn send_response(&self, _terminal_id: &str, _data: &[u8]) {}
 
     fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
-        let remote_id = strip_prefix(terminal_id, &self.connection_id);
-        let _ = self.ws_tx.try_send(WsClientMessage::Resize {
-            terminal_id: remote_id,
-            cols,
-            rows,
-        });
+        resize_remote_terminal(&self.ws_tx, &self.connection_id, terminal_id, cols, rows);
     }
 
     fn uses_mouse_backend(&self) -> bool {
-        false
+        REMOTE_TERMINAL_USES_MOUSE_BACKEND
     }
 
     fn resize_debounce_ms(&self) -> u64 {
-        150
+        REMOTE_TERMINAL_RESIZE_DEBOUNCE_MS
     }
 
     fn answers_terminal_queries(&self) -> bool {
         // Mirror of a server-owned PTY: the server's emulator answers DSR/DA/
         // OSC-color queries. Answering here too would duplicate every reply
         // and let emulator chatter steal the server's resize ownership.
-        false
+        REMOTE_TERMINAL_ANSWERS_QUERIES
     }
 }
 
@@ -96,13 +91,7 @@ impl TerminalBackend for RemoteBackend {
     }
 
     fn kill(&self, terminal_id: &str) {
-        let remote_id = strip_prefix(terminal_id, &self.connection_id);
-        let _ = self
-            .transport
-            .ws_tx
-            .try_send(WsClientMessage::CloseTerminal {
-                terminal_id: remote_id,
-            });
+        close_remote_terminal(&self.transport.ws_tx, &self.connection_id, terminal_id);
     }
 
     fn capture_buffer(&self, _terminal_id: &str) -> Option<PathBuf> {

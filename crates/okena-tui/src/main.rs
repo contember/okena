@@ -23,7 +23,10 @@ use okena_terminal::input::{KeyEvent, KeyModifiers, key_to_bytes};
 use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
 use okena_transport::client::{
     ConnectionEvent, ConnectionHandler, ConnectionStatus, LocalEndpoint, RemoteClient,
-    RemoteConnectionConfig, WsClientMessage, is_remote_terminal, make_prefixed_id, strip_prefix,
+    RemoteConnectionConfig, WsClientMessage, is_remote_terminal, make_prefixed_id,
+    resize_remote_terminal, send_remote_terminal_input, strip_prefix,
+    REMOTE_TERMINAL_ANSWERS_QUERIES, REMOTE_TERMINAL_RESIZE_DEBOUNCE_MS,
+    REMOTE_TERMINAL_USES_MOUSE_BACKEND,
 };
 use parking_lot::RwLock;
 
@@ -73,34 +76,25 @@ struct TuiRemoteTransport {
 
 impl TerminalTransport for TuiRemoteTransport {
     fn send_input(&self, terminal_id: &str, data: &[u8]) {
-        let remote_id = strip_prefix(terminal_id, &self.connection_id);
-        let _ = self.ws_tx.try_send(WsClientMessage::SendText {
-            terminal_id: remote_id,
-            text: String::from_utf8_lossy(data).to_string(),
-        });
+        send_remote_terminal_input(&self.ws_tx, &self.connection_id, terminal_id, data);
     }
 
     fn send_response(&self, _terminal_id: &str, _data: &[u8]) {}
 
     fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
-        let remote_id = strip_prefix(terminal_id, &self.connection_id);
-        let _ = self.ws_tx.try_send(WsClientMessage::Resize {
-            terminal_id: remote_id,
-            cols,
-            rows,
-        });
+        resize_remote_terminal(&self.ws_tx, &self.connection_id, terminal_id, cols, rows);
     }
 
     fn uses_mouse_backend(&self) -> bool {
-        false
+        REMOTE_TERMINAL_USES_MOUSE_BACKEND
     }
 
     fn resize_debounce_ms(&self) -> u64 {
-        150
+        REMOTE_TERMINAL_RESIZE_DEBOUNCE_MS
     }
 
     fn answers_terminal_queries(&self) -> bool {
-        false
+        REMOTE_TERMINAL_ANSWERS_QUERIES
     }
 }
 
