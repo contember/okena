@@ -178,12 +178,12 @@ impl GitStatusWatcher {
             self.any_pending_ci = self.ci_checks.values()
                 .any(|c| c.as_ref().map(|s| s.status.is_pending()).unwrap_or(false));
             let mut changed = false;
-            if let Some(Some(status)) = self.statuses.get_mut(&project_id) {
-                if status.pr_info.is_some() || status.ci_checks.is_some() {
-                    status.pr_info = None;
-                    status.ci_checks = None;
-                    changed = true;
-                }
+            if let Some(Some(status)) = self.statuses.get_mut(&project_id)
+                && (status.pr_info.is_some() || status.ci_checks.is_some())
+            {
+                status.pr_info = None;
+                status.ci_checks = None;
+                changed = true;
             }
             if changed {
                 self.publish_statuses(cx);
