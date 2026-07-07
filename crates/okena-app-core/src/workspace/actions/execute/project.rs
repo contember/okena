@@ -16,6 +16,36 @@ use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
 use std::sync::Arc;
 
+fn project_not_found(project_id: &str) -> ActionResult {
+    ActionResult::Err(format!("project not found: {}", project_id))
+}
+
+fn with_existing_project(
+    ws: &mut Workspace,
+    project_id: &str,
+    f: impl FnOnce(&mut Workspace),
+) -> ActionResult {
+    if ws.project(project_id).is_none() {
+        return project_not_found(project_id);
+    }
+    f(ws);
+    ActionResult::Ok(None)
+}
+
+fn with_existing_project_result(
+    ws: &mut Workspace,
+    project_id: &str,
+    f: impl FnOnce(&mut Workspace) -> Result<(), String>,
+) -> ActionResult {
+    if ws.project(project_id).is_none() {
+        return project_not_found(project_id);
+    }
+    match f(ws) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(e) => ActionResult::Err(e),
+    }
+}
+
 pub(super) fn add_project(
     ws: &mut Workspace,
     window_id: WindowId,
@@ -85,11 +115,7 @@ pub(super) fn rename_project(
     name: String,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", project_id));
-    }
-    ws.rename_project(&project_id, name, cx);
-    ActionResult::Ok(None)
+    with_existing_project(ws, &project_id, |ws| ws.rename_project(&project_id, name, cx))
 }
 
 pub(super) fn update_project_hooks(
@@ -155,12 +181,10 @@ pub(super) fn delete_project(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", project_id));
-    }
     let global_hooks = settings.hooks.clone();
-    ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
-    ActionResult::Ok(None)
+    with_existing_project(ws, &project_id, |ws| {
+        ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
+    })
 }
 
 pub(super) fn set_show_in_overview(
@@ -213,14 +237,10 @@ pub(super) fn remove_worktree_project(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", project_id));
-    }
     let global_hooks = settings.hooks.clone();
-    match ws.remove_worktree_project(focus_manager, &project_id, force, &global_hooks, cx) {
-        Ok(()) => ActionResult::Ok(None),
-        Err(e) => ActionResult::Err(e),
-    }
+    with_existing_project_result(ws, &project_id, |ws| {
+        ws.remove_worktree_project(focus_manager, &project_id, force, &global_hooks, cx)
+    })
 }
 
 pub(super) fn close_worktree(
@@ -235,13 +255,19 @@ pub(super) fn close_worktree(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", project_id));
-    }
-    match ws.close_worktree(focus_manager, &project_id, merge, stash, fetch, push, delete_branch, &settings.hooks, cx) {
-        Ok(()) => ActionResult::Ok(None),
-        Err(e) => ActionResult::Err(e),
-    }
+    with_existing_project_result(ws, &project_id, |ws| {
+        ws.close_worktree(
+            focus_manager,
+            &project_id,
+            merge,
+            stash,
+            fetch,
+            push,
+            delete_branch,
+            &settings.hooks,
+            cx,
+        )
+    })
 }
 
 pub(super) fn create_folder(ws: &mut Workspace, name: String, cx: &mut impl WorkspaceCx) -> ActionResult {
@@ -266,11 +292,9 @@ pub(super) fn move_to_folder(
     position: Option<usize>,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", project_id));
-    }
-    ws.move_project_to_folder(&project_id, &folder_id, position, cx);
-    ActionResult::Ok(None)
+    with_existing_project(ws, &project_id, |ws| {
+        ws.move_project_to_folder(&project_id, &folder_id, position, cx);
+    })
 }
 
 pub(super) fn move_out_of_folder(
@@ -279,11 +303,9 @@ pub(super) fn move_out_of_folder(
     top_level_index: usize,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", project_id));
-    }
-    ws.move_project_out_of_folder(&project_id, top_level_index, cx);
-    ActionResult::Ok(None)
+    with_existing_project(ws, &project_id, |ws| {
+        ws.move_project_out_of_folder(&project_id, top_level_index, cx);
+    })
 }
 
 pub(super) fn move_project(
@@ -292,11 +314,9 @@ pub(super) fn move_project(
     new_index: usize,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", project_id));
-    }
-    ws.move_project(&project_id, new_index, cx);
-    ActionResult::Ok(None)
+    with_existing_project(ws, &project_id, |ws| {
+        ws.move_project(&project_id, new_index, cx);
+    })
 }
 
 pub(super) fn move_item_in_order(
@@ -316,11 +336,9 @@ pub(super) fn toggle_project_pinned(
     project_id: String,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", project_id));
-    }
-    ws.toggle_project_pinned(&project_id, cx);
-    ActionResult::Ok(None)
+    with_existing_project(ws, &project_id, |ws| {
+        ws.toggle_project_pinned(&project_id, cx);
+    })
 }
 
 pub(super) fn reorder_worktree(
@@ -330,11 +348,9 @@ pub(super) fn reorder_worktree(
     new_index: usize,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&parent_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", parent_id));
-    }
-    ws.reorder_worktree(&parent_id, &worktree_id, new_index, cx);
-    ActionResult::Ok(None)
+    with_existing_project(ws, &parent_id, |ws| {
+        ws.reorder_worktree(&parent_id, &worktree_id, new_index, cx);
+    })
 }
 
 pub(super) fn set_worktree_color_override(
@@ -343,11 +359,9 @@ pub(super) fn set_worktree_color_override(
     color: Option<FolderColor>,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", project_id));
-    }
-    ws.set_worktree_color_override(&project_id, color, cx);
-    ActionResult::Ok(None)
+    with_existing_project(ws, &project_id, |ws| {
+        ws.set_worktree_color_override(&project_id, color, cx);
+    })
 }
 
 pub(super) fn create_worktree(
