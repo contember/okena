@@ -1,19 +1,19 @@
 use crate::ui_helpers::capitalize_first;
-use okena_extensions::{ExtensionSettingsStore, ThemeColors};
-use okena_usage::{
-    effective_time_pct, read_working_days, render_simple_bar, render_usage_row,
-    usage_body_container, usage_divider, usage_kv_row, usage_popover_container,
-    usage_popover_header, usage_trigger_items, SegmentUnit, UsageRow,
-};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use okena_extensions::{ExtensionSettingsStore, ThemeColors};
+use okena_usage::{
+    SegmentUnit, UsageRow, effective_time_pct, read_working_days, render_simple_bar,
+    render_usage_row, usage_body_container, usage_divider, usage_kv_row, usage_popover_container,
+    usage_popover_header, usage_trigger_items,
+};
 use parking_lot::Mutex;
 #[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Refresh interval for usage data
@@ -50,6 +50,14 @@ struct ExtraUsage {
     utilization: f64,
 }
 
+/// Usage info for a model-scoped weekly limit, e.g. a dedicated Fable bucket.
+#[derive(Clone)]
+struct ScopedTierUsage {
+    label: String,
+    tier: TierUsage,
+    active: bool,
+}
+
 /// All fetched usage data
 #[derive(Clone)]
 struct UsageData {
@@ -57,8 +65,7 @@ struct UsageData {
     plan: Option<String>,
     five_hour: Option<TierUsage>,
     seven_day: Option<TierUsage>,
-    seven_day_sonnet: Option<TierUsage>,
-    seven_day_opus: Option<TierUsage>,
+    weekly_scoped: Vec<ScopedTierUsage>,
     extra_usage: Option<ExtraUsage>,
 }
 
@@ -72,9 +79,10 @@ fn expand_tilde(path: &str) -> PathBuf {
             return home.join(rest);
         }
     } else if path == "~"
-        && let Some(home) = dirs::home_dir() {
-            return home;
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home;
+    }
     PathBuf::from(path)
 }
 
@@ -102,13 +110,15 @@ fn existing_path(path: &str, source: &str) -> Option<PathBuf> {
 pub fn resolve_claude_dir(cx: &App) -> PathBuf {
     if let Some(settings) = cx.global::<ExtensionSettingsStore>().get("claude-code", cx)
         && let Some(dir) = settings["config_dir"].as_str()
-            && let Some(expanded) = existing_path(dir, "settings config_dir") {
-                return expanded;
-            }
+        && let Some(expanded) = existing_path(dir, "settings config_dir")
+    {
+        return expanded;
+    }
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR")
-        && let Some(expanded) = existing_path(&dir, "CLAUDE_CONFIG_DIR") {
-            return expanded;
-        }
+        && let Some(expanded) = existing_path(&dir, "CLAUDE_CONFIG_DIR")
+    {
+        return expanded;
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
@@ -147,7 +157,9 @@ struct ClaudeUsageData {
 fn keychain_service_name(claude_dir: &Path) -> String {
     const BASE: &str = "Claude Code-credentials";
     let default_dir = dirs::home_dir().map(|h| h.join(".claude"));
-    let canonical = claude_dir.canonicalize().unwrap_or_else(|_| claude_dir.to_path_buf());
+    let canonical = claude_dir
+        .canonicalize()
+        .unwrap_or_else(|_| claude_dir.to_path_buf());
     if Some(&canonical) == default_dir.as_ref() {
         BASE.to_string()
     } else {
@@ -161,7 +173,9 @@ fn keychain_service_name(claude_dir: &Path) -> String {
 #[cfg(target_os = "macos")]
 fn suffixed_keychain_service_name(claude_dir: &Path) -> String {
     const BASE: &str = "Claude Code-credentials";
-    let canonical = claude_dir.canonicalize().unwrap_or_else(|_| claude_dir.to_path_buf());
+    let canonical = claude_dir
+        .canonicalize()
+        .unwrap_or_else(|_| claude_dir.to_path_buf());
     let mut h = Sha256::new();
     h.update(canonical.to_string_lossy().as_bytes());
     let d = h.finalize();
@@ -221,11 +235,16 @@ fn read_access_token(claude_dir: &Path) -> Option<String> {
     {
         let user = std::env::var("USER").ok()?;
         for service in keychain_service_names(claude_dir) {
-            let output = okena_core::process::safe_output(
-                okena_core::process::command("security")
-                    .args(["find-generic-password", "-s", &service, "-a", &user, "-w"]),
-            )
-            .ok()?;
+            let output =
+                okena_core::process::safe_output(okena_core::process::command("security").args([
+                    "find-generic-password",
+                    "-s",
+                    &service,
+                    "-a",
+                    &user,
+                    "-w",
+                ]))
+                .ok()?;
             if output.status.success() {
                 let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if let Some(token) = extract_access_token(&content, now) {
@@ -264,11 +283,16 @@ fn read_subscription_type(claude_dir: &Path) -> Option<String> {
     {
         let user = std::env::var("USER").ok()?;
         for service in keychain_service_names(claude_dir) {
-            let output = okena_core::process::safe_output(
-                okena_core::process::command("security")
-                    .args(["find-generic-password", "-s", &service, "-a", &user, "-w"]),
-            )
-            .ok()?;
+            let output =
+                okena_core::process::safe_output(okena_core::process::command("security").args([
+                    "find-generic-password",
+                    "-s",
+                    &service,
+                    "-a",
+                    &user,
+                    "-w",
+                ]))
+                .ok()?;
             if output.status.success() {
                 let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if let Some(plan) = extract_subscription_type(&content) {
@@ -282,26 +306,31 @@ fn read_subscription_type(claude_dir: &Path) -> Option<String> {
 }
 
 fn parse_usage(resp: &serde_json::Value) -> UsageData {
-    let five_hour = parse_tier(resp, "five_hour", FIVE_HOUR_SECS);
-    let seven_day = parse_tier(resp, "seven_day", SEVEN_DAY_SECS);
-    let seven_day_sonnet = parse_tier(resp, "seven_day_sonnet", SEVEN_DAY_SECS);
-    let seven_day_opus = parse_tier(resp, "seven_day_opus", SEVEN_DAY_SECS);
+    let mut five_hour = parse_tier(resp, "five_hour", FIVE_HOUR_SECS);
+    let mut seven_day = parse_tier(resp, "seven_day", SEVEN_DAY_SECS);
+    let mut weekly_scoped = Vec::new();
 
-    let extra_usage = resp.get("extra_usage").map(|eu| {
-        ExtraUsage {
-            is_enabled: eu["is_enabled"].as_bool().unwrap_or(false),
-            monthly_limit: eu["monthly_limit"].as_f64().unwrap_or(0.0),
-            used_credits: eu["used_credits"].as_f64().unwrap_or(0.0),
-            utilization: eu["utilization"].as_f64().unwrap_or(0.0),
-        }
+    if let Some(tier) = parse_tier(resp, "seven_day_sonnet", SEVEN_DAY_SECS) {
+        upsert_weekly_scoped(&mut weekly_scoped, "Sonnet".to_string(), tier, false);
+    }
+    if let Some(tier) = parse_tier(resp, "seven_day_opus", SEVEN_DAY_SECS) {
+        upsert_weekly_scoped(&mut weekly_scoped, "Opus".to_string(), tier, false);
+    }
+
+    apply_limits(resp, &mut five_hour, &mut seven_day, &mut weekly_scoped);
+
+    let extra_usage = resp.get("extra_usage").map(|eu| ExtraUsage {
+        is_enabled: eu["is_enabled"].as_bool().unwrap_or(false),
+        monthly_limit: eu["monthly_limit"].as_f64().unwrap_or(0.0),
+        used_credits: eu["used_credits"].as_f64().unwrap_or(0.0),
+        utilization: eu["utilization"].as_f64().unwrap_or(0.0),
     });
 
     UsageData {
         plan: None,
         five_hour,
         seven_day,
-        seven_day_sonnet,
-        seven_day_opus,
+        weekly_scoped,
         extra_usage,
     }
 }
@@ -311,21 +340,159 @@ const FIVE_HOUR_SECS: f64 = 5.0 * 3600.0;
 const SEVEN_DAY_SECS: f64 = 7.0 * 86400.0;
 
 fn parse_tier(resp: &serde_json::Value, key: &str, period_secs: f64) -> Option<TierUsage> {
-    let tier = resp.get(key)?;
-    let resets_at_raw = tier["resets_at"].as_str();
+    let tier = resp.get(key)?.as_object()?;
+    let resets_at_raw = tier.get("resets_at").and_then(|v| v.as_str());
     let reset_epoch = resets_at_raw.and_then(parse_iso8601_to_epoch);
-    let time_elapsed_pct = resets_at_raw.and_then(|ts| compute_time_elapsed_pct(ts, period_secs));
     Some(TierUsage {
-        utilization: tier["utilization"].as_f64().unwrap_or(0.0),
+        utilization: tier
+            .get("utilization")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
         reset_epoch,
         period_secs,
-        time_elapsed_pct,
+        time_elapsed_pct: resets_at_raw.and_then(|ts| compute_time_elapsed_pct(ts, period_secs)),
     })
+}
+
+fn apply_limits(
+    resp: &serde_json::Value,
+    five_hour: &mut Option<TierUsage>,
+    seven_day: &mut Option<TierUsage>,
+    weekly_scoped: &mut Vec<ScopedTierUsage>,
+) {
+    let Some(limits) = resp.get("limits").and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    for limit in limits {
+        let kind = limit.get("kind").and_then(|v| v.as_str());
+        let group = limit.get("group").and_then(|v| v.as_str());
+        let scoped_label = scoped_limit_label(limit);
+
+        if kind == Some("session") || group == Some("session") {
+            let fallback_reset = five_hour.as_ref().and_then(|tier| tier.reset_epoch);
+            if let Some(tier) = parse_limit_tier(limit, FIVE_HOUR_SECS, fallback_reset) {
+                *five_hour = Some(tier);
+            }
+            continue;
+        }
+
+        let scope_is_empty = limit.get("scope").is_none_or(|scope| scope.is_null());
+        if kind == Some("weekly_all") || (group == Some("weekly") && scope_is_empty) {
+            let fallback_reset = seven_day.as_ref().and_then(|tier| tier.reset_epoch);
+            if let Some(tier) = parse_limit_tier(limit, SEVEN_DAY_SECS, fallback_reset) {
+                *seven_day = Some(tier);
+            }
+            continue;
+        }
+
+        if kind == Some("weekly_scoped") || (group == Some("weekly") && scoped_label.is_some()) {
+            let Some(label) = scoped_label else {
+                continue;
+            };
+            let fallback_reset = scoped_reset_epoch(weekly_scoped, &label)
+                .or_else(|| seven_day.as_ref().and_then(|tier| tier.reset_epoch));
+            if let Some(tier) = parse_limit_tier(limit, SEVEN_DAY_SECS, fallback_reset) {
+                let active = limit
+                    .get("is_active")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                upsert_weekly_scoped(weekly_scoped, label, tier, active);
+            }
+        }
+    }
+}
+
+fn parse_limit_tier(
+    limit: &serde_json::Value,
+    period_secs: f64,
+    fallback_reset_epoch: Option<f64>,
+) -> Option<TierUsage> {
+    let utilization = limit
+        .get("percent")
+        .and_then(|v| v.as_f64())
+        .or_else(|| limit.get("utilization").and_then(|v| v.as_f64()))?;
+    let reset_epoch = limit
+        .get("resets_at")
+        .and_then(|v| v.as_str())
+        .and_then(parse_iso8601_to_epoch)
+        .or(fallback_reset_epoch);
+
+    Some(TierUsage {
+        utilization,
+        reset_epoch,
+        period_secs,
+        time_elapsed_pct: reset_epoch
+            .and_then(|e| compute_time_elapsed_pct_from_epoch(e, period_secs)),
+    })
+}
+
+fn scoped_limit_label(limit: &serde_json::Value) -> Option<String> {
+    let scope = limit.get("scope")?;
+
+    if let Some(model) = scope.get("model")
+        && let Some(label) = scope_label(model)
+    {
+        return Some(label);
+    }
+
+    if let Some(surface) = scope.get("surface")
+        && let Some(label) = scope_label(surface)
+    {
+        return Some(label);
+    }
+
+    None
+}
+
+fn scope_label(scope: &serde_json::Value) -> Option<String> {
+    scope
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .or_else(|| scope.get("name").and_then(|v| v.as_str()))
+        .or_else(|| scope.get("id").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn scoped_reset_epoch(weekly_scoped: &[ScopedTierUsage], label: &str) -> Option<f64> {
+    weekly_scoped
+        .iter()
+        .find(|entry| entry.label.eq_ignore_ascii_case(label))
+        .and_then(|entry| entry.tier.reset_epoch)
+}
+
+fn upsert_weekly_scoped(
+    weekly_scoped: &mut Vec<ScopedTierUsage>,
+    label: String,
+    tier: TierUsage,
+    active: bool,
+) {
+    if let Some(existing) = weekly_scoped
+        .iter_mut()
+        .find(|entry| entry.label.eq_ignore_ascii_case(&label))
+    {
+        existing.tier = tier;
+        existing.active = active;
+    } else {
+        weekly_scoped.push(ScopedTierUsage {
+            label,
+            tier,
+            active,
+        });
+    }
 }
 
 /// Compute what percentage of the billing period has elapsed.
 fn compute_time_elapsed_pct(resets_at: &str, period_secs: f64) -> Option<f64> {
-    let reset_epoch = parse_iso8601_to_epoch(resets_at)?;
+    compute_time_elapsed_pct_from_epoch(parse_iso8601_to_epoch(resets_at)?, period_secs)
+}
+
+fn compute_time_elapsed_pct_from_epoch(reset_epoch: f64, period_secs: f64) -> Option<f64> {
+    if period_secs <= 0.0 {
+        return None;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
@@ -456,8 +623,8 @@ impl ClaudeUsageData {
                                     .header("retry-after")
                                     .and_then(|v| v.parse::<u64>().ok())
                                     .unwrap_or(USAGE_INTERVAL.as_secs() * 2);
-                                let effective = Duration::from_secs(retry_secs)
-                                    .max(MIN_RETRY_DELAY);
+                                let effective =
+                                    Duration::from_secs(retry_secs).max(MIN_RETRY_DELAY);
                                 log::warn!(
                                     "[claude-usage] rate limited (429), retrying in {}s",
                                     effective.as_secs()
@@ -474,11 +641,10 @@ impl ClaudeUsageData {
                             if !resp.is_success() {
                                 return (None, None);
                             }
-                            let parsed: serde_json::Value =
-                                match serde_json::from_str(&body) {
-                                    Ok(v) => v,
-                                    Err(_) => return (None, None),
-                                };
+                            let parsed: serde_json::Value = match serde_json::from_str(&body) {
+                                Ok(v) => v,
+                                Err(_) => return (None, None),
+                            };
                             let mut usage = parse_usage(&parsed);
                             usage.plan = read_subscription_type(&dir);
                             (Some(usage), None)
@@ -523,9 +689,16 @@ impl ClaudeUsageData {
                 log::info!("[claude-usage] next fetch in {}s", delay.as_secs());
                 // Race: sleep vs wake signal (e.g. when UI becomes visible but has no data)
                 let woken = smol::future::or(
-                    async { smol::Timer::after(delay).await; false },
-                    async { let _ = wake_rx.recv().await; true },
-                ).await;
+                    async {
+                        smol::Timer::after(delay).await;
+                        false
+                    },
+                    async {
+                        let _ = wake_rx.recv().await;
+                        true
+                    },
+                )
+                .await;
                 // Drain any extra wake signals
                 while wake_rx.try_recv().is_ok() {}
                 // Don't reset consecutive_failures on wake — preserve backoff
@@ -621,11 +794,7 @@ impl ClaudeUsage {
         .detach();
     }
 
-    fn render_popover(
-        &self,
-        t: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_popover(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
         let shared = self.data.read(cx);
         let data = shared.data.lock();
         let data = match data.as_ref() {
@@ -671,7 +840,13 @@ impl ClaudeUsage {
                                     el.child(render_usage_row(
                                         t,
                                         cx,
-                                        &tier_row("Session", "5h", tier, "claude-marker-session", SegmentUnit::Hour),
+                                        &tier_row(
+                                            "Session",
+                                            "5h",
+                                            tier,
+                                            "claude-marker-session",
+                                            SegmentUnit::Hour,
+                                        ),
                                         working,
                                     ))
                                 })
@@ -679,35 +854,31 @@ impl ClaudeUsage {
                                     el.child(render_usage_row(
                                         t,
                                         cx,
-                                        &tier_row("Weekly", "7d", tier, "claude-marker-weekly", SegmentUnit::Day),
+                                        &tier_row(
+                                            "Weekly",
+                                            "7d",
+                                            tier,
+                                            "claude-marker-weekly",
+                                            SegmentUnit::Day,
+                                        ),
                                         working,
                                     ))
                                 })
-                                .when_some(
-                                    data.seven_day_sonnet
-                                        .as_ref()
-                                        .filter(|tier| tier.utilization >= 0.5),
-                                    |el, tier| {
-                                        el.child(render_usage_row(
-                                            t,
-                                            cx,
-                                            &tier_row("Sonnet", "7d", tier, "claude-marker-sonnet", SegmentUnit::Day),
-                                            working,
-                                        ))
-                                    },
-                                )
-                                .when_some(
-                                    data.seven_day_opus
-                                        .as_ref()
-                                        .filter(|tier| tier.utilization >= 0.5),
-                                    |el, tier| {
-                                        el.child(render_usage_row(
-                                            t,
-                                            cx,
-                                            &tier_row("Opus", "7d", tier, "claude-marker-opus", SegmentUnit::Day),
-                                            working,
-                                        ))
-                                    },
+                                .children(
+                                    data.weekly_scoped
+                                        .iter()
+                                        .filter(|scoped| should_show_scoped(scoped))
+                                        .map(|scoped| {
+                                            let row = tier_row(
+                                                scoped.label.as_str(),
+                                                "7d",
+                                                &scoped.tier,
+                                                marker_id_for_scoped(&scoped.label),
+                                                SegmentUnit::Day,
+                                            );
+                                            render_usage_row(t, cx, &row, working)
+                                                .into_any_element()
+                                        }),
                                 )
                                 .when_some(data.extra_usage.as_ref(), |el, extra| {
                                     if !extra.is_enabled {
@@ -726,10 +897,10 @@ impl ClaudeUsage {
 
 /// Build a shared [`UsageRow`] from a Claude rate-limit tier.
 fn tier_row(
-    label: &str,
+    label: impl Into<SharedString>,
     period: &str,
     tier: &TierUsage,
-    marker_id: &'static str,
+    marker_id: impl Into<SharedString>,
     unit: SegmentUnit,
 ) -> UsageRow {
     UsageRow {
@@ -742,6 +913,28 @@ fn tier_row(
         unit: Some(unit),
         marker_id: marker_id.into(),
     }
+}
+
+fn should_show_scoped(scoped: &ScopedTierUsage) -> bool {
+    scoped.active || scoped.tier.utilization >= 0.5
+}
+
+fn should_show_scoped_in_trigger(scoped: &ScopedTierUsage) -> bool {
+    scoped.active || scoped.tier.utilization >= 80.0
+}
+
+fn marker_id_for_scoped(label: &str) -> SharedString {
+    let slug: String = label
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("claude-marker-scoped-{slug}").into()
 }
 
 fn render_extra_usage_row(t: &ThemeColors, cx: &App, extra: &ExtraUsage) -> impl IntoElement {
@@ -789,6 +982,21 @@ impl Render for ClaudeUsage {
                         tier.time_elapsed_pct,
                     );
                     items.push(("7d".into(), tier.utilization, et));
+                }
+                for scoped in d
+                    .weekly_scoped
+                    .iter()
+                    .filter(|scoped| should_show_scoped_in_trigger(scoped))
+                {
+                    let tier = &scoped.tier;
+                    let et = effective_time_pct(
+                        tier.reset_epoch,
+                        tier.period_secs,
+                        Some(SegmentUnit::Day),
+                        working,
+                        tier.time_elapsed_pct,
+                    );
+                    items.push((scoped.label.clone().into(), tier.utilization, et));
                 }
             }
             None => {
@@ -968,6 +1176,158 @@ mod tests {
         assert!((pct - 50.0).abs() < 5.0, "Expected ~50%, got: {}", pct);
     }
 
+    #[test]
+    fn test_parse_usage_applies_limits_with_top_level_reset_fallback() {
+        let resp = serde_json::json!({
+            "five_hour": {
+                "utilization": 10.0,
+                "resets_at": "2026-07-07T14:00:00.000Z"
+            },
+            "seven_day": {
+                "utilization": 20.0,
+                "resets_at": "2026-07-08T21:00:00.000Z"
+            },
+            "limits": [
+                {
+                    "kind": "session",
+                    "group": "session",
+                    "percent": 46,
+                    "resets_at": null,
+                    "scope": null
+                },
+                {
+                    "kind": "weekly_all",
+                    "group": "weekly",
+                    "percent": 79,
+                    "resets_at": null,
+                    "scope": null
+                },
+                {
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 100,
+                    "resets_at": null,
+                    "scope": {
+                        "model": {
+                            "id": null,
+                            "display_name": "Fable"
+                        },
+                        "surface": null
+                    },
+                    "is_active": true
+                }
+            ],
+            "extra_usage": {
+                "is_enabled": false
+            }
+        });
+
+        let usage = parse_usage(&resp);
+        let five_hour = usage.five_hour.unwrap();
+        let seven_day = usage.seven_day.unwrap();
+        let fable = usage
+            .weekly_scoped
+            .iter()
+            .find(|entry| entry.label == "Fable")
+            .unwrap();
+
+        assert_eq!(five_hour.utilization, 46.0);
+        assert_eq!(
+            five_hour.reset_epoch,
+            parse_iso8601_to_epoch("2026-07-07T14:00:00.000Z")
+        );
+        assert_eq!(seven_day.utilization, 79.0);
+        assert_eq!(
+            seven_day.reset_epoch,
+            parse_iso8601_to_epoch("2026-07-08T21:00:00.000Z")
+        );
+        assert_eq!(fable.tier.utilization, 100.0);
+        assert_eq!(
+            fable.tier.reset_epoch,
+            parse_iso8601_to_epoch("2026-07-08T21:00:00.000Z")
+        );
+        assert!(fable.active);
+    }
+
+    #[test]
+    fn test_parse_usage_scoped_limit_uses_own_reset_when_present() {
+        let resp = serde_json::json!({
+            "seven_day": {
+                "utilization": 20.0,
+                "resets_at": "2026-07-08T21:00:00.000Z"
+            },
+            "limits": [
+                {
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 50,
+                    "resets_at": "2026-07-09T09:30:00.000Z",
+                    "scope": {
+                        "model": {
+                            "display_name": "Fable"
+                        }
+                    },
+                    "is_active": false
+                }
+            ]
+        });
+
+        let usage = parse_usage(&resp);
+        let fable = usage
+            .weekly_scoped
+            .iter()
+            .find(|entry| entry.label == "Fable")
+            .unwrap();
+
+        assert_eq!(
+            fable.tier.reset_epoch,
+            parse_iso8601_to_epoch("2026-07-09T09:30:00.000Z")
+        );
+    }
+
+    #[test]
+    fn test_parse_usage_limits_override_legacy_scoped_bucket() {
+        let resp = serde_json::json!({
+            "seven_day": {
+                "utilization": 20.0,
+                "resets_at": "2026-07-08T21:00:00.000Z"
+            },
+            "seven_day_opus": {
+                "utilization": 12.0,
+                "resets_at": "2026-07-08T20:00:00.000Z"
+            },
+            "limits": [
+                {
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 88,
+                    "resets_at": null,
+                    "scope": {
+                        "model": {
+                            "display_name": "Opus"
+                        }
+                    },
+                    "is_active": true
+                }
+            ]
+        });
+
+        let usage = parse_usage(&resp);
+        let opus_entries: Vec<&ScopedTierUsage> = usage
+            .weekly_scoped
+            .iter()
+            .filter(|entry| entry.label == "Opus")
+            .collect();
+
+        assert_eq!(opus_entries.len(), 1);
+        assert_eq!(opus_entries[0].tier.utilization, 88.0);
+        assert_eq!(
+            opus_entries[0].tier.reset_epoch,
+            parse_iso8601_to_epoch("2026-07-08T20:00:00.000Z")
+        );
+        assert!(opus_entries[0].active);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_keychain_service_default() {
@@ -978,7 +1338,10 @@ mod tests {
         // a tempdir stand-in only for the non-default branch, and test the default via the
         // real path (which exists on developer machines).
         if default_dir.exists() {
-            assert_eq!(keychain_service_name(&default_dir), "Claude Code-credentials");
+            assert_eq!(
+                keychain_service_name(&default_dir),
+                "Claude Code-credentials"
+            );
         }
     }
 
@@ -1004,7 +1367,7 @@ mod tests {
         let path = dir.path().canonicalize().unwrap();
         let service = keychain_service_name(&path);
 
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(path.to_string_lossy().as_bytes());
         let d = h.finalize();
@@ -1013,7 +1376,10 @@ mod tests {
             d[0], d[1], d[2], d[3]
         );
         assert_eq!(service, expected);
-        assert_ne!(service, "Claude Code-credentials", "custom dir must get a suffix");
+        assert_ne!(
+            service, "Claude Code-credentials",
+            "custom dir must get a suffix"
+        );
     }
 
     #[cfg(target_os = "macos")]
