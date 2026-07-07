@@ -437,15 +437,20 @@ impl From<anyhow::Error> for MobileFfiError {
     }
 }
 
+async fn send_mobile_action(
+    conn_id: &str,
+    action: ActionRequest,
+) -> Result<(), MobileFfiError> {
+    ConnectionManager::get().send_action(conn_id, action).await?;
+    Ok(())
+}
+
 // ── Terminal actions (async — await reqwest) ────────────────────────
 
 /// Create a new terminal in the given project.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn create_terminal(conn_id: String, project_id: String) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(&conn_id, ActionRequest::CreateTerminal { project_id })
-        .await?;
-    Ok(())
+    send_mobile_action(&conn_id, ActionRequest::CreateTerminal { project_id }).await
 }
 
 /// Close a terminal in the given project.
@@ -455,16 +460,14 @@ pub async fn close_terminal(
     project_id: String,
     terminal_id: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::CloseTerminal {
-                project_id,
-                terminal_id,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::CloseTerminal {
+            project_id,
+            terminal_id,
+        },
+    )
+    .await
 }
 
 /// Close multiple terminals in a project.
@@ -474,16 +477,14 @@ pub async fn close_terminals(
     project_id: String,
     terminal_ids: Vec<String>,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::CloseTerminals {
-                project_id,
-                terminal_ids,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::CloseTerminals {
+            project_id,
+            terminal_ids,
+        },
+    )
+    .await
 }
 
 /// Rename a terminal.
@@ -494,17 +495,15 @@ pub async fn rename_terminal(
     terminal_id: String,
     name: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::RenameTerminal {
-                project_id,
-                terminal_id,
-                name,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::RenameTerminal {
+            project_id,
+            terminal_id,
+            name,
+        },
+    )
+    .await
 }
 
 /// Focus a terminal.
@@ -514,17 +513,15 @@ pub async fn focus_terminal(
     project_id: String,
     terminal_id: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::FocusTerminal {
-                project_id,
-                terminal_id,
-                window: None,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::FocusTerminal {
+            project_id,
+            terminal_id,
+            window: None,
+        },
+    )
+    .await
 }
 
 /// Toggle minimized state of a terminal.
@@ -534,16 +531,14 @@ pub async fn toggle_minimized(
     project_id: String,
     terminal_id: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::ToggleMinimized {
-                project_id,
-                terminal_id,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::ToggleMinimized {
+            project_id,
+            terminal_id,
+        },
+    )
+    .await
 }
 
 /// Set/clear fullscreen terminal.
@@ -553,17 +548,15 @@ pub async fn set_fullscreen(
     project_id: String,
     terminal_id: Option<String>,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::SetFullscreen {
-                project_id,
-                terminal_id,
-                window: None,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::SetFullscreen {
+            project_id,
+            terminal_id,
+            window: None,
+        },
+    )
+    .await
 }
 
 /// Split a terminal pane. `direction` is "vertical" or "horizontal".
@@ -578,17 +571,15 @@ pub async fn split_terminal(
         "vertical" => SplitDirection::Vertical,
         _ => SplitDirection::Horizontal,
     };
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::SplitTerminal {
-                project_id,
-                path: path.into_iter().map(|v| v as usize).collect(),
-                direction: dir,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::SplitTerminal {
+            project_id,
+            path: path.into_iter().map(|v| v as usize).collect(),
+            direction: dir,
+        },
+    )
+    .await
 }
 
 /// Run a command in a terminal (presses Enter automatically).
@@ -598,16 +589,14 @@ pub async fn run_command(
     terminal_id: String,
     command: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::RunCommand {
-                terminal_id,
-                command,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::RunCommand {
+            terminal_id,
+            command,
+        },
+    )
+    .await
 }
 
 /// Read terminal content as text.
@@ -703,16 +692,14 @@ pub async fn start_service(
     project_id: String,
     service_name: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::StartService {
-                project_id,
-                service_name,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::StartService {
+            project_id,
+            service_name,
+        },
+    )
+    .await
 }
 
 /// Stop a service.
@@ -722,16 +709,14 @@ pub async fn stop_service(
     project_id: String,
     service_name: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::StopService {
-                project_id,
-                service_name,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::StopService {
+            project_id,
+            service_name,
+        },
+    )
+    .await
 }
 
 /// Restart a service.
@@ -741,16 +726,14 @@ pub async fn restart_service(
     project_id: String,
     service_name: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::RestartService {
-                project_id,
-                service_name,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::RestartService {
+            project_id,
+            service_name,
+        },
+    )
+    .await
 }
 
 /// Start all services in a project.
@@ -759,28 +742,19 @@ pub async fn start_all_services(
     conn_id: String,
     project_id: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(&conn_id, ActionRequest::StartAllServices { project_id })
-        .await?;
-    Ok(())
+    send_mobile_action(&conn_id, ActionRequest::StartAllServices { project_id }).await
 }
 
 /// Stop all services in a project.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn stop_all_services(conn_id: String, project_id: String) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(&conn_id, ActionRequest::StopAllServices { project_id })
-        .await?;
-    Ok(())
+    send_mobile_action(&conn_id, ActionRequest::StopAllServices { project_id }).await
 }
 
 /// Reload services config for a project.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn reload_services(conn_id: String, project_id: String) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(&conn_id, ActionRequest::ReloadServices { project_id })
-        .await?;
-    Ok(())
+    send_mobile_action(&conn_id, ActionRequest::ReloadServices { project_id }).await
 }
 
 // ── Project management (async) ──────────────────────────────────────
@@ -792,10 +766,7 @@ pub async fn add_project(
     name: String,
     path: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(&conn_id, ActionRequest::AddProject { name, path })
-        .await?;
-    Ok(())
+    send_mobile_action(&conn_id, ActionRequest::AddProject { name, path }).await
 }
 
 /// Set project color (named color, e.g. "blue"; unknown → default).
@@ -807,16 +778,14 @@ pub async fn set_project_color(
 ) -> Result<(), MobileFfiError> {
     let folder_color: okena_core::theme::FolderColor =
         serde_json::from_value(serde_json::Value::String(color)).unwrap_or_default();
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::SetProjectColor {
-                project_id,
-                color: folder_color,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::SetProjectColor {
+            project_id,
+            color: folder_color,
+        },
+    )
+    .await
 }
 
 /// Set folder color (named color; unknown → default).
@@ -828,16 +797,14 @@ pub async fn set_folder_color(
 ) -> Result<(), MobileFfiError> {
     let folder_color: okena_core::theme::FolderColor =
         serde_json::from_value(serde_json::Value::String(color)).unwrap_or_default();
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::SetFolderColor {
-                folder_id,
-                color: folder_color,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::SetFolderColor {
+            folder_id,
+            color: folder_color,
+        },
+    )
+    .await
 }
 
 /// Reorder a project within a folder.
@@ -848,17 +815,15 @@ pub async fn reorder_project_in_folder(
     project_id: String,
     new_index: u32,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::ReorderProjectInFolder {
-                folder_id,
-                project_id,
-                new_index: new_index as usize,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::ReorderProjectInFolder {
+            folder_id,
+            project_id,
+            new_index: new_index as usize,
+        },
+    )
+    .await
 }
 
 // ── Layout actions (async) ──────────────────────────────────────────
@@ -871,17 +836,15 @@ pub async fn update_split_sizes(
     path: Vec<u32>,
     sizes: Vec<f32>,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::UpdateSplitSizes {
-                project_id,
-                path: path.into_iter().map(|v| v as usize).collect(),
-                sizes,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::UpdateSplitSizes {
+            project_id,
+            path: path.into_iter().map(|v| v as usize).collect(),
+            sizes,
+        },
+    )
+    .await
 }
 
 /// Add a new tab to a tab group.
@@ -892,17 +855,15 @@ pub async fn add_tab(
     path: Vec<u32>,
     in_group: bool,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::AddTab {
-                project_id,
-                path: path.into_iter().map(|v| v as usize).collect(),
-                in_group,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::AddTab {
+            project_id,
+            path: path.into_iter().map(|v| v as usize).collect(),
+            in_group,
+        },
+    )
+    .await
 }
 
 /// Set the active tab in a tab group.
@@ -913,17 +874,15 @@ pub async fn set_active_tab(
     path: Vec<u32>,
     index: u32,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::SetActiveTab {
-                project_id,
-                path: path.into_iter().map(|v| v as usize).collect(),
-                index: index as usize,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::SetActiveTab {
+            project_id,
+            path: path.into_iter().map(|v| v as usize).collect(),
+            index: index as usize,
+        },
+    )
+    .await
 }
 
 /// Move a tab within a tab group.
@@ -935,18 +894,16 @@ pub async fn move_tab(
     from_index: u32,
     to_index: u32,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::MoveTab {
-                project_id,
-                path: path.into_iter().map(|v| v as usize).collect(),
-                from_index: from_index as usize,
-                to_index: to_index as usize,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::MoveTab {
+            project_id,
+            path: path.into_iter().map(|v| v as usize).collect(),
+            from_index: from_index as usize,
+            to_index: to_index as usize,
+        },
+    )
+    .await
 }
 
 /// Move a terminal into a tab group.
@@ -959,19 +916,17 @@ pub async fn move_terminal_to_tab_group(
     position: Option<u32>,
     target_project_id: Option<String>,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::MoveTerminalToTabGroup {
-                project_id,
-                terminal_id,
-                target_path: target_path.into_iter().map(|v| v as usize).collect(),
-                position: position.map(|p| p as usize),
-                target_project_id,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::MoveTerminalToTabGroup {
+            project_id,
+            terminal_id,
+            target_path: target_path.into_iter().map(|v| v as usize).collect(),
+            position: position.map(|p| p as usize),
+            target_project_id,
+        },
+    )
+    .await
 }
 
 /// Move a pane to a drop zone relative to another terminal.
@@ -984,17 +939,15 @@ pub async fn move_pane_to(
     target_terminal_id: String,
     zone: String,
 ) -> Result<(), MobileFfiError> {
-    ConnectionManager::get()
-        .send_action(
-            &conn_id,
-            ActionRequest::MovePaneTo {
-                project_id,
-                terminal_id,
-                target_project_id,
-                target_terminal_id,
-                zone,
-            },
-        )
-        .await?;
-    Ok(())
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+        },
+    )
+    .await
 }
