@@ -20,6 +20,20 @@ use okena_workspace::context::WorkspaceCx;
 use okena_core::keys::SpecialKey;
 use okena_core::types::SplitDirection;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::terminal::Terminal;
+
+fn with_ensured_terminal(
+    ws: &Workspace,
+    terminal_id: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    f: impl FnOnce(&Terminal) -> ActionResult,
+) -> ActionResult {
+    match ensure_terminal(terminal_id, terminals, backend, ws) {
+        Some(term) => f(&term),
+        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
+    }
+}
 
 pub(super) fn create(
     ws: &mut Workspace,
@@ -165,13 +179,10 @@ pub(super) fn send_text(
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            term.send_input(&text);
-            ActionResult::Ok(None)
-        }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
-    }
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+        term.send_input(&text);
+        ActionResult::Ok(None)
+    })
 }
 
 pub(super) fn run_command(
@@ -181,13 +192,10 @@ pub(super) fn run_command(
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            term.send_input(&format!("{}\r", command));
-            ActionResult::Ok(None)
-        }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
-    }
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+        term.send_input(&format!("{}\r", command));
+        ActionResult::Ok(None)
+    })
 }
 
 pub(super) fn send_special_key(
@@ -197,13 +205,10 @@ pub(super) fn send_special_key(
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            term.send_bytes(&key.to_bytes());
-            ActionResult::Ok(None)
-        }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
-    }
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+        term.send_bytes(&key.to_bytes());
+        ActionResult::Ok(None)
+    })
 }
 
 pub(super) fn resize(
@@ -214,19 +219,16 @@ pub(super) fn resize(
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            let size = TerminalSize {
-                cols,
-                rows,
-                cell_width: 8.0,
-                cell_height: 16.0,
-            };
-            term.resize(size);
-            ActionResult::Ok(None)
-        }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
-    }
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+        let size = TerminalSize {
+            cols,
+            rows,
+            cell_width: 8.0,
+            cell_height: 16.0,
+        };
+        term.resize(size);
+        ActionResult::Ok(None)
+    })
 }
 
 pub(super) fn update_split_sizes(
@@ -281,34 +283,31 @@ pub(super) fn read_content(
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            let content = term.with_content(|term| {
-                let grid = term.grid();
-                let screen_lines = grid.screen_lines();
-                let cols = grid.columns();
-                let mut lines = Vec::with_capacity(screen_lines);
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+        let content = term.with_content(|term| {
+            let grid = term.grid();
+            let screen_lines = grid.screen_lines();
+            let cols = grid.columns();
+            let mut lines = Vec::with_capacity(screen_lines);
 
-                for row in 0..screen_lines as i32 {
-                    let mut line = String::with_capacity(cols);
-                    for col in 0..cols {
-                        let cell = &grid[Point::new(Line(row), Column(col))];
-                        line.push(cell.c);
-                    }
-                    let trimmed = line.trim_end().to_string();
-                    lines.push(trimmed);
+            for row in 0..screen_lines as i32 {
+                let mut line = String::with_capacity(cols);
+                for col in 0..cols {
+                    let cell = &grid[Point::new(Line(row), Column(col))];
+                    line.push(cell.c);
                 }
+                let trimmed = line.trim_end().to_string();
+                lines.push(trimmed);
+            }
 
-                while lines.last().is_some_and(|l| l.is_empty()) {
-                    lines.pop();
-                }
+            while lines.last().is_some_and(|l| l.is_empty()) {
+                lines.pop();
+            }
 
-                lines.join("\n")
-            });
-            ActionResult::Ok(Some(serde_json::json!({"content": content})))
-        }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
-    }
+            lines.join("\n")
+        });
+        ActionResult::Ok(Some(serde_json::json!({"content": content})))
+    })
 }
 
 pub(super) fn export_buffer(
