@@ -14,6 +14,7 @@ use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceDat
 use async_channel::Receiver;
 use gpui::*;
 use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::git_poll::GitPollTrigger;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -43,9 +44,9 @@ pub struct HeadlessApp {
     pty_broadcaster: Arc<PtyBroadcaster>,
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
-    /// Broadcast of daemon-originated toasts forwarded to thin clients. Held so
-    /// the wiring matches the daemon's; the headless app has no toast producer of
-    /// its own yet (a follow-up could drain its `HookMonitor` into it).
+    /// Broadcast of daemon-originated toasts forwarded to thin clients. Fed by
+    /// the toast-drain loop, which forwards the `HookMonitor`'s soft-close / hook
+    /// toasts onto this channel.
     toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>>,
     next_remote_connection_id: Arc<AtomicU64>,
@@ -137,7 +138,7 @@ impl HeadlessApp {
         let (git_status_tx, _) = tokio_watch::channel(HashMap::new());
         let git_status_tx = Arc::new(git_status_tx);
         // Toast broadcast (capacity matches a small backlog; lagging clients just
-        // drop non-critical notifications). No producer in headless mode yet.
+        // drop non-critical notifications). Fed by the toast-drain loop below.
         let (toast_tx, _) = tokio::sync::broadcast::channel::<ApiToast>(64);
         let toast_tx = Arc::new(toast_tx);
         let remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>> =
@@ -149,6 +150,27 @@ impl HeadlessApp {
             let remote_subscribed_terminals = remote_subscribed_terminals.clone();
             |cx| GitStatusWatcher::new(workspace, git_status_tx, remote_subscribed_terminals, cx)
         });
+
+        // Git-poll wake-ups: the same channel the dedicated `okena-daemon` uses.
+        // The remote server sends `visibility_changed` when a client subscribes
+        // to terminals, and the command loop sends a per-action trigger (git
+        // status requested, project shown, branch checked out). The consumer
+        // task below drives the `GitStatusWatcher` so a project refreshes the
+        // moment it becomes visible instead of on the next poll cycle.
+        let (git_poll_trigger_tx, mut git_poll_trigger_rx) =
+            tokio::sync::mpsc::unbounded_channel::<GitPollTrigger>();
+        cx.spawn({
+            let git_watcher = git_watcher.downgrade();
+            async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
+                while let Some(trigger) = git_poll_trigger_rx.recv().await {
+                    let Some(watcher) = git_watcher.upgrade() else { break };
+                    cx.update(|cx| {
+                        watcher.update(cx, |w, cx| w.apply_poll_trigger(trigger, cx));
+                    });
+                }
+            }
+        })
+        .detach();
 
         // Create service manager for project-scoped background processes
         let local_backend_for_services: Arc<dyn TerminalBackend> =
@@ -288,11 +310,12 @@ impl HeadlessApp {
             let service_manager = service_manager.clone();
             let hook_monitor = hook_monitor.clone();
             let deadlines = deadlines.clone();
+            let git_poll_trigger_tx = git_poll_trigger_tx.clone();
             async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
                 remote_command_loop(
                     bridge_rx, local_backend, workspace, focus_manager_resolver, windows_resolver,
                     terminals, state_version, git_status_tx, service_manager, action_dispatcher,
-                    hook_monitor, deadlines, cx,
+                    hook_monitor, deadlines, Some(git_poll_trigger_tx), cx,
                 ).await;
             }
         })
@@ -345,7 +368,13 @@ impl HeadlessApp {
         .detach();
 
         // Start remote server
-        app.start_remote_server(bridge_tx, listen_addrs, tls_enabled, &remote_info);
+        app.start_remote_server(
+            bridge_tx,
+            listen_addrs,
+            tls_enabled,
+            git_poll_trigger_tx,
+            &remote_info,
+        );
 
         app
     }
@@ -356,6 +385,7 @@ impl HeadlessApp {
         bridge_tx: bridge::BridgeSender,
         listen_addrs: Vec<IpAddr>,
         tls_enabled: bool,
+        git_poll_trigger_tx: tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
         remote_info: &RemoteInfo,
     ) {
         match RemoteServer::start(
@@ -367,11 +397,11 @@ impl HeadlessApp {
             self.git_status_tx.clone(),
             self.toast_tx.clone(),
             self.remote_subscribed_terminals.clone(),
-            None,
+            Some(git_poll_trigger_tx),
             self.next_remote_connection_id.clone(),
             // Live-WS-connection count for `/v1/shutdown`; headless has no other
             // reader so it's created inline. `None` shutdown signal: the
-            // transitional `okena --headless` path has no graceful run-loop to
+            // single-binary `okena --headless` daemon has no graceful run-loop to
             // wake, so the endpoint hard-exits instead (see routes/shutdown.rs).
             Arc::new(AtomicU64::new(0)),
             None,

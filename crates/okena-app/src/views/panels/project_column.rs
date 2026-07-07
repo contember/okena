@@ -88,11 +88,14 @@ impl ProjectColumn {
         git_provider: Arc<dyn okena_views_git::diff_viewer::provider::GitProvider>,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Observe git watcher for re-renders (replaces per-column polling)
+        // Observe git watcher for re-renders (replaces per-column polling).
+        // In daemon-client mode this is always `None` (every project is remote,
+        // so git status arrives via the remote snapshot); the immediate refresh
+        // for a newly visible project is requested by `WindowView` sending a
+        // `GitStatus` action to the daemon (see
+        // `request_git_poll_for_visible_project`).
         if let Some(ref watcher) = git_watcher {
             cx.observe(watcher, |_, _, cx| cx.notify()).detach();
-            let project_id = project_id.clone();
-            watcher.update(cx, |w, cx| w.refresh_visible_project(project_id, cx));
         }
 
         // Observe the workspace itself. In daemon-client mode there is no local

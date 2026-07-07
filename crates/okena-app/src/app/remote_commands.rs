@@ -12,6 +12,7 @@ use crate::workspace::hook_monitor::HookMonitor;
 use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
 use okena_core::api::ApiGitStatus;
+use okena_core::git_poll::{git_poll_trigger_for_action, GitPollTrigger};
 use okena_workspace::actions::soft_close::{
     begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow, SoftCloseDeadlines,
 };
@@ -81,17 +82,21 @@ pub(crate) type WindowsResolver = Arc<dyn Fn(&App) -> Vec<ApiWindow> + Send + Sy
 pub(crate) type ActionDispatcher =
     Arc<dyn Fn(&mut App, Option<WindowId>, &str) -> Result<(), String> + Send + Sync>;
 
-/// Shared remote command loop used by both GUI (`Okena`) and headless (`HeadlessApp`).
+/// Remote command loop for the single-binary `okena --headless` daemon
+/// (`HeadlessApp`).
 ///
 /// Processes commands from the remote API bridge on the GPUI main thread.
 /// Callers are responsible for spawning this via `cx.spawn()`.
 ///
 /// `focus_manager_resolver` is consulted per-action so the focused-window
 /// scope (PRD user story 27 / slice 05 cri 13) is honored at the moment the
-/// action lands, not at loop startup. GUI callers pass a closure that reads
-/// `cx.active_window()` and looks the corresponding `WindowView` up on
-/// `Okena`; headless callers pass a constant closure returning the synthetic
-/// dormant `FocusManager` paired with `WindowId::Main`.
+/// action lands, not at loop startup. Headless passes a constant closure
+/// returning the synthetic dormant `FocusManager` paired with `WindowId::Main`.
+///
+/// `git_poll_trigger_tx`, when set, receives a wake-up after each successful
+/// action that should refresh git status (git status requested, project shown,
+/// branch checked out) — a consumer drives the `GitStatusWatcher` so the badge
+/// updates without waiting for the next poll cycle.
 // Bridge loop: each param is a distinct channel/entity dependency.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn remote_command_loop(
@@ -107,6 +112,7 @@ pub(crate) async fn remote_command_loop(
     action_dispatcher: ActionDispatcher,
     hook_monitor: HookMonitor,
     deadlines: SoftCloseDeadlines,
+    git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
     cx: &mut AsyncApp,
 ) {
     loop {
@@ -342,7 +348,11 @@ pub(crate) async fn remote_command_loop(
                     }
 
                     action => {
-                        cx.update(|cx| {
+                        // Compute the git-poll wake-up before `action` is moved
+                        // into `execute_action`; it's sent only after the action
+                        // succeeds (mirrors the dedicated daemon's loop).
+                        let git_poll_trigger = git_poll_trigger_for_action(&action);
+                        let result = cx.update(|cx| {
                             // Resolve the action's explicit target window (if
                             // any) BEFORE moving `action` into `execute_action`.
                             // An action that carries `window: Some(s)` must land
@@ -397,7 +407,14 @@ pub(crate) async fn remote_command_loop(
                                     })
                                 }
                             }
-                        })
+                        });
+                        if matches!(result, CommandResult::Ok(_))
+                            && let (Some(trigger), Some(tx)) =
+                                (git_poll_trigger, &git_poll_trigger_tx)
+                        {
+                            let _ = tx.send(trigger);
+                        }
+                        result
                     }
                 }
             }

@@ -3,6 +3,7 @@ use okena_workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use okena_core::api::ApiGitStatus;
+use okena_core::git_poll::GitPollTrigger;
 use okena_core::process::{with_lane, Lane};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -155,6 +156,54 @@ impl GitStatusWatcher {
     /// is fetched only when this project has no cached PR/CI result yet.
     pub fn refresh_visible_project(&mut self, project_id: String, cx: &mut Context<Self>) {
         self.refresh_project_with_github(project_id, false, cx);
+    }
+
+    /// Drive an immediate refresh off an external [`GitPollTrigger`]. Lets the
+    /// single-binary `okena --headless` daemon react to the same wake-ups the
+    /// dedicated `okena-daemon` handles in its poll loop: a client showing a
+    /// project or requesting git status, a branch checkout, or a client
+    /// subscribing to terminals — without waiting for the next poll cycle.
+    pub fn apply_poll_trigger(&mut self, trigger: GitPollTrigger, cx: &mut Context<Self>) {
+        match trigger.project_id {
+            // Branch checkout: cached PR/CI belongs to the old branch — refresh
+            // and re-fetch `gh`. Otherwise (project shown / git status asked):
+            // refresh, fetching `gh` only when it isn't cached yet.
+            Some(project_id) if trigger.invalidate_github => {
+                self.refresh_project(project_id, cx);
+            }
+            Some(project_id) => {
+                self.refresh_visible_project(project_id, cx);
+            }
+            // No project id (a client's terminal subscription changed): fetch
+            // `gh` for any newly visible/subscribed project not yet cached.
+            None => self.refresh_visible_projects_missing_github(cx),
+        }
+    }
+
+    /// Refresh every currently visible-or-subscribed non-remote project that has
+    /// no cached PR/CI yet. Mirrors the poll loop's `gh_ids` set so a project
+    /// that just entered view (e.g. a remote client subscribed to its terminal)
+    /// gets its badge immediately instead of on the next `gh` cadence cycle.
+    fn refresh_visible_projects_missing_github(&mut self, cx: &mut Context<Self>) {
+        let mut gh_ids = self.workspace.read(cx).all_visible_project_ids();
+        if let Ok(remote_terminals) = self.remote_subscribed_terminals.read() {
+            for terminal_ids in remote_terminals.values() {
+                for tid in terminal_ids {
+                    if let Some(p) = self.workspace.read(cx).find_project_for_terminal(tid)
+                        && !p.is_remote
+                    {
+                        gh_ids.insert(p.id.clone());
+                    }
+                }
+            }
+        }
+        let stale: Vec<String> = gh_ids
+            .into_iter()
+            .filter(|id| !self.statuses.contains_key(id) || self.missing_github_stats(id))
+            .collect();
+        for id in stale {
+            self.refresh_visible_project(id, cx);
+        }
     }
 
     fn refresh_project_with_github(

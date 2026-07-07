@@ -697,7 +697,32 @@ impl WindowView {
                     self.create_remote_column(project_id, connection_id.as_deref(), cx)
             {
                 self.project_columns.insert(project_id.clone(), entity);
+                self.request_git_poll_for_visible_project(project_id, cx);
             }
+        }
+    }
+
+    /// Ask the daemon to refresh a project's git/PR/CI status now that it just
+    /// became visible in this window. Per-window visibility is client-owned, so
+    /// the daemon doesn't otherwise know the project is on screen until a
+    /// terminal subscribes — without this, its badge waits for the next poll
+    /// cycle. Mirrors the web client's request-on-visible. Fire-and-forget: the
+    /// fresh status arrives over the git-status stream, not this action's reply.
+    fn request_git_poll_for_visible_project(&self, project_id: &str, cx: &mut Context<Self>) {
+        if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
+            project_id,
+            self.window_id,
+            &self.workspace,
+            &self.focus_manager,
+            &self.remote_manager,
+            cx,
+        ) {
+            dispatcher.dispatch(
+                okena_core::api::ActionRequest::GitStatus {
+                    project_id: project_id.to_string(),
+                },
+                cx,
+            );
         }
     }
 
