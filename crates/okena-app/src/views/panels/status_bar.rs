@@ -321,11 +321,11 @@ impl StatusBar {
     }
 
     fn memory_percent_from_bytes(stats: &ApiSystemStats) -> u64 {
-        if stats.memory_total_bytes > 0 {
-            stats.memory_used_bytes.saturating_mul(100) / stats.memory_total_bytes
-        } else {
-            0
-        }
+        stats
+            .memory_used_bytes
+            .saturating_mul(100)
+            .checked_div(stats.memory_total_bytes)
+            .unwrap_or(0)
     }
 
     fn format_gib_tenths(bytes: u64) -> String {

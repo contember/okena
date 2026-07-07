@@ -838,6 +838,6 @@ mod tests {
             prev = d;
         }
         // The one-shot give-up toast fires during the ramp, not only at the cap.
-        assert!(RECOVERY_TOAST_AFTER_ATTEMPTS >= 4);
+        const { assert!(RECOVERY_TOAST_AFTER_ATTEMPTS >= 4) };
     }
 }
