@@ -55,13 +55,15 @@ pub fn has_github_remote(path: &Path) -> bool {
 pub fn get_pr_info(path: &Path) -> Option<crate::PrInfo> {
     let path_str = path.to_str()?;
     let branch = super::status::get_current_branch(path)?;
+    let current_sha = super::status::get_head_sha(path);
+    let pushed_sha = get_pushed_sha(path);
 
     let output = safe_output_with_timeout(
         command("gh")
             .args([
                 "pr", "list", "--head", &branch, "--state", "all", "--limit", "1",
-                "--json", "url,state,isDraft,number,baseRefName",
-                "--jq", ".[0] | [.url, .state, .isDraft, .number, .baseRefName] | @tsv",
+                "--json", "url,state,isDraft,number,baseRefName,headRefOid",
+                "--jq", ".[0] | [.url, .state, .isDraft, .number, .baseRefName, .headRefOid] | @tsv",
             ])
             .current_dir(path_str),
         GH_TIMEOUT,
@@ -70,28 +72,38 @@ pub fn get_pr_info(path: &Path) -> Option<crate::PrInfo> {
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return parse_pr_list_tsv(stdout.trim());
+        return parse_pr_list_tsv(stdout.trim(), current_sha.as_deref(), pushed_sha.as_deref());
     }
 
     None
 }
 
 /// Parse the single TSV line our `gh pr list --jq ... | @tsv` query emits into a
-/// [`PrInfo`]. Fields, in order: url, state, isDraft, number, baseRefName (the
-/// last may be absent on older `gh`). Returns `None` for an empty line or one
-/// that doesn't start with a URL (i.e. no PR found for the branch).
-fn parse_pr_list_tsv(line: &str) -> Option<crate::PrInfo> {
+/// [`PrInfo`]. Fields, in order: url, state, isDraft, number, baseRefName,
+/// headRefOid. Returns `None` for an empty line, no PR, or a closed PR whose
+/// head is no longer the current branch head.
+fn parse_pr_list_tsv(
+    line: &str,
+    current_sha: Option<&str>,
+    pushed_sha: Option<&str>,
+) -> Option<crate::PrInfo> {
     let parts: Vec<&str> = line.split('\t').collect();
     if parts.len() < 4 || !parts[0].starts_with("http") {
         return None;
     }
     let url = parts[0].to_string();
+    let raw_state = parts[1];
     let is_draft = parts[2] == "true";
     let number = parts[3].parse::<u32>().unwrap_or(0);
+    let head_oid = parts.get(5).map(|s| s.trim()).filter(|s| !s.is_empty());
+    let is_closed_pr = !is_draft && matches!(raw_state, "MERGED" | "CLOSED");
+    if is_closed_pr && !closed_pr_head_matches(head_oid, current_sha, pushed_sha) {
+        return None;
+    }
     let state = if is_draft {
         crate::PrState::Draft
     } else {
-        match parts[1] {
+        match raw_state {
             "OPEN" => crate::PrState::Open,
             "MERGED" => crate::PrState::Merged,
             "CLOSED" => crate::PrState::Closed,
@@ -108,6 +120,17 @@ fn parse_pr_list_tsv(line: &str) -> Option<crate::PrInfo> {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     Some(crate::PrInfo { url, state, number, base })
+}
+
+fn closed_pr_head_matches(
+    head_oid: Option<&str>,
+    current_sha: Option<&str>,
+    pushed_sha: Option<&str>,
+) -> bool {
+    let Some(head_oid) = head_oid else {
+        return false;
+    };
+    current_sha == Some(head_oid) || pushed_sha == Some(head_oid)
 }
 
 /// Compute elapsed milliseconds between two ISO-8601 timestamps (those
@@ -471,8 +494,8 @@ mod tests {
 
     #[test]
     fn parse_pr_list_tsv_captures_base_branch() {
-        let line = "https://github.com/o/r/pull/9\tOPEN\tfalse\t9\tdevelop";
-        let pr = super::parse_pr_list_tsv(line).expect("should parse");
+        let line = "https://github.com/o/r/pull/9\tOPEN\tfalse\t9\tdevelop\tabc123";
+        let pr = super::parse_pr_list_tsv(line, Some("different"), None).expect("should parse");
         assert_eq!(pr.url, "https://github.com/o/r/pull/9");
         assert_eq!(pr.state, crate::PrState::Open);
         assert_eq!(pr.number, 9);
@@ -482,26 +505,40 @@ mod tests {
     #[test]
     fn parse_pr_list_tsv_base_absent_is_none() {
         // Older `gh` without baseRefName: only four fields.
-        let line = "https://github.com/o/r/pull/3\tMERGED\tfalse\t3";
-        let pr = super::parse_pr_list_tsv(line).expect("should parse");
-        assert_eq!(pr.state, crate::PrState::Merged);
+        let line = "https://github.com/o/r/pull/3\tOPEN\tfalse\t3";
+        let pr = super::parse_pr_list_tsv(line, None, None).expect("should parse");
+        assert_eq!(pr.state, crate::PrState::Open);
         assert_eq!(pr.number, 3);
         assert_eq!(pr.base, None);
     }
 
     #[test]
     fn parse_pr_list_tsv_draft_overrides_state() {
-        let line = "https://github.com/o/r/pull/5\tOPEN\ttrue\t5\tmain";
-        let pr = super::parse_pr_list_tsv(line).expect("should parse");
+        let line = "https://github.com/o/r/pull/5\tOPEN\ttrue\t5\tmain\tabc123";
+        let pr = super::parse_pr_list_tsv(line, Some("different"), None).expect("should parse");
         assert_eq!(pr.state, crate::PrState::Draft);
         assert_eq!(pr.base.as_deref(), Some("main"));
     }
 
     #[test]
+    fn parse_pr_list_tsv_keeps_closed_pr_at_current_head() {
+        let line = "https://github.com/o/r/pull/3\tMERGED\tfalse\t3\tmain\tabc123";
+        let pr = super::parse_pr_list_tsv(line, Some("abc123"), None).expect("should parse");
+        assert_eq!(pr.state, crate::PrState::Merged);
+        assert_eq!(pr.number, 3);
+    }
+
+    #[test]
+    fn parse_pr_list_tsv_ignores_stale_closed_pr() {
+        let line = "https://github.com/o/r/pull/4\tCLOSED\tfalse\t4\tmain\toldsha";
+        assert!(super::parse_pr_list_tsv(line, Some("newsha"), Some("newsha")).is_none());
+    }
+
+    #[test]
     fn parse_pr_list_tsv_empty_or_no_pr_is_none() {
-        assert!(super::parse_pr_list_tsv("").is_none());
+        assert!(super::parse_pr_list_tsv("", None, None).is_none());
         // A jq null/empty result — no leading URL.
-        assert!(super::parse_pr_list_tsv("\t\t\t").is_none());
+        assert!(super::parse_pr_list_tsv("\t\t\t", None, None).is_none());
     }
 
     // ─── CI check parsing tests ────────────────────────────────────────

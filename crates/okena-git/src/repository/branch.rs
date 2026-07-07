@@ -31,22 +31,29 @@ pub fn get_available_branches_for_worktree(path: &Path) -> Vec<String> {
 
 /// Get the default branch of a repository (e.g. "main" or "master").
 /// Checks the `origin/HEAD` symref first, then falls back to checking for
-/// local `main` / `master` branches.
+/// remote/local `main` / `master` branches.
 pub fn get_default_branch(repo_path: &Path) -> Option<String> {
     let repo = crate::gix_helpers::open(repo_path)?;
 
     // Read refs/remotes/origin/HEAD; it is a symbolic ref whose target points
-    // at e.g. refs/remotes/origin/main.
+    // at e.g. refs/remotes/origin/main. Ignore stale/dangling targets left by
+    // renamed or deleted default branches.
     if let Ok(head_ref) = repo.find_reference("refs/remotes/origin/HEAD")
         && let Some(target_name) = head_ref.target().try_name() {
             let target = target_name.as_bstr().to_string();
             if let Some(branch) = target.strip_prefix("refs/remotes/origin/")
-                && !branch.is_empty() {
+                && !branch.is_empty()
+                && repo.find_reference(target.as_str()).is_ok() {
                     return Some(branch.to_string());
                 }
         }
 
-    // Fallback: check if main or master branch exists locally.
+    // Fallback: check if main or master exists on origin, then locally.
+    for candidate in ["main", "master"] {
+        if repo.find_reference(&format!("refs/remotes/origin/{}", candidate)).is_ok() {
+            return Some(candidate.to_string());
+        }
+    }
     for candidate in ["main", "master"] {
         if repo.find_reference(&format!("refs/heads/{}", candidate)).is_ok() {
             return Some(candidate.to_string());
@@ -452,6 +459,24 @@ mod tests {
         let (_tmp, repo) = init_temp_repo();
         // No origin/HEAD exists — should fall back to local "main".
         assert_eq!(get_default_branch(&repo).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn get_default_branch_ignores_stale_origin_head() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["branch", "backup/pre-cleanup"]);
+        git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git_in(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/backup/pre-cleanup",
+            ],
+        );
+
+        assert_eq!(get_default_branch(&repo).as_deref(), Some("main"));
+        assert_eq!(resolve_review_base(&repo), None);
     }
 
     #[test]
