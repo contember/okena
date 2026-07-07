@@ -34,7 +34,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use okena_core::api::ApiGitStatus;
-use okena_core::process::{with_lane, Lane};
+use okena_core::git_poll::GitPollTrigger;
+use okena_core::process::{Lane, with_lane};
 use okena_git::{self as git, GitStatus};
 use okena_workspace::state::Workspace;
 use parking_lot::Mutex;
@@ -52,22 +53,6 @@ const CI_PENDING_POLL_EVERY_N_CYCLES: u64 = 3;
 /// (~60s). Mirrors the GUI watcher's `CI_SETTLED_POLL_EVERY_N_CYCLES`.
 const CI_SETTLED_POLL_EVERY_N_CYCLES: u64 = 12;
 
-/// External wake-up request for the daemon git poller.
-#[derive(Clone, Debug)]
-pub struct GitPollTrigger {
-    pub project_id: String,
-    pub poll_github: bool,
-}
-
-impl GitPollTrigger {
-    pub fn branch_change(project_id: String) -> Self {
-        Self {
-            project_id,
-            poll_github: true,
-        }
-    }
-}
-
 /// Project the local [`GitStatus`] onto the slimmer wire type pushed to remote
 /// clients. GPUI-free reimplementation of `okena-views-git`'s `to_api`.
 fn to_api(s: &GitStatus) -> ApiGitStatus {
@@ -82,6 +67,36 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
         unpushed: s.unpushed,
         review_base: s.review_base.clone(),
         default_branch: s.default_branch.clone(),
+    }
+}
+
+#[derive(Default)]
+struct TriggerAccumulator {
+    /// Unconditional `gh` refreshes. Used when existing PR/CI cache is invalid.
+    force_gh_ids: HashSet<String>,
+    /// Conditional refreshes. These become forced only if PR/CI cache is absent.
+    candidate_gh_ids: HashSet<String>,
+    /// Projects whose cached PR/CI belongs to a previous branch.
+    invalidate_gh_ids: HashSet<String>,
+}
+
+impl TriggerAccumulator {
+    fn record(&mut self, trigger: GitPollTrigger) {
+        let Some(project_id) = trigger.project_id else {
+            return;
+        };
+        if trigger.invalidate_github {
+            self.invalidate_gh_ids.insert(project_id.clone());
+            self.force_gh_ids.insert(project_id);
+        } else if trigger.poll_github {
+            self.candidate_gh_ids.insert(project_id);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.force_gh_ids.clear();
+        self.candidate_gh_ids.clear();
+        self.invalidate_gh_ids.clear();
     }
 }
 
@@ -126,19 +141,18 @@ pub async fn run_git_poll(
     // Drives the adaptive CI cadence: faster polling while any check is pending.
     let mut any_pending_ci = false;
     let mut cycle: u64 = 0;
-    let mut forced_gh_ids: HashSet<String> = HashSet::new();
+    let mut trigger_acc = TriggerAccumulator::default();
+    let mut known_gh_ids: HashSet<String> = HashSet::new();
     let mut trigger_rx_closed = false;
 
     loop {
-        drain_git_poll_triggers(&mut trigger_rx, &mut forced_gh_ids, &mut trigger_rx_closed);
-        if !forced_gh_ids.is_empty() {
-            for id in &forced_gh_ids {
-                pr_infos.remove(id);
-                ci_checks.remove(id);
-            }
-            any_pending_ci = ci_checks
-                .values()
-                .any(|c| c.as_ref().map(|s| s.status.is_pending()).unwrap_or(false));
+        drain_git_poll_triggers(&mut trigger_rx, &mut trigger_acc, &mut trigger_rx_closed);
+        if clear_github_cache_for_ids(
+            &trigger_acc.invalidate_gh_ids,
+            &mut pr_infos,
+            &mut ci_checks,
+        ) {
+            any_pending_ci = has_pending_ci(&ci_checks);
         }
 
         // ── 1. Snapshot the projects to poll under the workspace lock ────────
@@ -149,7 +163,7 @@ pub async fn run_git_poll(
         // (network) is instead gated to `gh_ids` — projects visible in some
         // window PLUS any with a remotely-subscribed terminal (i.e. what a
         // client is actually looking at). Mirrors the GUI watcher's split.
-        let (projects, gh_ids): (Vec<(String, String)>, HashSet<String>) = {
+        let (projects, mut gh_ids): (Vec<(String, String)>, HashSet<String>) = {
             let ws = workspace.lock();
             let projects = ws
                 .projects()
@@ -170,26 +184,24 @@ pub async fn run_git_poll(
                     }
                 }
             }
-            gh_ids.extend(forced_gh_ids.iter().cloned());
+            gh_ids.extend(trigger_acc.force_gh_ids.iter().cloned());
+            gh_ids.extend(trigger_acc.candidate_gh_ids.iter().cloned());
             (projects, gh_ids)
         };
-
-        // Skip the cycle-0 `gh` fan-out: at startup the basic gix status renders
-        // immediately regardless, and we don't want a thundering herd of `gh` at
-        // the worst moment. PR/CI kick in on cycle 1 (+5s), then settle into
-        // their normal cadence. Mirrors the GUI watcher's `check_prs`/`check_ci`.
-        let ci_poll_interval = if any_pending_ci {
-            CI_PENDING_POLL_EVERY_N_CYCLES
-        } else {
-            CI_SETTLED_POLL_EVERY_N_CYCLES
-        };
-        let pr_cadence = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(PR_POLL_EVERY_N_CYCLES));
-        let ci_cadence = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(ci_poll_interval));
-        let force_gh = !forced_gh_ids.is_empty();
-        let check_prs = force_gh || pr_cadence;
-        let check_ci = force_gh || ci_cadence;
-        let pr_poll_ids = gh_poll_ids(&gh_ids, &forced_gh_ids, force_gh, pr_cadence);
-        let ci_poll_ids = gh_poll_ids(&gh_ids, &forced_gh_ids, force_gh, ci_cadence);
+        if cycle != 0 || !known_gh_ids.is_empty() {
+            trigger_acc.force_gh_ids.extend(missing_github_stats_ids(
+                gh_ids.difference(&known_gh_ids),
+                &pr_infos,
+                &ci_checks,
+            ));
+        }
+        trigger_acc.force_gh_ids.extend(missing_github_stats_ids(
+            trigger_acc.candidate_gh_ids.iter(),
+            &pr_infos,
+            &ci_checks,
+        ));
+        gh_ids.extend(trigger_acc.force_gh_ids.iter().cloned());
+        known_gh_ids = gh_ids.clone();
 
         // ── 2. Refresh each project's git status on the blocking pool ────────
         let mut new_statuses: HashMap<String, GitStatus> = HashMap::new();
@@ -217,16 +229,43 @@ pub async fn run_git_poll(
             }
         }
 
+        let branch_changes = branch_changed_ids(&last, &new_statuses);
+        if !branch_changes.is_empty() {
+            if clear_github_cache_for_ids(&branch_changes, &mut pr_infos, &mut ci_checks) {
+                any_pending_ci = has_pending_ci(&ci_checks);
+            }
+            for id in &branch_changes {
+                if let Some(status) = new_statuses.get_mut(id) {
+                    status.pr_info = None;
+                    status.ci_checks = None;
+                }
+            }
+            trigger_acc
+                .force_gh_ids
+                .extend(branch_changes.iter().cloned());
+            gh_ids.extend(branch_changes);
+        }
+
+        // Skip the cycle-0 `gh` fan-out unless something explicitly forced it:
+        // startup still gets basic gix status immediately without a `gh` herd.
+        let ci_poll_interval = if any_pending_ci {
+            CI_PENDING_POLL_EVERY_N_CYCLES
+        } else {
+            CI_SETTLED_POLL_EVERY_N_CYCLES
+        };
+        let pr_cadence = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(PR_POLL_EVERY_N_CYCLES));
+        let ci_cadence = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(ci_poll_interval));
+        let force_gh = !trigger_acc.force_gh_ids.is_empty();
+        let check_prs = force_gh || pr_cadence;
+        let check_ci = force_gh || ci_cadence;
+        let pr_poll_ids = gh_poll_ids(&gh_ids, &trigger_acc.force_gh_ids, force_gh, pr_cadence);
+        let ci_poll_ids = gh_poll_ids(&gh_ids, &trigger_acc.force_gh_ids, force_gh, ci_cadence);
+
         // ── 3. Publish the basic status map on change — BEFORE the slow `gh` ──
         // git status comes from gix (fast, in-process); PR/CI come from `gh`
         // (network, and can hang). Publishing here means a stuck `gh` can never
         // block the branch/diff badge from appearing.
-        publish(
-            &mut last,
-            &new_statuses,
-            &git_status_tx,
-            &state_version,
-        );
+        publish(&mut last, &new_statuses, &git_status_tx, &state_version);
 
         // Stop once every external `watch` receiver is gone (the server is down).
         if git_status_tx.is_closed() {
@@ -298,9 +337,7 @@ pub async fn run_git_poll(
                     }
                 }
             }
-            any_pending_ci = ci_checks
-                .values()
-                .any(|c| c.as_ref().map(|s| s.status.is_pending()).unwrap_or(false));
+            any_pending_ci = has_pending_ci(&ci_checks);
         }
 
         // ── 5. Re-publish with the richer PR/CI merged in (follow-up update) ─
@@ -311,23 +348,18 @@ pub async fn run_git_poll(
                 status.pr_info = pr_infos.get(id).cloned().flatten();
                 status.ci_checks = ci_checks.get(id).cloned().flatten();
             }
-            publish(
-                &mut last,
-                &new_statuses,
-                &git_status_tx,
-                &state_version,
-            );
+            publish(&mut last, &new_statuses, &git_status_tx, &state_version);
         }
 
-        forced_gh_ids.clear();
+        trigger_acc.clear();
         cycle += 1;
-        wait_for_next_cycle(&mut trigger_rx, &mut forced_gh_ids, &mut trigger_rx_closed).await;
+        wait_for_next_cycle(&mut trigger_rx, &mut trigger_acc, &mut trigger_rx_closed).await;
     }
 }
 
 fn drain_git_poll_triggers(
     trigger_rx: &mut mpsc::UnboundedReceiver<GitPollTrigger>,
-    forced_gh_ids: &mut HashSet<String>,
+    trigger_acc: &mut TriggerAccumulator,
     trigger_rx_closed: &mut bool,
 ) {
     if *trigger_rx_closed {
@@ -336,9 +368,7 @@ fn drain_git_poll_triggers(
     loop {
         match trigger_rx.try_recv() {
             Ok(trigger) => {
-                if trigger.poll_github {
-                    forced_gh_ids.insert(trigger.project_id);
-                }
+                trigger_acc.record(trigger);
             }
             Err(mpsc::error::TryRecvError::Empty) => break,
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -347,6 +377,57 @@ fn drain_git_poll_triggers(
             }
         }
     }
+}
+
+fn missing_github_stats(
+    id: &str,
+    pr_infos: &HashMap<String, Option<git::PrInfo>>,
+    ci_checks: &HashMap<String, Option<git::CiCheckSummary>>,
+) -> bool {
+    !(pr_infos.contains_key(id) && ci_checks.contains_key(id))
+}
+
+fn missing_github_stats_ids<'a>(
+    ids: impl Iterator<Item = &'a String>,
+    pr_infos: &HashMap<String, Option<git::PrInfo>>,
+    ci_checks: &HashMap<String, Option<git::CiCheckSummary>>,
+) -> HashSet<String> {
+    ids.filter(|id| missing_github_stats(id, pr_infos, ci_checks))
+        .cloned()
+        .collect()
+}
+
+fn branch_changed_ids(
+    last: &HashMap<String, GitStatus>,
+    new_statuses: &HashMap<String, GitStatus>,
+) -> HashSet<String> {
+    new_statuses
+        .iter()
+        .filter_map(|(id, status)| {
+            last.get(id)
+                .filter(|prev| prev.branch != status.branch)
+                .map(|_| id.clone())
+        })
+        .collect()
+}
+
+fn clear_github_cache_for_ids(
+    ids: &HashSet<String>,
+    pr_infos: &mut HashMap<String, Option<git::PrInfo>>,
+    ci_checks: &mut HashMap<String, Option<git::CiCheckSummary>>,
+) -> bool {
+    let mut changed = false;
+    for id in ids {
+        changed |= pr_infos.remove(id).is_some();
+        changed |= ci_checks.remove(id).is_some();
+    }
+    changed
+}
+
+fn has_pending_ci(ci_checks: &HashMap<String, Option<git::CiCheckSummary>>) -> bool {
+    ci_checks
+        .values()
+        .any(|c| c.as_ref().map(|s| s.status.is_pending()).unwrap_or(false))
 }
 
 fn gh_poll_ids(
@@ -365,7 +446,7 @@ fn gh_poll_ids(
 
 async fn wait_for_next_cycle(
     trigger_rx: &mut mpsc::UnboundedReceiver<GitPollTrigger>,
-    forced_gh_ids: &mut HashSet<String>,
+    trigger_acc: &mut TriggerAccumulator,
     trigger_rx_closed: &mut bool,
 ) {
     if *trigger_rx_closed {
@@ -378,9 +459,7 @@ async fn wait_for_next_cycle(
         trigger = trigger_rx.recv() => {
             match trigger {
                 Some(trigger) => {
-                    if trigger.poll_github {
-                        forced_gh_ids.insert(trigger.project_id);
-                    }
+                    trigger_acc.record(trigger);
                 }
                 None => {
                     *trigger_rx_closed = true;
@@ -454,5 +533,95 @@ mod tests {
         let forced: HashSet<String> = ["switched".to_string()].into_iter().collect();
 
         assert_eq!(gh_poll_ids(&gh_ids, &forced, true, false), forced);
+    }
+
+    #[test]
+    fn missing_github_stats_requires_both_cache_slots() {
+        let mut prs = HashMap::new();
+        let mut checks = HashMap::new();
+
+        assert!(missing_github_stats("p1", &prs, &checks));
+
+        prs.insert("p1".to_string(), None);
+        assert!(missing_github_stats("p1", &prs, &checks));
+
+        checks.insert("p1".to_string(), None);
+        assert!(!missing_github_stats("p1", &prs, &checks));
+    }
+
+    #[test]
+    fn branch_changed_ids_only_reports_existing_branch_changes() {
+        let mut last = HashMap::new();
+        last.insert(
+            "same".to_string(),
+            GitStatus {
+                branch: Some("main".to_string()),
+                ..GitStatus::default()
+            },
+        );
+        last.insert(
+            "changed".to_string(),
+            GitStatus {
+                branch: Some("main".to_string()),
+                ..GitStatus::default()
+            },
+        );
+
+        let mut new_statuses = HashMap::new();
+        new_statuses.insert(
+            "same".to_string(),
+            GitStatus {
+                branch: Some("main".to_string()),
+                ..GitStatus::default()
+            },
+        );
+        new_statuses.insert(
+            "changed".to_string(),
+            GitStatus {
+                branch: Some("feature".to_string()),
+                ..GitStatus::default()
+            },
+        );
+        new_statuses.insert(
+            "new".to_string(),
+            GitStatus {
+                branch: Some("main".to_string()),
+                ..GitStatus::default()
+            },
+        );
+
+        let changed = branch_changed_ids(&last, &new_statuses);
+        assert_eq!(changed, HashSet::from(["changed".to_string()]));
+    }
+
+    #[test]
+    fn clear_github_cache_for_ids_removes_pr_and_ci_entries() {
+        let mut prs = HashMap::from([("p1".to_string(), None), ("p2".to_string(), None)]);
+        let mut checks = HashMap::from([("p1".to_string(), None), ("p3".to_string(), None)]);
+
+        let changed = clear_github_cache_for_ids(
+            &HashSet::from(["p1".to_string(), "missing".to_string()]),
+            &mut prs,
+            &mut checks,
+        );
+
+        assert!(changed);
+        assert!(!prs.contains_key("p1"));
+        assert!(prs.contains_key("p2"));
+        assert!(!checks.contains_key("p1"));
+        assert!(checks.contains_key("p3"));
+    }
+
+    #[test]
+    fn trigger_accumulator_keeps_visible_projects_conditional() {
+        let mut acc = TriggerAccumulator::default();
+        acc.record(GitPollTrigger::project_visible("visible".to_string()));
+        acc.record(GitPollTrigger::branch_change("switched".to_string()));
+        acc.record(GitPollTrigger::visibility_changed());
+
+        assert!(acc.candidate_gh_ids.contains("visible"));
+        assert!(acc.force_gh_ids.contains("switched"));
+        assert!(acc.invalidate_gh_ids.contains("switched"));
+        assert!(!acc.force_gh_ids.contains("visible"));
     }
 }

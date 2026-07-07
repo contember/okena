@@ -46,6 +46,7 @@ use okena_app_core::remote_snapshot::build_state_response;
 use okena_core::api::{
     ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult,
 };
+use okena_core::git_poll::GitPollTrigger;
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
 use okena_services::manager::ServiceManager;
 use okena_terminal::backend::TerminalBackend;
@@ -60,7 +61,6 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 
 use crate::daemon_config::{get_settings_schema, DaemonConfig};
-use crate::git_poll::GitPollTrigger;
 use crate::service_cx::ServiceReactorRef;
 use crate::soft_close::SoftCloseDeadlines;
 use crate::workspace_cx::DaemonWorkspaceCx;
@@ -100,6 +100,12 @@ fn git_poll_trigger_for_action(action: &ActionRequest) -> Option<GitPollTrigger>
         | ActionRequest::GitCreateAndCheckoutBranch { project_id, .. } => {
             Some(GitPollTrigger::branch_change(project_id.clone()))
         }
+        ActionRequest::GitStatus { project_id }
+        | ActionRequest::SetProjectShowInOverview {
+            project_id,
+            show: true,
+            ..
+        } => Some(GitPollTrigger::project_visible(project_id.clone())),
         _ => None,
     }
 }
@@ -871,8 +877,41 @@ mod tests {
         })
         .expect("branch checkout creates trigger");
 
-        assert_eq!(trigger.project_id, "p1");
+        assert_eq!(trigger.project_id.as_deref(), Some("p1"));
         assert!(trigger.poll_github);
+        assert!(trigger.invalidate_github);
+    }
+
+    #[test]
+    fn visible_project_actions_create_non_invalidating_git_poll_trigger() {
+        let trigger = git_poll_trigger_for_action(&ActionRequest::SetProjectShowInOverview {
+            project_id: "p1".to_string(),
+            show: true,
+            window: None,
+        })
+        .expect("showing a project creates trigger");
+
+        assert_eq!(trigger.project_id.as_deref(), Some("p1"));
+        assert!(trigger.poll_github);
+        assert!(!trigger.invalidate_github);
+
+        let trigger = git_poll_trigger_for_action(&ActionRequest::GitStatus {
+            project_id: "p1".to_string(),
+        })
+        .expect("requesting git status creates trigger");
+
+        assert_eq!(trigger.project_id.as_deref(), Some("p1"));
+        assert!(trigger.poll_github);
+        assert!(!trigger.invalidate_github);
+
+        assert!(
+            git_poll_trigger_for_action(&ActionRequest::SetProjectShowInOverview {
+                project_id: "p1".to_string(),
+                show: false,
+                window: None,
+            })
+            .is_none()
+        );
     }
 
     #[test]
@@ -892,8 +931,9 @@ mod tests {
             &tx,
         );
         let trigger = rx.try_recv().expect("success sends trigger");
-        assert_eq!(trigger.project_id, "p1");
+        assert_eq!(trigger.project_id.as_deref(), Some("p1"));
         assert!(trigger.poll_github);
+        assert!(trigger.invalidate_github);
     }
 
     // ── Loop round-trip tests ─────────────────────────────────────────────────

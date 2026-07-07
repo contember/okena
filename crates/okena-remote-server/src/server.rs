@@ -3,6 +3,7 @@ use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
 use crate::routes;
 use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::git_poll::GitPollTrigger;
 use okena_transport::client::LocalEndpoint;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -36,6 +37,7 @@ impl RemoteServer {
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
         toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+        git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
         next_connection_id: Arc<AtomicU64>,
         active_connections: Arc<AtomicU64>,
         process_shutdown: Option<Arc<tokio::sync::Notify>>,
@@ -166,6 +168,7 @@ impl RemoteServer {
                 git_status,
                 toast_tx,
                 remote_subscribed_terminals,
+                git_poll_trigger_tx,
                 next_connection_id,
                 active_connections,
                 process_shutdown,

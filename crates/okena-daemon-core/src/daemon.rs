@@ -59,6 +59,7 @@ use std::sync::atomic::AtomicU64;
 
 use async_channel::Receiver;
 use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::git_poll::GitPollTrigger;
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_remote_server::auth::AuthStore;
 use okena_remote_server::bridge::{self, BridgeReceiver};
@@ -71,7 +72,7 @@ use okena_terminal::session_backend::SessionBackend;
 use okena_workspace::persistence::{AppSettings, LockGuard, acquire_instance_lock};
 use okena_workspace::state::{Workspace, WorkspaceData};
 use parking_lot::Mutex;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::daemon_config::DaemonConfig;
 use crate::reactor::DaemonReactor;
@@ -135,6 +136,10 @@ pub struct DaemonCore {
     /// expensive `gh` PR/CI lookups only for projects a client is viewing.
     remote_subscribed_terminals:
         Arc<std::sync::RwLock<HashMap<u64, std::collections::HashSet<String>>>>,
+    /// Git poll wake-up sender shared by command handling and the remote server.
+    git_poll_trigger_tx: mpsc::UnboundedSender<GitPollTrigger>,
+    /// Git poll wake-up receiver consumed by [`run`](DaemonCore::run).
+    git_poll_trigger_rx: mpsc::UnboundedReceiver<GitPollTrigger>,
     /// Shared settings cell (the [`DaemonConfig`] write path; also read by the
     /// command loop's `execute_action` for hooks / worktree / default shell).
     settings: Arc<Mutex<AppSettings>>,
@@ -250,6 +255,7 @@ impl DaemonCore {
         let active_connections = Arc::new(AtomicU64::new(0));
         let shutdown_requested = Arc::new(tokio::sync::Notify::new());
         let (bridge_tx, bridge_rx) = bridge::bridge_channel();
+        let (git_poll_trigger_tx, git_poll_trigger_rx) = mpsc::unbounded_channel();
 
         // ── 6. Start the remote server ───────────────────────────────────────
         // It owns its OWN internal tokio runtime and talks to us only via the
@@ -263,6 +269,7 @@ impl DaemonCore {
             git_status_tx.clone(),
             toast_tx.clone(),
             remote_subscribed_terminals.clone(),
+            Some(git_poll_trigger_tx.clone()),
             next_connection_id,
             active_connections,
             Some(shutdown_requested.clone()),
@@ -299,6 +306,8 @@ impl DaemonCore {
             git_status_tx,
             toast_tx,
             remote_subscribed_terminals,
+            git_poll_trigger_tx,
+            git_poll_trigger_rx,
             settings,
             daemon_config,
             _instance_lock: instance_lock,
@@ -327,6 +336,8 @@ impl DaemonCore {
             git_status_tx,
             toast_tx,
             remote_subscribed_terminals,
+            git_poll_trigger_tx,
+            git_poll_trigger_rx,
             settings,
             daemon_config,
             // Bound (not `..`) so the lock is held until the end of `run`, then
@@ -337,9 +348,6 @@ impl DaemonCore {
         let handle = runtime.handle().clone();
         let local = tokio::task::LocalSet::new();
         local.block_on(&runtime, async move {
-            let (git_poll_trigger_tx, git_poll_trigger_rx) =
-                tokio::sync::mpsc::unbounded_channel();
-
             // Observers MUST be spawned inside the LocalSet (they `spawn_local`).
             reactor.spawn_observers();
             tokio::task::spawn_local(crate::pty_loop::run_pty_loop(

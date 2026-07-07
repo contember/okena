@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApp } from "../state/store";
 import { postAction } from "../api/client";
 import type { ApiProject } from "../api/types";
@@ -24,6 +24,7 @@ function DesktopLayout() {
     state.selectedProjectId,
   );
   const fileViewerProject = state.workspace?.projects.find((project) => project.id === fileViewerProjectId);
+  useRequestGitPollForVisibleProjects(projects, state.selectedProjectId);
 
   return (
     <div className="app-shell flex h-screen flex-col">
@@ -61,6 +62,34 @@ function DesktopLayout() {
       )}
     </div>
   );
+}
+
+function useRequestGitPollForVisibleProjects(
+  projects: readonly ApiProject[],
+  selectedProjectId: string | null,
+): void {
+  const previousVisibleProjectIds = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const nextVisibleProjectIds = new Set(projects.map((project) => project.id));
+    for (const project of projects) {
+      if (previousVisibleProjectIds.current.has(project.id)) {
+        continue;
+      }
+      requestGitPoll(project.id);
+    }
+    previousVisibleProjectIds.current = nextVisibleProjectIds;
+  }, [projects]);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      requestGitPoll(selectedProjectId);
+    }
+  }, [selectedProjectId]);
+}
+
+function requestGitPoll(projectId: string): void {
+  postAction({ action: "git_status", project_id: projectId }).catch(() => {});
 }
 
 function ProjectColumn({
@@ -233,6 +262,7 @@ function MobileLayout() {
   const project = state.workspace?.projects.find(
     (p) => p.id === state.selectedProjectId,
   );
+  useRequestGitPollForVisibleProjects(project ? [project] : [], state.selectedProjectId);
 
   const terminalIds = project ? collectTerminalIds(project.layout) : [];
 

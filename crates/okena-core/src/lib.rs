@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod api;
+pub mod git_poll;
 pub mod keys;
 pub mod process;
 pub mod profiles;

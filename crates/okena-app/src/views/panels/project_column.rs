@@ -91,6 +91,8 @@ impl ProjectColumn {
         // Observe git watcher for re-renders (replaces per-column polling)
         if let Some(ref watcher) = git_watcher {
             cx.observe(watcher, |_, _, cx| cx.notify()).detach();
+            let project_id = project_id.clone();
+            watcher.update(cx, |w, cx| w.refresh_visible_project(project_id, cx));
         }
 
         // Observe the workspace itself. In daemon-client mode there is no local

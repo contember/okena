@@ -21,6 +21,7 @@ use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::git_poll::GitPollTrigger;
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -50,6 +51,9 @@ pub struct AppState {
     /// Per-connection set of subscribed terminal IDs (connection_id → terminal_ids).
     /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    /// Optional wake-up path for the host git poller when a WS client starts
+    /// viewing terminals.
+    pub git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
     pub next_connection_id: Arc<AtomicU64>,
     /// Count of currently-live authenticated WS connections. The stream route
     /// increments it on accept and decrements it on close; `/v1/shutdown` reads
@@ -104,6 +108,7 @@ pub fn build_router(
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
     toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
     next_connection_id: Arc<AtomicU64>,
     active_connections: Arc<AtomicU64>,
     process_shutdown: Option<Arc<tokio::sync::Notify>>,
@@ -118,6 +123,7 @@ pub fn build_router(
         git_status,
         toast_tx,
         remote_subscribed_terminals,
+        git_poll_trigger_tx,
         next_connection_id,
         active_connections,
         process_shutdown,

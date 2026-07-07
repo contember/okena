@@ -367,6 +367,7 @@ impl HeadlessApp {
             self.git_status_tx.clone(),
             self.toast_tx.clone(),
             self.remote_subscribed_terminals.clone(),
+            None,
             self.next_remote_connection_id.clone(),
             // Live-WS-connection count for `/v1/shutdown`; headless has no other
             // reader so it's created inline. `None` shutdown signal: the

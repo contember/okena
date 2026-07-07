@@ -12,6 +12,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
+use okena_core::git_poll::GitPollTrigger;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -174,6 +175,9 @@ async fn handle_ws(
                                 // Sync to shared state for git polling
                                 if let Ok(mut map) = state.remote_subscribed_terminals.write() {
                                     map.insert(connection_id, subscribed_ids.keys().cloned().collect());
+                                }
+                                if let Some(tx) = &state.git_poll_trigger_tx {
+                                    let _ = tx.send(GitPollTrigger::visibility_changed());
                                 }
                                 let mappings: HashMap<String, u32> = terminal_ids
                                     .iter()
