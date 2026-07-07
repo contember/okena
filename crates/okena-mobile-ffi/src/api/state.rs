@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use crate::client::manager::ConnectionManager;
-use okena_core::api::ApiLayoutNode;
+use okena_transport::client::collect_layout_terminal_ids;
 
 /// Flat FFI-friendly project info.
 #[derive(Debug, Clone)]
@@ -68,9 +68,7 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
         .iter()
         .map(|p| {
             let terminal_ids = if let Some(ref layout) = p.layout {
-                let mut ids = Vec::new();
-                collect_layout_ids_vec(layout, &mut ids);
-                ids
+                collect_layout_terminal_ids(layout)
             } else {
                 Vec::new()
             };
@@ -153,19 +151,4 @@ pub fn get_fullscreen_terminal(conn_id: String) -> Option<FullscreenInfo> {
             terminal_id: f.terminal_id.clone(),
         })
     })
-}
-
-fn collect_layout_ids_vec(node: &ApiLayoutNode, ids: &mut Vec<String>) {
-    match node {
-        ApiLayoutNode::Terminal { terminal_id, .. } => {
-            if let Some(id) = terminal_id {
-                ids.push(id.clone());
-            }
-        }
-        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
-            for child in children {
-                collect_layout_ids_vec(child, ids);
-            }
-        }
-    }
 }
