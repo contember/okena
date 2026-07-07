@@ -14,6 +14,7 @@
 
 use crate::auth::{self, PersistedToken};
 use base64::Engine as _;
+pub use okena_core::process::is_process_alive;
 use okena_transport::client::LocalEndpoint;
 use okena_workspace::persistence::config_dir;
 use rand::Rng as _;
@@ -166,22 +167,6 @@ pub fn running_daemon_in(dir: &Path) -> Option<LocalDaemon> {
 /// (unknown) is treated as "assume alive".
 pub fn running_daemon() -> Option<LocalDaemon> {
     running_daemon_in(&config_dir())
-}
-
-/// Check whether a process with the given pid is still running.
-pub fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // signal 0 probes for existence without delivering a signal.
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        // Without a cheap liveness probe, assume alive — the caller falls back
-        // to a connection attempt, which fails fast if the daemon is gone.
-        let _ = pid;
-        true
-    }
 }
 
 /// A freshly minted local bearer token plus the metadata a caller needs to

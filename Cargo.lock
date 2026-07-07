@@ -6166,7 +6166,6 @@ dependencies = [
  "base64",
  "clap",
  "dirs 5.0.1",
- "libc",
  "okena-core",
  "okena-remote-server",
  "okena-transport",
@@ -6447,7 +6446,6 @@ dependencies = [
  "hmac",
  "hyper",
  "hyper-util",
- "libc",
  "log",
  "okena-core",
  "okena-ext-updater",
@@ -6479,7 +6477,6 @@ version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
  "gpui",
- "libc",
  "log",
  "okena-core",
  "okena-terminal",

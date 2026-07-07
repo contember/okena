@@ -1,3 +1,4 @@
+use crate::process::is_process_alive;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -699,39 +700,6 @@ fn unique_id(display_name: &str, index: &ProfileIndex) -> String {
         }
     }
     unreachable!()
-}
-
-fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-    }
-    #[cfg(windows)]
-    {
-        // Use WaitForSingleObject with a 0 timeout rather than
-        // GetExitCodeProcess + STILL_ACTIVE: a process that legitimately exited
-        // with code 259 (== STILL_ACTIVE) would otherwise be reported alive
-        // forever (or until its PID is reused). The process handle is signaled
-        // once the process terminates; WAIT_TIMEOUT means it is still running.
-        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-        };
-        unsafe {
-            let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
-            if handle.is_null() {
-                return false;
-            }
-            let result = WaitForSingleObject(handle, 0);
-            CloseHandle(handle);
-            result == WAIT_TIMEOUT
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        false
-    }
 }
 
 fn now_iso8601() -> String {

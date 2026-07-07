@@ -91,6 +91,40 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// Check whether a process with the given PID is still running.
+pub fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // signal 0 probes for existence without delivering a signal.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        // A process handle is signaled after exit. This avoids treating an
+        // actual exit code of 259 (`STILL_ACTIVE`) as forever alive.
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let result = WaitForSingleObject(handle, 0);
+            CloseHandle(handle);
+            result == WAIT_TIMEOUT
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Without a cheap liveness probe, assume alive and let callers fall
+        // back to their existing connection/time-out paths.
+        let _ = pid;
+        true
+    }
+}
+
 /// Raise the soft open-file-descriptor limit toward the hard limit at startup.
 ///
 /// The command bus caps concurrent child processes (~20), but interactive PTY

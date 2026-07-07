@@ -59,9 +59,6 @@ sysinfo = "0.33"
 # repo-root `web/dist` from inside this crate.
 rust-embed = { version = "8.5", features = ["interpolate-folder-path"] }
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 tempfile = "3"

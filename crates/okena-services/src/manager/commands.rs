@@ -2,9 +2,10 @@
 
 use super::{
     MAX_RESTART_COUNT, ServiceAsyncCx, ServiceCx, ServiceHandle, ServiceKind, ServiceManager,
-    ServiceStatus, is_process_alive,
+    ServiceStatus,
 };
 use crate::port_detect;
+use okena_core::process::is_process_alive;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::path::Path;

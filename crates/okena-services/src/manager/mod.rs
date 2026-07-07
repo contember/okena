@@ -304,20 +304,5 @@ impl ServiceManager {
     }
 }
 
-/// Check if a process with the given PID is still alive.
-pub(super) fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // signal 0 doesn't send a signal but checks if process exists
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        // On non-Unix, conservatively assume alive (caller will time out)
-        let _ = pid;
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests;

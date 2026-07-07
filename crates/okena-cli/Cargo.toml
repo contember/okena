@@ -23,7 +23,3 @@ base64 = "0.22"
 rand = "0.8"
 uuid = { version = "1.10", features = ["v4"] }
 dirs = "5.0"
-
-[target.'cfg(unix)'.dependencies]
-# Liveness check for the running server's PID (libc::kill on unix).
-libc = "0.2"

@@ -3,6 +3,7 @@ pub mod parser;
 pub mod register;
 pub mod resolve;
 
+use okena_core::process::is_process_alive;
 use okena_workspace::persistence::config_dir;
 use clap::Parser as _;
 use parser::{
@@ -284,18 +285,6 @@ fn discover_server() -> Result<DiscoveredServer, String> {
     }
 
     Ok(DiscoveredServer { host, port, local_endpoint })
-}
-
-fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
-    }
 }
 
 /// Ensure we have a valid token, auto-registering if needed.
