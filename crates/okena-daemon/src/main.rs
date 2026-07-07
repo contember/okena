@@ -172,7 +172,8 @@ fn main() -> anyhow::Result<()> {
     // mode, also bind the configured interface so off-host clients can connect.
     // An explicit `--listen` is standalone/headless intent and is honored even
     // when the settings toggle is off.
-    let listen_addrs = resolve_listen_addrs(listen_override, &settings);
+    let listen_addrs =
+        okena_remote_server::local::resolve_daemon_listen_addrs(listen_override, &settings);
 
     // 5. Build params (read TLS out before moving `settings`) and run. `run`
     //    blocks until the bridge closes or ctrl-c arrives — that is expected,
@@ -217,43 +218,5 @@ fn parse_listen_override() -> Option<IpAddr> {
             eprintln!("--listen requires an address argument, e.g. --listen 0.0.0.0");
             std::process::exit(1);
         }
-    }
-}
-
-fn resolve_listen_addrs(
-    listen_override: Option<IpAddr>,
-    settings: &okena_workspace::persistence::AppSettings,
-) -> Vec<IpAddr> {
-    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-
-    if let Some(addr) = listen_override {
-        return bind_addrs_with_loopback(addr);
-    }
-
-    if !settings.remote_server_enabled {
-        return vec![loopback];
-    }
-
-    let configured = settings.remote_listen_address.trim();
-    match configured.parse::<IpAddr>() {
-        Ok(addr) => bind_addrs_with_loopback(addr),
-        Err(_) => {
-            if !configured.is_empty() {
-                log::warn!(
-                    "Invalid remote_listen_address in settings ({configured:?}); falling back to 127.0.0.1"
-                );
-            }
-            vec![loopback]
-        }
-    }
-}
-
-fn bind_addrs_with_loopback(addr: IpAddr) -> Vec<IpAddr> {
-    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-
-    if addr == loopback || addr.is_unspecified() {
-        vec![addr]
-    } else {
-        vec![loopback, addr]
     }
 }

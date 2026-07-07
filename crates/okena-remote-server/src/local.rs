@@ -19,6 +19,7 @@ use okena_workspace::persistence::config_dir;
 use rand::Rng as _;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -77,6 +78,47 @@ pub fn default_local_endpoint() -> Option<LocalEndpoint> {
     #[cfg(not(unix))]
     {
         None
+    }
+}
+
+/// Resolve daemon TCP bind addresses from an explicit CLI override or persisted
+/// remote settings. Same-host access stays available unless the user explicitly
+/// requested an unspecified bind such as `0.0.0.0`.
+pub fn resolve_daemon_listen_addrs(
+    listen_override: Option<IpAddr>,
+    settings: &okena_workspace::persistence::AppSettings,
+) -> Vec<IpAddr> {
+    let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    if let Some(addr) = listen_override {
+        return bind_addrs_with_loopback(addr);
+    }
+
+    if !settings.remote_server_enabled {
+        return vec![loopback];
+    }
+
+    let configured = settings.remote_listen_address.trim();
+    match configured.parse::<IpAddr>() {
+        Ok(addr) => bind_addrs_with_loopback(addr),
+        Err(_) => {
+            if !configured.is_empty() {
+                log::warn!(
+                    "Invalid remote_listen_address in settings ({configured:?}); falling back to 127.0.0.1"
+                );
+            }
+            vec![loopback]
+        }
+    }
+}
+
+fn bind_addrs_with_loopback(addr: IpAddr) -> Vec<IpAddr> {
+    let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    if addr == loopback || addr.is_unspecified() {
+        vec![addr]
+    } else {
+        vec![loopback, addr]
     }
 }
 
@@ -825,6 +867,54 @@ mod tests {
             tls: false,
             local_endpoint: None,
         }
+    }
+
+    fn remote_settings(
+        enabled: bool,
+        listen_address: &str,
+    ) -> okena_workspace::persistence::AppSettings {
+        let mut settings = okena_workspace::persistence::AppSettings::default();
+        settings.remote_server_enabled = enabled;
+        settings.remote_listen_address = listen_address.to_string();
+        settings
+    }
+
+    #[test]
+    fn resolve_daemon_listen_addrs_defaults_to_loopback_when_remote_disabled() {
+        let settings = remote_settings(false, "0.0.0.0");
+        assert_eq!(
+            resolve_daemon_listen_addrs(None, &settings),
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
+        );
+    }
+
+    #[test]
+    fn resolve_daemon_listen_addrs_adds_loopback_for_remote_interface() {
+        let remote_addr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let settings = remote_settings(true, "192.0.2.10");
+
+        assert_eq!(
+            resolve_daemon_listen_addrs(None, &settings),
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST), remote_addr]
+        );
+    }
+
+    #[test]
+    fn resolve_daemon_listen_addrs_honors_unspecified_override() {
+        let bind_all = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let settings = remote_settings(false, "127.0.0.1");
+
+        assert_eq!(resolve_daemon_listen_addrs(Some(bind_all), &settings), vec![bind_all]);
+    }
+
+    #[test]
+    fn resolve_daemon_listen_addrs_falls_back_on_invalid_config() {
+        let settings = remote_settings(true, "not an ip");
+
+        assert_eq!(
+            resolve_daemon_listen_addrs(None, &settings),
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
+        );
     }
 
     #[test]

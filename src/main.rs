@@ -318,7 +318,8 @@ fn run_headless(listen_addr: Option<IpAddr>) {
         let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
         let pty_manager = Arc::new(pty_manager);
 
-        let listen_addrs = resolve_daemon_listen_addrs(listen_addr, &app_settings);
+        let listen_addrs =
+            okena_app::remote::local::resolve_daemon_listen_addrs(listen_addr, &app_settings);
         let tls_enabled = listen_addrs.iter().any(|addr| !addr.is_loopback())
             && app_settings.remote_tls_enabled;
 
@@ -337,40 +338,6 @@ fn run_headless(listen_addr: Option<IpAddr>) {
         });
         cx.set_global(GlobalHeadless(headless));
     });
-}
-
-fn resolve_daemon_listen_addrs(
-    listen_override: Option<IpAddr>,
-    settings: &persistence::AppSettings,
-) -> Vec<IpAddr> {
-    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-    if let Some(addr) = listen_override {
-        return daemon_bind_addrs_with_loopback(addr);
-    }
-    if !settings.remote_server_enabled {
-        return vec![loopback];
-    }
-    let configured = settings.remote_listen_address.trim();
-    match configured.parse::<IpAddr>() {
-        Ok(addr) => daemon_bind_addrs_with_loopback(addr),
-        Err(_) => {
-            if !configured.is_empty() {
-                log::warn!(
-                    "Invalid remote_listen_address in settings ({configured:?}); falling back to 127.0.0.1"
-                );
-            }
-            vec![loopback]
-        }
-    }
-}
-
-fn daemon_bind_addrs_with_loopback(addr: IpAddr) -> Vec<IpAddr> {
-    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-    if addr == loopback || addr.is_unspecified() {
-        vec![addr]
-    } else {
-        vec![loopback, addr]
-    }
 }
 
 fn main() {
