@@ -1,6 +1,7 @@
 //! GitProvider trait and the remote-server (HTTP) implementation.
 
 use okena_git::{BranchList, CommitLogEntry, DiffMode, DiffResult, FileDiffSummary};
+use serde::de::DeserializeOwned;
 
 /// Provides git data from either local git commands or a remote server.
 pub trait GitProvider: Send + Sync + 'static {
@@ -84,6 +85,23 @@ impl RemoteGitProvider {
             action,
         )
     }
+
+    fn post_json_or_default<T>(&self, action: okena_core::api::ActionRequest, label: &str) -> T
+    where
+        T: DeserializeOwned + Default,
+    {
+        match self.post_action(action) {
+            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
+                log::warn!("Failed to deserialize {label}: {e}");
+                T::default()
+            }),
+            _ => T::default(),
+        }
+    }
+
+    fn post_unit(&self, action: okena_core::api::ActionRequest) -> Result<(), String> {
+        self.post_action(action).map(|_| ())
+    }
 }
 
 impl GitProvider for RemoteGitProvider {
@@ -128,13 +146,7 @@ impl GitProvider for RemoteGitProvider {
         let action = okena_core::api::ActionRequest::GitDiffSummary {
             project_id: self.project_id.clone(),
         };
-        match self.post_action(action) {
-            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
-                log::warn!("Failed to deserialize diff summary: {}", e);
-                Vec::new()
-            }),
-            _ => Vec::new(),
-        }
+        self.post_json_or_default(action, "diff summary")
     }
 
     fn get_commit_graph(&self, count: usize, branch: Option<&str>) -> Vec<CommitLogEntry> {
@@ -143,39 +155,21 @@ impl GitProvider for RemoteGitProvider {
             count,
             branch: branch.map(String::from),
         };
-        match self.post_action(action) {
-            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
-                log::warn!("Failed to deserialize commit graph: {}", e);
-                Vec::new()
-            }),
-            _ => Vec::new(),
-        }
+        self.post_json_or_default(action, "commit graph")
     }
 
     fn list_branches(&self) -> Vec<String> {
         let action = okena_core::api::ActionRequest::GitListBranches {
             project_id: self.project_id.clone(),
         };
-        match self.post_action(action) {
-            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
-                log::warn!("Failed to deserialize branch list: {}", e);
-                Vec::new()
-            }),
-            _ => Vec::new(),
-        }
+        self.post_json_or_default(action, "branch list")
     }
 
     fn list_branches_classified(&self) -> BranchList {
         let action = okena_core::api::ActionRequest::GitListBranchesClassified {
             project_id: self.project_id.clone(),
         };
-        match self.post_action(action) {
-            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
-                log::warn!("Failed to deserialize classified branch list: {}", e);
-                BranchList::default()
-            }),
-            _ => BranchList::default(),
-        }
+        self.post_json_or_default(action, "classified branch list")
     }
 
     fn stage_file(&self, file_path: &str) -> Result<(), String> {
@@ -183,7 +177,7 @@ impl GitProvider for RemoteGitProvider {
             project_id: self.project_id.clone(),
             file_path: file_path.to_string(),
         };
-        self.post_action(action).map(|_| ())
+        self.post_unit(action)
     }
 
     fn unstage_file(&self, file_path: &str) -> Result<(), String> {
@@ -191,7 +185,7 @@ impl GitProvider for RemoteGitProvider {
             project_id: self.project_id.clone(),
             file_path: file_path.to_string(),
         };
-        self.post_action(action).map(|_| ())
+        self.post_unit(action)
     }
 
     fn discard_file(&self, file_path: &str) -> Result<(), String> {
@@ -199,7 +193,7 @@ impl GitProvider for RemoteGitProvider {
             project_id: self.project_id.clone(),
             file_path: file_path.to_string(),
         };
-        self.post_action(action).map(|_| ())
+        self.post_unit(action)
     }
 
     fn delete_file(&self, file_path: &str) -> Result<(), String> {
@@ -207,7 +201,7 @@ impl GitProvider for RemoteGitProvider {
             project_id: self.project_id.clone(),
             relative_path: file_path.to_string(),
         };
-        self.post_action(action).map(|_| ())
+        self.post_unit(action)
     }
 
     fn checkout_local_branch(&self, branch: &str) -> Result<(), String> {
@@ -215,7 +209,7 @@ impl GitProvider for RemoteGitProvider {
             project_id: self.project_id.clone(),
             branch: branch.to_string(),
         };
-        self.post_action(action).map(|_| ())
+        self.post_unit(action)
     }
 
     fn checkout_remote_branch(&self, remote_branch: &str) -> Result<(), String> {
@@ -223,7 +217,7 @@ impl GitProvider for RemoteGitProvider {
             project_id: self.project_id.clone(),
             remote_branch: remote_branch.to_string(),
         };
-        self.post_action(action).map(|_| ())
+        self.post_unit(action)
     }
 
     fn create_and_checkout_branch(
@@ -236,7 +230,7 @@ impl GitProvider for RemoteGitProvider {
             new_name: new_name.to_string(),
             start_point: start_point.map(String::from),
         };
-        self.post_action(action).map(|_| ())
+        self.post_unit(action)
     }
 
     fn absolute_file_path(&self, file_path: &str) -> Option<String> {
