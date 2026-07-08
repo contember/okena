@@ -45,6 +45,14 @@ pub struct TerminalContent {
     window_id: Option<WindowId>,
     workspace: Entity<Workspace>,
     scroll_accumulator: f32,
+    /// True while we're in the inertial "momentum" tail after a trackpad scroll
+    /// gesture was released. On macOS the OS keeps emitting scroll-wheel events
+    /// as a flick coasts, but GPUI drops the momentum phase and reports them as
+    /// plain `TouchPhase::Moved` — so we reconstruct the gesture boundary here:
+    /// set on `Ended`, cleared on the next `Started`. Used to reject Control-zoom
+    /// during momentum so a fast scroll that coasts into an accidental Control
+    /// press can't resize the font (see the `on_scroll_wheel` handler).
+    in_scroll_inertia: bool,
     mouse_down_cell: Option<(usize, i32)>,
     forwarded_button: Option<(u8, u8)>,
     /// Runs while a drag-selection is active, scrolling the viewport when the
@@ -82,6 +90,7 @@ impl TerminalContent {
             window_id,
             workspace,
             scroll_accumulator: 0.0,
+            in_scroll_inertia: false,
             mouse_down_cell: None,
             forwarded_button: None,
             autoscroll_task: None,
@@ -625,11 +634,32 @@ impl Render for TerminalContent {
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                // Track the trackpad gesture boundary so we can tell an active,
+                // finger-on-the-pad scroll from its inertial momentum tail. GPUI
+                // collapses the macOS momentum phase into `TouchPhase::Moved`, so
+                // this flag is our only signal (see `in_scroll_inertia`).
+                match event.touch_phase {
+                    TouchPhase::Started => this.in_scroll_inertia = false,
+                    TouchPhase::Ended => this.in_scroll_inertia = true,
+                    TouchPhase::Moved => {}
+                }
+
                 if event.modifiers.shift {
                     return;
                 }
                 let delta = event.delta.pixel_delta(px(17.0));
-                if event.modifiers.control {
+
+                // Only zoom on genuinely user-driven Control+scroll. Reject the
+                // inertial-momentum tail of a trackpad flick — a precise (pixel)
+                // delta arriving while coasting after the fingers lifted — so a
+                // fast scroll that coasts into an accidental Control press can't
+                // resize the font; that momentum falls through to scroll the
+                // terminal instead. A real mouse wheel reports `Lines` (never
+                // momentum), so wheel-driven Control+scroll always zooms.
+                let is_inertial_momentum =
+                    this.in_scroll_inertia && matches!(event.delta, ScrollDelta::Pixels(_));
+
+                if event.modifiers.control && !is_inertial_momentum {
                     let current_zoom = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
                     let zoom_delta = if f32::from(delta.y) > 0.0 { 0.1 } else { -0.1 };
                     let new_zoom = (current_zoom + zoom_delta).clamp(0.5, 3.0);
