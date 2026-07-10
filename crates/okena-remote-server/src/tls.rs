@@ -194,6 +194,23 @@ mod handshake_tests {
         addr
     }
 
+    async fn spawn_tls_only(material: &TlsMaterial) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let tls = super::server_config(material).unwrap();
+        let app = Router::new().route("/health", get(|| async { "ok" }));
+        tokio::spawn(async move {
+            let _ = crate::serve::serve_tls(
+                listener,
+                app,
+                tls,
+                std::future::pending::<()>(),
+            )
+            .await;
+        });
+        addr
+    }
+
     /// GET with a short readiness retry while the server task spins up.
     async fn get_with_retry(client: &reqwest::Client, url: &str) -> Result<reqwest::Response, reqwest::Error> {
         let mut last_err = None;
@@ -264,6 +281,33 @@ mod handshake_tests {
         assert!(
             client_bad.get(&url).send().await.is_err(),
             "mismatched pin must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn tls_only_listener_rejects_plain_http() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let dir = tempfile::tempdir().unwrap();
+        let material = load_or_generate(dir.path()).unwrap();
+        let addr = spawn_tls_only(&material).await;
+        let https_client = okena_transport::client::tls::build_reqwest_client(
+            true,
+            Some(material.fingerprint.clone()),
+            okena_transport::client::tls::new_observed(),
+        );
+        let https_url = format!("https://{addr}/health");
+        assert!(
+            get_with_retry(&https_client, &https_url)
+                .await
+                .map(|response| response.status().is_success())
+                .unwrap_or(false)
+        );
+
+        let http_url = format!("http://{addr}/health");
+        assert!(
+            reqwest::Client::new().get(http_url).send().await.is_err(),
+            "TLS-only listeners must close plaintext HTTP connections"
         );
     }
 }

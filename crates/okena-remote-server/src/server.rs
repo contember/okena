@@ -11,6 +11,10 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
 
+fn tls_listener_allows_plaintext(addr: IpAddr) -> bool {
+    addr.is_loopback()
+}
+
 /// Handle to a running remote control server.
 /// Dropping this will trigger shutdown.
 pub struct RemoteServer {
@@ -82,8 +86,10 @@ impl RemoteServer {
             None => None,
         };
 
-        let scheme = if tls_enabled {
-            "http+https dual-stack"
+        let scheme = if tls_enabled && bind_addrs.iter().any(|addr| !addr.is_loopback()) {
+            "https (remote), http+https (loopback)"
+        } else if tls_enabled {
+            "http+https (loopback)"
         } else {
             "http/ws"
         };
@@ -201,16 +207,25 @@ impl RemoteServer {
                 let tls_config = tls_server_config.clone();
                 tcp_servers.push(tokio::spawn(async move {
                     let result = if let Some(tls_config) = tls_config {
-                        // TLS enabled → dual-stack: accept BOTH http and TLS on this one
-                        // port so already-paired plain-http clients keep working while
-                        // new/auto clients negotiate TLS.
-                        crate::serve::serve_dual_stack(
-                            listener,
-                            app,
-                            tls_config,
-                            shutdown_signal(shutdown_rx),
-                        )
-                        .await
+                        if tls_listener_allows_plaintext(addr) {
+                            // Preserve local plain-http compatibility only where
+                            // traffic cannot leave the host.
+                            crate::serve::serve_dual_stack(
+                                listener,
+                                app,
+                                tls_config,
+                                shutdown_signal(shutdown_rx),
+                            )
+                            .await
+                        } else {
+                            crate::serve::serve_tls(
+                                listener,
+                                app,
+                                tls_config,
+                                shutdown_signal(shutdown_rx),
+                            )
+                            .await
+                        }
                     } else {
                         // TLS disabled → plain http only.
                         crate::serve::serve_plain(listener, app, shutdown_signal(shutdown_rx)).await
@@ -513,5 +528,13 @@ mod tests {
     fn local_tcp_host_uses_ipv6_loopback_for_ipv6_only_binds() {
         let addrs = [IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)];
         assert_eq!(local_tcp_host(&addrs), "::1");
+    }
+
+    #[test]
+    fn tls_plaintext_compatibility_is_loopback_only() {
+        assert!(tls_listener_allows_plaintext("127.0.0.1".parse().unwrap()));
+        assert!(tls_listener_allows_plaintext("::1".parse().unwrap()));
+        assert!(!tls_listener_allows_plaintext("0.0.0.0".parse().unwrap()));
+        assert!(!tls_listener_allows_plaintext("192.168.1.20".parse().unwrap()));
     }
 }
