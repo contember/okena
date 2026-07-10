@@ -5,6 +5,7 @@ use okena_core::theme::ThemeMode;
 pub use okena_core::types::DiffViewMode;
 
 use anyhow::Result;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -698,10 +699,26 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 pub fn save_settings(settings: &AppSettings) -> Result<()> {
     let _slow = okena_core::timing::SlowGuard::new("save_settings");
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = acquire_settings_file_lock()?;
     save_settings_locked(settings)
 }
 
-/// Inner save — caller MUST already hold `SETTINGS_LOCK`.
+fn acquire_settings_file_lock() -> Result<std::fs::File> {
+    let lock_path = get_settings_path().with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+/// Inner save — caller holds both process and file locks.
 fn save_settings_locked(settings: &AppSettings) -> Result<()> {
     let path = get_settings_path();
     if let Some(parent) = path.parent() {
@@ -716,7 +733,13 @@ fn save_settings_locked(settings: &AppSettings) -> Result<()> {
             to_save.remote_connections = on_disk.remote_connections;
         }
 
-    let content = serde_json::to_string_pretty(&to_save)?;
+    write_settings_locked(&to_save)
+}
+
+/// Write a complete settings value. Caller holds both settings locks.
+fn write_settings_locked(settings: &AppSettings) -> Result<()> {
+    let path = get_settings_path();
+    let content = serde_json::to_string_pretty(settings)?;
 
     // Atomic write: tmp + fsync + rename ensures the file is never partial.
     let tmp_path = path.with_extension("json.tmp");
@@ -737,87 +760,26 @@ fn save_settings_locked(settings: &AppSettings) -> Result<()> {
 
 /// Atomically load, update, and save the `remote_connections` field in settings.
 ///
-/// Uses a process-level mutex to prevent concurrent read-modify-write races.
-/// On Unix, also uses file locking (flock) for cross-process safety.
+/// Uses the same process and cross-process locks as [`save_settings`].
 pub fn update_remote_connections<F>(updater: F) -> Result<()>
 where
     F: FnOnce(&mut Vec<RemoteConnectionConfig>),
 {
     let _slow = okena_core::timing::SlowGuard::new("update_remote_connections");
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = acquire_settings_file_lock()?;
 
     let path = get_settings_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    #[cfg(unix)]
-    {
-        use std::io::{Read, Write, Seek};
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-
-        // Acquire exclusive file lock for cross-process safety. Retry on EINTR;
-        // if locking genuinely fails (e.g. a filesystem without advisory locking,
-        // such as some network mounts) log it and proceed — the process-level
-        // SETTINGS_LOCK still serializes writers within this process.
-        // SAFETY: the fd is owned by the live `file` binding for the whole call.
-        loop {
-            let rc = unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) };
-            if rc == 0 {
-                break;
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            log::warn!("flock on settings.json failed, proceeding without cross-process lock: {err}");
-            break;
-        }
-
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-
-        let mut settings: AppSettings = if content.is_empty() {
-            AppSettings::default()
-        } else {
-            serde_json::from_str(&content).unwrap_or_default()
-        };
-
-        updater(&mut settings.remote_connections);
-
-        let new_content = serde_json::to_string_pretty(&settings)?;
-        file.seek(std::io::SeekFrom::Start(0))?;
-        file.set_len(0)?;
-        file.write_all(new_content.as_bytes())?;
-
-        // Set restrictive permissions
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-
-        // Lock is released automatically when `file` is dropped
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let path = get_settings_path();
-        let mut settings: AppSettings = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_default();
-        updater(&mut settings.remote_connections);
-
-        let content = serde_json::to_string_pretty(&settings)?;
-        let tmp_path = path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, &content)?;
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(())
-    }
+    let mut settings: AppSettings = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default();
+    updater(&mut settings.remote_connections);
+    write_settings_locked(&settings)
 }
 
 #[cfg(test)]

@@ -1,5 +1,4 @@
 use crate::action_dispatch::ActionDispatcher;
-use crate::settings::GlobalSettings;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
 use crate::workspace::requests::{
     FolderOverlay, FolderOverlayKind, OverlayRequest, ProjectOverlay, ProjectOverlayKind,
@@ -744,15 +743,10 @@ impl WindowView {
         .detach();
     }
 
-    /// Flush pending saves, spawn a new Okena process for `id`, then quit.
+    /// Spawn a new Okena process for `id`, then quit.
     /// The spawned child is dropped immediately and survives as an orphan (Unix)
     /// or independent process (Windows) — same pattern as the updater's restart_app.
     pub(super) fn handle_switch_profile(&self, id: String, cx: &mut Context<Self>) {
-        // 1. Flush settings
-        if let Some(gs) = cx.try_global::<GlobalSettings>() {
-            gs.0.read(cx).flush_pending_save();
-        }
-
         // NOTE: do NOT flush workspace.json here. The GUI is a daemon client and
         // its Workspace is a read-only mirror (prefixed ids) — the daemon is the
         // single writer (§5). Writing it would clobber the daemon's file with
@@ -760,8 +754,8 @@ impl WindowView {
         // profile's daemon owns its own persistence; the relaunch below starts
         // the new profile's daemon.
 
-        // 2. Spawn current_exe with --profile <id>. Strip any existing --profile arg
-        //    so we don't double-pass it.
+        // Spawn current_exe with --profile <id>. Strip any existing --profile arg
+        // so we don't double-pass it.
         match std::env::current_exe() {
             Ok(exe) => {
                 let mut args: Vec<String> = std::env::args().skip(1).collect();

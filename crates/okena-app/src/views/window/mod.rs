@@ -528,7 +528,8 @@ impl WindowView {
                     sidebar_for_activity.update(cx, |_, cx| cx.notify());
                 }
                 // Local-daemon self-heal is driven by `Okena`, not the sidebar.
-                RemoteManagerEvent::LocalConnectionFailed => {}
+                RemoteManagerEvent::LocalConnectionFailed
+                | RemoteManagerEvent::SettingsChanged(_) => {}
             }).detach();
         }
 

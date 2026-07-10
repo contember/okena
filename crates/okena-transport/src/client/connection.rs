@@ -1,4 +1,4 @@
-use okena_core::api::{ApiSystemStats, StateResponse};
+use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
 use crate::client::config::{LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
 use crate::client::id::make_prefixed_id;
 use crate::client::state::{collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states};
@@ -131,6 +131,28 @@ fn ws_message_channel() -> (
     async_channel::Receiver<WsClientMessage>,
 ) {
     async_channel::unbounded()
+}
+
+async fn fetch_remote_settings(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<serde_json::Value, String> {
+    let response = client
+        .post(format!("{base_url}/v1/actions"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&ActionRequest::GetSettings)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|error| format!("Failed to fetch settings: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Settings fetch failed: HTTP {}", response.status()));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Failed to parse settings: {error}"))
 }
 
 /// Reconnect budget after an established WS drops. The local daemon connection
@@ -930,6 +952,17 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 state: state.clone(),
             })
             .await;
+        match fetch_remote_settings(&client, &base_url, token).await {
+            Ok(settings) => {
+                let _ = event_tx
+                    .send(ConnectionEvent::SettingsChanged {
+                        connection_id: config.id.clone(),
+                        settings,
+                    })
+                    .await;
+            }
+            Err(error) => log::warn!("{error}"),
+        }
 
         // Step 5: Subscribe to all terminal streams
         if !terminal_ids.is_empty() {
@@ -1216,6 +1249,17 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                         Err(e) => {
                                             log::warn!("State re-fetch failed: {}", e);
                                         }
+                                    }
+                                    match fetch_remote_settings(&client, &base_url, token).await {
+                                        Ok(settings) => {
+                                            let _ = event_tx_clone
+                                                .send(ConnectionEvent::SettingsChanged {
+                                                    connection_id: config_id.clone(),
+                                                    settings,
+                                                })
+                                                .await;
+                                        }
+                                        Err(error) => log::warn!("{error}"),
                                     }
                                 }
                                 "pong" => {

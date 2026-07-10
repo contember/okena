@@ -3,7 +3,7 @@ use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::Terminal;
 use okena_workspace::toast::{Toast, ToastManager};
 use okena_terminal::TerminalsRegistry;
-use okena_workspace::settings::{load_settings, update_remote_connections};
+use okena_workspace::settings::{load_settings, update_remote_connections, AppSettings};
 
 use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
 use okena_core::soft_close::{
@@ -71,7 +71,25 @@ async fn run_action_queue(
     receiver: async_channel::Receiver<QueuedAction>,
     event_tx: async_channel::Sender<ConnectionEvent>,
 ) {
-    while let Ok(action) = receiver.recv().await {
+    let mut pending = None;
+    loop {
+        let mut action = match pending.take() {
+            Some(action) => action,
+            None => match receiver.recv().await {
+                Ok(action) => action,
+                Err(_) => break,
+            },
+        };
+        if matches!(&action.action, ActionRequest::SetSettings { .. }) {
+            while let Ok(next) = receiver.try_recv() {
+                if matches!(&next.action, ActionRequest::SetSettings { .. }) {
+                    action = next;
+                } else {
+                    pending = Some(next);
+                    break;
+                }
+            }
+        }
         send_queued_action(&connection_id, action, &event_tx).await;
     }
 }
@@ -165,6 +183,9 @@ pub enum RemoteManagerEvent {
     /// to re-run daemon discovery/ensure and re-point the connection. Emitted
     /// ONLY for `LOCAL_DAEMON_CONNECTION_ID`, never for user-managed remotes.
     LocalConnectionFailed,
+
+    /// The local daemon published a new authoritative settings snapshot.
+    SettingsChanged(Box<AppSettings>),
 }
 
 /// GPUI Entity managing all remote connections.
@@ -645,6 +666,7 @@ impl RemoteConnectionManager {
             ConnectionEvent::TokenObtained { .. } => "TokenObtained",
             ConnectionEvent::TlsUpgraded { .. } => "TlsUpgraded",
             ConnectionEvent::StateReceived { .. } => "StateReceived",
+            ConnectionEvent::SettingsChanged { .. } => "SettingsChanged",
             ConnectionEvent::SubscriptionMappings { .. } => "SubscriptionMappings",
             ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
             ConnectionEvent::SystemStatsChanged { .. } => "SystemStatsChanged",
@@ -752,6 +774,21 @@ impl RemoteConnectionManager {
                     conn.set_remote_state(Some(state));
                 }
                 cx.notify();
+            }
+            ConnectionEvent::SettingsChanged {
+                connection_id,
+                settings,
+            } => {
+                if connection_id == LOCAL_DAEMON_CONNECTION_ID {
+                    match serde_json::from_value::<AppSettings>(settings) {
+                        Ok(settings) => {
+                            cx.emit(RemoteManagerEvent::SettingsChanged(Box::new(settings)))
+                        }
+                        Err(error) => {
+                            log::warn!("Failed to decode daemon settings: {error}");
+                        }
+                    }
+                }
             }
             ConnectionEvent::SubscriptionMappings {
                 connection_id,

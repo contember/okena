@@ -339,6 +339,32 @@ impl Okena {
         // settings-gated notification path the local loop uses. Without this,
         // notifications from real (remote) terminals would be parsed and then
         // silently dropped in the daemon-client model.
+        {
+            let remote_manager = remote_manager.clone();
+            let settings = crate::settings::settings_entity(cx);
+            cx.subscribe(&settings, move |_this, _settings, event, cx| {
+                let crate::settings::SettingsEvent::Changed(settings) = event;
+                match serde_json::to_value(settings) {
+                    Ok(mut patch) => {
+                        if let Some(object) = patch.as_object_mut() {
+                            object.remove("remote_connections");
+                        }
+                        remote_manager.update(cx, |manager, cx| {
+                            manager.send_action(
+                                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                                okena_core::api::ActionRequest::SetSettings { patch },
+                                cx,
+                            );
+                        });
+                    }
+                    Err(error) => {
+                        log::error!("Failed to encode settings update: {error}");
+                    }
+                }
+            })
+            .detach();
+        }
+
         cx.subscribe(
             &remote_manager,
             |this, _rm, event, cx| match event {
@@ -359,6 +385,32 @@ impl Okena {
                 // the GUI recovers instead of staying wedged on a dead socket.
                 RemoteManagerEvent::LocalConnectionFailed => {
                     this.recover_local_daemon(cx);
+                }
+                RemoteManagerEvent::SettingsChanged(settings) => {
+                    let settings = settings.as_ref().clone();
+                    let mode = settings.theme_mode;
+                    let custom_id = settings.custom_theme_id.clone();
+                    crate::settings::settings_entity(cx).update(cx, |state, cx| {
+                        state.replace_from_daemon(settings.clone(), cx);
+                    });
+
+                    if let Some(global_theme) = cx.try_global::<crate::theme::GlobalTheme>() {
+                        let theme = global_theme.0.clone();
+                        theme.update(cx, |theme, cx| {
+                            if mode == crate::theme::ThemeMode::Custom
+                                && let Some(custom_id) = custom_id.as_ref()
+                                && let Some((_, colors)) = crate::theme::load_custom_themes()
+                                    .into_iter()
+                                    .find(|(info, _)| info.id == format!("custom:{custom_id}"))
+                            {
+                                theme.set_custom_colors(colors);
+                                theme.set_mode(crate::theme::ThemeMode::Custom);
+                            } else {
+                                theme.set_mode(mode);
+                            }
+                            cx.notify();
+                        });
+                    }
                 }
             },
         )

@@ -96,20 +96,14 @@ use crate::assets::{Assets, embedded_fonts};
 use okena_app::keybindings;
 use okena_app::keybindings::{About, NewWindow, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings, ShowProfileManager};
 use okena_app::logging;
-use okena_app::settings::GlobalSettings;
 use okena_app::terminal::pty_manager::PtyManager;
 use okena_app::theme::{AppTheme, GlobalTheme, ThemeMode};
 use okena_app::views::panels::toast::ToastManager;
 use okena_app::workspace::persistence;
 use okena_core::profiles;
 
-/// Quit action handler - flushes pending saves before exiting
+/// Quit action handler.
 fn quit(_: &Quit, cx: &mut App) {
-    // Flush pending settings save
-    if let Some(gs) = cx.try_global::<GlobalSettings>() {
-        gs.0.read(cx).flush_pending_save();
-    }
-
     // NOTE: do NOT save workspace.json here. The GUI is a daemon client and its
     // Workspace is a read-only MIRROR (project/folder ids are prefixed
     // `remote:local-daemon:…`). The daemon is the single writer (§5) and owns
@@ -875,19 +869,5 @@ fn main() {
             cx.activate(true);
         }
 
-        // Flush pending saves on ALL quit paths (including window X button).
-        // The Quit action handler only runs for Ctrl+Q / menu quit, not for
-        // QuitMode::LastWindowClosed. on_app_quit fires for every exit path.
-        let _quit_sub = cx.on_app_quit(|cx| {
-            // Flush pending settings save
-            if let Some(gs) = cx.try_global::<GlobalSettings>() {
-                gs.0.read(cx).flush_pending_save();
-            }
-
-            // NOTE: do NOT save workspace.json here — the daemon is the single
-            // writer (§5) and the GUI's Workspace is a read-only mirror. See the
-            // `quit` handler above for why writing it here corrupts the profile.
-            async {}
-        });
     });
 }

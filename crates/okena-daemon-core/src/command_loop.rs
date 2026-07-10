@@ -106,6 +106,15 @@ fn send_git_poll_trigger_after_success(
     }
 }
 
+fn publish_config_change_after_success(
+    result: &CommandResult,
+    state_version: &watch::Sender<u64>,
+) {
+    if matches!(result, CommandResult::Ok(_)) {
+        state_version.send_modify(|version| *version = version.wrapping_add(1));
+    }
+}
+
 /// GPUI-free remote command loop for the headless daemon.
 ///
 /// Processes [`RemoteCommand`]s off the [`BridgeReceiver`] until every bridge
@@ -203,12 +212,22 @@ pub async fn daemon_command_loop(
                 // ── App-scoped: settings / theme ─────────────────────────────
                 ActionRequest::GetSettings => daemon_config.get_settings(),
                 ActionRequest::GetSettingsSchema => get_settings_schema(),
-                ActionRequest::SetSettings { patch } => daemon_config.set_settings(patch),
+                ActionRequest::SetSettings { patch } => {
+                    let result = daemon_config.set_settings(patch);
+                    publish_config_change_after_success(&result, &state_version);
+                    result
+                }
                 ActionRequest::GetThemes => daemon_config.get_themes(),
                 ActionRequest::GetTheme { id } => daemon_config.get_theme(id),
-                ActionRequest::SetTheme { id } => daemon_config.set_theme(id),
+                ActionRequest::SetTheme { id } => {
+                    let result = daemon_config.set_theme(id);
+                    publish_config_change_after_success(&result, &state_version);
+                    result
+                }
                 ActionRequest::SaveCustomTheme { id, config, activate } => {
-                    daemon_config.save_custom_theme(id, config, activate)
+                    let result = daemon_config.save_custom_theme(id, config, activate);
+                    publish_config_change_after_success(&result, &state_version);
+                    result
                 }
 
                 // ── Command palette ──────────────────────────────────────────
@@ -1236,5 +1255,18 @@ mod tests {
             &vec!["t1".to_string()],
             "the deleted project's terminal PTY was killed, not leaked"
         );
+    }
+
+    #[test]
+    fn successful_config_changes_advance_state_version() {
+        let (state_version, receiver) = watch::channel(7);
+        publish_config_change_after_success(&CommandResult::Ok(None), &state_version);
+        assert_eq!(*receiver.borrow(), 8);
+
+        publish_config_change_after_success(
+            &CommandResult::Err("invalid settings".to_string()),
+            &state_version,
+        );
+        assert_eq!(*receiver.borrow(), 8);
     }
 }

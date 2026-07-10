@@ -674,6 +674,7 @@ impl ConnectionManager {
                     }
                     *cache = Some(state);
                 }
+                ConnectionEvent::SettingsChanged { .. } => {}
                 ConnectionEvent::SubscriptionMappings { mappings, .. } => {
                     conn.client.write().update_stream_mappings(mappings);
                 }

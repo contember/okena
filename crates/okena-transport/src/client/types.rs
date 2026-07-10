@@ -72,6 +72,11 @@ pub enum ConnectionEvent {
         connection_id: String,
         state: StateResponse,
     },
+    /// Daemon-authoritative settings snapshot changed.
+    SettingsChanged {
+        connection_id: String,
+        settings: serde_json::Value,
+    },
     /// Stream subscription mappings received
     SubscriptionMappings {
         connection_id: String,

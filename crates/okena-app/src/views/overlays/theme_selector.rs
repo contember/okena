@@ -151,7 +151,7 @@ impl ThemeSelector {
             cx.notify();
         });
 
-        // Save to settings via SettingsState (ensures in-memory and disk stay in sync)
+        // Publish through SettingsState; the daemon persists the preference.
         let custom_id = if mode == ThemeMode::Custom {
             // Extract file stem from "custom:stem" ID
             theme_entry.info.id.strip_prefix("custom:").map(|s| s.to_string())

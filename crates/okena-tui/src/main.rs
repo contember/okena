@@ -458,6 +458,7 @@ fn handle_connection_event(
             client.set_remote_state(Some(new_state.clone()));
             state.state = Some(new_state);
         }
+        ConnectionEvent::SettingsChanged { .. } => {}
         ConnectionEvent::SubscriptionMappings { mappings, .. } => {
             client.update_stream_mappings(mappings);
         }

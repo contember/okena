@@ -1,7 +1,7 @@
 //! Global observable settings module
 //!
 //! Provides app-wide access to settings through the GlobalSettings global.
-//! Settings are automatically persisted to disk with debouncing.
+//! The desktop client publishes edits for its daemon to persist.
 
 #[cfg(feature = "gpui")]
 use okena_terminal::session_backend::SessionBackend;
@@ -16,10 +16,6 @@ use crate::workspace::persistence::{load_settings, save_settings, get_settings_p
 use crate::workspace::persistence::AppSettings;
 #[cfg(feature = "gpui")]
 use gpui::*;
-#[cfg(feature = "gpui")]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "gpui")]
-use std::sync::Arc;
 
 /// Global settings wrapper for app-wide access
 #[cfg(feature = "gpui")]
@@ -33,7 +29,6 @@ impl Global for GlobalSettings {}
 #[cfg(feature = "gpui")]
 pub struct SettingsState {
     pub settings: AppSettings,
-    save_pending: Arc<AtomicBool>,
     /// The worktree path template that was active when settings were loaded or last migrated.
     /// Used to detect meaningful changes and suggest worktree migration.
     worktree_template_baseline: String,
@@ -41,7 +36,16 @@ pub struct SettingsState {
     template_migration_task: Option<gpui::Task<()>>,
 }
 
-/// Macro to generate setter methods with clamping and auto-save
+#[cfg(feature = "gpui")]
+#[derive(Clone)]
+pub enum SettingsEvent {
+    Changed(AppSettings),
+}
+
+#[cfg(feature = "gpui")]
+impl EventEmitter<SettingsEvent> for SettingsState {}
+
+/// Macro to generate setter methods with clamping and daemon sync.
 #[cfg(feature = "gpui")]
 macro_rules! setting_setter {
     // For f32 values with min/max clamping
@@ -80,7 +84,6 @@ impl SettingsState {
         let baseline = settings.worktree.path_template.clone();
         Self {
             settings,
-            save_pending: Arc::new(AtomicBool::new(false)),
             worktree_template_baseline: baseline,
             template_migration_task: None,
         }
@@ -359,48 +362,18 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Synchronously flush any pending settings save (called on quit)
-    pub fn flush_pending_save(&self) {
-        if self.save_pending.swap(false, Ordering::Relaxed)
-            && let Err(e) = save_settings(&self.settings) {
-                log::error!("Failed to flush settings on quit: {}", e);
-            }
-    }
-
-    /// Save and notify - common logic for all setters.
-    /// Public so that the ExtensionSettingsStore setter callback can trigger persistence.
-    pub fn save_and_notify(&mut self, cx: &mut Context<Self>) {
-        self.save_debounced(cx);
+    /// Replace the local mirror without publishing the change back to the daemon.
+    pub fn replace_from_daemon(&mut self, mut settings: AppSettings, cx: &mut Context<Self>) {
+        settings.remote_connections = self.settings.remote_connections.clone();
+        self.worktree_template_baseline = settings.worktree.path_template.clone();
+        self.settings = settings;
         cx.notify();
     }
 
-    /// Save settings with debouncing to avoid excessive writes
-    fn save_debounced(&mut self, cx: &mut Context<Self>) {
-        self.save_pending.store(true, Ordering::Relaxed);
-        let save_pending = self.save_pending.clone();
-
-        cx.spawn(async move |this, cx| {
-            smol::Timer::after(std::time::Duration::from_millis(300)).await;
-
-            if save_pending.swap(false, Ordering::Relaxed) {
-                let settings = cx.update(|cx| {
-                    this.upgrade().map(|e| e.read(cx).settings.clone())
-                });
-                if let Some(settings) = settings {
-                    // Run blocking fs IO off the main thread; settings.json
-                    // also reads itself back to merge remote_connections, so
-                    // the cost is two sync IO ops under SETTINGS_LOCK.
-                    let save_result = smol::unblock(move || save_settings(&settings)).await;
-                    if let Err(e) = save_result {
-                        log::error!("Failed to save settings: {}", e);
-                        cx.update(|cx| {
-                            ToastManager::error(format!("Failed to save settings: {}", e), cx);
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
+    /// Publish and notify — the daemon is the sole settings writer.
+    pub fn save_and_notify(&mut self, cx: &mut Context<Self>) {
+        cx.emit(SettingsEvent::Changed(self.settings.clone()));
+        cx.notify();
     }
 }
 
