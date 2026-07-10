@@ -659,9 +659,13 @@ fn main() {
         // lets the startup extras-observer in `Okena::new` reopen every extra
         // window the user had. Snapshots don't clobber it (apply_remote_snapshot
         // never overwrites main_window/extra_windows).
+        let mut client_project_layouts = std::collections::HashMap::new();
         if let Some(layout) = persistence::load_window_layout() {
             workspace_data.main_window = layout.main_window;
             workspace_data.extra_windows = layout.extra_windows;
+            workspace_data.service_panel_heights = layout.service_panel_heights;
+            workspace_data.hook_panel_heights = layout.hook_panel_heights;
+            client_project_layouts = layout.project_layouts;
         }
 
         // Create theme entity from settings, restoring custom theme if applicable
@@ -820,7 +824,13 @@ fn main() {
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
-                    Okena::new(workspace_data, local_daemon, window, cx)
+                    Okena::new(
+                        workspace_data,
+                        client_project_layouts,
+                        local_daemon,
+                        window,
+                        cx,
+                    )
                 });
                 cx.new(|cx| Root::new(okena, window, cx))
             },

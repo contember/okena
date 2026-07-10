@@ -109,7 +109,7 @@ pub fn apply_remote_snapshot(
                 let prefixed_id = format!("remote:{}:{}", conn_id, api_project.id);
                 expected_remote_ids.insert(prefixed_id.clone());
 
-                let layout = api_project.layout.as_ref().map(|l| {
+                let mut layout = api_project.layout.as_ref().map(|l| {
                     LayoutNode::from_api_prefixed(l, &format!("remote:{}", conn_id))
                 });
 
@@ -180,6 +180,11 @@ pub fn apply_remote_snapshot(
                     // Don't overwrite show_in_overview — it's client-side state
                     // (the user may have toggled visibility locally).
                 } else {
+                    if let Some(client_layout) = remote_sync.take_project_layout(&prefixed_id) {
+                        layout = layout
+                            .as_ref()
+                            .map(|server| LayoutNode::merge_visual_state(server, &client_layout));
+                    }
                     let worktree_info = api_project.worktree_info.as_ref().map(|wt| {
                         WorktreeMetadata {
                             parent_project_id: format!("remote:{}:{}", conn_id, wt.parent_project_id),
@@ -260,6 +265,11 @@ pub fn apply_remote_snapshot(
             // from `snapshots`, and server-side deletions scrub via the stale
             // project pass after a successful state snapshot.
             let prefix = format!("remote:{}:", conn_id);
+            for project in data.projects.iter().filter(|p| p.id.starts_with(&prefix)) {
+                if let Some(layout) = &project.layout {
+                    remote_sync.preserve_project_layout(project.id.clone(), layout.clone());
+                }
+            }
             data.projects.retain(|p| !p.id.starts_with(&prefix));
             data.folders.retain(|f| !f.id.starts_with(&prefix));
             data.project_order.retain(|id| !id.starts_with(&prefix));
@@ -578,6 +588,45 @@ mod tests {
     }
 
     #[test]
+    fn restores_client_layout_on_first_snapshot() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let server_layout = ApiLayoutNode::Tabs {
+            active_tab: 0,
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+        rs.seed_project_layouts(HashMap::from([(
+            "remote:c1:a".to_string(),
+            LayoutNode::Tabs {
+                active_tab: 1,
+                children: vec![
+                    LayoutNode::from_api_prefixed(&terminal("t1"), "remote:c1"),
+                    LayoutNode::from_api_prefixed(&terminal("t2"), "remote:c1"),
+                ],
+            },
+        )]));
+
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(server_layout))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+
+        assert!(matches!(
+            data.projects[0].layout,
+            Some(LayoutNode::Tabs { active_tab: 1, .. })
+        ));
+    }
+
+    #[test]
     fn prunes_stale_remote_projects_when_connection_gone() {
         let mut data = empty_data();
         let mut rs = RemoteSyncState::new();
@@ -633,11 +682,22 @@ mod tests {
         let extra_id = extra.id;
         data.extra_windows = vec![extra];
         let mut rs = RemoteSyncState::new();
+        let layout = ApiLayoutNode::Tabs {
+            active_tab: 0,
+            children: vec![terminal("t1"), terminal("t2")],
+        };
 
         apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
             config: config("c1"),
-            state: Some(state_with(vec![api_project("a", None)], vec!["a".into()], vec![])),
+            state: Some(state_with(
+                vec![api_project("a", Some(layout.clone()))],
+                vec!["a".into()],
+                vec![],
+            )),
         }], WindowId::Main);
+        if let Some(LayoutNode::Tabs { active_tab, .. }) = data.projects[0].layout.as_mut() {
+            *active_tab = 1;
+        }
         data.main_window.hidden_project_ids.insert("remote:c1:a".to_string());
         data.window_mut(WindowId::Extra(extra_id)).unwrap()
             .hidden_project_ids
@@ -658,7 +718,11 @@ mod tests {
 
         apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
             config: config("c1"),
-            state: Some(state_with(vec![api_project("a", None)], vec!["a".into()], vec![])),
+            state: Some(state_with(
+                vec![api_project("a", Some(layout))],
+                vec!["a".into()],
+                vec![],
+            )),
         }], WindowId::Main);
 
         assert_eq!(data.projects.len(), 1);
@@ -668,6 +732,10 @@ mod tests {
                 .hidden_project_ids
                 .contains("remote:c1:a")
         );
+        assert!(matches!(
+            data.projects[0].layout.as_ref(),
+            Some(LayoutNode::Tabs { active_tab: 1, .. })
+        ));
     }
 
     #[test]

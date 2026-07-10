@@ -161,6 +161,7 @@ pub struct Okena {
 impl Okena {
     pub fn new(
         workspace_data: WorkspaceData,
+        client_project_layouts: HashMap<String, crate::workspace::state::LayoutNode>,
         local_daemon: okena_remote_server::local::EnsuredDaemon,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -168,7 +169,11 @@ impl Okena {
         // Create workspace entity. The GUI is always a thin daemon client: the
         // daemon owns persistence + the instance lock and is the single writer,
         // so the GUI's `Workspace` is a pure mirror with no autosave.
-        let workspace = cx.new(|_cx| Workspace::new(workspace_data));
+        let workspace = cx.new(|_cx| {
+            let mut workspace = Workspace::new(workspace_data);
+            workspace.seed_client_project_layouts(client_project_layouts);
+            workspace
+        });
         cx.set_global(GlobalWorkspace(workspace.clone()));
 
         // Shared terminals registry — one per Okena instance, threaded into
@@ -386,6 +391,10 @@ impl Okena {
             // Stop any recovery from resurrecting the connection or spawning a
             // daemon while we tear down (esp. the remove_connection just below).
             this.quitting.store(true, Ordering::SeqCst);
+            let (final_layout, project_layouts) = {
+                let workspace = this.workspace.read(cx);
+                (workspace.data().clone(), workspace.client_project_layouts())
+            };
             // Disconnect our own loopback connection before handing lifecycle
             // to the daemon, so its live-client count excludes this GUI.
             this.remote_manager.update(cx, |rm, cx| {
@@ -395,7 +404,18 @@ impl Okena {
                 );
             });
             hand_off_ui_owned_daemon(this.spawned_daemon.take());
-            async {}
+            async move {
+                if let Err(error) = smol::unblock(move || {
+                    crate::workspace::persistence::save_window_layout(
+                        &final_layout,
+                        project_layouts,
+                    )
+                })
+                .await
+                {
+                    log::error!("Failed to save final window layout: {error}");
+                }
+            }
         })
         .detach();
 
@@ -440,12 +460,19 @@ impl Okena {
                 cx.spawn(async move |_, cx| {
                     smol::Timer::after(Duration::from_millis(500)).await;
                     if save_pending.swap(false, Ordering::Relaxed) {
-                        let (data, version) = cx.update(|cx| {
+                        let (data, project_layouts, version) = cx.update(|cx| {
                             let ws = workspace.read(cx);
-                            (ws.data().clone(), ws.data_version())
+                            (
+                                ws.data().clone(),
+                                ws.client_project_layouts(),
+                                ws.data_version(),
+                            )
                         });
                         let save_result = smol::unblock(move || {
-                            crate::workspace::persistence::save_window_layout(&data)
+                            crate::workspace::persistence::save_window_layout(
+                                &data,
+                                project_layouts,
+                            )
                         })
                         .await;
                         match save_result {

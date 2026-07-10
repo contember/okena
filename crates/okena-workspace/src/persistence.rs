@@ -476,17 +476,17 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
 /// upgrade — and has been removed. The actual fix lives in
 /// `apply_initial_remote_project_visibility` (the daemon's single-window
 /// `show_in_overview` no longer drives client visibility). The version is kept
-/// only as a forward-compat marker for genuine future schema changes.
-pub const WINDOW_LAYOUT_VERSION: u32 = 2;
+/// v3 adds project layout presentation and panel heights so those client-owned
+/// values survive a desktop restart without entering daemon persistence.
+pub const WINDOW_LAYOUT_VERSION: u32 = 3;
 
 /// Process-level mutex serializing window-layout saves (mirrors WORKSPACE_LOCK
 /// — the debounced client save can fire concurrently during a window drag).
 static WINDOW_LAYOUT_LOCK: Mutex<()> = Mutex::new(());
 
-/// Client-owned window layout: the per-window PRESENTATION state (which windows
-/// are open, their OS bounds, per-window viewport) that the desktop GUI persists
-/// locally — separate from the daemon-owned `workspace.json`. Restored on
-/// startup so multiple windows + their bounds survive a relaunch.
+/// Client-owned presentation: windows, OS bounds, per-window viewport, panel
+/// heights, and visual project-layout state. The desktop GUI persists it locally
+/// separate from the daemon-owned `workspace.json`.
 ///
 /// The GUI is a thin client of the daemon: the daemon owns project DATA (and is
 /// the single writer of workspace.json), while window geometry/visibility is
@@ -500,6 +500,14 @@ pub struct ClientWindowLayout {
     pub main_window: WindowState,
     #[serde(default)]
     pub extra_windows: Vec<WindowState>,
+    /// Client-owned visual state keyed by prefixed project ID. The daemon's
+    /// layout remains structurally authoritative when this is restored.
+    #[serde(default)]
+    pub project_layouts: HashMap<String, LayoutNode>,
+    #[serde(default)]
+    pub service_panel_heights: HashMap<String, f32>,
+    #[serde(default)]
+    pub hook_panel_heights: HashMap<String, f32>,
 }
 
 /// Path to the client-owned window-layout file (alongside settings.json).
@@ -575,6 +583,13 @@ fn load_workspace_window_layout() -> Option<ClientWindowLayout> {
         version: WINDOW_LAYOUT_VERSION,
         main_window: data.main_window,
         extra_windows: data.extra_windows,
+        project_layouts: data
+            .projects
+            .into_iter()
+            .filter_map(|project| project.layout.map(|layout| (project.id, layout)))
+            .collect(),
+        service_panel_heights: data.service_panel_heights,
+        hook_panel_heights: data.hook_panel_heights,
     };
     prefix_local_daemon_window_refs(&mut layout);
     Some(layout)
@@ -593,6 +608,19 @@ fn merge_missing_window_layout_state(target: &mut ClientWindowLayout, source: Cl
         } else if target.extra_windows.is_empty() && window_state_has_presentation(&source_extra) {
             target.extra_windows.push(source_extra);
         }
+    }
+
+    for (project_id, project_layout) in source.project_layouts {
+        target
+            .project_layouts
+            .entry(project_id)
+            .or_insert(project_layout);
+    }
+    if target.service_panel_heights.is_empty() {
+        target.service_panel_heights = source.service_panel_heights;
+    }
+    if target.hook_panel_heights.is_empty() {
+        target.hook_panel_heights = source.hook_panel_heights;
     }
 }
 
@@ -640,6 +668,41 @@ fn prefix_local_daemon_window_refs(layout: &mut ClientWindowLayout) {
     for extra in &mut layout.extra_windows {
         prefix_local_daemon_window_state_refs(extra);
     }
+    prefix_local_daemon_project_layouts(&mut layout.project_layouts);
+    prefix_local_daemon_keyed_values(&mut layout.service_panel_heights);
+    prefix_local_daemon_keyed_values(&mut layout.hook_panel_heights);
+}
+
+fn prefix_local_daemon_keyed_values<T>(values: &mut HashMap<String, T>) {
+    *values = std::mem::take(values)
+        .into_iter()
+        .map(|(id, value)| (prefix_local_daemon_id(&id), value))
+        .collect();
+}
+
+fn prefix_local_daemon_project_layouts(layouts: &mut HashMap<String, LayoutNode>) {
+    *layouts = std::mem::take(layouts)
+        .into_iter()
+        .map(|(project_id, mut layout)| {
+            prefix_local_daemon_terminal_ids(&mut layout);
+            (prefix_local_daemon_id(&project_id), layout)
+        })
+        .collect();
+}
+
+fn prefix_local_daemon_terminal_ids(layout: &mut LayoutNode) {
+    match layout {
+        LayoutNode::Terminal { terminal_id, .. } => {
+            if let Some(id) = terminal_id.take() {
+                *terminal_id = Some(prefix_local_daemon_id(&id));
+            }
+        }
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for child in children {
+                prefix_local_daemon_terminal_ids(child);
+            }
+        }
+    }
 }
 
 fn prefix_local_daemon_window_state_refs(window: &mut WindowState) {
@@ -675,21 +738,37 @@ fn prefix_local_daemon_id(id: &str) -> String {
     }
 }
 
-/// Save the client window layout (main + extra windows) atomically
+/// Save the client presentation atomically
 /// (tmp + fsync + rename). Extracts only the presentation state from `data`;
 /// never touches workspace.json. Best-effort — a failure just means stale
 /// window restore.
-pub fn save_window_layout(data: &WorkspaceData) -> Result<()> {
+pub fn save_window_layout(
+    data: &WorkspaceData,
+    project_layouts: HashMap<String, LayoutNode>,
+) -> Result<()> {
     let _guard = WINDOW_LAYOUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let layout = ClientWindowLayout {
         version: WINDOW_LAYOUT_VERSION,
         main_window: data.main_window.clone(),
         extra_windows: data.extra_windows.clone(),
+        project_layouts,
+        service_panel_heights: data.service_panel_heights.clone(),
+        hook_panel_heights: data.hook_panel_heights.clone(),
     };
     let path = get_window_layout_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Multiple desktop clients can share one profile. Serialize their
+    // profile-wide snapshots across processes; the last completed save wins.
+    let lock_path = path.with_extension("json.lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    fs2::FileExt::lock_exclusive(&lock_file)?;
     let json = serde_json::to_string_pretty(&layout)?;
     let tmp_path = path.with_extension("json.tmp");
     {
@@ -957,10 +1036,29 @@ mod tests {
             width: 1280.0,
             height: 720.0,
         });
+        let project_layout = LayoutNode::Terminal {
+            terminal_id: Some("remote:local-daemon:t1".to_string()),
+            minimized: true,
+            detached: false,
+            shell_type: Default::default(),
+            zoom_level: 1.25,
+        };
         let layout = ClientWindowLayout {
             version: WINDOW_LAYOUT_VERSION,
             main_window: WindowState::default(),
             extra_windows: vec![extra],
+            project_layouts: HashMap::from([(
+                "remote:local-daemon:p1".to_string(),
+                project_layout.clone(),
+            )]),
+            service_panel_heights: HashMap::from([(
+                "remote:local-daemon:p1".to_string(),
+                240.0,
+            )]),
+            hook_panel_heights: HashMap::from([(
+                "remote:local-daemon:p1".to_string(),
+                180.0,
+            )]),
         };
         let json = serde_json::to_string(&layout).unwrap();
         let parsed: ClientWindowLayout = serde_json::from_str(&json).unwrap();
@@ -971,6 +1069,20 @@ mod tests {
         assert!(parsed.extra_windows[0]
             .hidden_project_ids
             .contains("remote:local-daemon:p1"));
+        assert_eq!(
+            parsed.project_layouts.get("remote:local-daemon:p1"),
+            Some(&project_layout)
+        );
+        assert_eq!(
+            parsed
+                .service_panel_heights
+                .get("remote:local-daemon:p1"),
+            Some(&240.0)
+        );
+        assert_eq!(
+            parsed.hook_panel_heights.get("remote:local-daemon:p1"),
+            Some(&180.0)
+        );
 
         // An empty/absent file shape parses to defaults.
         let empty: ClientWindowLayout = serde_json::from_str("{}").unwrap();
@@ -993,6 +1105,7 @@ mod tests {
             version: 1,
             main_window: main,
             extra_windows: vec![extra],
+            ..Default::default()
         };
 
         migrate_window_layout(&mut layout);
@@ -1012,6 +1125,7 @@ mod tests {
             version: WINDOW_LAYOUT_VERSION,
             main_window: keep,
             extra_windows: vec![],
+            ..Default::default()
         };
         migrate_window_layout(&mut current);
         assert!(current.main_window.hidden_project_ids.contains("remote:local-daemon:p3"));
@@ -1029,6 +1143,18 @@ mod tests {
             version: 1,
             main_window: main,
             extra_windows: Vec::new(),
+            project_layouts: HashMap::from([(
+                "p1".to_string(),
+                LayoutNode::Terminal {
+                    terminal_id: Some("t1".to_string()),
+                    minimized: true,
+                    detached: false,
+                    shell_type: Default::default(),
+                    zoom_level: 1.5,
+                },
+            )]),
+            service_panel_heights: HashMap::from([("p1".to_string(), 200.0)]),
+            hook_panel_heights: HashMap::from([("p1".to_string(), 160.0)]),
         };
 
         migrate_window_layout(&mut layout);
@@ -1062,6 +1188,24 @@ mod tests {
                 .copied(),
             Some(true),
         );
+        let restored = layout
+            .project_layouts
+            .get("remote:local-daemon:p1")
+            .expect("prefixed project layout");
+        assert_eq!(
+            restored.collect_terminal_ids(),
+            vec!["remote:local-daemon:t1"]
+        );
+        assert_eq!(
+            layout
+                .service_panel_heights
+                .get("remote:local-daemon:p1"),
+            Some(&200.0)
+        );
+        assert_eq!(
+            layout.hook_panel_heights.get("remote:local-daemon:p1"),
+            Some(&160.0)
+        );
     }
 
     #[test]
@@ -1079,6 +1223,7 @@ mod tests {
             version: WINDOW_LAYOUT_VERSION,
             main_window: source_main,
             extra_windows: Vec::new(),
+            ..Default::default()
         };
         prefix_local_daemon_window_refs(&mut source);
 
@@ -1086,6 +1231,7 @@ mod tests {
             version: WINDOW_LAYOUT_VERSION,
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
+            ..Default::default()
         };
 
         merge_missing_window_layout_state(&mut target, source);
@@ -1123,11 +1269,13 @@ mod tests {
             version: WINDOW_LAYOUT_VERSION,
             main_window: target_main,
             extra_windows: Vec::new(),
+            ..Default::default()
         };
         let source = ClientWindowLayout {
             version: WINDOW_LAYOUT_VERSION,
             main_window: source_main,
             extra_windows: Vec::new(),
+            ..Default::default()
         };
 
         merge_missing_window_layout_state(&mut target, source);
@@ -1168,11 +1316,13 @@ mod tests {
             version: WINDOW_LAYOUT_VERSION,
             main_window: WindowState::default(),
             extra_windows: vec![target_extra],
+            ..Default::default()
         };
         let source = ClientWindowLayout {
             version: WINDOW_LAYOUT_VERSION,
             main_window: WindowState::default(),
             extra_windows: vec![source_extra],
+            ..Default::default()
         };
 
         merge_missing_window_layout_state(&mut target, source);

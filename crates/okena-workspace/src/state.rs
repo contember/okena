@@ -109,6 +109,24 @@ impl Workspace {
         }
     }
 
+    /// Seed desktop-owned project presentation before the first daemon snapshot.
+    pub fn seed_client_project_layouts(&mut self, layouts: HashMap<String, LayoutNode>) {
+        self.remote_sync.seed_project_layouts(layouts);
+    }
+
+    /// Snapshot all desktop-owned layouts, including projects temporarily
+    /// absent while their daemon connection is reconnecting.
+    pub fn client_project_layouts(&self) -> HashMap<String, LayoutNode> {
+        let mut layouts = self.remote_sync.preserved_project_layouts().clone();
+        layouts.extend(self.data.projects.iter().filter_map(|project| {
+            project
+                .layout
+                .clone()
+                .map(|layout| (project.id.clone(), layout))
+        }));
+        layouts
+    }
+
     /// Current data version (incremented on persistent data mutations)
     pub fn data_version(&self) -> u64 {
         self.data_version

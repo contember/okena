@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use okena_core::api::{ApiGitStatus, ApiServiceInfo};
+use okena_layout::LayoutNode;
 use okena_state::WindowId;
 
 /// Per-project transient remote state populated during state sync.
@@ -35,6 +36,9 @@ pub struct RemoteSyncState {
     /// state sync. The server assigns the project ID, so the client matches
     /// the first newly materialized project by connection/name/path.
     pending_project_visibility: Vec<PendingRemoteProjectVisibility>,
+    /// Client-owned layouts waiting for their daemon projects to materialize,
+    /// or retained across a temporary disconnect.
+    preserved_project_layouts: HashMap<String, LayoutNode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +172,24 @@ impl RemoteSyncState {
 
     pub fn remove_snapshot(&mut self, project_id: &str) {
         self.snapshots.remove(project_id);
+    }
+
+    // === client presentation ===
+
+    pub fn seed_project_layouts(&mut self, layouts: HashMap<String, LayoutNode>) {
+        self.preserved_project_layouts = layouts;
+    }
+
+    pub fn preserve_project_layout(&mut self, project_id: String, layout: LayoutNode) {
+        self.preserved_project_layouts.insert(project_id, layout);
+    }
+
+    pub fn take_project_layout(&mut self, project_id: &str) -> Option<LayoutNode> {
+        self.preserved_project_layouts.remove(project_id)
+    }
+
+    pub fn preserved_project_layouts(&self) -> &HashMap<String, LayoutNode> {
+        &self.preserved_project_layouts
     }
 
     /// Remove all snapshots whose project ID starts with the given prefix.
