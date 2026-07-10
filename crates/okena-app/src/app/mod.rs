@@ -205,9 +205,9 @@ impl Okena {
         });
 
         // Register the implicit, trusted loopback connection to our local
-        // daemon so its projects mirror into the GUI. We own the spawned child
-        // (if any) and kill it on quit; an attached daemon (`spawned == None`)
-        // is left alone (§ risk: only the spawner kills). The connection uses a
+        // daemon so its projects mirror into the GUI. A spawned child handle is
+        // retained for bounded fallback cleanup if graceful UI lifecycle handoff
+        // fails; an attached daemon is never force-killed. The connection uses a
         // fixed id so it's recognizable and dedup-safe, and is never written to
         // settings — `add_connection` does not persist, and the only insertion
         // site (`OverlayManagerEvent::RemoteConnected`) is never fired for it.

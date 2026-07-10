@@ -413,10 +413,8 @@ fn local_tcp_host(bind_addrs: &[IpAddr]) -> &'static str {
 }
 
 /// Read remote.json and return its path + parsed contents ONLY when it still
-/// advertises THIS process. The shared pid-guard for every teardown path: a
-/// restart handoff exits via `std::process::exit` (skipping teardown) and the
-/// successor rewrites remote.json with its own pid, so a late/racy teardown must
-/// never clobber that successor's discovery file.
+/// advertises THIS process. The shared pid-guard ensures a late or concurrent
+/// teardown never clobbers a successor daemon's discovery file.
 fn read_remote_json_if_ours() -> Option<(std::path::PathBuf, serde_json::Value)> {
     let path = remote_json_path();
     let data = std::fs::read_to_string(&path).ok()?;

@@ -252,8 +252,9 @@ fn daemon_binary_path() -> Option<std::path::PathBuf> {
 /// from this process, so it uses the same config dir.
 ///
 /// The caller owns the returned [`std::process::Child`]. In the UI-owned
-/// lifecycle the desktop kills it when the last window closes; mint the token
-/// *before* spawning so the fresh daemon loads it at startup (no reload needed).
+/// lifecycle the final desktop client requests graceful shutdown; the child
+/// handle is retained only for bounded fallback cleanup. Mint the token *before*
+/// spawning so the fresh daemon loads it at startup (no reload needed).
 pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
     match daemon_binary_path() {
         Some(daemon) => std::process::Command::new(daemon).arg("--ui-owned").spawn(),
@@ -337,8 +338,8 @@ pub struct EnsuredDaemon {
     /// Plaintext bearer token to authenticate the client connection. `None`
     /// means the client connects over a trusted local transport.
     pub token: Option<String>,
-    /// `Some` ONLY when we spawned the daemon in this call. UI-owned lifecycle:
-    /// the caller kills only what it spawned; never kill a daemon we merely attached to.
+    /// `Some` only when this call spawned the daemon. Used to reap that exact
+    /// child if graceful lifecycle handoff fails; attached daemons are never killed.
     pub spawned: Option<std::process::Child>,
 }
 
