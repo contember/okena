@@ -25,6 +25,7 @@ mod tests {
             terminal_id: Some("abc-123".into()),
             minimized: false,
             detached: false,
+            shell_type: Default::default(),
             cols: None,
             rows: None,
         };
@@ -43,6 +44,7 @@ mod tests {
             terminal_id: None,
             minimized: true,
             detached: false,
+            shell_type: Default::default(),
             cols: None,
             rows: None,
         };
@@ -70,6 +72,7 @@ mod tests {
                     terminal_id: Some("t1".into()),
                     minimized: false,
                     detached: false,
+                    shell_type: Default::default(),
                     cols: None,
                     rows: None,
                 },
@@ -80,6 +83,7 @@ mod tests {
                             terminal_id: Some("t2".into()),
                             minimized: false,
                             detached: false,
+                            shell_type: Default::default(),
                             cols: None,
                             rows: None,
                         },
@@ -87,6 +91,7 @@ mod tests {
                             terminal_id: Some("t3".into()),
                             minimized: false,
                             detached: true,
+                            shell_type: Default::default(),
                             cols: None,
                             rows: None,
                         },
@@ -105,6 +110,7 @@ mod tests {
             terminal_id: Some("raw-id".into()),
             minimized: false,
             detached: false,
+            shell_type: Default::default(),
             cols: None,
             rows: None,
         };

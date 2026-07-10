@@ -643,15 +643,21 @@ impl LayoutNode {
     ///
     /// Takes the structural layout from `server` (terminals, splits, tabs) but
     /// preserves local visual state from `local` where the structure matches:
-    /// - **Terminal** with same ID → keep local `minimized` and `detached`
+    /// - **Terminal** with same ID → keep local presentation, server shell
     /// - **Split** with same direction + child count → keep local `sizes`, recurse children
     /// - **Tabs** with same child count → keep local `active_tab`, recurse children
     /// - **Mismatch** → use server's structure but apply visual state from matching terminals
     pub fn merge_visual_state(server: &LayoutNode, local: &LayoutNode) -> LayoutNode {
         match (server, local) {
             (
-                LayoutNode::Terminal { terminal_id: s_id, shell_type, zoom_level, .. },
-                LayoutNode::Terminal { terminal_id: l_id, minimized, detached, .. },
+                LayoutNode::Terminal { terminal_id: s_id, shell_type, .. },
+                LayoutNode::Terminal {
+                    terminal_id: l_id,
+                    minimized,
+                    detached,
+                    zoom_level,
+                    ..
+                },
             ) if s_id == l_id => {
                 LayoutNode::Terminal {
                     terminal_id: s_id.clone(),
@@ -698,11 +704,17 @@ impl LayoutNode {
         }
     }
 
-    /// Collect visual state (minimized, detached) from all terminals in this tree.
-    fn collect_terminal_visual_state(&self, states: &mut HashMap<String, (bool, bool)>) {
+    /// Collect client-owned terminal presentation from this tree.
+    fn collect_terminal_visual_state(&self, states: &mut HashMap<String, (bool, bool, f32)>) {
         match self {
-            LayoutNode::Terminal { terminal_id: Some(id), minimized, detached, .. } => {
-                states.insert(id.clone(), (*minimized, *detached));
+            LayoutNode::Terminal {
+                terminal_id: Some(id),
+                minimized,
+                detached,
+                zoom_level,
+                ..
+            } => {
+                states.insert(id.clone(), (*minimized, *detached, *zoom_level));
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for child in children {
@@ -713,13 +725,20 @@ impl LayoutNode {
         }
     }
 
-    /// Apply visual state from a map of terminal_id → (minimized, detached) to matching terminals.
-    fn apply_terminal_visual_state(&mut self, states: &HashMap<String, (bool, bool)>) {
+    /// Apply client-owned presentation to matching terminals.
+    fn apply_terminal_visual_state(&mut self, states: &HashMap<String, (bool, bool, f32)>) {
         match self {
-            LayoutNode::Terminal { terminal_id: Some(id), minimized, detached, .. } => {
-                if let Some(&(m, d)) = states.get(id) {
+            LayoutNode::Terminal {
+                terminal_id: Some(id),
+                minimized,
+                detached,
+                zoom_level,
+                ..
+            } => {
+                if let Some(&(m, d, zoom)) = states.get(id) {
                     *minimized = m;
                     *detached = d;
+                    *zoom_level = zoom;
                 }
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
@@ -739,12 +758,13 @@ impl LayoutNode {
                 terminal_id,
                 minimized,
                 detached,
+                shell_type,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.clone(),
                 minimized: *minimized,
                 detached: *detached,
-                shell_type: Default::default(),
+                shell_type: shell_type.clone(),
                 zoom_level: 1.0,
             },
             okena_core::api::ApiLayoutNode::Split {
@@ -774,12 +794,13 @@ impl LayoutNode {
                 terminal_id,
                 minimized,
                 detached,
+                shell_type,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
                 minimized: *minimized,
                 detached: *detached,
-                shell_type: Default::default(),
+                shell_type: shell_type.clone(),
                 zoom_level: 1.0,
             },
             okena_core::api::ApiLayoutNode::Split {
@@ -822,6 +843,7 @@ impl LayoutNode {
                 terminal_id,
                 minimized,
                 detached,
+                shell_type,
                 ..
             } => {
                 let (cols, rows) = terminal_id
@@ -833,6 +855,7 @@ impl LayoutNode {
                     terminal_id: terminal_id.clone(),
                     minimized: *minimized,
                     detached: *detached,
+                    shell_type: shell_type.clone(),
                     cols,
                     rows,
                 }
@@ -1526,23 +1549,79 @@ mod tests {
 
     #[test]
     fn merge_matching_terminals_preserves_visual_flags() {
-        let server = terminal("t1");
+        let server = LayoutNode::Terminal {
+            terminal_id: Some("t1".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Custom {
+                path: "/bin/zsh".to_string(),
+                args: Vec::new(),
+            },
+            zoom_level: 1.0,
+        };
         let local = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
             minimized: true,
             detached: true,
             shell_type: ShellType::Default,
-            zoom_level: 1.0,
+            zoom_level: 1.75,
         };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match merged {
-            LayoutNode::Terminal { minimized, detached, terminal_id, .. } => {
+            LayoutNode::Terminal {
+                minimized,
+                detached,
+                terminal_id,
+                shell_type,
+                zoom_level,
+            } => {
                 assert_eq!(terminal_id.as_deref(), Some("t1"));
                 assert!(minimized, "local minimized should be preserved");
                 assert!(detached, "local detached should be preserved");
+                assert_eq!(zoom_level, 1.75, "local zoom should be preserved");
+                assert_eq!(
+                    shell_type,
+                    ShellType::Custom {
+                        path: "/bin/zsh".to_string(),
+                        args: Vec::new(),
+                    },
+                    "server shell should remain authoritative"
+                );
             }
             _ => panic!("Expected terminal"),
         }
+    }
+
+    #[test]
+    fn api_layout_preserves_daemon_shell_type() {
+        let node = LayoutNode::Terminal {
+            terminal_id: Some("t1".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Custom {
+                path: "/bin/fish".to_string(),
+                args: vec!["--private".to_string()],
+            },
+            zoom_level: 2.0,
+        };
+
+        let restored = LayoutNode::from_api(&node.to_api());
+        let LayoutNode::Terminal {
+            shell_type,
+            zoom_level,
+            ..
+        } = restored
+        else {
+            panic!("Expected terminal");
+        };
+        assert_eq!(
+            shell_type,
+            ShellType::Custom {
+                path: "/bin/fish".to_string(),
+                args: vec!["--private".to_string()],
+            }
+        );
+        assert_eq!(zoom_level, 1.0, "client zoom is not daemon-owned wire state");
     }
 
     #[test]
@@ -1682,15 +1761,27 @@ mod tests {
     #[test]
     fn merge_split_from_terminal_preserves_minimized() {
         let server = hsplit(vec![terminal("t1"), terminal("t2")]);
-        let local = terminal_minimized("t1");
+        let local = LayoutNode::Terminal {
+            terminal_id: Some("t1".to_string()),
+            minimized: true,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.5,
+        };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match &merged {
             LayoutNode::Split { children, .. } => {
                 assert_eq!(children.len(), 2);
                 match &children[0] {
-                    LayoutNode::Terminal { terminal_id, minimized, .. } => {
+                    LayoutNode::Terminal {
+                        terminal_id,
+                        minimized,
+                        zoom_level,
+                        ..
+                    } => {
                         assert_eq!(terminal_id.as_deref(), Some("t1"));
                         assert!(*minimized, "minimized state should be preserved after split");
+                        assert_eq!(*zoom_level, 1.5, "zoom should survive structure changes");
                     }
                     _ => panic!("Expected terminal"),
                 }

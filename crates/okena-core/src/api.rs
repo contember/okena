@@ -451,6 +451,8 @@ pub enum ApiLayoutNode {
         terminal_id: Option<String>,
         minimized: bool,
         detached: bool,
+        #[serde(default)]
+        shell_type: ShellType,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cols: Option<u16>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1051,6 +1053,7 @@ mod tests {
                             terminal_id: Some("t1".into()),
                             minimized: false,
                             detached: false,
+                            shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
                         },
@@ -1060,6 +1063,7 @@ mod tests {
                                 terminal_id: Some("t2".into()),
                                 minimized: true,
                                 detached: true,
+                                shell_type: ShellType::Default,
                                 cols: None,
                                 rows: None,
                             }],
@@ -1529,6 +1533,7 @@ mod tests {
                     terminal_id: Some("t1".into()),
                     minimized: false,
                     detached: false,
+                    shell_type: ShellType::Default,
                     cols: None,
                     rows: None,
                 },
@@ -1539,6 +1544,7 @@ mod tests {
                             terminal_id: Some("t2".into()),
                             minimized: false,
                             detached: false,
+                            shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
                         },
@@ -1546,6 +1552,7 @@ mod tests {
                             terminal_id: None,
                             minimized: false,
                             detached: false,
+                            shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
                         },
@@ -1553,6 +1560,7 @@ mod tests {
                             terminal_id: Some("t3".into()),
                             minimized: false,
                             detached: true,
+                            shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
                         },
@@ -1562,6 +1570,16 @@ mod tests {
         };
         let ids = layout.collect_terminal_ids();
         assert_eq!(ids, vec!["t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn api_layout_node_defaults_shell_for_older_servers() {
+        let json = r#"{"type":"terminal","terminal_id":"t1","minimized":false,"detached":false}"#;
+        let node: ApiLayoutNode = serde_json::from_str(json).unwrap();
+        let ApiLayoutNode::Terminal { shell_type, .. } = node else {
+            panic!("expected terminal");
+        };
+        assert_eq!(shell_type, ShellType::Default);
     }
 
     #[test]

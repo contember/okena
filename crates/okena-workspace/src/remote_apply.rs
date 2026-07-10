@@ -427,6 +427,7 @@ mod tests {
             terminal_id: Some(id.to_string()),
             minimized: false,
             detached: false,
+            shell_type: Default::default(),
             cols: None,
             rows: None,
         }
