@@ -210,7 +210,13 @@ pub fn get_cursor(conn_id: String, terminal_id: String) -> CursorState {
 /// Send text input to a terminal. Synchronous: only enqueues a WS message.
 #[uniffi::export]
 pub fn send_text(conn_id: String, terminal_id: String, text: String) {
-    ConnectionManager::get().send_ws_message(&conn_id, WsClientMessage::SendText { terminal_id, text });
+    ConnectionManager::get().send_ws_message(
+        &conn_id,
+        WsClientMessage::SendInput {
+            terminal_id,
+            data: text.into_bytes(),
+        },
+    );
 }
 
 /// Resize a terminal (local grid + WS resize message).
@@ -402,10 +408,15 @@ pub fn send_special_key(
     let special_key: SpecialKey = serde_json::from_value(serde_json::Value::String(key.clone()))
         .map_err(|_| MobileFfiError::Action {
             message: format!("Unknown special key: {key}"),
-        })?;
+    })?;
     let bytes = special_key.to_bytes();
-    let text = String::from_utf8_lossy(&bytes).to_string();
-    ConnectionManager::get().send_ws_message(&conn_id, WsClientMessage::SendText { terminal_id, text });
+    ConnectionManager::get().send_ws_message(
+        &conn_id,
+        WsClientMessage::SendInput {
+            terminal_id,
+            data: bytes.to_vec(),
+        },
+    );
     Ok(())
 }
 

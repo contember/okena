@@ -12,10 +12,15 @@ pub fn send_remote_terminal_input(
     data: &[u8],
 ) {
     let remote_id = strip_prefix(terminal_id, connection_id);
-    let _ = ws_tx.try_send(WsClientMessage::SendText {
-        terminal_id: remote_id,
-        text: String::from_utf8_lossy(data).to_string(),
-    });
+    if ws_tx
+        .try_send(WsClientMessage::SendInput {
+            terminal_id: remote_id,
+            data: data.to_vec(),
+        })
+        .is_err()
+    {
+        log::warn!("remote terminal input channel is closed");
+    }
 }
 
 pub fn resize_remote_terminal(
@@ -49,15 +54,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn send_remote_terminal_input_strips_prefix_and_encodes_lossy_utf8() {
+    fn send_remote_terminal_input_preserves_arbitrary_bytes() {
         let (tx, rx) = async_channel::bounded(1);
 
         send_remote_terminal_input(&tx, "conn-1", "remote:conn-1:term-a", b"a\xff");
 
         match rx.try_recv().expect("message queued") {
-            WsClientMessage::SendText { terminal_id, text } => {
+            WsClientMessage::SendInput { terminal_id, data } => {
                 assert_eq!(terminal_id, "term-a");
-                assert_eq!(text, "a\u{fffd}");
+                assert_eq!(data, b"a\xff");
             }
             other => panic!("unexpected message: {other:?}"),
         }

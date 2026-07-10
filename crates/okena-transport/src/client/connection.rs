@@ -126,6 +126,13 @@ fn initial_connect_retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(millis)
 }
 
+fn ws_message_channel() -> (
+    async_channel::Sender<WsClientMessage>,
+    async_channel::Receiver<WsClientMessage>,
+) {
+    async_channel::unbounded()
+}
+
 /// Reconnect budget after an established WS drops. The local daemon connection
 /// dead-ends within a few seconds so the app-layer self-heal (re-running
 /// ensure_local_daemon, which can respawn the daemon) takes over quickly;
@@ -307,7 +314,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         }
 
         // Create fresh WS message channel
-        let (ws_tx, ws_rx) = async_channel::bounded::<WsClientMessage>(256);
+        let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
 
         let task = self.runtime.spawn(async move {
@@ -524,7 +531,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let shared_token = self.shared_token.clone();
 
         // Create fresh WS message channel
-        let (ws_tx, ws_rx) = async_channel::bounded::<WsClientMessage>(256);
+        let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
 
         self.status = ConnectionStatus::Connecting;
@@ -959,8 +966,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let stream_map_for_writer = stream_map.clone();
         let writer_handle = tokio::spawn(async move {
             while let Ok(msg) = ws_rx_clone.recv().await {
-                // For SendText, prefer binary frame when stream_id is known
-                if let WsClientMessage::SendText { terminal_id, text } = &msg {
+                // Prefer compact binary input when the subscription mapping is known.
+                if let WsClientMessage::SendInput { terminal_id, data } = &msg {
                     let stream_id = stream_map_for_writer
                         .read()
                         .ok()
@@ -969,7 +976,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         let frame = okena_core::ws::build_binary_frame(
                             okena_core::ws::FRAME_TYPE_INPUT,
                             sid,
-                            text.as_bytes(),
+                            data,
                         );
                         if let Err(e) = futures::SinkExt::send(
                             &mut ws_write,
@@ -985,11 +992,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 }
 
                 let json = match &msg {
-                    WsClientMessage::SendText { terminal_id, text } => {
+                    WsClientMessage::SendInput { terminal_id, data } => {
                         serde_json::json!({
-                            "type": "send_text",
+                            "type": "send_bytes",
                             "terminal_id": terminal_id,
-                            "text": text,
+                            "data": data,
                         })
                     }
                     WsClientMessage::Resize {
@@ -1519,5 +1526,18 @@ mod tests {
         assert_eq!(ws_reconnect_backoff_secs(&remote, 5), 16);
         assert_eq!(ws_reconnect_backoff_secs(&remote, 6), 30);
         assert_eq!(ws_reconnect_backoff_secs(&remote, 10), 30, "capped at 30s");
+    }
+
+    #[test]
+    fn ws_message_channel_absorbs_input_bursts_without_dropping() {
+        let (tx, rx) = ws_message_channel();
+        for byte in 0..=u8::MAX {
+            tx.try_send(WsClientMessage::SendInput {
+                terminal_id: "terminal".to_string(),
+                data: vec![byte],
+            })
+            .unwrap();
+        }
+        assert_eq!(rx.len(), usize::from(u8::MAX) + 1);
     }
 }

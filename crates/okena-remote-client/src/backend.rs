@@ -16,13 +16,33 @@ use std::sync::Arc;
 /// Used inside `Terminal` objects for I/O - the Terminal doesn't know
 /// it's remote vs local.
 pub struct RemoteTransport {
-    pub(crate) ws_tx: async_channel::Sender<WsClientMessage>,
+    ws_tx: parking_lot::RwLock<async_channel::Sender<WsClientMessage>>,
     pub(crate) connection_id: String,
+}
+
+impl RemoteTransport {
+    pub(crate) fn new(
+        ws_tx: async_channel::Sender<WsClientMessage>,
+        connection_id: String,
+    ) -> Self {
+        Self {
+            ws_tx: parking_lot::RwLock::new(ws_tx),
+            connection_id,
+        }
+    }
+
+    pub(crate) fn replace_sender(&self, ws_tx: async_channel::Sender<WsClientMessage>) {
+        *self.ws_tx.write() = ws_tx;
+    }
+
+    fn sender(&self) -> async_channel::Sender<WsClientMessage> {
+        self.ws_tx.read().clone()
+    }
 }
 
 impl TerminalTransport for RemoteTransport {
     fn send_input(&self, terminal_id: &str, data: &[u8]) {
-        send_remote_terminal_input(&self.ws_tx, &self.connection_id, terminal_id, data);
+        send_remote_terminal_input(&self.sender(), &self.connection_id, terminal_id, data);
     }
 
     /// No-op: the daemon owns the PTY and is the sole responder to terminal
@@ -35,7 +55,7 @@ impl TerminalTransport for RemoteTransport {
     fn send_response(&self, _terminal_id: &str, _data: &[u8]) {}
 
     fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
-        resize_remote_terminal(&self.ws_tx, &self.connection_id, terminal_id, cols, rows);
+        resize_remote_terminal(&self.sender(), &self.connection_id, terminal_id, cols, rows);
     }
 
     fn uses_mouse_backend(&self) -> bool {
@@ -91,7 +111,7 @@ impl TerminalBackend for RemoteBackend {
     }
 
     fn kill(&self, terminal_id: &str) {
-        close_remote_terminal(&self.transport.ws_tx, &self.connection_id, terminal_id);
+        close_remote_terminal(&self.transport.sender(), &self.connection_id, terminal_id);
     }
 
     fn capture_buffer(&self, _terminal_id: &str) -> Option<PathBuf> {

@@ -86,6 +86,9 @@ pub fn execute_action(
         ActionRequest::SendText { terminal_id, text } => {
             terminal::send_text(ws, terminal_id, text, backend, terminals)
         }
+        ActionRequest::SendBytes { terminal_id, data } => {
+            terminal::send_bytes(ws, terminal_id, data, backend, terminals)
+        }
         ActionRequest::RunCommand { terminal_id, command } => {
             terminal::run_command(ws, terminal_id, command, backend, terminals)
         }

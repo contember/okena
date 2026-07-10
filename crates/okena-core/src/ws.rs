@@ -19,6 +19,10 @@ pub enum WsInbound {
         terminal_id: String,
         text: String,
     },
+    SendBytes {
+        terminal_id: String,
+        data: Vec<u8>,
+    },
     SendSpecialKey {
         terminal_id: String,
         key: SpecialKey,
@@ -143,6 +147,10 @@ mod tests {
             WsInbound::SendText {
                 terminal_id: "t1".into(),
                 text: "hello".into(),
+            },
+            WsInbound::SendBytes {
+                terminal_id: "t1".into(),
+                data: vec![0x1b, 0xff],
             },
             WsInbound::SendSpecialKey {
                 terminal_id: "t1".into(),

@@ -15,6 +15,7 @@ use std::sync::Arc;
 /// Desktop-specific handler that creates `Terminal` objects and manages the registry.
 pub struct DesktopConnectionHandler {
     terminals: TerminalsRegistry,
+    transports: parking_lot::Mutex<HashMap<String, Arc<RemoteTransport>>>,
     /// Coalescing doorbell rung on every chunk of remote output so the manager's
     /// activity pump wakes and repaints server-driven sidebar indicators. See
     /// `RemoteConnectionManager::start_terminal_activity_pump`.
@@ -25,6 +26,7 @@ impl DesktopConnectionHandler {
     pub fn new(terminals: TerminalsRegistry, activity_tx: async_channel::Sender<()>) -> Self {
         Self {
             terminals,
+            transports: parking_lot::Mutex::new(HashMap::new()),
             activity_tx,
         }
     }
@@ -46,12 +48,15 @@ impl ConnectionHandler for DesktopConnectionHandler {
         // keeps the views' Arc<Terminal> references valid and avoids leaking
         // the old Terminal (with its ~19-48 MB scrollback grid) on every reconnect.
         if terminals.contains_key(prefixed_id) {
+            if let Some(transport) = self.transports.lock().get(prefixed_id) {
+                transport.replace_sender(ws_sender);
+            }
             return;
         }
-        let transport = Arc::new(RemoteTransport {
-            ws_tx: ws_sender,
-            connection_id: connection_id.to_string(),
-        });
+        let transport = Arc::new(RemoteTransport::new(
+            ws_sender,
+            connection_id.to_string(),
+        ));
         let size = if cols > 0 && rows > 0 {
             TerminalSize { cols, rows, ..TerminalSize::default() }
         } else {
@@ -60,10 +65,13 @@ impl ConnectionHandler for DesktopConnectionHandler {
         let terminal = Arc::new(Terminal::new(
             prefixed_id.to_string(),
             size,
-            transport,
+            transport.clone(),
             String::new(),
         ));
         terminals.insert(prefixed_id.to_string(), terminal);
+        self.transports
+            .lock()
+            .insert(prefixed_id.to_string(), transport);
     }
 
     fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]) {
@@ -94,6 +102,7 @@ impl ConnectionHandler for DesktopConnectionHandler {
 
     fn remove_terminal(&self, prefixed_id: &str) {
         self.terminals.lock().remove(prefixed_id);
+        self.transports.lock().remove(prefixed_id);
     }
 
     fn remove_all_terminals(&self, connection_id: &str) {
@@ -105,6 +114,7 @@ impl ConnectionHandler for DesktopConnectionHandler {
             .collect();
         for key in to_remove {
             terminals.remove(&key);
+            self.transports.lock().remove(&key);
         }
     }
 
@@ -128,6 +138,7 @@ impl ConnectionHandler for DesktopConnectionHandler {
         }
         for key in to_remove {
             terminals.remove(&key);
+            self.transports.lock().remove(&key);
         }
     }
 }
@@ -214,13 +225,10 @@ impl RemoteConnection {
     /// Get a TerminalBackend for this connection.
     pub fn backend(&self) -> Arc<dyn TerminalBackend> {
         let ws_tx = self.client.ws_sender().cloned().unwrap_or_else(|| {
-            let (tx, _) = async_channel::bounded::<WsClientMessage>(1);
+            let (tx, _) = async_channel::unbounded::<WsClientMessage>();
             tx
         });
-        let transport = Arc::new(RemoteTransport {
-            ws_tx,
-            connection_id: self.config().id.clone(),
-        });
+        let transport = Arc::new(RemoteTransport::new(ws_tx, self.config().id.clone()));
         Arc::new(RemoteBackend::new(transport, self.config().id.clone()))
     }
 }
@@ -237,7 +245,7 @@ mod tests {
         let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         let (activity_tx, _activity_rx) = async_channel::bounded(1);
         let (ws_tx, _ws_rx) = async_channel::bounded(8);
-        let transport = Arc::new(RemoteTransport { ws_tx, connection_id: "conn".into() });
+        let transport = Arc::new(RemoteTransport::new(ws_tx, "conn".into()));
         let terminal = Arc::new(Terminal::new(
             prefixed_id.to_string(),
             TerminalSize::default(),
@@ -276,5 +284,31 @@ mod tests {
         // authority — the client keeps enforcing its window size.
         handler.resize_terminal("conn:t2", 100, 30, false);
         assert!(terminal.is_resize_owner_local());
+    }
+
+    #[test]
+    fn reconnect_replaces_sender_for_existing_terminal() {
+        let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let (activity_tx, _activity_rx) = async_channel::bounded(1);
+        let handler = DesktopConnectionHandler::new(terminals.clone(), activity_tx);
+        let (old_tx, old_rx) = async_channel::unbounded();
+        handler.create_terminal("conn", "term", "remote:conn:term", old_tx, 80, 24);
+
+        let (new_tx, new_rx) = async_channel::unbounded();
+        handler.create_terminal("conn", "term", "remote:conn:term", new_tx, 80, 24);
+        terminals
+            .lock()
+            .get("remote:conn:term")
+            .unwrap()
+            .send_bytes(b"input");
+
+        assert!(old_rx.try_recv().is_err());
+        match new_rx.try_recv().unwrap() {
+            WsClientMessage::SendInput { terminal_id, data } => {
+                assert_eq!(terminal_id, "term");
+                assert_eq!(data, b"input");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 }

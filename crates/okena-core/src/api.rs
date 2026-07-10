@@ -481,6 +481,10 @@ pub enum ActionRequest {
         terminal_id: String,
         text: String,
     },
+    SendBytes {
+        terminal_id: String,
+        data: Vec<u8>,
+    },
     RunCommand {
         terminal_id: String,
         command: String,
@@ -1245,6 +1249,10 @@ mod tests {
             ActionRequest::SendText {
                 terminal_id: "t1".into(),
                 text: "hello".into(),
+            },
+            ActionRequest::SendBytes {
+                terminal_id: "t1".into(),
+                data: vec![0x1b, 0xff],
             },
             ActionRequest::RunCommand {
                 terminal_id: "t1".into(),

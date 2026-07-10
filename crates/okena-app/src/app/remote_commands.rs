@@ -38,6 +38,7 @@ pub(crate) fn parse_window_id(s: &str) -> Option<WindowId> {
 fn claim_input_resize_owner(action: &ActionRequest, owner_id: &str) {
     let terminal_id = match action {
         ActionRequest::SendText { terminal_id, .. }
+        | ActionRequest::SendBytes { terminal_id, .. }
         | ActionRequest::RunCommand { terminal_id, .. }
         | ActionRequest::SendSpecialKey { terminal_id, .. } => Some(terminal_id.as_str()),
         _ => None,

@@ -22,8 +22,8 @@ pub enum ConnectionStatus {
 /// Messages sent from the UI thread to the WebSocket writer task.
 #[derive(Debug)]
 pub enum WsClientMessage {
-    /// Send text input to a remote terminal
-    SendText { terminal_id: String, text: String },
+    /// Send byte-exact input to a remote terminal.
+    SendInput { terminal_id: String, data: Vec<u8> },
     /// Resize a remote terminal
     Resize {
         terminal_id: String,
@@ -134,11 +134,11 @@ mod tests {
 
     #[test]
     fn ws_client_message_debug() {
-        let msg = WsClientMessage::SendText {
+        let msg = WsClientMessage::SendInput {
             terminal_id: "t1".to_string(),
-            text: "hello".to_string(),
+            data: b"hello".to_vec(),
         };
         let debug = format!("{:?}", msg);
-        assert!(debug.contains("SendText"));
+        assert!(debug.contains("SendInput"));
     }
 }

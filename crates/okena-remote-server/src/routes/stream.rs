@@ -263,6 +263,15 @@ async fn handle_ws(
                                     reply: None,
                                 }).await;
                             }
+                            Ok(WsInbound::SendBytes { terminal_id, data }) => {
+                                let _ = state.bridge_tx.send(BridgeMessage {
+                                    command: RemoteCommand::ActionFromConnection {
+                                        action: ActionRequest::SendBytes { terminal_id, data },
+                                        connection_id: connection_owner_id.clone(),
+                                    },
+                                    reply: None,
+                                }).await;
+                            }
                             Ok(WsInbound::SendSpecialKey { terminal_id, key }) => {
                                 let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::ActionFromConnection {
@@ -330,12 +339,11 @@ async fn handle_ws(
                         // Binary input frame from client — fire-and-forget
                         if let Some((FRAME_TYPE_INPUT, stream_id, payload)) = parse_binary_frame(&data)
                             && let Some(terminal_id) = reverse_stream_map.get(&stream_id) {
-                                let text = String::from_utf8_lossy(payload).to_string();
                                 let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::ActionFromConnection {
-                                        action: ActionRequest::SendText {
+                                        action: ActionRequest::SendBytes {
                                             terminal_id: terminal_id.clone(),
-                                            text,
+                                            data: payload.to_vec(),
                                         },
                                         connection_id: connection_owner_id.clone(),
                                     },

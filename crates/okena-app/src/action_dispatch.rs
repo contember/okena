@@ -400,6 +400,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             terminal_id: s(&terminal_id),
             text,
         },
+        ActionRequest::SendBytes { terminal_id, data } => ActionRequest::SendBytes {
+            terminal_id: s(&terminal_id),
+            data,
+        },
         ActionRequest::RunCommand {
             terminal_id,
             command,

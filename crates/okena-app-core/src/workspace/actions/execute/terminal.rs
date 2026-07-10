@@ -185,6 +185,19 @@ pub(super) fn send_text(
     })
 }
 
+pub(super) fn send_bytes(
+    ws: &mut Workspace,
+    terminal_id: String,
+    data: Vec<u8>,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+) -> ActionResult {
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+        term.send_bytes(&data);
+        ActionResult::Ok(None)
+    })
+}
+
 pub(super) fn run_command(
     ws: &mut Workspace,
     terminal_id: String,
