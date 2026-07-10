@@ -31,7 +31,7 @@ pub async fn post_actions(
             let body = payload.unwrap_or(serde_json::json!({"ok": true}));
             (StatusCode::OK, Json(body)).into_response()
         }
-        Ok(CommandResult::OkBytes(_)) => {
+        Ok(CommandResult::OkBytes(_) | CommandResult::OkSnapshot { .. }) => {
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Ok(CommandResult::Err(e)) => (

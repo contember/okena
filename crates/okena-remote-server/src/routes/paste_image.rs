@@ -76,7 +76,9 @@ pub async fn post_paste_image(
     }
 
     match reply_rx.await {
-        Ok(CommandResult::Ok(_)) | Ok(CommandResult::OkBytes(_)) => {
+        Ok(CommandResult::Ok(_))
+        | Ok(CommandResult::OkBytes(_))
+        | Ok(CommandResult::OkSnapshot { .. }) => {
             (StatusCode::OK, Json(serde_json::json!({"path": path_str}))).into_response()
         }
         Ok(CommandResult::Err(e)) => {

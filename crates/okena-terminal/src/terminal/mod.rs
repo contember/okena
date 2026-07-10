@@ -301,6 +301,9 @@ pub struct Terminal {
     /// the atomic avoids locking, not cross-thread access).
     pub(super) content_generation: AtomicU64,
 
+    /// Latest broadcaster sequence incorporated into the terminal model.
+    pub(super) processed_output_sequence: AtomicU64,
+
     /// Cached "waiting for input" state. Written by the GPUI idle-check
     /// loop (`set_waiting_for_input`), read lock-free by renderers
     /// (`is_waiting_for_input`). Atomic avoids mutex overhead in the
@@ -404,6 +407,7 @@ impl Terminal {
             pending_output: Mutex::new(Vec::new()),
             dirty: AtomicBool::new(false),
             content_generation: AtomicU64::new(0),
+            processed_output_sequence: AtomicU64::new(0),
             initial_cwd,
             reported_cwd,
             pending_notifications,

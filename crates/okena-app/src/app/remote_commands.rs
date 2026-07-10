@@ -560,8 +560,8 @@ pub(crate) async fn remote_command_loop(
                     let ws = workspace.read(cx);
                     match ensure_terminal(&terminal_id, &terminals, &*backend, ws) {
                         Some(term) => {
-                            let snapshot = term.render_snapshot();
-                            CommandResult::OkBytes(snapshot)
+                            let (data, sequence) = term.render_snapshot_with_sequence();
+                            CommandResult::OkSnapshot { data, sequence }
                         }
                         None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
                     }

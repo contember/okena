@@ -21,6 +21,10 @@ use tokio::sync::{broadcast, mpsc};
 
 const SYSTEM_STATS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+fn output_is_newer(watermarks: &HashMap<String, u64>, terminal_id: &str, sequence: u64) -> bool {
+    sequence > watermarks.get(terminal_id).copied().unwrap_or(0)
+}
+
 struct SystemStatsCache {
     system: System,
     stats: ApiSystemStats,
@@ -131,6 +135,7 @@ async fn handle_ws(
     // ── Main loop state ─────────────────────────────────────────────────
     let mut pty_rx = state.broadcaster.subscribe();
     let mut subscribed_ids: HashMap<String, u32> = HashMap::new(); // terminal_id -> stream_id
+    let mut output_watermarks: HashMap<String, u64> = HashMap::new();
     let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
     let mut next_stream_id: u32 = 1;
     let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
@@ -203,19 +208,6 @@ async fn handle_ws(
                                         HashMap::new()
                                     }
                                 };
-                                // Terminals already present in the registry (so
-                                // `GetTerminalSizes` returned a size for them)
-                                // existed BEFORE this subscribe: their snapshot
-                                // reflects current state, so the pending PTY
-                                // events that the snapshot already accounts for
-                                // must be drained (replaying would garble the
-                                // display). Terminals absent here are spawned
-                                // lazily by `ensure_terminal` DURING this
-                                // subscribe — their snapshot was empty (the shell
-                                // hadn't printed yet), so their first output must
-                                // NOT be dropped.
-                                let pre_existing: std::collections::HashSet<String> =
-                                    sizes.keys().cloned().collect();
                                 let resp = serde_json::to_string(&WsOutbound::Subscribed { mappings, sizes: sizes.clone() }).expect("BUG: WsOutbound must serialize");
                                 if out_tx.send(Message::Text(resp.into())).await.is_err() {
                                     break;
@@ -231,37 +223,27 @@ async fn handle_ws(
                                     break;
                                 }
 
-                                // Send initial snapshots for all subscribed terminals
-                                if send_snapshots(&out_tx, &state, &terminal_ids, &subscribed_ids).await.is_err() {
-                                    break;
-                                }
-                                // Selectively drain PTY events that accumulated
-                                // before/during snapshot generation. For
-                                // pre-existing terminals the snapshot already
-                                // contains their effects, so drop them. For
-                                // just-spawned terminals (subscribed but absent
-                                // from `pre_existing`) FORWARD the events — the
-                                // shell's first prompt arrives here and the empty
-                                // snapshot did not cover it, so dropping it would
-                                // leave the pane blank until the next keypress.
-                                if drain_or_forward_post_snapshot(
+                                let watermarks = match send_snapshots_and_reconcile(
                                     &out_tx,
+                                    &state,
                                     &mut pty_rx,
+                                    &terminal_ids,
                                     &subscribed_ids,
-                                    &pre_existing,
                                     &connection_owner_id,
                                 )
                                 .await
-                                .is_err()
                                 {
-                                    break;
-                                }
+                                    Ok(watermarks) => watermarks,
+                                    Err(()) => break,
+                                };
+                                output_watermarks.extend(watermarks);
                             }
                             Ok(WsInbound::Unsubscribe { terminal_ids }) => {
                                 for id in &terminal_ids {
                                     if let Some(sid) = subscribed_ids.remove(id) {
                                         reverse_stream_map.remove(&sid);
                                     }
+                                    output_watermarks.remove(id);
                                 }
                                 // Sync to shared state for git polling
                                 if let Ok(mut map) = state.remote_subscribed_terminals.write() {
@@ -375,8 +357,10 @@ async fn handle_ws(
                         let mut resize_msgs: Vec<WsOutbound> = Vec::new();
 
                         match &event {
-                            crate::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data } => {
-                                if let Some(&stream_id) = subscribed_ids.get(terminal_id) {
+                            crate::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data, sequence } => {
+                                if output_is_newer(&output_watermarks, terminal_id, *sequence)
+                                    && let Some(&stream_id) = subscribed_ids.get(terminal_id)
+                                {
                                     batch.entry(stream_id).or_default().extend_from_slice(data);
                                 }
                             }
@@ -405,8 +389,10 @@ async fn handle_ws(
                         loop {
                             match pty_rx.try_recv() {
                                 Ok(ev) => match &ev {
-                                    crate::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data } => {
-                                        if let Some(&sid) = subscribed_ids.get(terminal_id) {
+                                    crate::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data, sequence } => {
+                                        if output_is_newer(&output_watermarks, terminal_id, *sequence)
+                                            && let Some(&sid) = subscribed_ids.get(terminal_id)
+                                        {
                                             batch.entry(sid).or_default().extend_from_slice(data);
                                         }
                                     }
@@ -443,11 +429,22 @@ async fn handle_ws(
                                         break;
                                     }
                                     let ids: Vec<String> = subscribed_ids.keys().cloned().collect();
-                                    if send_snapshots(&out_tx, &state, &ids, &subscribed_ids).await.is_err() {
-                                        channel_closed = true;
-                                        break;
+                                    match send_snapshots_and_reconcile(
+                                        &out_tx,
+                                        &state,
+                                        &mut pty_rx,
+                                        &ids,
+                                        &subscribed_ids,
+                                        &connection_owner_id,
+                                    )
+                                    .await
+                                    {
+                                        Ok(watermarks) => output_watermarks.extend(watermarks),
+                                        Err(()) => {
+                                            channel_closed = true;
+                                            break;
+                                        }
                                     }
-                                    while pty_rx.try_recv().is_ok() {}
                                     break;
                                 }
                                 Err(broadcast::error::TryRecvError::Closed) => {
@@ -492,11 +489,19 @@ async fn handle_ws(
 
                         // Auto-resync: send fresh snapshot for all subscribed terminals
                         let ids: Vec<String> = subscribed_ids.keys().cloned().collect();
-                        if send_snapshots(&out_tx, &state, &ids, &subscribed_ids).await.is_err() {
-                            break;
+                        match send_snapshots_and_reconcile(
+                            &out_tx,
+                            &state,
+                            &mut pty_rx,
+                            &ids,
+                            &subscribed_ids,
+                            &connection_owner_id,
+                        )
+                        .await
+                        {
+                            Ok(watermarks) => output_watermarks.extend(watermarks),
+                            Err(()) => break,
                         }
-                        // Drain stale PTY events — snapshot already includes their effects.
-                        while pty_rx.try_recv().is_ok() {}
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -657,60 +662,46 @@ async fn send_authority_resizes(
     Ok(())
 }
 
-/// Drain the PTY events that accumulated before/during snapshot generation at
-/// subscribe time, discarding those already reflected in a terminal's snapshot
-/// and forwarding those that are not.
-///
-/// The plain blanket drain (`while pty_rx.try_recv().is_ok() {}`) is correct for
-/// terminals that already had a live PTY before this subscribe: their snapshot
-/// reflects current state, so replaying the queued events would garble the
-/// display. But a terminal spawned lazily *during* this subscribe (its
-/// `render_snapshot()` was empty because the shell hadn't printed yet) has its
-/// first output sitting in the queue — dropping it would leave the pane blank
-/// until the next keypress. So:
-///
-/// * events for `pre_existing` terminals (snapshot covers them) are dropped;
-/// * events for subscribed-but-just-spawned terminals are forwarded as the same
-///   resize-then-PTY frames the main loop sends;
-/// * events for non-subscribed terminals are dropped (not ours).
-///
-/// On `Lagged` the queued backlog is meaningless (we already lost events), so we
-/// simply stop draining; the main loop's own lag handling resynchronizes via
-/// fresh snapshots. Returns `Err(())` if a client send fails (caller breaks).
-async fn drain_or_forward_post_snapshot(
+enum PostSnapshotDrain {
+    Complete,
+    Lagged(u64),
+}
+
+/// Drop only output already included in each snapshot and forward newer events.
+async fn drain_post_snapshot(
     out_tx: &mpsc::Sender<Message>,
     pty_rx: &mut broadcast::Receiver<crate::pty_broadcaster::PtyBroadcastEvent>,
     subscribed_ids: &HashMap<String, u32>,
-    pre_existing: &std::collections::HashSet<String>,
+    watermarks: &HashMap<String, u64>,
     connection_owner_id: &str,
-) -> Result<(), ()> {
+) -> Result<PostSnapshotDrain, ()> {
     use crate::pty_broadcaster::PtyBroadcastEvent;
 
-    // Coalesce forwarded output per stream and keep only the latest resize per
-    // terminal, matching the main loop's batching.
     let mut batch: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut resize_msgs: Vec<WsOutbound> = Vec::new();
 
-    while let Ok(event) = pty_rx.try_recv() {
-        match event {
-            PtyBroadcastEvent::Output { terminal_id, data } => {
-                // Forward only for subscribed terminals that were NOT already
-                // covered by a snapshot (i.e. just spawned this subscribe).
-                if !pre_existing.contains(&terminal_id)
+    loop {
+        match pty_rx.try_recv() {
+            Ok(PtyBroadcastEvent::Output {
+                terminal_id,
+                data,
+                sequence,
+            }) => {
+                let watermark = watermarks.get(&terminal_id).copied().unwrap_or(0);
+                if sequence > watermark
                     && let Some(&stream_id) = subscribed_ids.get(&terminal_id)
                 {
                     batch.entry(stream_id).or_default().extend_from_slice(&data);
                 }
             }
-            PtyBroadcastEvent::Resized {
+            Ok(PtyBroadcastEvent::Resized {
                 terminal_id,
                 cols,
                 rows,
                 server_owns,
                 owner_connection_id,
-            } => {
-                if !pre_existing.contains(&terminal_id) && subscribed_ids.contains_key(&terminal_id)
-                {
+            }) => {
+                if subscribed_ids.contains_key(&terminal_id) {
                     resize_msgs.retain(|m| {
                         !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if *id == terminal_id)
                     });
@@ -724,11 +715,14 @@ async fn drain_or_forward_post_snapshot(
                     ));
                 }
             }
+            Err(broadcast::error::TryRecvError::Empty) => break,
+            Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                return Ok(PostSnapshotDrain::Lagged(count));
+            }
+            Err(broadcast::error::TryRecvError::Closed) => return Err(()),
         }
     }
 
-    // Resize first (so the client updates its grid before applying PTY data),
-    // then the coalesced PTY frames — same ordering as the main broadcast arm.
     for msg in resize_msgs {
         let resp = serde_json::to_string(&msg).expect("BUG: WsOutbound must serialize");
         if out_tx.send(Message::Text(resp.into())).await.is_err() {
@@ -741,40 +735,94 @@ async fn drain_or_forward_post_snapshot(
             return Err(());
         }
     }
-    Ok(())
+    Ok(PostSnapshotDrain::Complete)
 }
 
 /// Send snapshot frames for the given terminal IDs via the mpsc channel.
-/// Returns Err if the channel send fails (caller should break).
 async fn send_snapshots(
     out_tx: &mpsc::Sender<Message>,
     state: &AppState,
     terminal_ids: &[String],
     subscribed_ids: &HashMap<String, u32>,
-) -> Result<(), ()> {
+) -> Result<HashMap<String, u64>, ()> {
+    let mut watermarks = HashMap::new();
     for id in terminal_ids {
         if let Some(&stream_id) = subscribed_ids.get(id) {
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            if state
-                .bridge_tx
-                .send(BridgeMessage {
-                    command: RemoteCommand::RenderSnapshot {
-                        terminal_id: id.clone(),
-                    },
-                    reply: Some(reply_tx),
-                })
-                .await
-                .is_ok()
-                && let Ok(CommandResult::OkBytes(snapshot)) = reply_rx.await
-            {
-                let frame = build_binary_frame(FRAME_TYPE_SNAPSHOT, stream_id, &snapshot);
-                if out_tx.send(Message::Binary(frame.into())).await.is_err() {
+            let target_sequence = state.broadcaster.last_published_sequence(id);
+            let (data, sequence) = render_snapshot_after(state, id, target_sequence).await?;
+            let frame = build_binary_frame(FRAME_TYPE_SNAPSHOT, stream_id, &data);
+            if out_tx.send(Message::Binary(frame.into())).await.is_err() {
+                return Err(());
+            }
+            watermarks.insert(id.clone(), sequence);
+        }
+    }
+    Ok(watermarks)
+}
+
+async fn render_snapshot_after(
+    state: &AppState,
+    terminal_id: &str,
+    target_sequence: u64,
+) -> Result<(Vec<u8>, u64), ()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        state
+            .bridge_tx
+            .send(BridgeMessage {
+                command: RemoteCommand::RenderSnapshot {
+                    terminal_id: terminal_id.to_string(),
+                },
+                reply: Some(reply_tx),
+            })
+            .await
+            .map_err(|_| ())?;
+        let Ok(CommandResult::OkSnapshot { data, sequence }) = reply_rx.await else {
+            return Err(());
+        };
+        if sequence >= target_sequence {
+            return Ok((data, sequence));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            log::warn!(
+                "Terminal {terminal_id} snapshot stopped at sequence {sequence}, expected {target_sequence}"
+            );
+            return Err(());
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+async fn send_snapshots_and_reconcile(
+    out_tx: &mpsc::Sender<Message>,
+    state: &AppState,
+    pty_rx: &mut broadcast::Receiver<crate::pty_broadcaster::PtyBroadcastEvent>,
+    terminal_ids: &[String],
+    subscribed_ids: &HashMap<String, u32>,
+    connection_owner_id: &str,
+) -> Result<HashMap<String, u64>, ()> {
+    loop {
+        let watermarks = send_snapshots(out_tx, state, terminal_ids, subscribed_ids).await?;
+        match drain_post_snapshot(
+            out_tx,
+            pty_rx,
+            subscribed_ids,
+            &watermarks,
+            connection_owner_id,
+        )
+        .await?
+        {
+            PostSnapshotDrain::Complete => return Ok(watermarks),
+            PostSnapshotDrain::Lagged(count) => {
+                let message = serde_json::to_string(&WsOutbound::Dropped { count })
+                    .expect("BUG: WsOutbound must serialize");
+                if out_tx.send(Message::Text(message.into())).await.is_err() {
                     return Err(());
                 }
             }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -817,5 +865,44 @@ mod tests {
     #[test]
     fn legacy_unknown_remote_owner_keeps_prior_client_behavior() {
         assert!(!resized_server_owns(false, None, "conn-a"));
+    }
+
+    #[test]
+    fn late_broadcasts_already_covered_by_snapshot_are_ignored() {
+        let watermarks = HashMap::from([("terminal".to_string(), 42)]);
+        assert!(!output_is_newer(&watermarks, "terminal", 41));
+        assert!(!output_is_newer(&watermarks, "terminal", 42));
+        assert!(output_is_newer(&watermarks, "terminal", 43));
+    }
+
+    #[tokio::test]
+    async fn post_snapshot_drain_forwards_only_output_after_watermark() {
+        let broadcaster = crate::pty_broadcaster::PtyBroadcaster::new();
+        let mut pty_rx = broadcaster.subscribe();
+        let covered = broadcaster.publish("terminal".to_string(), b"covered".to_vec());
+        broadcaster.publish("terminal".to_string(), b"new".to_vec());
+
+        let (out_tx, mut out_rx) = mpsc::channel(4);
+        let subscribed = HashMap::from([("terminal".to_string(), 7)]);
+        let watermarks = HashMap::from([("terminal".to_string(), covered)]);
+        let outcome = drain_post_snapshot(
+            &out_tx,
+            &mut pty_rx,
+            &subscribed,
+            &watermarks,
+            "connection",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, PostSnapshotDrain::Complete));
+
+        let message = out_rx.recv().await.unwrap();
+        let Message::Binary(frame) = message else {
+            panic!("expected PTY frame");
+        };
+        let (frame_type, stream_id, payload) = parse_binary_frame(&frame).unwrap();
+        assert_eq!(frame_type, okena_core::ws::FRAME_TYPE_PTY);
+        assert_eq!(stream_id, 7);
+        assert_eq!(payload, b"new");
     }
 }

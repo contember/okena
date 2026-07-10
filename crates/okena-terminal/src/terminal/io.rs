@@ -9,6 +9,11 @@ use super::prompt_marks::advance_with_prompt_marks;
 impl Terminal {
     /// Process output from PTY
     pub fn process_output(&self, data: &[u8]) {
+        self.process_output_with_sequence(data, 0);
+    }
+
+    /// Process PTY output and atomically associate it with its broadcast order.
+    pub fn process_output_with_sequence(&self, data: &[u8], sequence: u64) {
         let mut _slow = okena_core::timing::SlowGuard::with_detail(
             "Terminal::process_output",
             format!("{} bytes", data.len()),
@@ -55,6 +60,9 @@ impl Terminal {
 
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
+        if sequence != 0 {
+            self.processed_output_sequence.store(sequence, Ordering::Release);
+        }
         *self.last_output_time.lock() = Instant::now();
     }
 

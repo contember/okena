@@ -957,6 +957,8 @@ pub enum CommandResult {
     Ok(Option<serde_json::Value>),
     /// Success with raw bytes (e.g., terminal snapshots).
     OkBytes(Vec<u8>),
+    /// Terminal snapshot plus the last PTY event incorporated into its grid.
+    OkSnapshot { data: Vec<u8>, sequence: u64 },
     /// Error with a human-readable message.
     Err(String),
 }

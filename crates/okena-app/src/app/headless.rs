@@ -460,10 +460,14 @@ impl HeadlessApp {
 
                 // Process first event (broadcasting handled by PtyOutputSink in reader threads)
                 match &event {
-                    PtyEvent::Data { terminal_id, data } => {
+                    PtyEvent::Data {
+                        terminal_id,
+                        data,
+                        sequence,
+                    } => {
                         let terminals_guard = terminals.lock();
                         if let Some(terminal) = terminals_guard.get(terminal_id) {
-                            terminal.process_output(data);
+                            terminal.process_output_with_sequence(data, *sequence);
                         }
                     }
                     PtyEvent::Exit { terminal_id, exit_code } => {
@@ -475,10 +479,14 @@ impl HeadlessApp {
                 // Drain any additional pending events (batch processing)
                 while let Ok(event) = pty_events.try_recv() {
                     match &event {
-                        PtyEvent::Data { terminal_id, data } => {
+                        PtyEvent::Data {
+                            terminal_id,
+                            data,
+                            sequence,
+                        } => {
                             let terminals_guard = terminals.lock();
                             if let Some(terminal) = terminals_guard.get(terminal_id) {
-                                terminal.process_output(data);
+                                terminal.process_output_with_sequence(data, *sequence);
                             }
                         }
                         PtyEvent::Exit { terminal_id, exit_code } => {

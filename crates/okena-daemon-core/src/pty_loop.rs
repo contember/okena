@@ -215,7 +215,11 @@ fn process_event(
     bytes_this_turn: &mut usize,
 ) {
     match event {
-        PtyEvent::Data { terminal_id, data } => {
+        PtyEvent::Data {
+            terminal_id,
+            data,
+            sequence,
+        } => {
             // Hold the registry lock only for the HashMap lookup — clone the
             // `Arc<Terminal>` out and drop the guard before the (potentially
             // long) ANSI parse, so input/resize/kill on OTHER terminals don't
@@ -223,7 +227,7 @@ fn process_event(
             let term = terminals.lock().get(terminal_id).cloned();
             if let Some(term) = term {
                 *bytes_this_turn += data.len();
-                term.process_output(data);
+                term.process_output_with_sequence(data, *sequence);
             }
             dirty_terminal_ids.push(terminal_id.clone());
         }
@@ -723,6 +727,7 @@ mod tests {
                 tx.send(PtyEvent::Data {
                     terminal_id: "t1".to_string(),
                     data: b"hello".to_vec(),
+                    sequence: 0,
                 })
                 .await
                 .expect("send synthesized data event");

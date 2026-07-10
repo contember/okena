@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 /// Trait for broadcasting PTY output to external consumers (e.g. remote WebSocket clients).
 /// Implementations must be thread-safe as this is called from PTY reader threads.
 pub trait PtyOutputSink: Send + Sync {
-    fn publish(&self, terminal_id: String, data: Vec<u8>);
+    fn publish(&self, terminal_id: String, data: Vec<u8>) -> u64;
     /// `server_owns` is true when the origin's local user currently holds resize
     /// authority. Clients use it to stop re-asserting their own window size and
     /// defer to the origin instead of fighting it back over the next round-trip.
@@ -36,7 +36,11 @@ pub trait PtyOutputSink: Send + Sync {
 #[derive(Debug)]
 pub enum PtyEvent {
     /// Data received from PTY
-    Data { terminal_id: String, data: Vec<u8> },
+    Data {
+        terminal_id: String,
+        data: Vec<u8>,
+        sequence: u64,
+    },
     /// PTY process exited
     Exit {
         terminal_id: String,
@@ -636,13 +640,14 @@ impl PtyManager {
                     let data = buf[..n].to_vec();
                     log::debug!("PTY {} received {} bytes: {:?}", terminal_id, n, String::from_utf8_lossy(&data[..n.min(100)]));
                     // Broadcast to external consumers immediately (bypasses UI event loop)
-                    if let Some(ref sink) = output_sink {
-                        sink.publish(terminal_id.clone(), data.clone());
-                    }
+                    let sequence = output_sink
+                        .as_ref()
+                        .map_or(0, |sink| sink.publish(terminal_id.clone(), data.clone()));
                     // send_blocking will block when channel is full (backpressure)
                     if tx.send_blocking(PtyEvent::Data {
                         terminal_id: terminal_id.clone(),
                         data,
+                        sequence,
                     }).is_err() {
                         // Receiver dropped - app is shutting down
                         break;

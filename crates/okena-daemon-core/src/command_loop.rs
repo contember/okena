@@ -572,7 +572,10 @@ pub async fn daemon_command_loop(
             RemoteCommand::RenderSnapshot { terminal_id } => {
                 let ws = workspace.lock();
                 match ensure_terminal(&terminal_id, &terminals, &*backend, &ws) {
-                    Some(term) => CommandResult::OkBytes(term.render_snapshot()),
+                    Some(term) => {
+                        let (data, sequence) = term.render_snapshot_with_sequence();
+                        CommandResult::OkSnapshot { data, sequence }
+                    }
                     None => CommandResult::Err(format!("terminal not found: {terminal_id}")),
                 }
             }
