@@ -1,7 +1,7 @@
 use crate::client::handler::MobileConnectionHandler;
 use crate::client::terminal_holder::TerminalHolder;
 
-use okena_core::api::{ActionRequest, StateResponse};
+use okena_core::api::{ActionRequest, ApiFullscreen, ApiLayoutNode, StateResponse};
 use okena_transport::client::{
     make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig,
     WsClientMessage,
@@ -23,6 +23,193 @@ struct MobileConnection {
     status: RwLock<ConnectionStatus>,
     state_cache: RwLock<Option<StateResponse>>,
     _event_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+fn merge_layout_presentation(server: &ApiLayoutNode, local: &ApiLayoutNode) -> ApiLayoutNode {
+    match (server, local) {
+        (
+            ApiLayoutNode::Terminal {
+                terminal_id: server_id,
+                shell_type,
+                cols,
+                rows,
+                ..
+            },
+            ApiLayoutNode::Terminal {
+                terminal_id: local_id,
+                minimized,
+                detached,
+                ..
+            },
+        ) if server_id == local_id => ApiLayoutNode::Terminal {
+            terminal_id: server_id.clone(),
+            minimized: *minimized,
+            detached: *detached,
+            shell_type: shell_type.clone(),
+            cols: *cols,
+            rows: *rows,
+        },
+        (
+            ApiLayoutNode::Split {
+                direction,
+                sizes: server_sizes,
+                children: server_children,
+            },
+            ApiLayoutNode::Split {
+                sizes: local_sizes,
+                children: local_children,
+                ..
+            },
+        ) if server_children.len() == local_children.len() => ApiLayoutNode::Split {
+            direction: *direction,
+            sizes: if server_sizes.len() == local_sizes.len() {
+                local_sizes.clone()
+            } else {
+                server_sizes.clone()
+            },
+            children: server_children
+                .iter()
+                .zip(local_children)
+                .map(|(server, local)| merge_layout_presentation(server, local))
+                .collect(),
+        },
+        (
+            ApiLayoutNode::Tabs {
+                children: server_children,
+                ..
+            },
+            ApiLayoutNode::Tabs {
+                children: local_children,
+                active_tab,
+            },
+        ) if server_children.len() == local_children.len() => ApiLayoutNode::Tabs {
+            children: server_children
+                .iter()
+                .zip(local_children)
+                .map(|(server, local)| merge_layout_presentation(server, local))
+                .collect(),
+            active_tab: (*active_tab).min(server_children.len().saturating_sub(1)),
+        },
+        _ => {
+            let mut presentation = HashMap::new();
+            collect_terminal_presentation(local, &mut presentation);
+            let mut merged = server.clone();
+            apply_terminal_presentation(&mut merged, &presentation);
+            merged
+        }
+    }
+}
+
+fn collect_terminal_presentation(
+    layout: &ApiLayoutNode,
+    presentation: &mut HashMap<String, (bool, bool)>,
+) {
+    match layout {
+        ApiLayoutNode::Terminal {
+            terminal_id: Some(id),
+            minimized,
+            detached,
+            ..
+        } => {
+            presentation.insert(id.clone(), (*minimized, *detached));
+        }
+        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
+            for child in children {
+                collect_terminal_presentation(child, presentation);
+            }
+        }
+        ApiLayoutNode::Terminal { terminal_id: None, .. } => {}
+    }
+}
+
+fn apply_terminal_presentation(
+    layout: &mut ApiLayoutNode,
+    presentation: &HashMap<String, (bool, bool)>,
+) {
+    match layout {
+        ApiLayoutNode::Terminal {
+            terminal_id: Some(id),
+            minimized,
+            detached,
+            ..
+        } => {
+            if let Some(&(local_minimized, local_detached)) = presentation.get(id) {
+                *minimized = local_minimized;
+                *detached = local_detached;
+            }
+        }
+        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
+            for child in children {
+                apply_terminal_presentation(child, presentation);
+            }
+        }
+        ApiLayoutNode::Terminal { terminal_id: None, .. } => {}
+    }
+}
+
+fn merge_state_presentation(next: &mut StateResponse, previous: &StateResponse) {
+    for project in &mut next.projects {
+        let Some(previous_project) = previous.projects.iter().find(|old| old.id == project.id)
+        else {
+            continue;
+        };
+        if let (Some(server), Some(local)) = (&project.layout, &previous_project.layout) {
+            project.layout = Some(merge_layout_presentation(server, local));
+        }
+    }
+
+    next.fullscreen_terminal = previous.fullscreen_terminal.as_ref().and_then(|fullscreen| {
+        let terminal_exists = next.projects.iter().any(|project| {
+            project.id == fullscreen.project_id
+                && project
+                    .layout
+                    .as_ref()
+                    .is_some_and(|layout| layout_contains_terminal(layout, &fullscreen.terminal_id))
+        });
+        terminal_exists.then(|| fullscreen.clone())
+    });
+}
+
+fn layout_contains_terminal(layout: &ApiLayoutNode, terminal_id: &str) -> bool {
+    match layout {
+        ApiLayoutNode::Terminal { terminal_id: Some(id), .. } => id == terminal_id,
+        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => children
+            .iter()
+            .any(|child| layout_contains_terminal(child, terminal_id)),
+        ApiLayoutNode::Terminal { terminal_id: None, .. } => false,
+    }
+}
+
+fn toggle_terminal_minimized(layout: &mut ApiLayoutNode, terminal_id: &str) -> bool {
+    match layout {
+        ApiLayoutNode::Terminal {
+            terminal_id: Some(id),
+            minimized,
+            ..
+        } if id == terminal_id => {
+            *minimized = !*minimized;
+            true
+        }
+        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => children
+            .iter_mut()
+            .any(|child| toggle_terminal_minimized(child, terminal_id)),
+        ApiLayoutNode::Terminal { .. } => false,
+    }
+}
+
+fn layout_at_path_mut<'a>(
+    mut layout: &'a mut ApiLayoutNode,
+    path: &[usize],
+) -> Option<&'a mut ApiLayoutNode> {
+    for &index in path {
+        layout = match layout {
+            ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
+                children.get_mut(index)?
+            }
+            ApiLayoutNode::Terminal { .. } => return None,
+        };
+    }
+    Some(layout)
 }
 
 impl ConnectionManager {
@@ -228,6 +415,100 @@ impl ConnectionManager {
             .and_then(|conn| conn.state_cache.read().clone())
     }
 
+    pub fn toggle_minimized_local(
+        &self,
+        conn_id: &str,
+        project_id: &str,
+        terminal_id: &str,
+    ) -> Result<(), String> {
+        let connections = self.connections.read();
+        let connection = connections
+            .get(conn_id)
+            .ok_or_else(|| format!("Connection not found: {conn_id}"))?;
+        let mut state = connection.state_cache.write();
+        let project = state
+            .as_mut()
+            .and_then(|state| state.projects.iter_mut().find(|project| project.id == project_id))
+            .ok_or_else(|| format!("Project not found: {project_id}"))?;
+        let changed = project
+            .layout
+            .as_mut()
+            .is_some_and(|layout| toggle_terminal_minimized(layout, terminal_id));
+        if changed {
+            Ok(())
+        } else {
+            Err(format!("Terminal not found: {terminal_id}"))
+        }
+    }
+
+    pub fn set_fullscreen_local(
+        &self,
+        conn_id: &str,
+        project_id: &str,
+        terminal_id: Option<String>,
+    ) -> Result<(), String> {
+        let connections = self.connections.read();
+        let connection = connections
+            .get(conn_id)
+            .ok_or_else(|| format!("Connection not found: {conn_id}"))?;
+        let mut state = connection.state_cache.write();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| format!("State unavailable for connection: {conn_id}"))?;
+
+        state.fullscreen_terminal = match terminal_id {
+            Some(terminal_id) => {
+                let exists = state.projects.iter().any(|project| {
+                    project.id == project_id
+                        && project.layout.as_ref().is_some_and(|layout| {
+                            layout_contains_terminal(layout, &terminal_id)
+                        })
+                });
+                if !exists {
+                    return Err(format!("Terminal not found: {terminal_id}"));
+                }
+                Some(ApiFullscreen {
+                    project_id: project_id.to_string(),
+                    terminal_id,
+                })
+            }
+            None => None,
+        };
+        Ok(())
+    }
+
+    pub fn set_active_tab_local(
+        &self,
+        conn_id: &str,
+        project_id: &str,
+        path: &[usize],
+        index: usize,
+    ) -> Result<(), String> {
+        let connections = self.connections.read();
+        let connection = connections
+            .get(conn_id)
+            .ok_or_else(|| format!("Connection not found: {conn_id}"))?;
+        let mut state = connection.state_cache.write();
+        let layout = state
+            .as_mut()
+            .and_then(|state| state.projects.iter_mut().find(|project| project.id == project_id))
+            .and_then(|project| project.layout.as_mut())
+            .and_then(|layout| layout_at_path_mut(layout, path))
+            .ok_or_else(|| format!("Tab group not found at path: {path:?}"))?;
+        let ApiLayoutNode::Tabs {
+            children,
+            active_tab,
+        } = layout
+        else {
+            return Err(format!("Layout at path is not a tab group: {path:?}"));
+        };
+        if index >= children.len() {
+            return Err(format!("Tab index out of range: {index}"));
+        }
+        *active_tab = index;
+        Ok(())
+    }
+
     /// Access a terminal holder for reading cells / cursor.
     /// The callback receives the TerminalHolder if found.
     pub fn with_terminal<F, R>(&self, conn_id: &str, terminal_id: &str, f: F) -> Option<R>
@@ -384,8 +665,14 @@ impl ConnectionManager {
                             .as_secs() as i64,
                     );
                 }
-                ConnectionEvent::StateReceived { state, .. } => {
-                    *conn.state_cache.write() = Some(state);
+                ConnectionEvent::StateReceived { mut state, .. } => {
+                    let mut cache = conn.state_cache.write();
+                    if let Some(previous) = cache.as_ref() {
+                        merge_state_presentation(&mut state, previous);
+                    } else {
+                        state.fullscreen_terminal = None;
+                    }
+                    *cache = Some(state);
                 }
                 ConnectionEvent::SubscriptionMappings { mappings, .. } => {
                     conn.client.write().update_stream_mappings(mappings);
@@ -417,5 +704,133 @@ impl ConnectionManager {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use okena_core::api::ApiProject;
+    use okena_core::shell::ShellType;
+
+    fn terminal(id: &str, minimized: bool, shell_type: ShellType) -> ApiLayoutNode {
+        ApiLayoutNode::Terminal {
+            terminal_id: Some(id.to_string()),
+            minimized,
+            detached: false,
+            shell_type,
+            cols: None,
+            rows: None,
+        }
+    }
+
+    fn project(id: &str, layout: ApiLayoutNode) -> ApiProject {
+        ApiProject {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: "/tmp".to_string(),
+            show_in_overview: true,
+            layout: Some(layout),
+            terminal_names: HashMap::new(),
+            git_status: None,
+            folder_color: Default::default(),
+            services: Vec::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: Vec::new(),
+            hooks: Default::default(),
+        }
+    }
+
+    fn state(projects: Vec<ApiProject>) -> StateResponse {
+        StateResponse {
+            state_version: 1,
+            projects,
+            focused_project_id: None,
+            fullscreen_terminal: None,
+            project_order: Vec::new(),
+            folders: Vec::new(),
+            windows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mobile_layout_merge_keeps_local_presentation_and_server_shell() {
+        let server = ApiLayoutNode::Tabs {
+            children: vec![
+                terminal(
+                    "one",
+                    false,
+                    ShellType::Custom {
+                        path: "/bin/fish".to_string(),
+                        args: Vec::new(),
+                    },
+                ),
+                terminal("two", false, ShellType::Default),
+            ],
+            active_tab: 0,
+        };
+        let local = ApiLayoutNode::Tabs {
+            children: vec![
+                terminal("one", true, ShellType::Default),
+                terminal("two", false, ShellType::Default),
+            ],
+            active_tab: 1,
+        };
+
+        let merged = merge_layout_presentation(&server, &local);
+        let ApiLayoutNode::Tabs {
+            children,
+            active_tab,
+        } = merged
+        else {
+            panic!("expected tabs");
+        };
+        assert_eq!(active_tab, 1);
+        let ApiLayoutNode::Terminal {
+            minimized,
+            shell_type,
+            ..
+        } = &children[0]
+        else {
+            panic!("expected terminal");
+        };
+        assert!(*minimized);
+        assert_eq!(
+            shell_type,
+            &ShellType::Custom {
+                path: "/bin/fish".to_string(),
+                args: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn mobile_fullscreen_survives_resync_only_while_terminal_exists() {
+        let mut previous = state(vec![project(
+            "project",
+            terminal("terminal", false, ShellType::Default),
+        )]);
+        previous.fullscreen_terminal = Some(ApiFullscreen {
+            project_id: "project".to_string(),
+            terminal_id: "terminal".to_string(),
+        });
+
+        let mut next = state(vec![project(
+            "project",
+            terminal("terminal", false, ShellType::Default),
+        )]);
+        merge_state_presentation(&mut next, &previous);
+        assert!(next.fullscreen_terminal.is_some());
+
+        let mut without_terminal = state(vec![project(
+            "project",
+            terminal("replacement", false, ShellType::Default),
+        )]);
+        merge_state_presentation(&mut without_terminal, &previous);
+        assert!(without_terminal.fullscreen_terminal.is_none());
     }
 }

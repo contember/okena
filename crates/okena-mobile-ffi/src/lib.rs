@@ -542,14 +542,9 @@ pub async fn toggle_minimized(
     project_id: String,
     terminal_id: String,
 ) -> Result<(), MobileFfiError> {
-    send_mobile_action(
-        &conn_id,
-        ActionRequest::ToggleMinimized {
-            project_id,
-            terminal_id,
-        },
-    )
-    .await
+    ConnectionManager::get()
+        .toggle_minimized_local(&conn_id, &project_id, &terminal_id)
+        .map_err(|message| MobileFfiError::Action { message })
 }
 
 /// Set/clear fullscreen terminal.
@@ -559,15 +554,9 @@ pub async fn set_fullscreen(
     project_id: String,
     terminal_id: Option<String>,
 ) -> Result<(), MobileFfiError> {
-    send_mobile_action(
-        &conn_id,
-        ActionRequest::SetFullscreen {
-            project_id,
-            terminal_id,
-            window: None,
-        },
-    )
-    .await
+    ConnectionManager::get()
+        .set_fullscreen_local(&conn_id, &project_id, terminal_id)
+        .map_err(|message| MobileFfiError::Action { message })
 }
 
 /// Split a terminal pane. `direction` is "vertical" or "horizontal".
@@ -885,15 +874,19 @@ pub async fn set_active_tab(
     path: Vec<u32>,
     index: u32,
 ) -> Result<(), MobileFfiError> {
-    send_mobile_action(
-        &conn_id,
-        ActionRequest::SetActiveTab {
-            project_id,
-            path: path.into_iter().map(|v| v as usize).collect(),
-            index: index as usize,
-        },
-    )
-    .await
+    let path = path
+        .into_iter()
+        .map(usize::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| MobileFfiError::Action {
+            message: format!("Invalid tab path: {error}"),
+        })?;
+    let index = usize::try_from(index).map_err(|error| MobileFfiError::Action {
+        message: format!("Invalid tab index: {error}"),
+    })?;
+    ConnectionManager::get()
+        .set_active_tab_local(&conn_id, &project_id, &path, index)
+        .map_err(|message| MobileFfiError::Action { message })
 }
 
 /// Move a tab within a tab group.
