@@ -66,11 +66,10 @@ pub struct AppState {
     /// desktop quit requests.
     pub ui_owned: bool,
     pub shutdown_when_idle: Arc<AtomicBool>,
-    /// Graceful process-shutdown trigger for `/v1/shutdown`. `Some` on the
-    /// dedicated daemon, whose `run()` awaits it and then tears down cleanly
-    /// (socket unlink + remote.json removal + instance-lock release on drop);
-    /// `None` on the single-binary `okena --headless` daemon, which hard-exits.
-    pub process_shutdown: Option<Arc<tokio::sync::Notify>>,
+    /// Graceful process-shutdown trigger for `/v1/shutdown`. The shared daemon
+    /// run loop awaits it and tears down the socket, discovery file, and
+    /// instance lock through normal drops.
+    pub process_shutdown: Arc<tokio::sync::Notify>,
     pub update_info: okena_ext_updater::UpdateInfo,
 }
 
@@ -116,7 +115,7 @@ pub fn build_router(
     git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
     next_connection_id: Arc<AtomicU64>,
     active_connections: Arc<AtomicU64>,
-    process_shutdown: Option<Arc<tokio::sync::Notify>>,
+    process_shutdown: Arc<tokio::sync::Notify>,
     ui_owned: bool,
     update_info: okena_ext_updater::UpdateInfo,
 ) -> Router {

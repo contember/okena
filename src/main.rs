@@ -23,7 +23,6 @@ use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeM
 use gpui_component::Root;
 #[cfg(target_os = "linux")]
 use okena_app::simple_root::SimpleRoot as Root;
-use std::sync::Arc;
 
 use std::net::IpAddr;
 
@@ -91,12 +90,10 @@ impl std::io::Write for TeeWriter {
 }
 
 use okena_app::app::Okena;
-use okena_app::app::headless::HeadlessApp;
 use crate::assets::{Assets, embedded_fonts};
 use okena_app::keybindings;
 use okena_app::keybindings::{About, NewWindow, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings, ShowProfileManager};
 use okena_app::logging;
-use okena_app::terminal::pty_manager::PtyManager;
 use okena_app::theme::{AppTheme, GlobalTheme, ThemeMode};
 use okena_app::views::panels::toast::ToastManager;
 use okena_app::workspace::persistence;
@@ -279,59 +276,32 @@ fn set_app_menus(cx: &mut App) {
     ]);
 }
 
-/// `okena pair` — generate a pairing code and write it to a file for the running server to validate.
-/// Global handle keeping the headless app entity alive for the process lifetime.
-struct GlobalHeadless(#[allow(dead_code)] Entity<HeadlessApp>);
-impl Global for GlobalHeadless {}
-
 /// Run the application in headless mode (no GUI, remote server only).
-fn run_headless(listen_addr: Option<IpAddr>) {
+fn run_headless(listen_addr: Option<IpAddr>) -> anyhow::Result<()> {
     println!("Starting Okena in headless mode...");
-
-    Application::with_platform(gpui_platform::current_platform(true)).run(move |cx: &mut App| {
-        cx.set_quit_mode(QuitMode::Explicit);
-
-        // Initialize global settings (must be before workspace load)
-        let settings_entity = settings::init_settings(cx);
-        let app_settings = settings_entity.read(cx).get().clone();
-
-        // Seed the process palette so headless terminals answer OSC color
-        // queries themselves (client mirrors deliberately don't answer, and no
-        // views push per-terminal palettes here).
-        okena_app::terminal::terminal::set_process_palette(
-            AppTheme::new(app_settings.theme_mode, true).colors,
+    let app_settings = okena_workspace::settings::load_settings();
+    let session_backend = app_settings.session_backend;
+    let workspace_data = persistence::load_workspace(session_backend).unwrap_or_else(|error| {
+        log::error!(
+            "Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.",
+            error,
+            persistence::get_workspace_path().with_extension("json.bak")
         );
-
-        // Load or create workspace
-        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
-            log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
-            persistence::default_workspace()
-        });
-
-        // Create PTY manager
-        let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
-        let pty_manager = Arc::new(pty_manager);
-
-        let listen_addrs =
-            okena_app::remote::local::resolve_daemon_listen_addrs(listen_addr, &app_settings);
-        let tls_enabled = listen_addrs.iter().any(|addr| !addr.is_loopback())
-            && app_settings.remote_tls_enabled;
-
-        // Create the headless app entity (starts PTY loop, command loop, and remote server)
-        // Must be stored in a global to keep the entity alive — dropping the handle
-        // would release the entity and cancel all spawned tasks + drop RemoteServer.
-        let headless = cx.new(|cx| {
-            HeadlessApp::new(
-                workspace_data,
-                pty_manager,
-                pty_events,
-                listen_addrs,
-                tls_enabled,
-                cx,
-            )
-        });
-        cx.set_global(GlobalHeadless(headless));
+        persistence::default_workspace()
     });
+    let listen_addrs =
+        okena_remote_server::local::resolve_daemon_listen_addrs(listen_addr, &app_settings);
+    let tls_enabled = listen_addrs.iter().any(|addr| !addr.is_loopback())
+        && app_settings.remote_tls_enabled;
+    let params = okena_daemon_core::DaemonParams {
+        workspace_data,
+        settings: app_settings,
+        session_backend,
+        listen_addrs,
+        tls_enabled,
+        ui_owned: std::env::args().any(|arg| arg == "--ui-owned"),
+    };
+    okena_daemon_core::DaemonCore::new(params)?.run()
 }
 
 fn main() {
@@ -535,18 +505,10 @@ fn main() {
             );
         }
 
-        // The headless path IS the daemon — the single writer (§5). It owns the
-        // instance lock + workspace.json. (The GUI path below never locks: it is
-        // always a thin daemon-client and the daemon it spawns/attaches holds
-        // the lock.) Held for run_headless's lifetime.
-        let _instance_lock = match persistence::acquire_instance_lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        };
-        run_headless(listen_addr);
+        if let Err(error) = run_headless(listen_addr) {
+            eprintln!("Failed to start headless daemon: {error:#}");
+            std::process::exit(1);
+        }
         return;
     }
 

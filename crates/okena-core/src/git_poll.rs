@@ -36,9 +36,9 @@ impl GitPollTrigger {
 
 /// Map an action to the git-poll wake-up it should trigger (if any).
 ///
-/// Shared by both daemons so the same actions always drive the same immediate
-/// refresh: the dedicated `okena-daemon` (`DaemonCore`) and the single-binary
-/// `okena --headless` (`HeadlessApp`) both call this after a successful action.
+/// Shared by both daemon entry points so the same actions always drive the same
+/// immediate refresh. Both `okena-daemon` and `okena --headless` run
+/// `DaemonCore` and call this after a successful action.
 ///
 /// - Branch checkout invalidates the cached PR/CI (they belong to the old
 ///   branch) and re-polls `gh`.

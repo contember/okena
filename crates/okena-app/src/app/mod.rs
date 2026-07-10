@@ -1,15 +1,11 @@
 mod detached_overlays;
 mod detached_terminals;
 mod extras;
-pub mod headless;
 mod notifications;
-mod remote_commands;
-mod remote_config;
 
 pub use detached_overlays::open_detached_overlay;
 
 use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
-use crate::services::manager::ServiceManager;
 use crate::views::window::{TerminalsRegistry, WindowView};
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use gpui::*;
@@ -113,68 +109,6 @@ fn hand_off_ui_owned_daemon(mut spawned_child: Option<std::process::Child>) {
                 );
             }
         }
-    }
-}
-
-/// Set up an observer that loads/unloads service configs when projects change.
-/// Handles deferred worktrees by skipping projects whose directory doesn't exist yet.
-///
-/// Used by the headless daemon (`HeadlessApp`), which is the real service owner.
-/// The GUI is a thin client and never runs services in-process.
-pub(crate) fn observe_project_services<T: 'static>(
-    workspace: &Entity<Workspace>,
-    service_manager: &Entity<ServiceManager>,
-    cx: &mut Context<T>,
-) {
-    let service_manager = service_manager.clone();
-    let known: Arc<parking_lot::Mutex<HashSet<String>>> =
-        Arc::new(parking_lot::Mutex::new(HashSet::new()));
-
-    // Initial load
-    {
-        let data = workspace.read(cx).data().clone();
-        sync_services(&data, &mut known.lock(), &service_manager, cx);
-    }
-
-    let known_for_observer = known.clone();
-    cx.observe(workspace, move |_this, workspace: Entity<Workspace>, cx| {
-        let data = workspace.read(cx).data().clone();
-        sync_services(&data, &mut known_for_observer.lock(), &service_manager, cx);
-    })
-    .detach();
-}
-
-fn sync_services(
-    data: &WorkspaceData,
-    known: &mut HashSet<String>,
-    service_manager: &Entity<ServiceManager>,
-    cx: &mut impl AppContext,
-) {
-    let current_ids: HashSet<String> = data.projects.iter()
-        .filter(|p| !p.is_remote)
-        .map(|p| p.id.clone())
-        .collect();
-
-    for p in &data.projects {
-        if p.is_remote || known.contains(&p.id) {
-            continue;
-        }
-        // Skip projects whose directory doesn't exist yet (deferred worktrees).
-        if !std::path::Path::new(&p.path).exists() {
-            continue;
-        }
-        service_manager.update(cx, |sm, cx| {
-            sm.load_project_services(&p.id, &p.path, &p.service_terminals, cx);
-        });
-        known.insert(p.id.clone());
-    }
-
-    let removed: Vec<String> = known.difference(&current_ids).cloned().collect();
-    for id in &removed {
-        service_manager.update(cx, |sm, cx| {
-            sm.unload_project_services(id, cx);
-        });
-        known.remove(id);
     }
 }
 

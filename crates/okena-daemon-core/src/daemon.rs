@@ -1,15 +1,13 @@
-//! Final daemon assembly: the GPUI-free analogue of `okena-app`'s
-//! [`HeadlessApp`](okena_app::app::headless::HeadlessApp).
+//! Final GPUI-free daemon assembly shared by both headless entry points.
 //!
-//! [`HeadlessApp`] wires the headless GUI mode: it stands up the workspace
-//! entity, PTY manager, service manager, git watcher, the remote command bridge,
-//! and the [`RemoteServer`](okena_remote_server::server::RemoteServer), all on
-//! GPUI's main-thread reactor. [`DaemonCore`] does the exact same wiring with no
-//! GPUI in scope: the shared state lives behind `Arc<parking_lot::Mutex<…>>` in
+//! [`DaemonCore`] stands up the workspace, PTY and service managers, git watcher,
+//! remote command bridge, and
+//! [`RemoteServer`](okena_remote_server::server::RemoteServer) without GPUI. The
+//! shared state lives behind `Arc<parking_lot::Mutex<…>>` in
 //! [`DaemonReactor`](crate::reactor::DaemonReactor), the `cx.observe` closures
 //! become the `watch`-channel-driven observer tasks
 //! ([`spawn_observers`](crate::reactor::DaemonReactor::spawn_observers)), and the
-//! GPUI command loop becomes [`daemon_command_loop`](crate::command_loop).
+//! command bridge is driven by [`daemon_command_loop`](crate::command_loop).
 //!
 //! [`DaemonCore::new`] builds everything and starts the remote server (so its
 //! port + pairing info are printed before [`run`](DaemonCore::run) blocks);
@@ -30,10 +28,9 @@
 //!
 //! ## Lifecycle
 //!
-//! The daemon is UI-owned: the spawning UI starts it and kills it. So
-//! [`run`](DaemonCore::run) blocking until the bridge closes (the remote server
-//! is gone) or ctrl-c arrives is the intended behavior — there is no other
-//! shutdown surface.
+//! [`run`](DaemonCore::run) blocks until ctrl-c, a bridge failure, or a graceful
+//! shutdown request. A UI-owned daemon shuts down when its final owning desktop
+//! client hands off ownership.
 //!
 //! ## Testing
 //!
@@ -90,7 +87,8 @@ pub struct DaemonParams {
     /// TCP addresses the remote server binds to. The UI-owned daemon always
     /// includes loopback for same-host clients; remote mode may add a LAN bind.
     pub listen_addrs: Vec<IpAddr>,
-    /// Whether the remote server should serve TLS (dual-stack http+https).
+    /// Whether TLS is enabled. Non-loopback listeners require it; loopback also
+    /// accepts plain HTTP for local clients.
     pub tls_enabled: bool,
     /// Whether desktop clients own this daemon's process lifetime.
     pub ui_owned: bool,
@@ -162,9 +160,8 @@ pub struct DaemonCore {
 impl DaemonCore {
     /// Build the daemon and start its remote server.
     ///
-    /// Mirrors [`HeadlessApp::new`](okena_app::app::headless::HeadlessApp) with no
-    /// GPUI: stands up the PTY manager + broadcaster, the terminal registry +
-    /// backend, the workspace + reactor, the settings + config, the server wiring
+    /// Stands up the PTY manager + broadcaster, the terminal registry + backend,
+    /// the workspace + reactor, the settings + config, and the server wiring
     /// channels, then starts the [`RemoteServer`] and prints its pairing info.
     /// The reactor tasks are NOT started here — that is [`run`](DaemonCore::run)'s
     /// job (they need a `LocalSet`).
@@ -274,13 +271,13 @@ impl DaemonCore {
             Some(git_poll_trigger_tx.clone()),
             next_connection_id,
             active_connections,
-            Some(shutdown_requested.clone()),
+            shutdown_requested.clone(),
             params.ui_owned,
             params.tls_enabled,
             env!("CARGO_PKG_VERSION"),
         )?;
 
-        // ── 7. Print pairing info to stdout (mirror headless.rs) ──────────────
+        // ── 7. Print pairing info to stdout ──────────────────────────────────
         let port = remote_server.port();
         let code = auth_store.get_or_create_code();
         log::info!("Remote server started on port {port}");

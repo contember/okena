@@ -8,8 +8,8 @@
 //! `settings::init_settings(cx)`.
 //!
 //! The desktop app's `spawn_daemon` prefers this binary when it exists next to
-//! `okena`; the `okena --headless` fallback remains supported for single-binary
-//! installs.
+//! `okena`; the `okena --headless` entry point runs the same `DaemonCore` for
+//! single-binary installs.
 
 use std::io::Write;
 use std::net::IpAddr;
@@ -181,8 +181,8 @@ fn main() -> anyhow::Result<()> {
     //
     // TLS policy by deployment mode (architecture §1): a purely local daemon
     // serves plain http; once any non-loopback listener is active, honor the
-    // user's TLS preference for off-host clients. The server remains dual-stack,
-    // so same-host plain clients continue to work on the local endpoint.
+    // user's TLS preference for off-host clients. Purely local daemons remain
+    // plain HTTP and can also use the local Unix socket.
     let tls_enabled =
         listen_addrs.iter().any(|addr| !addr.is_loopback()) && settings.remote_tls_enabled;
     let params = DaemonParams {

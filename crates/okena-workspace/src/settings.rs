@@ -307,9 +307,9 @@ pub struct AppSettings {
 
     /// Serve the remote control server over TLS (https/wss) using a persisted
     /// self-signed certificate. Clients pin the cert fingerprint on pairing.
-    /// Default ON (incl. for existing configs missing the key): the server is
-    /// dual-stack, so enabling TLS does not break already-paired plain-http
-    /// clients — they keep working while new/auto clients negotiate TLS.
+    /// Default ON (including existing configs missing the key). TLS is only
+    /// activated when the daemon exposes a non-loopback listener; loopback-only
+    /// daemons continue serving plain HTTP.
     #[serde(default = "default_true")]
     pub remote_tls_enabled: bool,
 
@@ -870,13 +870,12 @@ mod tests {
             AppSettings::default().remote_tls_enabled,
             "fresh installs should default to TLS on"
         );
-        // Existing settings.json predates the key → defaults to ON too. Safe
-        // because the server is dual-stack (still accepts plain http), so
-        // already-paired clients don't break.
+        // Existing settings.json predates the key and defaults to ON too. TLS
+        // only takes effect when a non-loopback listener is configured.
         let existing: AppSettings = serde_json::from_str(r#"{"version": 2}"#).unwrap();
         assert!(
             existing.remote_tls_enabled,
-            "existing configs without the key default to TLS on (dual-stack server)"
+            "existing configs without the key default to TLS on"
         );
         // An explicit opt-out is still respected.
         let explicit: AppSettings =

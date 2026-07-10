@@ -37,7 +37,7 @@ pub struct LocalDaemon {
     pub host: String,
     /// Daemon process id (0 if the file omitted it).
     pub pid: u32,
-    /// Whether the daemon negotiates TLS (dual-stack) on its port.
+    /// Whether local TCP clients should negotiate TLS with this daemon.
     pub tls: bool,
     /// Whether desktop clients own this daemon's process lifetime.
     pub ui_owned: bool,

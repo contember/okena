@@ -530,7 +530,7 @@ pub async fn daemon_command_loop(
                     .collect();
 
                 // The daemon serves a SINGLE synthetic main window (ported from
-                // headless.rs's windows_resolver). No GUI, so it's always
+                // the former GUI-headless windows resolver). No GUI, so it's always
                 // "active", has no per-window focus/fullscreen/bounds, and no
                 // hidden set — every project in `project_order` is visible.
                 let visible_project_ids: Vec<String> = ws

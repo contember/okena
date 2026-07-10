@@ -6087,6 +6087,7 @@ dependencies = [
  "okena-app",
  "okena-cli",
  "okena-core",
+ "okena-daemon-core",
  "okena-ext-claude",
  "okena-ext-codex",
  "okena-ext-github",

@@ -1,5 +1,5 @@
 //! GPUI-free PTY event loop: the headless analogue of the GUI's batched
-//! `async_channel` drain in `okena-app`'s `app/mod.rs` / `app/headless.rs`.
+//! `async_channel` drain previously hosted by `okena-app`.
 //!
 //! The GUI reads [`PtyEvent`]s off the [`PtyManager`]'s channel on the GPUI
 //! thread, feeds `Data` into the per-terminal `process_output`, and on `Exit`

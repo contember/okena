@@ -6,8 +6,7 @@
 //! Self-exclusion: the caller disconnects its OWN loopback WS before calling and
 //! the daemon simply counts live WS connections — see `local::request_local_shutdown`.
 //!
-//! Dedicated daemons wake their graceful run loop; the single-binary fallback
-//! retains its pid-guarded hard-exit cleanup.
+//! Every host wakes the shared graceful daemon run loop.
 
 use crate::routes::{AppState, PeerInfo};
 use axum::Json;
@@ -40,14 +39,7 @@ pub(crate) fn schedule_process_shutdown(state: &AppState) {
     let notify = state.process_shutdown.clone();
     tokio::spawn(async move {
         tokio::time::sleep(EXIT_DELAY).await;
-        match notify {
-            Some(notify) => notify.notify_one(),
-            None => {
-                crate::server::cleanup_on_hard_exit();
-                log::info!("Headless daemon exiting for shutdown");
-                std::process::exit(0);
-            }
-        }
+        notify.notify_one();
     });
 }
 
