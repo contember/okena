@@ -20,6 +20,106 @@ use gpui::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+struct QueuedAction {
+    config: RemoteConnectionConfig,
+    token: String,
+    action: ActionRequest,
+}
+
+struct ActionQueues {
+    runtime: Arc<tokio::runtime::Runtime>,
+    event_tx: async_channel::Sender<ConnectionEvent>,
+    senders: parking_lot::Mutex<HashMap<String, async_channel::Sender<QueuedAction>>>,
+}
+
+impl ActionQueues {
+    fn new(
+        runtime: Arc<tokio::runtime::Runtime>,
+        event_tx: async_channel::Sender<ConnectionEvent>,
+    ) -> Self {
+        Self {
+            runtime,
+            event_tx,
+            senders: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn enqueue(&self, connection_id: &str, action: QueuedAction) {
+        let sender = self
+            .senders
+            .lock()
+            .entry(connection_id.to_string())
+            .or_insert_with(|| {
+                let (tx, rx) = async_channel::unbounded();
+                let connection_id = connection_id.to_string();
+                let event_tx = self.event_tx.clone();
+                self.runtime.spawn(async move {
+                    run_action_queue(connection_id, rx, event_tx).await;
+                });
+                tx
+            })
+            .clone();
+
+        if sender.try_send(action).is_err() {
+            log::error!("action queue unexpectedly closed for {connection_id}");
+        }
+    }
+}
+
+async fn run_action_queue(
+    connection_id: String,
+    receiver: async_channel::Receiver<QueuedAction>,
+    event_tx: async_channel::Sender<ConnectionEvent>,
+) {
+    while let Ok(action) = receiver.recv().await {
+        send_queued_action(&connection_id, action, &event_tx).await;
+    }
+}
+
+async fn send_queued_action(
+    connection_id: &str,
+    queued: QueuedAction,
+    event_tx: &async_channel::Sender<ConnectionEvent>,
+) {
+    let QueuedAction {
+        config,
+        token,
+        action,
+    } = queued;
+    let name = config.name.clone();
+    let (client, url) = http_client_and_url(&config, "/v1/actions");
+    let result = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&action)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+
+    let message = match result {
+        Ok(resp) if resp.status().is_success() => {
+            log::debug!("send_action: success for {name}");
+            return;
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            log::error!("send_action: failed ({status}): {body} for {name}");
+            format!("Action failed ({status}): {body}")
+        }
+        Err(error) => {
+            log::error!("send_action: request error for {name}: {error}");
+            format!("Action request failed: {error}")
+        }
+    };
+    let _ = event_tx
+        .send(ConnectionEvent::ServerWarning {
+            connection_id: connection_id.to_string(),
+            message,
+        })
+        .await;
+}
+
 fn http_client_and_url(config: &RemoteConnectionConfig, path: &str) -> (reqwest::Client, String) {
     #[cfg(unix)]
     if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = &config.local_endpoint {
@@ -79,6 +179,9 @@ pub struct RemoteConnectionManager {
     /// Channel for events coming from tokio tasks
     event_tx: async_channel::Sender<ConnectionEvent>,
 
+    /// Per-connection FIFO queues for state-changing HTTP actions.
+    action_queues: ActionQueues,
+
     /// Coalescing doorbell rung by the tokio reader whenever a remote terminal
     /// produces output. Capacity 1: a wake already pending absorbs further
     /// output until the GPUI side drains, so output bursts collapse into a
@@ -124,11 +227,13 @@ impl RemoteConnectionManager {
         // Coalescing doorbell for remote terminal output (see field docs).
         let (activity_tx, activity_rx) = async_channel::bounded::<()>(1);
 
+        let action_queues = ActionQueues::new(runtime.clone(), event_tx.clone());
         let manager = Self {
             connections: HashMap::new(),
             terminals,
             runtime,
             event_tx,
+            action_queues,
             activity_tx,
         };
         manager.start_terminal_activity_pump(activity_rx, cx);
@@ -420,7 +525,7 @@ impl RemoteConnectionManager {
 
     /// Send an action to a remote server via HTTP POST /v1/actions.
     ///
-    /// Fire-and-forget: spawns on the tokio runtime, logs errors and shows toast on failure.
+    /// Fire-and-forget from the UI thread, but FIFO within each connection.
     pub fn send_action(
         &self,
         connection_id: &str,
@@ -443,42 +548,14 @@ impl RemoteConnectionManager {
             }
         };
 
-        let name = config.name.clone();
-        let event_tx = self.event_tx.clone();
-
-        self.runtime.spawn(async move {
-            let (client, url) = http_client_and_url(&config, "/v1/actions");
-            let result = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", token))
-                .json(&action)
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await;
-
-            match result {
-                Ok(resp) if resp.status().is_success() => {
-                    log::debug!("send_action: success for {}", name);
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    log::error!("send_action: failed ({}): {} for {}", status, body, name);
-                    // Send a warning event back to the GPUI thread
-                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
-                        connection_id: String::new(),
-                        message: format!("Action failed ({}): {}", status, body),
-                    });
-                }
-                Err(e) => {
-                    log::error!("send_action: request error for {}: {}", name, e);
-                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
-                        connection_id: String::new(),
-                        message: format!("Action request failed: {}", e),
-                    });
-                }
-            }
-        });
+        self.action_queues.enqueue(
+            connection_id,
+            QueuedAction {
+                config,
+                token,
+                action,
+            },
+        );
     }
 
     /// Upload a pasted clipboard image to the remote server, which writes it to
@@ -846,8 +923,53 @@ fn now_unix_timestamp() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{activity_changed, is_local_connection_terminal_failure, RemoteConnectionManager};
+    use super::{
+        activity_changed, is_local_connection_terminal_failure, ActionQueues, QueuedAction,
+        RemoteConnectionManager,
+    };
+    use okena_core::api::ActionRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    fn accept_until(listener: &TcpListener, deadline: Instant) -> TcpStream {
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "timed out waiting for request");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("failed to accept request: {error}"),
+            }
+        }
+    }
+
+    fn read_request_body(stream: &mut TcpStream) -> String {
+        let mut reader = BufReader::new(&mut *stream);
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            let lowercase = line.to_ascii_lowercase();
+            if let Some(value) = lowercase.strip_prefix("content-length:") {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).unwrap();
+        String::from_utf8(body).unwrap()
+    }
+
+    fn respond_ok(stream: &mut TcpStream) {
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    }
 
     #[test]
     fn local_error_status_triggers_recovery() {
@@ -884,6 +1006,56 @@ mod tests {
             "some-user-remote",
             &ConnectionStatus::Error("gone".into()),
         ));
+    }
+
+    #[test]
+    fn action_queue_waits_for_each_response_before_sending_the_next_action() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut first = accept_until(&listener, deadline);
+            assert!(read_request_body(&mut first).contains("first"));
+
+            std::thread::sleep(Duration::from_millis(100));
+            match listener.accept() {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Ok(_) => panic!("second action started before the first response"),
+                Err(error) => panic!("failed to inspect action queue: {error}"),
+            }
+            respond_ok(&mut first);
+
+            let mut second = accept_until(&listener, deadline);
+            assert!(read_request_body(&mut second).contains("second"));
+            respond_ok(&mut second);
+        });
+
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let (event_tx, _event_rx) = async_channel::unbounded();
+        let queues = ActionQueues::new(runtime, event_tx);
+        let mut config = make_config("127.0.0.1", port);
+        config.name = "ordered-test".to_string();
+        for terminal_id in ["first", "second"] {
+            queues.enqueue(
+                "connection",
+                QueuedAction {
+                    config: config.clone(),
+                    token: "token".to_string(),
+                    action: ActionRequest::SendText {
+                        terminal_id: terminal_id.to_string(),
+                        text: "input".to_string(),
+                    },
+                },
+            );
+        }
+
+        server.join().unwrap();
     }
 
     fn gens(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
