@@ -16,9 +16,10 @@
 //!    binds a port / acquires the instance lock.
 //! 2. Ack the HTTP request immediately (so the client gets a clean response and
 //!    can begin polling for the new daemon).
-//! 3. Schedule `std::process::exit` on a short timer — *after* the response has
-//!    been flushed — which drops this daemon's socket, releases its port, and
-//!    lets the lock file go stale (a dead PID), so the replacement takes over.
+//! 3. Notify the graceful daemon run loop on a short timer — *after* the
+//!    response has been flushed. The daemon persists its final state and drops
+//!    its socket, discovery file, and instance lock before the replacement
+//!    takes over.
 //!
 //! The replacement's port scan picks the first free port in 19100–19200, which
 //! may differ from the outgoing daemon's (the old one can linger in TIME_WAIT).
@@ -36,7 +37,7 @@ const EXIT_DELAY: Duration = Duration::from_millis(300);
 
 pub async fn post_restart(
     Extension(peer): Extension<PeerInfo>,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> StatusCode {
     if !peer.is_local_trusted() {
         return StatusCode::FORBIDDEN;
@@ -54,14 +55,14 @@ pub async fn post_restart(
         }
     }
 
-    // Exit after the response is flushed. A detached task on the server runtime
-    // sleeps briefly, then hard-exits: `std::process::exit` skips destructors,
-    // so the lock file + remote.json are left with this (now-dead) PID, which the
-    // replacement treats as stale and takes over.
+    // Wake the graceful run loop after the response is flushed. The replacement
+    // is already waiting on this PID, so it cannot race the outgoing daemon's
+    // final persistence and lock release.
+    let process_shutdown = state.process_shutdown.clone();
     tokio::spawn(async move {
         tokio::time::sleep(EXIT_DELAY).await;
         log::info!("Daemon exiting for restart");
-        std::process::exit(0);
+        process_shutdown.notify_one();
     });
 
     StatusCode::OK

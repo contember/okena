@@ -72,9 +72,8 @@ pub fn get_workspace_path() -> PathBuf {
 }
 
 /// Path to the instance lock file for the active profile (falling back to the
-/// legacy flat layout). Shared by `acquire_instance_lock` and any teardown that
-/// needs to remove the lock without holding a `LockGuard` (e.g. the hard-exit
-/// daemon shutdown path), so both agree on the location.
+/// legacy flat layout). Shared by lock acquisition and lifecycle diagnostics so
+/// every process resolves the same ownership boundary.
 pub fn instance_lock_path() -> PathBuf {
     okena_core::profiles::try_current()
         .map(|p| p.lock_path())
