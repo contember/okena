@@ -52,7 +52,7 @@
 //! normal remote terminal path. (Surfacing the `HookMonitor`'s in-flight/run
 //! status into `StateResponse` for a client-side hooks panel is a follow-up.)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -69,7 +69,7 @@ use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{LocalBackend, TerminalBackend};
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_terminal::session_backend::SessionBackend;
-use okena_workspace::persistence::{AppSettings, LockGuard, acquire_instance_lock};
+use okena_workspace::persistence::{self, AppSettings, LockGuard, acquire_instance_lock};
 use okena_workspace::state::{Workspace, WorkspaceData};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
@@ -326,7 +326,7 @@ impl DaemonCore {
         let DaemonCore {
             runtime,
             reactor,
-            remote_server,
+            mut remote_server,
             bridge_rx,
             backend,
             terminals,
@@ -347,6 +347,9 @@ impl DaemonCore {
         } = self;
         let handle = runtime.handle().clone();
         let local = tokio::task::LocalSet::new();
+        let shutdown_workspace = reactor.workspace.clone();
+        let shutdown_backend = backend.clone();
+        let shutdown_terminals = terminals.clone();
         local.block_on(&runtime, async move {
             // Observers MUST be spawned inside the LocalSet (they `spawn_local`).
             reactor.spawn_observers();
@@ -457,9 +460,136 @@ impl DaemonCore {
                 }
             }
         });
-        // Keep `remote_server` alive across `block_on`; dropping it here stops
-        // the server and removes remote.json.
-        drop(remote_server);
+        // Cancel every LocalSet task first, then stop accepting new requests.
+        // The reactor Arc remains available for the final authoritative save.
+        drop(local);
+        remote_server.stop();
+
+        flush_shutdown_state(
+            &shutdown_workspace,
+            &*shutdown_backend,
+            &shutdown_terminals,
+            persistence::save_workspace,
+        )?;
         Ok(())
+    }
+}
+
+fn flush_shutdown_state(
+    workspace: &Arc<Mutex<Workspace>>,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    save: impl FnOnce(&WorkspaceData) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let (data, terminal_ids) = {
+        let mut ws = workspace.lock();
+        let terminal_ids: HashSet<String> = ws
+            .drain_pending_closes()
+            .into_iter()
+            .chain(ws.drain_pending_terminal_kills())
+            .collect();
+        (ws.data().clone(), terminal_ids)
+    };
+
+    for terminal_id in terminal_ids {
+        backend.kill(&terminal_id);
+        terminals.lock().remove(&terminal_id);
+    }
+
+    save(&data)
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use okena_terminal::shell_config::ShellType;
+    use okena_terminal::terminal::TerminalTransport;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct StubTransport;
+
+    impl TerminalTransport for StubTransport {
+        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    struct RecordingBackend {
+        killed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TerminalBackend for RecordingBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("not used")
+        }
+
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("not used")
+        }
+
+        fn kill(&self, terminal_id: &str) {
+            self.killed.lock().push(terminal_id.to_string());
+        }
+
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn is_remote(&self) -> bool {
+            false
+        }
+
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn shutdown_drains_terminal_kills_before_saving() {
+        let workspace = Arc::new(Mutex::new(Workspace::new(WorkspaceData::empty())));
+        workspace.lock().queue_terminal_kills([
+            "terminal-a".to_string(),
+            "terminal-a".to_string(),
+            "terminal-b".to_string(),
+        ]);
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let killed = Arc::new(Mutex::new(Vec::new()));
+        let backend = RecordingBackend {
+            killed: killed.clone(),
+        };
+        let saved = AtomicBool::new(false);
+
+        flush_shutdown_state(&workspace, &backend, &terminals, |_| {
+            assert_eq!(killed.lock().len(), 2, "cleanup precedes final save");
+            saved.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(saved.load(Ordering::Relaxed));
+        assert!(workspace.lock().drain_pending_terminal_kills().is_empty());
     }
 }
