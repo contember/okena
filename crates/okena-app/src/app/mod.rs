@@ -566,8 +566,14 @@ const RECOVERY_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// once we've failed enough consecutive times AND a live-but-unreachable daemon
 /// is the thing blocking us (so we never kill a daemon that's merely absent, nor
 /// one that's actually healthy). Pure so the decision is unit-testable.
-fn should_escalate_recovery(failed_attempts: u32, live_unreachable_daemon: bool) -> bool {
-    failed_attempts >= RECOVERY_ESCALATE_AFTER_ATTEMPTS && live_unreachable_daemon
+fn should_escalate_recovery(
+    failed_attempts: u32,
+    live_unreachable_daemon: bool,
+    owns_daemon: bool,
+) -> bool {
+    failed_attempts >= RECOVERY_ESCALATE_AFTER_ATTEMPTS
+        && live_unreachable_daemon
+        && owns_daemon
 }
 
 /// Backoff before the next local-daemon recovery attempt, given how many have
@@ -667,26 +673,39 @@ impl Okena {
                                     })
                                 })
                                 .await;
-                            if should_escalate_recovery(failed_attempts, stuck_daemon.is_some())
-                                && let Some(daemon) = stuck_daemon
+                            if let Some(daemon) = stuck_daemon
                             {
-                                log::warn!(
-                                    "Local daemon pid {} is live but unreachable after {failed_attempts} failed recovery attempts; killing it so the next attempt respawns",
-                                    daemon.pid
-                                );
-                                kill_process_by_pid(daemon.pid);
-                                // If the killed daemon was our own spawned child,
-                                // wait() it now — otherwise the zombie would linger
-                                // for the app lifetime if the next ensure ATTACHES
-                                // (which never adopts a new Child handle).
-                                let _ = this.update(cx, |this, _cx| {
-                                    if let Some(child) = this.spawned_daemon.as_mut()
-                                        && child.id() == daemon.pid
-                                    {
-                                        let _ = child.wait();
-                                        this.spawned_daemon = None;
-                                    }
-                                });
+                                let owns_daemon = this
+                                    .update(cx, |this, _cx| {
+                                        this.spawned_daemon
+                                            .as_ref()
+                                            .is_some_and(|child| child.id() == daemon.pid)
+                                    })
+                                    .unwrap_or(false);
+                                if should_escalate_recovery(
+                                    failed_attempts,
+                                    true,
+                                    owns_daemon,
+                                ) {
+                                    log::warn!(
+                                        "Owned local daemon pid {} is live but unreachable after {failed_attempts} failed recovery attempts; killing it so the next attempt respawns",
+                                        daemon.pid
+                                    );
+                                    kill_process_by_pid(daemon.pid);
+                                    let _ = this.update(cx, |this, _cx| {
+                                        if let Some(child) = this.spawned_daemon.as_mut()
+                                            && child.id() == daemon.pid
+                                        {
+                                            let _ = child.wait();
+                                            this.spawned_daemon = None;
+                                        }
+                                    });
+                                } else {
+                                    log::warn!(
+                                        "Attached local daemon pid {} is unreachable; refusing to kill a process this GUI did not spawn",
+                                        daemon.pid
+                                    );
+                                }
                             }
                         }
 
@@ -808,13 +827,35 @@ mod tests {
     #[test]
     fn escalates_only_after_threshold_and_when_stuck() {
         // Below the threshold: never escalate, even if a daemon is stuck.
-        assert!(!should_escalate_recovery(0, true));
-        assert!(!should_escalate_recovery(RECOVERY_ESCALATE_AFTER_ATTEMPTS - 1, true));
+        assert!(!should_escalate_recovery(0, true, true));
+        assert!(!should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS - 1,
+            true,
+            true,
+        ));
         // At/after the threshold WITH a live-unreachable daemon: escalate.
-        assert!(should_escalate_recovery(RECOVERY_ESCALATE_AFTER_ATTEMPTS, true));
-        assert!(should_escalate_recovery(RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5, true));
+        assert!(should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS,
+            true,
+            true,
+        ));
+        assert!(should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5,
+            true,
+            true,
+        ));
         // No live-unreachable daemon (absent or healthy): never kill.
-        assert!(!should_escalate_recovery(RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5, false));
+        assert!(!should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5,
+            false,
+            true,
+        ));
+        // A daemon this GUI merely attached to is never killable.
+        assert!(!should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5,
+            true,
+            false,
+        ));
     }
 
     #[test]
