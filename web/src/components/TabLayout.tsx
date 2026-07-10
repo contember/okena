@@ -24,14 +24,8 @@ export function TabLayout({
   const selectTab = useCallback(
     (index: number) => {
       setActiveIdx(index);
-      postAction({
-        action: "set_active_tab",
-        project_id: project.id,
-        path,
-        index,
-      }).catch(() => {});
     },
-    [project.id, path],
+    [],
   );
 
   const addTab = useCallback(() => {
