@@ -6452,6 +6452,7 @@ dependencies = [
  "async-channel 2.5.0",
  "axum",
  "base64",
+ "fs2",
  "futures",
  "gpui",
  "hmac",

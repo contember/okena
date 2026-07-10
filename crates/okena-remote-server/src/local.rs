@@ -203,36 +203,19 @@ pub fn mint_local_token_in(dir: &Path) -> Result<MintedToken, String> {
     let token_hmac = auth::compute_hmac(&secret, token.as_bytes());
     let token_hmac_b64 = base64::engine::general_purpose::STANDARD.encode(&token_hmac);
 
-    let tokens_path = dir.join("remote_tokens.json");
-    let mut persisted: Vec<PersistedToken> = std::fs::read_to_string(&tokens_path)
-        .ok()
-        .and_then(|data| serde_json::from_str(&data).ok())
-        .unwrap_or_default();
-
     let token_id = uuid::Uuid::new_v4().to_string();
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    persisted.push(PersistedToken {
+    let persisted = PersistedToken {
         id: token_id.clone(),
         token_hmac: token_hmac_b64,
         created_at,
-    });
-
-    let json = serde_json::to_string_pretty(&persisted)
-        .map_err(|e| format!("Failed to serialize tokens: {e}"))?;
-    if let Some(parent) = tokens_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(&tokens_path, json.as_bytes())
+    };
+    auth::append_persisted_token(&dir.join("remote_tokens.json"), persisted)
         .map_err(|e| format!("Failed to write remote_tokens.json: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tokens_path, std::fs::Permissions::from_mode(0o600));
-    }
 
     Ok(MintedToken {
         token,
@@ -1168,6 +1151,48 @@ mod tests {
         let raw = std::fs::read_to_string(dir.join("remote_tokens.json")).unwrap();
         let persisted: Vec<PersistedToken> = serde_json::from_str(&raw).unwrap();
         assert_eq!(persisted.len(), 2, "second mint appends, not overwrites");
+    }
+
+    #[test]
+    fn concurrent_mints_preserve_every_token() {
+        let dir = temp_dir();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let dir = dir.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                mint_local_token_in(&dir).expect("concurrent mint")
+            }));
+        }
+        barrier.wait();
+        let minted: Vec<MintedToken> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        let raw = std::fs::read_to_string(dir.join("remote_tokens.json")).unwrap();
+        let persisted: Vec<PersistedToken> = serde_json::from_str(&raw).unwrap();
+        let secret = std::fs::read(dir.join("remote_secret")).unwrap();
+        assert_eq!(persisted.len(), 2);
+        assert!(
+            minted
+                .iter()
+                .all(|minted| persisted.iter().any(|token| token.id == minted.token_id))
+        );
+        for minted in minted {
+            let expected = base64::engine::general_purpose::STANDARD
+                .encode(auth::compute_hmac(&secret, minted.token.as_bytes()));
+            assert_eq!(
+                persisted
+                    .iter()
+                    .find(|token| token.id == minted.token_id)
+                    .unwrap()
+                    .token_hmac,
+                expected
+            );
+        }
     }
 
     #[test]

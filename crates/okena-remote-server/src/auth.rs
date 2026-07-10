@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use fs2::FileExt;
 use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
 use rand::Rng;
@@ -349,8 +350,10 @@ impl AuthStore {
         let before = inner.tokens.len();
         inner.tokens.retain(|r| r.id != id);
         let removed = inner.tokens.len() < before;
-        if removed {
-            save_tokens_to(&self.tokens_path, &inner.tokens);
+        if removed
+            && let Err(error) = remove_persisted_token(&self.tokens_path, id)
+        {
+            log::error!("Failed to persist token revocation: {error}");
         }
         removed
     }
@@ -519,6 +522,18 @@ fn generate_secret() -> Vec<u8> {
 }
 
 fn load_or_create_secret_at(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    FileExt::lock_exclusive(&lock)?;
+
     if let Ok(data) = std::fs::read(path) {
         if data.len() == 32 {
             return Ok(data);
@@ -527,17 +542,20 @@ fn load_or_create_secret_at(path: &std::path::Path) -> std::io::Result<Vec<u8>> 
     }
 
     let secret = generate_secret();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, &secret)?;
-    #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        if let Err(e) = std::fs::set_permissions(path, perms) {
-            log::warn!("Failed to set remote_secret permissions: {}", e);
+        use std::io::Write;
+        let tmp_path = path.with_extension("tmp");
+        {
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(&secret)?;
+            file.sync_all()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
         }
+        std::fs::rename(tmp_path, path)?;
     }
 
     Ok(secret)
@@ -574,9 +592,9 @@ pub fn tokens_path() -> PathBuf {
 }
 
 /// Save token records to disk, filtering out expired tokens.
-fn save_tokens_to(path: &std::path::Path, tokens: &[TokenRecord]) {
+fn persisted_tokens(tokens: &[TokenRecord]) -> Vec<PersistedToken> {
     let now = SystemTime::now();
-    let persisted: Vec<PersistedToken> = tokens
+    tokens
         .iter()
         .filter(|t| {
             now.duration_since(t.created_at).unwrap_or(Duration::MAX)
@@ -594,36 +612,141 @@ fn save_tokens_to(path: &std::path::Path, tokens: &[TokenRecord]) {
                 created_at: unix,
             }
         })
-        .collect();
+        .collect()
+}
 
-    let json = match serde_json::to_string_pretty(&persisted) {
-        Ok(j) => j,
-        Err(e) => {
-            log::error!("Failed to serialize tokens: {}", e);
-            return;
-        }
-    };
-
+fn lock_tokens_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    if let Err(e) = std::fs::write(path, json.as_bytes()) {
-        log::error!("Failed to write remote_tokens.json: {}", e);
-    } else {
+    let lock_path = path.with_extension("lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+fn load_persisted_unlocked(path: &std::path::Path) -> Result<Vec<PersistedToken>, TokenLoadError> {
+    let data = std::fs::read_to_string(path).map_err(TokenLoadError::Read)?;
+    serde_json::from_str(&data).map_err(TokenLoadError::Parse)
+}
+
+fn normalize_persisted_tokens(tokens: &mut Vec<PersistedToken>) {
+    let cutoff = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(TOKEN_TTL_SECS);
+    tokens.retain(|token| token.created_at > cutoff);
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index + 1..]
+            .iter()
+            .any(|later| later.id == tokens[index].id)
+        {
+            tokens.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    tokens.sort_by_key(|token| token.created_at);
+    const MAX_TOKENS: usize = 64;
+    if tokens.len() > MAX_TOKENS {
+        tokens.drain(0..tokens.len() - MAX_TOKENS);
+    }
+}
+
+fn write_persisted_unlocked(
+    path: &std::path::Path,
+    tokens: &[PersistedToken],
+) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(tokens).map_err(std::io::Error::other)?;
+    let tmp_path = path.with_extension("json.tmp");
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(&json)?;
+        file.sync_all()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
+    }
+    std::fs::rename(tmp_path, path)
+}
+
+pub(crate) fn append_persisted_token(
+    path: &std::path::Path,
+    token: PersistedToken,
+) -> std::io::Result<()> {
+    let _guard = lock_tokens_file(path)?;
+    let mut tokens = match load_persisted_unlocked(path) {
+        Ok(tokens) => tokens,
+        Err(TokenLoadError::Read(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Vec::new()
+        }
+        Err(error) => return Err(std::io::Error::other(error.to_string())),
+    };
+    tokens.push(token);
+    normalize_persisted_tokens(&mut tokens);
+    write_persisted_unlocked(path, &tokens)
+}
+
+fn remove_persisted_token(path: &std::path::Path, id: &str) -> std::io::Result<()> {
+    let _guard = lock_tokens_file(path)?;
+    let mut tokens = match load_persisted_unlocked(path) {
+        Ok(tokens) => tokens,
+        Err(TokenLoadError::Read(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Vec::new()
+        }
+        Err(error) => return Err(std::io::Error::other(error.to_string())),
+    };
+    tokens.retain(|token| token.id != id);
+    normalize_persisted_tokens(&mut tokens);
+    write_persisted_unlocked(path, &tokens)
+}
+
+fn save_tokens_to(path: &std::path::Path, tokens: &[TokenRecord]) {
+    let _guard = match lock_tokens_file(path) {
+        Ok(guard) => guard,
+        Err(error) => {
+            log::error!("Failed to lock remote_tokens.json: {error}");
+            return;
+        }
+    };
+    let mut persisted = match load_persisted_unlocked(path) {
+        Ok(tokens) => tokens,
+        Err(TokenLoadError::Read(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Vec::new()
+        }
+        Err(error) => {
+            log::error!("Failed to merge remote_tokens.json: {error}");
+            return;
+        }
+    };
+    for token in persisted_tokens(tokens) {
+        if let Some(existing) = persisted.iter_mut().find(|existing| existing.id == token.id) {
+            *existing = token;
+        } else {
+            persisted.push(token);
+        }
+    }
+    normalize_persisted_tokens(&mut persisted);
+
+    if let Err(error) = write_persisted_unlocked(path, &persisted) {
+        log::error!("Failed to write remote_tokens.json: {error}");
     }
 }
 
 /// Load token records from disk, filtering out expired tokens.
 fn load_tokens_from(path: &std::path::Path) -> Result<Vec<TokenRecord>, TokenLoadError> {
-    let data = std::fs::read_to_string(path).map_err(TokenLoadError::Read)?;
-    let persisted: Vec<PersistedToken> =
-        serde_json::from_str(&data).map_err(TokenLoadError::Parse)?;
+    let _guard = lock_tokens_file(path).map_err(TokenLoadError::Read)?;
+    let persisted = load_persisted_unlocked(path)?;
 
     let now = SystemTime::now();
     Ok(persisted
@@ -902,6 +1025,29 @@ mod tests {
             store.validate_token(external_token),
             "externally written token should be valid after reload"
         );
+    }
+
+    #[test]
+    fn daemon_save_preserves_token_minted_by_an_external_process() {
+        let store = test_store();
+        let _ = pair_token(&store);
+        append_persisted_token(
+            &store.tokens_path,
+            PersistedToken {
+                id: "external".to_string(),
+                token_hmac: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+                created_at: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            },
+        )
+        .unwrap();
+
+        save_tokens_to(&store.tokens_path, &store.inner.lock().tokens);
+        let persisted = load_persisted_unlocked(&store.tokens_path).unwrap();
+        assert!(persisted.iter().any(|token| token.id == "external"));
+        assert!(persisted.iter().any(|token| token.id != "external"));
     }
 
     #[test]
