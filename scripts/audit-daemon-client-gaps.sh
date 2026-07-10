@@ -78,10 +78,9 @@ CAT1_PATTERNS=(
 
 cat1_hits=0
 for pat in "${CAT1_PATTERNS[@]}"; do
-  # Exclude test modules, the snapshot reconciler, the action dispatcher, and
-  # the daemon/headless owners (legitimate writers).
+  # Exclude test modules, the snapshot reconciler, and the action dispatcher.
   matches=$(grep -rnE "$pat" "${GUI_GLOBS[@]}" 2>/dev/null \
-            | grep -vE '(/tests?/|_test\.rs|#\[cfg\(test\)\]|remote_apply\.rs|action_dispatch\.rs|/app/headless\.rs)' \
+            | grep -vE '(/tests?/|_test\.rs|#\[cfg\(test\)\]|remote_apply\.rs|action_dispatch\.rs)' \
             | grep -vE '^\s*//' )
   if [ -n "$matches" ]; then
     red "  ▸ $pat"
@@ -125,7 +124,11 @@ PAIRS=(
 #   hidden_terminals          — dormant placeholder (`#[allow(dead_code)]`); actual
 #                               per-terminal visibility flows through
 #                               LayoutNode.minimized/detached, which ARE on the wire.
-CAT2_IGNORE='^(version|service_panel_heights|hook_panel_heights|connection_id|is_remote|service_terminals|hidden_terminals)$'
+#   WindowState presentation  — each desktop owns its windows, visibility,
+#                               ordering, sizing, and layout mode locally in
+#                               window-layout.json; daemon ApiWindow must not
+#                               overwrite those choices.
+CAT2_IGNORE='^(version|service_panel_heights|hook_panel_heights|connection_id|is_remote|service_terminals|hidden_terminals|folder_collapsed|hidden_project_ids|os_bounds|project_layout|project_sort_mode|project_widths|show_attention_section)$'
 
 cat2_hits=0
 for pair in "${PAIRS[@]}"; do
