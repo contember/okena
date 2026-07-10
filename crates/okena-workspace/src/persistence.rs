@@ -6,6 +6,8 @@ use crate::state::WorktreeMetadata;
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,60 +86,65 @@ pub fn instance_lock_path() -> PathBuf {
 /// If another instance is already running, returns an error with its PID.
 pub fn acquire_instance_lock() -> Result<LockGuard> {
     let _slow = okena_core::timing::SlowGuard::new("acquire_instance_lock");
-    let lock_path = instance_lock_path();
+    acquire_instance_lock_at(instance_lock_path())
+}
 
+fn acquire_instance_lock_at(lock_path: PathBuf) -> Result<LockGuard> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Check if a lock file already exists with a live process
-    if lock_path.exists()
-        && let Ok(content) = std::fs::read_to_string(&lock_path)
-            && let Ok(pid) = content.trim().parse::<u32>() {
-                if is_process_alive(pid) {
-                    anyhow::bail!(
-                        "Another Okena instance is already running (PID {pid}). \
-                         If this is incorrect, delete {lock_path:?} and try again."
-                    );
-                }
-                // Stale lock file from a crashed process — safe to take over
-                log::info!("Removing stale lock file from PID {pid}");
-            }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
 
-    let my_pid = std::process::id();
-    std::fs::write(&lock_path, my_pid.to_string())?;
+    if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+        let mut content = String::new();
+        let _ = file.read_to_string(&mut content);
+        let owner = instance_lock_pid(&content)
+            .map(|pid| format!("PID {pid}"))
+            .unwrap_or_else(|| "another process".to_string());
+        anyhow::bail!(
+            "Another Okena instance is already running ({owner}): {error}. \
+             If this is incorrect, delete {lock_path:?} and try again."
+        );
+    }
 
-    Ok(LockGuard { path: lock_path })
+    let identity = format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
+    file.set_len(0)?;
+    file.rewind()?;
+    file.write_all(identity.as_bytes())?;
+    file.sync_data()?;
+
+    Ok(LockGuard {
+        path: lock_path,
+        identity,
+        file: Some(file),
+    })
 }
 
-/// Guard that removes the lock file on drop
+pub fn instance_lock_pid(content: &str) -> Option<u32> {
+    content.trim().split(':').next()?.parse().ok()
+}
+
+/// Guard that keeps the OS lock held and removes only its own lock file.
 pub struct LockGuard {
     path: PathBuf,
+    identity: String,
+    file: Option<File>,
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// Check whether a process with the given PID is still alive
-fn is_process_alive(pid: u32) -> bool {
-    let _slow = okena_core::timing::SlowGuard::new("is_process_alive");
-    #[cfg(unix)]
-    {
-        // kill(pid, 0) checks existence without sending a signal
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(windows)]
-    {
-        // On Windows, try tasklist to check if PID exists
-        okena_core::process::safe_output(
-            okena_core::process::command("tasklist")
-                .args(["/FI", &format!("PID eq {pid}"), "/NH"]),
-        )
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-            .unwrap_or(false)
+        if std::fs::read_to_string(&self.path).is_ok_and(|content| content == self.identity) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+        if let Some(file) = self.file.take() {
+            let _ = fs2::FileExt::unlock(&file);
+        }
     }
 }
 
@@ -911,6 +918,34 @@ pub fn default_workspace() -> WorkspaceData {
 mod tests {
     use super::*;
     use crate::state::{FolderData, SplitDirection};
+
+    fn test_lock_path() -> PathBuf {
+        std::env::temp_dir().join(format!("okena-lock-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn instance_lock_is_exclusive_and_reacquirable() {
+        let path = test_lock_path();
+        let first = acquire_instance_lock_at(path.clone()).expect("first lock");
+        let error = match acquire_instance_lock_at(path.clone()) {
+            Ok(_) => panic!("second lock must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Another Okena instance"));
+
+        drop(first);
+        assert!(!path.exists(), "owner removes its lock file");
+        let second = acquire_instance_lock_at(path.clone()).expect("lock after release");
+        drop(second);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn instance_lock_pid_accepts_legacy_and_owned_formats() {
+        assert_eq!(instance_lock_pid("1234"), Some(1234));
+        assert_eq!(instance_lock_pid("1234:owner-token"), Some(1234));
+        assert_eq!(instance_lock_pid("invalid"), None);
+    }
 
     #[test]
     fn client_window_layout_round_trips() {

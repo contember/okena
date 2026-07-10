@@ -29,6 +29,7 @@ dirs = "5.0"
 anyhow = "1.0"
 smol = "2.0"
 libc = "0.2"
+fs2 = "0.4"
 
 # `gpui` here is the *same* optional dependency declared in `[dependencies]`;
 # this entry only layers on the `test-support` feature so the gpui-gated test

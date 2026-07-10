@@ -448,14 +448,16 @@ fn remove_remote_json_and_local_socket() {
 }
 
 /// Remove the instance lock file, but ONLY if it still records THIS process's
-/// pid (mirrors the remote.json pid-guard). The lock file holds a bare pid
-/// string (see `acquire_instance_lock`).
+/// pid (mirrors the remote.json pid-guard). The lock identity starts with its
+/// owner pid (see `acquire_instance_lock`).
 fn remove_instance_lock_if_ours() {
     let lock_path = okena_workspace::persistence::instance_lock_path();
     let Ok(content) = std::fs::read_to_string(&lock_path) else {
         return;
     };
-    if content.trim().parse::<u32>().ok() == Some(std::process::id()) {
+    if okena_workspace::persistence::instance_lock_pid(&content)
+        == Some(std::process::id())
+    {
         let _ = std::fs::remove_file(&lock_path);
     }
 }

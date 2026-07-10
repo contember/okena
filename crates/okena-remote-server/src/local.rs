@@ -663,19 +663,36 @@ pub fn ensure_local_daemon_in(
 
     let mut child = spawn_daemon().map_err(|e| format!("Failed to spawn daemon: {e}"))?;
     match wait_until_reachable_in(dir, spawn_timeout) {
-        Some(daemon) => match auth_token_for_daemon(dir, &daemon) {
-            Ok(token) => Ok(EnsuredDaemon {
-                daemon,
-                token,
-                spawned: Some(child),
-            }),
-            Err(e) => {
+        Some(daemon) => {
+            let spawned_this_daemon = daemon.pid == child.id();
+            if !spawned_this_daemon {
+                log::info!(
+                    "Another daemon won startup (advertised pid {}, child pid {}); attaching",
+                    daemon.pid,
+                    child.id(),
+                );
                 let _ = child.kill();
-                Err(e)
+                let _ = child.wait();
             }
-        },
+
+            match auth_token_for_daemon(dir, &daemon) {
+                Ok(token) => Ok(EnsuredDaemon {
+                    daemon,
+                    token,
+                    spawned: spawned_this_daemon.then_some(child),
+                }),
+                Err(e) => {
+                    if spawned_this_daemon {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    Err(e)
+                }
+            }
+        }
         None => {
             let _ = child.kill();
+            let _ = child.wait();
             Err("Daemon did not become ready in time.".into())
         }
     }
