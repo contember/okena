@@ -58,6 +58,64 @@ fn kill_process_by_pid(pid: u32) {
     }
 }
 
+fn hand_off_ui_owned_daemon(mut spawned_child: Option<std::process::Child>) {
+    let Some(daemon) = okena_remote_server::local::running_daemon() else {
+        if let Some(child) = spawned_child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        return;
+    };
+    if !daemon.ui_owned {
+        log::info!("Leaving standalone local daemon pid {} running", daemon.pid);
+        return;
+    }
+
+    let owns_current_process = spawned_child
+        .as_ref()
+        .is_some_and(|child| child.id() == daemon.pid);
+    match okena_remote_server::local::request_local_shutdown(&daemon) {
+        Ok(outcome) if outcome.accepted && outcome.active_clients == 0 => {
+            if !okena_remote_server::local::wait_for_pid_exit(
+                daemon.pid,
+                Duration::from_secs(3),
+            ) {
+                if let Some(child) = spawned_child.as_mut().filter(|_| owns_current_process) {
+                    let _ = child.kill();
+                } else {
+                    log::warn!(
+                        "UI-owned daemon pid {} did not exit, but this GUI has no matching child handle",
+                        daemon.pid
+                    );
+                }
+            }
+            if let Some(child) = spawned_child.as_mut().filter(|_| owns_current_process) {
+                let _ = child.wait();
+            }
+        }
+        Ok(outcome) if outcome.accepted => {
+            log::info!(
+                "UI-owned daemon shutdown armed until {} other client(s) disconnect",
+                outcome.active_clients
+            );
+        }
+        Ok(_) => {
+            log::info!("Local daemon declined UI lifecycle handoff");
+        }
+        Err(error) => {
+            if let Some(child) = spawned_child.as_mut().filter(|_| owns_current_process) {
+                log::warn!("Shutdown request failed ({error}); killing owned daemon child");
+                let _ = child.kill();
+                let _ = child.wait();
+            } else {
+                log::warn!(
+                    "Shutdown request failed ({error}); refusing to kill daemon without a matching child handle"
+                );
+            }
+        }
+    }
+}
+
 /// Set up an observer that loads/unloads service configs when projects change.
 /// Handles deferred worktrees by skipping projects whose directory doesn't exist yet.
 ///
@@ -153,10 +211,7 @@ pub struct Okena {
     /// XDG notification, the thread sends a `NotificationJump` here and the
     /// click loop focuses the originating pane. See `app/notifications.rs`.
     notification_jump_tx: async_channel::Sender<notifications::NotificationJump>,
-    /// Child of a daemon WE spawned in `--daemon-client` mode; killed on app
-    /// quit. `None` if we attached to an existing daemon or in classic mode.
-    /// Replaced (old handle reaped) by `recover_local_daemon` when self-healing
-    /// spawns a fresh daemon.
+    /// Child this GUI spawned, retained for owner-checked recovery fallback.
     spawned_daemon: Option<std::process::Child>,
     /// Single-flight guard for the local-daemon recovery task: set while a
     /// recovery loop runs so repeat `LocalConnectionFailed` events don't stack
@@ -339,79 +394,21 @@ impl Okena {
         })
         .detach();
 
-        // UI-owned daemon lifecycle: when the app quits, ask the daemon WE
-        // spawned in `--daemon-client` mode to stop — gracefully, and only if no
-        // other client still depends on it. A daemon we merely attached to
-        // (`spawned_daemon == None`) is left running for other UIs.
-        //
-        // This replaces the old SIGKILL-at-quit, which raced a quickly-restarted
-        // GUI: the new GUI attaches to our daemon just as our quit kills it,
-        // leaving it dialing a dead socket. Now we disconnect our own loopback
-        // connection first, then POST `/v1/shutdown` to the CURRENT daemon
-        // discovered from `remote.json` (its pid reflects any UI-triggered
-        // restart successor):
-        //   • accepted    → the daemon tears itself down cleanly; we briefly wait
-        //                    for its pid to exit and SIGKILL only as a last resort.
-        //   • refused      → another client is still attached; leave it running
-        //                    (the fix — never kill a daemon others are using).
-        //   • unreachable  → fall back to the old best-effort kill.
-        //
-        // Runs synchronously in this callback body (not the returned future):
-        // GPUI polls on_app_quit futures for only ~200ms (`SHUTDOWN_TIMEOUT`),
-        // but the body runs before that budget applies, so the bounded (a few
-        // seconds worst case) shutdown handshake completes reliably.
+        // Hand UI-owned lifecycle to the daemon on quit. It exits after the
+        // final client disconnects; standalone daemons are left running.
         cx.on_app_quit(move |this: &mut Self, cx| {
             // Stop any recovery from resurrecting the connection or spawning a
             // daemon while we tear down (esp. the remove_connection just below).
             this.quitting.store(true, Ordering::SeqCst);
-            if let Some(mut child) = this.spawned_daemon.take() {
-                // Disconnect our own loopback connection first so the daemon does
-                // not count us among the clients that would block its shutdown.
-                this.remote_manager.update(cx, |rm, cx| {
-                    rm.remove_connection(
-                        okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
-                        cx,
-                    );
-                });
-
-                match okena_remote_server::local::running_daemon() {
-                    Some(daemon) => {
-                        match okena_remote_server::local::request_local_shutdown(&daemon) {
-                            Ok(outcome) if outcome.accepted => {
-                                // Daemon is exiting cleanly; SIGKILL only if it wedges.
-                                if !okena_remote_server::local::wait_for_pid_exit(
-                                    daemon.pid,
-                                    Duration::from_secs(3),
-                                ) {
-                                    kill_process_by_pid(daemon.pid);
-                                }
-                                let _ = child.wait();
-                            }
-                            Ok(outcome) => {
-                                log::info!(
-                                    "Local daemon shutdown refused ({} other client(s)); leaving it running",
-                                    outcome.active_clients
-                                );
-                                // Do NOT kill: another client is using it. Dropping
-                                // the Child handle does not terminate it on Unix.
-                            }
-                            Err(e) => {
-                                log::info!(
-                                    "Local daemon shutdown request failed ({e}); falling back to kill"
-                                );
-                                let _ = child.kill();
-                                let _ = child.wait();
-                                kill_process_by_pid(daemon.pid);
-                            }
-                        }
-                    }
-                    None => {
-                        // No live daemon advertised — it already exited. Reap our Child.
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                }
-            }
+            // Disconnect our own loopback connection before handing lifecycle
+            // to the daemon, so its live-client count excludes this GUI.
+            this.remote_manager.update(cx, |rm, cx| {
+                rm.remove_connection(
+                    okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                    cx,
+                );
+            });
+            hand_off_ui_owned_daemon(this.spawned_daemon.take());
             async {}
         })
         .detach();

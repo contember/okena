@@ -1,19 +1,13 @@
 //! `POST /v1/shutdown` — loopback-only, client-aware daemon shutdown.
 //!
-//! Replaces the desktop's old SIGKILL-at-quit. The quitting GUI asks the daemon
-//! to stop, but the daemon REFUSES while any *other* client is still connected —
-//! e.g. a second GUI that attached during a fast restart, or a mobile/web WS.
-//! This is the fix for the restart race where the old GUI's quit killed the
-//! daemon the new GUI had just attached to. Loopback-gated exactly like
-//! `/v1/restart`; refusal is a normal 200 response, not an HTTP error.
+//! A quitting GUI arms its UI-owned daemon to stop after the final authenticated
+//! client disconnects. Standalone daemons ignore desktop lifecycle handoff.
 //!
 //! Self-exclusion: the caller disconnects its OWN loopback WS before calling and
 //! the daemon simply counts live WS connections — see `local::request_local_shutdown`.
 //!
-//! On accept the daemon exits cleanly (unlike restart's hard `process::exit`,
-//! since there is no successor to hand the port/lock to): waking the daemon's
-//! `run()` loop drops the `RemoteServer` (unlinks the socket + removes
-//! remote.json) and releases the instance lock on drop.
+//! Dedicated daemons wake their graceful run loop; the single-binary fallback
+//! retains its pid-guarded hard-exit cleanup.
 
 use crate::routes::{AppState, PeerInfo};
 use axum::Json;
@@ -37,12 +31,24 @@ pub struct ShutdownResponse {
     pub active_clients: u64,
 }
 
-/// Pure accept/refuse decision: shut down only when no client is connected.
-///
-/// The caller disconnects its own loopback WS first (see `request_local_shutdown`),
-/// so a live count of zero means "only the quitting UI was here".
-pub fn should_shut_down(active_clients: u64) -> bool {
-    active_clients == 0
+/// Only daemons explicitly spawned for a desktop lifecycle accept quit handoff.
+pub fn should_shut_down(ui_owned: bool) -> bool {
+    ui_owned
+}
+
+pub(crate) fn schedule_process_shutdown(state: &AppState) {
+    let notify = state.process_shutdown.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(EXIT_DELAY).await;
+        match notify {
+            Some(notify) => notify.notify_one(),
+            None => {
+                crate::server::cleanup_on_hard_exit();
+                log::info!("Headless daemon exiting for shutdown");
+                std::process::exit(0);
+            }
+        }
+    });
 }
 
 pub async fn post_shutdown(
@@ -53,9 +59,9 @@ pub async fn post_shutdown(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let active_clients = state.active_connections.load(Ordering::Relaxed);
-    if !should_shut_down(active_clients) {
-        log::info!("Shutdown refused: {active_clients} other client(s) connected");
+    if !should_shut_down(state.ui_owned) {
+        let active_clients = state.active_connections.load(Ordering::Relaxed);
+        log::info!("Shutdown ignored for standalone daemon");
         return Json(ShutdownResponse {
             shutting_down: false,
             active_clients,
@@ -63,31 +69,17 @@ pub async fn post_shutdown(
         .into_response();
     }
 
-    // Accepted. Tear down AFTER the response has been flushed (like restart).
-    match state.process_shutdown.clone() {
-        Some(notify) => {
-            tokio::spawn(async move {
-                tokio::time::sleep(EXIT_DELAY).await;
-                log::info!("Daemon shutting down (no other clients connected)");
-                // Wakes the daemon's `run()` loop → drops the RemoteServer
-                // (socket unlink + pid-guarded remote.json removal) and releases
-                // the instance lock on drop. A clean teardown, no SIGKILL.
-                notify.notify_one();
-            });
-        }
-        None => {
-            // Transitional `okena --headless` fallback: no graceful run-loop to
-            // signal, so hard-exit like the restart route. Because `process::exit`
-            // skips Drop, clean up our own files first (pid-guarded): remove
-            // remote.json, unlink the local socket, and drop the instance lock —
-            // otherwise the leftover socket/lock race the next daemon start.
-            tokio::spawn(async move {
-                tokio::time::sleep(EXIT_DELAY).await;
-                crate::server::cleanup_on_hard_exit();
-                log::info!("Headless daemon exiting for shutdown");
-                std::process::exit(0);
-            });
-        }
+    // Arm before reading the connection count so a concurrent last disconnect
+    // either observes the flag or is observed by the load below.
+    state.shutdown_when_idle.store(true, Ordering::SeqCst);
+    let active_clients = state.active_connections.load(Ordering::SeqCst);
+    if active_clients == 0 && state.shutdown_when_idle.swap(false, Ordering::SeqCst) {
+        log::info!("UI-owned daemon shutting down with no clients remaining");
+        schedule_process_shutdown(&state);
+    } else {
+        log::info!(
+            "UI-owned daemon shutdown armed until {active_clients} remaining client(s) disconnect"
+        );
     }
 
     Json(ShutdownResponse {
@@ -104,10 +96,9 @@ mod tests {
     use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
     #[test]
-    fn shuts_down_only_when_no_clients_remain() {
-        assert!(should_shut_down(0), "no other clients → accept");
-        assert!(!should_shut_down(1), "one other client → refuse");
-        assert!(!should_shut_down(5), "many other clients → refuse");
+    fn only_ui_owned_daemons_accept_lifecycle_handoff() {
+        assert!(should_shut_down(true));
+        assert!(!should_shut_down(false));
     }
 
     #[test]

@@ -25,7 +25,7 @@ use okena_core::git_poll::GitPollTrigger;
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -56,11 +56,16 @@ pub struct AppState {
     pub git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
     pub next_connection_id: Arc<AtomicU64>,
     /// Count of currently-live authenticated WS connections. The stream route
-    /// increments it on accept and decrements it on close; `/v1/shutdown` reads
-    /// it to refuse while any client is still connected. (`remote_subscribed_terminals`
+    /// increments it on accept and decrements it on close; `/v1/shutdown` uses
+    /// it for UI-owned lifecycle handoff. (`remote_subscribed_terminals`
     /// only tracks connections that have subscribed to a terminal, so it can't
     /// stand in for a live-connection registry.)
     pub active_connections: Arc<AtomicU64>,
+    /// UI-owned daemons shut down once the last connected client leaves after
+    /// any desktop has requested lifecycle handoff. Standalone daemons ignore
+    /// desktop quit requests.
+    pub ui_owned: bool,
+    pub shutdown_when_idle: Arc<AtomicBool>,
     /// Graceful process-shutdown trigger for `/v1/shutdown`. `Some` on the
     /// dedicated daemon, whose `run()` awaits it and then tears down cleanly
     /// (socket unlink + remote.json removal + instance-lock release on drop);
@@ -112,6 +117,7 @@ pub fn build_router(
     next_connection_id: Arc<AtomicU64>,
     active_connections: Arc<AtomicU64>,
     process_shutdown: Option<Arc<tokio::sync::Notify>>,
+    ui_owned: bool,
     update_info: okena_ext_updater::UpdateInfo,
 ) -> Router {
     let state = AppState {
@@ -127,6 +133,8 @@ pub fn build_router(
         next_connection_id,
         active_connections,
         process_shutdown,
+        ui_owned,
+        shutdown_when_idle: Arc::new(AtomicBool::new(false)),
         update_info,
     };
 

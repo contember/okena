@@ -191,6 +191,7 @@ fn main() -> anyhow::Result<()> {
         session_backend,
         listen_addrs,
         tls_enabled,
+        ui_owned: std::env::args().any(|arg| arg == "--ui-owned"),
     };
 
     DaemonCore::new(params)

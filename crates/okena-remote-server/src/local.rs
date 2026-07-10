@@ -39,6 +39,8 @@ pub struct LocalDaemon {
     pub pid: u32,
     /// Whether the daemon negotiates TLS (dual-stack) on its port.
     pub tls: bool,
+    /// Whether desktop clients own this daemon's process lifetime.
+    pub ui_owned: bool,
     pub local_endpoint: Option<LocalEndpoint>,
 }
 
@@ -63,10 +65,11 @@ pub fn discover_in(dir: &Path) -> Option<LocalDaemon> {
         .to_string();
     let pid = v.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
     let tls = v.get("tls").and_then(|t| t.as_bool()).unwrap_or(false);
+    let ui_owned = v.get("ui_owned").and_then(|v| v.as_bool()).unwrap_or(false);
     let local_endpoint = v
         .get("local_endpoint")
         .and_then(|value| serde_json::from_value::<LocalEndpoint>(value.clone()).ok());
-    Some(LocalDaemon { port, host, pid, tls, local_endpoint })
+    Some(LocalDaemon { port, host, pid, tls, ui_owned, local_endpoint })
 }
 
 pub fn default_local_endpoint() -> Option<LocalEndpoint> {
@@ -270,7 +273,7 @@ fn daemon_binary_path() -> Option<std::path::PathBuf> {
 /// *before* spawning so the fresh daemon loads it at startup (no reload needed).
 pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
     match daemon_binary_path() {
-        Some(daemon) => std::process::Command::new(daemon).spawn(),
+        Some(daemon) => std::process::Command::new(daemon).arg("--ui-owned").spawn(),
         None => {
             let exe = std::env::current_exe()?;
             log::info!(
@@ -278,7 +281,9 @@ pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
                  daemon (the single-binary path). The dedicated GPUI-free okena-daemon is \
                  the lighter variant and is used when present."
             );
-            std::process::Command::new(exe).arg("--headless").spawn()
+            std::process::Command::new(exe)
+                .args(["--headless", "--ui-owned"])
+                .spawn()
         }
     }
 }
@@ -374,8 +379,7 @@ pub fn notify_auth_reload(daemon: &LocalDaemon) {
 /// Outcome of asking the local daemon to shut down (`POST /v1/shutdown`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShutdownOutcome {
-    /// The daemon accepted and is tearing itself down. `false` means it refused
-    /// because other clients are still connected — the caller must NOT kill it.
+    /// The daemon accepted immediate shutdown or armed it for the last disconnect.
     pub accepted: bool,
     /// Live client connections the daemon counted (excluding the caller, which
     /// disconnects its own loopback WS before asking).
@@ -391,9 +395,8 @@ const SHUTDOWN_RETRY_DELAY: Duration = Duration::from_millis(150);
 /// Ask the local daemon to shut down (`POST /v1/shutdown`). Returns whether it
 /// accepted plus the live-client count it saw.
 ///
-/// The daemon REFUSES while any *other* client is connected, so this is safe to
-/// call on quit even if a second GUI attached during a fast restart — it will
-/// simply report `accepted: false` and stay up.
+/// A UI-owned daemon arms shutdown while another client is connected and exits
+/// after the last disconnect. A standalone daemon refuses the request.
 ///
 /// Self-exclusion (option **a**): the caller must disconnect its OWN loopback WS
 /// before calling; the daemon just counts live WS connections. The bounded retry
@@ -867,6 +870,7 @@ mod tests {
             host: LOCAL_HOST.to_string(),
             pid: std::process::id(),
             tls: false,
+            ui_owned: true,
             local_endpoint: None,
         }
     }
@@ -946,11 +950,11 @@ mod tests {
     }
 
     #[test]
-    fn discover_parses_port_pid_tls() {
+    fn discover_parses_port_pid_tls_and_lifecycle() {
         let dir = temp_dir();
         std::fs::write(
             dir.join("remote.json"),
-            r#"{"port": 19123, "pid": 4242, "tls": true}"#,
+            r#"{"port": 19123, "pid": 4242, "tls": true, "ui_owned": true}"#,
         )
         .unwrap();
         let d = discover_in(&dir).expect("should parse");
@@ -961,6 +965,7 @@ mod tests {
                 host: LOCAL_HOST.to_string(),
                 pid: 4242,
                 tls: true,
+                ui_owned: true,
                 local_endpoint: None,
             }
         );
@@ -991,6 +996,7 @@ mod tests {
                 host: LOCAL_HOST.to_string(),
                 pid: 0,
                 tls: false,
+                ui_owned: false,
                 local_endpoint: None,
             }
         );
@@ -1084,6 +1090,7 @@ mod tests {
             host: LOCAL_HOST.to_string(),
             pid: std::process::id(),
             tls: false,
+            ui_owned: true,
             local_endpoint: Some(LocalEndpoint::UnixSocket {
                 path: "/tmp/okena-test.sock".to_string(),
             }),

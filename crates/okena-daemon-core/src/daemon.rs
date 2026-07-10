@@ -92,6 +92,8 @@ pub struct DaemonParams {
     pub listen_addrs: Vec<IpAddr>,
     /// Whether the remote server should serve TLS (dual-stack http+https).
     pub tls_enabled: bool,
+    /// Whether desktop clients own this daemon's process lifetime.
+    pub ui_owned: bool,
 }
 
 /// The assembled, GPUI-free daemon: owns the tokio runtime, the shared reactor
@@ -273,6 +275,7 @@ impl DaemonCore {
             next_connection_id,
             active_connections,
             Some(shutdown_requested.clone()),
+            params.ui_owned,
             params.tls_enabled,
             env!("CARGO_PKG_VERSION"),
         )?;

@@ -41,6 +41,7 @@ impl RemoteServer {
         next_connection_id: Arc<AtomicU64>,
         active_connections: Arc<AtomicU64>,
         process_shutdown: Option<Arc<tokio::sync::Notify>>,
+        ui_owned: bool,
         tls_enabled: bool,
         app_version: &'static str,
     ) -> anyhow::Result<Self> {
@@ -147,7 +148,13 @@ impl RemoteServer {
         };
 
         // Write remote.json
-        if let Err(e) = write_remote_json(port, tls_enabled, &bind_addrs, local_endpoint.as_ref()) {
+        if let Err(e) = write_remote_json(
+            port,
+            tls_enabled,
+            ui_owned,
+            &bind_addrs,
+            local_endpoint.as_ref(),
+        ) {
             log::warn!("Failed to write remote.json: {}", e);
         }
 
@@ -172,6 +179,7 @@ impl RemoteServer {
                 next_connection_id,
                 active_connections,
                 process_shutdown,
+                ui_owned,
                 update_info,
             );
             #[cfg(unix)]
@@ -336,6 +344,7 @@ fn remote_json_path() -> std::path::PathBuf {
 fn write_remote_json(
     port: u16,
     tls_enabled: bool,
+    ui_owned: bool,
     bind_addrs: &[IpAddr],
     local_endpoint: Option<&LocalEndpoint>,
 ) -> anyhow::Result<()> {
@@ -349,6 +358,7 @@ fn write_remote_json(
         "local_host": local_tcp_host(bind_addrs),
         "pid": std::process::id(),
         "tls": tls_enabled,
+        "ui_owned": ui_owned,
     });
     if let Some(local_endpoint) = local_endpoint {
         content["local_endpoint"] = serde_json::to_value(local_endpoint)?;

@@ -405,6 +405,7 @@ impl HeadlessApp {
             // wake, so the endpoint hard-exits instead (see routes/shutdown.rs).
             Arc::new(AtomicU64::new(0)),
             None,
+            std::env::args().any(|arg| arg == "--ui-owned"),
             tls_enabled,
             env!("CARGO_PKG_VERSION"),
         ) {

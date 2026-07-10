@@ -138,7 +138,7 @@ async fn handle_ws(
     // Register this live connection (deregistered in the cleanup block below).
     // `/v1/shutdown` counts these to refuse while any client is still connected.
     // We register only after auth so unauthenticated dial attempts don't count.
-    state.active_connections.fetch_add(1, Ordering::Relaxed);
+    state.active_connections.fetch_add(1, Ordering::SeqCst);
 
     // Subscribe to state_version and git status changes
     let mut state_rx = state.state_version.subscribe();
@@ -579,7 +579,18 @@ async fn handle_ws(
     }
 
     // Deregister the live connection (paired with the fetch_add above).
-    state.active_connections.fetch_sub(1, Ordering::Relaxed);
+    let remaining = state
+        .active_connections
+        .fetch_sub(1, Ordering::SeqCst)
+        .saturating_sub(1);
+    if remaining == 0
+        && state
+            .shutdown_when_idle
+            .swap(false, Ordering::SeqCst)
+    {
+        log::info!("Last client disconnected from UI-owned daemon; shutting down");
+        super::shutdown::schedule_process_shutdown(&state);
+    }
 
     // Release resize ownership so a reconnecting client isn't denied by a
     // dead owner; the next resize from any connection adopts it.
