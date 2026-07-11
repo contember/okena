@@ -151,7 +151,17 @@ fn http_client_and_url(config: &RemoteConnectionConfig, path: &str) -> (reqwest:
         return (client, config.http_url(path));
     }
 
-    (reqwest::Client::new(), config.http_url(path))
+    // A TLS remote uses a self-signed cert pinned by fingerprint (TOFU). A plain
+    // `reqwest::Client::new()` validates against the system trust store and
+    // rejects it with "error sending request", so every action would fail even
+    // though the WS stream (which uses the pinned connector) works. Build the
+    // same pinned client here.
+    let client = okena_transport::client::tls::build_reqwest_client(
+        config.tls,
+        config.pinned_cert_sha256.clone(),
+        okena_transport::client::tls::new_observed(),
+    );
+    (client, config.http_url(path))
 }
 
 /// Lightweight events emitted by [`RemoteConnectionManager`] that must NOT go
