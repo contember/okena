@@ -393,11 +393,10 @@ impl RemoteConnectionManager {
         Ok(())
     }
 
-    /// Reconnect an existing connection (disconnect then connect again).
+    /// Reconnect without discarding the last state or live terminal objects.
     pub fn reconnect(&mut self, connection_id: &str, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.get_mut(connection_id) {
-            conn.disconnect();
-            conn.connect();
+            conn.reconnect();
             cx.notify();
         }
     }
@@ -425,8 +424,7 @@ impl RemoteConnectionManager {
             if let Some(token) = token {
                 conn.config_mut().saved_token = Some(token);
             }
-            conn.disconnect();
-            conn.connect();
+            conn.reconnect();
             cx.notify();
         }
     }

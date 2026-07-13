@@ -1083,11 +1083,15 @@ mod tests {
         let mut data = make_workspace();
         data.main_window.hidden_project_ids.insert("p1".to_string());
         data.main_window.project_widths.insert("p1".to_string(), 0.42);
+        data.service_panel_heights.insert("p1".to_string(), 180.0);
+        data.hook_panel_heights.insert("p1".to_string(), 220.0);
 
         data.delete_project_scrub_all_windows("p1");
 
         assert!(!data.main_window.hidden_project_ids.contains("p1"));
         assert!(!data.main_window.project_widths.contains_key("p1"));
+        assert!(!data.service_panel_heights.contains_key("p1"));
+        assert!(!data.hook_panel_heights.contains_key("p1"));
     }
 
     #[test]

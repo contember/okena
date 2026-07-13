@@ -689,6 +689,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.status = ConnectionStatus::Disconnected;
     }
 
+    /// Restart the transport while retaining the last state and terminal
+    /// objects. The fresh state sync reconciles deletions after reconnect.
+    pub fn reconnect(&mut self) {
+        self.stream_map.clear();
+        self.reverse_stream_map.clear();
+        self.connect();
+    }
+
     /// Run the main WebSocket loop with reconnection.
     async fn run_ws_loop(
         config: RemoteConnectionConfig,
@@ -1502,6 +1510,49 @@ pub async fn try_refresh_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct TestHandler {
+        remove_all_calls: AtomicUsize,
+    }
+
+    impl ConnectionHandler for TestHandler {
+        fn create_terminal(
+            &self,
+            _connection_id: &str,
+            _terminal_id: &str,
+            _prefixed_id: &str,
+            _ws_sender: async_channel::Sender<WsClientMessage>,
+            _cols: u16,
+            _rows: u16,
+        ) {
+        }
+
+        fn on_terminal_output(&self, _prefixed_id: &str, _data: &[u8]) {}
+
+        fn remove_terminal(&self, _prefixed_id: &str) {}
+
+        fn resize_terminal(
+            &self,
+            _prefixed_id: &str,
+            _cols: u16,
+            _rows: u16,
+            _server_owns: bool,
+        ) {
+        }
+
+        fn remove_all_terminals(&self, _connection_id: &str) {
+            self.remove_all_calls.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn remove_terminals_except(
+            &self,
+            _connection_id: &str,
+            _keep_ids: &std::collections::HashSet<String>,
+        ) {
+        }
+    }
 
     fn config(id: &str, local_endpoint: Option<LocalEndpoint>) -> RemoteConnectionConfig {
         RemoteConnectionConfig {
@@ -1583,5 +1634,37 @@ mod tests {
             .unwrap();
         }
         assert_eq!(rx.len(), usize::from(u8::MAX) + 1);
+    }
+
+    #[test]
+    fn explicit_reconnect_retains_last_state_and_terminal_objects() {
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let handler = Arc::new(TestHandler::default());
+        let (event_tx, _event_rx) = async_channel::unbounded();
+        let mut client = RemoteClient::new(
+            config("reconnect", None),
+            runtime,
+            handler.clone(),
+            event_tx,
+        );
+        client.set_remote_state(Some(StateResponse {
+            state_version: 1,
+            projects: Vec::new(),
+            focused_project_id: None,
+            fullscreen_terminal: None,
+            project_order: Vec::new(),
+            folders: Vec::new(),
+            windows: Vec::new(),
+        }));
+
+        client.reconnect();
+
+        assert!(client.remote_state().is_some());
+        assert_eq!(handler.remove_all_calls.load(Ordering::Relaxed), 0);
     }
 }

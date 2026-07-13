@@ -878,7 +878,9 @@ impl Workspace {
             self.data.delete_folder_scrub_all_windows(folder_id);
         }
 
-        self.remote_sync.retain_not_starting_with(&prefix);
+        for project_id in self.remote_sync.retain_not_starting_with(&prefix) {
+            self.data.delete_project_scrub_all_windows(&project_id);
+        }
 
         if let Some(focused) = focus_manager.focused_project_id()
             && focused.starts_with(&prefix) {

@@ -173,6 +173,10 @@ impl RemoteConnection {
         self.client.disconnect();
     }
 
+    pub fn reconnect(&mut self) {
+        self.client.reconnect();
+    }
+
     pub fn config(&self) -> &RemoteConnectionConfig {
         self.client.config()
     }

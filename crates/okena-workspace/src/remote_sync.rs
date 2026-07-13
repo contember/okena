@@ -1,6 +1,6 @@
 //! Transient remote-sync coordination state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use okena_core::api::{ApiGitStatus, ApiServiceInfo};
 use okena_layout::LayoutNode;
@@ -192,10 +192,81 @@ impl RemoteSyncState {
         &self.preserved_project_layouts
     }
 
-    /// Remove all snapshots whose project ID starts with the given prefix.
-    pub fn retain_not_starting_with(&mut self, prefix: &str) {
-        self.snapshots.retain(|id, _| !id.starts_with(prefix));
+    pub fn remove_project(&mut self, project_id: &str) {
+        self.snapshots.remove(project_id);
+        self.preserved_project_layouts.remove(project_id);
+        for projects in self.pending_focus.values_mut() {
+            projects.remove(project_id);
+        }
+        self.pending_focus.retain(|_, projects| !projects.is_empty());
     }
+
+    /// Drop cached project presentation after a connection disappears or a
+    /// successful snapshot confirms that the project was deleted.
+    pub fn prune_project_state(
+        &mut self,
+        active_connection_ids: &HashSet<String>,
+        synced_connection_ids: &HashSet<String>,
+        expected_project_ids: &HashSet<String>,
+    ) -> Vec<String> {
+        let mut known_ids: HashSet<String> = self.snapshots.keys().cloned().collect();
+        known_ids.extend(self.preserved_project_layouts.keys().cloned());
+        for projects in self.pending_focus.values() {
+            known_ids.extend(projects.keys().cloned());
+        }
+
+        let mut removed: Vec<String> = known_ids
+            .into_iter()
+            .filter(|project_id| {
+                let Some(connection_id) = remote_connection_id(project_id) else {
+                    return false;
+                };
+                !active_connection_ids.contains(connection_id)
+                    || (synced_connection_ids.contains(connection_id)
+                        && !expected_project_ids.contains(project_id))
+            })
+            .collect();
+        for project_id in &removed {
+            self.remove_project(project_id);
+        }
+        self.pending_project_visibility
+            .retain(|pending| active_connection_ids.contains(&pending.connection_id));
+        removed.sort();
+        removed
+    }
+
+    /// Remove all cached remote state whose project ID starts with the prefix.
+    pub fn retain_not_starting_with(&mut self, prefix: &str) -> Vec<String> {
+        let mut removed: HashSet<String> = self
+            .snapshots
+            .keys()
+            .chain(self.preserved_project_layouts.keys())
+            .filter(|id| id.starts_with(prefix))
+            .cloned()
+            .collect();
+        for projects in self.pending_focus.values() {
+            removed.extend(projects.keys().filter(|id| id.starts_with(prefix)).cloned());
+        }
+        for project_id in &removed {
+            self.remove_project(project_id);
+        }
+
+        if let Some(connection_id) = prefix
+            .strip_prefix("remote:")
+            .and_then(|rest| rest.strip_suffix(':'))
+        {
+            self.pending_project_visibility
+                .retain(|pending| pending.connection_id != connection_id);
+        }
+
+        let mut removed: Vec<String> = removed.into_iter().collect();
+        removed.sort();
+        removed
+    }
+}
+
+fn remote_connection_id(project_id: &str) -> Option<&str> {
+    project_id.strip_prefix("remote:")?.split(':').next()
 }
 
 impl PendingRemoteProjectVisibility {

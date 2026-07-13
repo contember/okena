@@ -62,6 +62,7 @@ pub fn apply_remote_snapshot(
     window_id: WindowId,
 ) -> RemoteSyncOutcome {
     let mut expected_remote_ids: HashSet<String> = HashSet::new();
+    let mut synced_conn_ids: HashSet<String> = HashSet::new();
     let active_conn_ids: HashSet<String> = snapshots.iter()
         .map(|s| s.config.id.clone())
         .collect();
@@ -70,6 +71,7 @@ pub fn apply_remote_snapshot(
         let conn_id = &snap.config.id;
 
         if let Some(ref state) = snap.state {
+            synced_conn_ids.insert(conn_id.clone());
             // Build the server folder lookup
             let server_folder_map: HashMap<&str, &okena_core::api::ApiFolder> =
                 state.folders.iter().map(|f| (f.id.as_str(), f)).collect();
@@ -276,6 +278,14 @@ pub fn apply_remote_snapshot(
         }
     }
 
+    for project_id in remote_sync.prune_project_state(
+        &active_conn_ids,
+        &synced_conn_ids,
+        &expected_remote_ids,
+    ) {
+        data.delete_project_scrub_all_windows(&project_id);
+    }
+
     // Remove stale remote projects/folders from connections that no longer exist
     let removed_project_ids: Vec<String> = data.projects.iter()
         .filter(|p| p.is_remote && !expected_remote_ids.contains(&p.id))
@@ -297,6 +307,7 @@ pub fn apply_remote_snapshot(
         .collect();
     for project_id in removed_project_ids {
         data.delete_project_scrub_all_windows(&project_id);
+        remote_sync.remove_project(&project_id);
     }
     for folder_id in removed_folder_ids {
         data.delete_folder_scrub_all_windows(&folder_id);
@@ -550,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_visual_state_preserves_local_state_on_resync() {
+    fn merge_visual_state_preserves_local_presentation_on_resync() {
         let mut data = empty_data();
         let mut rs = RemoteSyncState::new();
 
@@ -565,14 +576,22 @@ mod tests {
         };
         apply_remote_snapshot(&mut data, &mut rs, &[first], WindowId::Main);
 
-        // Locally the user switched to tab 1 — mutate the materialized layout.
-        if let Some(LayoutNode::Tabs { active_tab, .. }) = data.projects[0].layout.as_mut() {
+        // Locally the user switched tabs and zoomed the first terminal.
+        if let Some(LayoutNode::Tabs {
+            active_tab,
+            children,
+        }) = data.projects[0].layout.as_mut()
+        {
             *active_tab = 1;
+            let LayoutNode::Terminal { zoom_level, .. } = &mut children[0] else {
+                panic!("expected terminal");
+            };
+            *zoom_level = 1.5;
         } else {
             panic!("expected tabs layout");
         }
 
-        // Re-sync with the same server layout (active_tab 0). Local active_tab must win.
+        // Re-sync with the daemon defaults. Client-owned presentation must win.
         let second = RemoteSnapshot {
             config: config("c1"),
             state: Some(state_with(vec![api_project("a", Some(layout))], vec!["a".into()], vec![])),
@@ -580,11 +599,103 @@ mod tests {
         apply_remote_snapshot(&mut data, &mut rs, &[second], WindowId::Main);
 
         match data.projects[0].layout.as_ref().unwrap() {
-            LayoutNode::Tabs { active_tab, .. } => assert_eq!(*active_tab, 1, "local active_tab preserved"),
+            LayoutNode::Tabs {
+                active_tab,
+                children,
+            } => {
+                assert_eq!(*active_tab, 1, "local active_tab preserved");
+                let LayoutNode::Terminal { zoom_level, .. } = &children[0] else {
+                    panic!("expected terminal");
+                };
+                assert_eq!(*zoom_level, 1.5, "local zoom preserved");
+            }
             _ => panic!("expected tabs layout"),
         }
         // Still only one materialized project (update, not duplicate).
         assert_eq!(data.projects.len(), 1);
+    }
+
+    #[test]
+    fn reordered_tabs_preserve_selected_terminal_and_terminal_presentation() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let initial_layout = ApiLayoutNode::Tabs {
+            active_tab: 0,
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(initial_layout))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+
+        let Some(LayoutNode::Tabs {
+            children,
+            active_tab,
+        }) = data.projects[0].layout.as_mut()
+        else {
+            panic!("expected tabs");
+        };
+        *active_tab = 0;
+        let LayoutNode::Terminal { zoom_level, .. } = &mut children[0] else {
+            panic!("expected terminal");
+        };
+        *zoom_level = 1.5;
+        let LayoutNode::Terminal { minimized, .. } = &mut children[1] else {
+            panic!("expected terminal");
+        };
+        *minimized = true;
+
+        let reordered = ApiLayoutNode::Tabs {
+            active_tab: 1,
+            children: vec![terminal("t2"), terminal("t1")],
+        };
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(reordered))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+
+        let Some(LayoutNode::Tabs {
+            children,
+            active_tab,
+        }) = data.projects[0].layout.as_ref()
+        else {
+            panic!("expected tabs");
+        };
+        assert_eq!(*active_tab, 1);
+        assert!(matches!(
+            &children[0],
+            LayoutNode::Terminal {
+                terminal_id: Some(id),
+                minimized: true,
+                ..
+            } if id == "remote:c1:t2"
+        ));
+        assert!(matches!(
+            &children[1],
+            LayoutNode::Terminal {
+                terminal_id: Some(id),
+                zoom_level,
+                ..
+            } if id == "remote:c1:t1" && (*zoom_level - 1.5).abs() < f32::EPSILON
+        ));
     }
 
     #[test]
@@ -709,6 +820,10 @@ mod tests {
         }], WindowId::Main);
 
         assert!(data.projects.is_empty());
+        assert!(
+            rs.preserved_project_layouts()
+                .contains_key("remote:c1:a")
+        );
         assert!(data.main_window.hidden_project_ids.contains("remote:c1:a"));
         assert!(
             data.window(WindowId::Extra(extra_id)).unwrap()
@@ -736,6 +851,45 @@ mod tests {
             data.projects[0].layout.as_ref(),
             Some(LayoutNode::Tabs { active_tab: 1, .. })
         ));
+        assert!(rs.preserved_project_layouts().is_empty());
+    }
+
+    #[test]
+    fn permanent_disconnect_prunes_presentation_and_panel_state() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(terminal("t1")))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+        data.service_panel_heights
+            .insert("remote:c1:a".to_string(), 180.0);
+        data.hook_panel_heights
+            .insert("remote:c1:a".to_string(), 220.0);
+
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: None,
+            }],
+            WindowId::Main,
+        );
+        apply_remote_snapshot(&mut data, &mut rs, &[], WindowId::Main);
+
+        assert!(rs.preserved_project_layouts().is_empty());
+        assert!(!data.service_panel_heights.contains_key("remote:c1:a"));
+        assert!(!data.hook_panel_heights.contains_key("remote:c1:a"));
     }
 
     #[test]

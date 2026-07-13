@@ -156,14 +156,12 @@ impl WorkspaceData {
         }
     }
 
-    /// Remove a project's id from every window's per-project storage.
+    /// Remove a project's id from every client-owned presentation store.
     ///
     /// Walks `main_window` plus every entry in `extra_windows`, and removes
-    /// `project_id` from each window's `hidden_project_ids` set and
-    /// `project_widths` map. Idempotent: a project absent from a given window
-    /// is a no-op for that window. Other per-window fields (`folder_filter`,
-    /// `folder_collapsed`, `os_bounds`) are not per-project storage and are
-    /// left untouched.
+    /// `project_id` is removed from each window's `hidden_project_ids` and
+    /// `project_widths`, plus the shared service/hook panel-height caches.
+    /// Other per-window fields are left untouched.
     ///
     /// Called from the project-delete path so no orphan per-project entries
     /// survive the delete on any window.
@@ -174,6 +172,8 @@ impl WorkspaceData {
             extra.hidden_project_ids.remove(project_id);
             extra.project_widths.remove(project_id);
         }
+        self.service_panel_heights.remove(project_id);
+        self.hook_panel_heights.remove(project_id);
     }
 
     /// Remove a folder id from every window's per-folder storage.
