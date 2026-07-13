@@ -3,6 +3,15 @@ import type { ApiLayoutNode, ApiProject } from "../api/types";
 import { postAction } from "../api/client";
 import { LayoutRenderer } from "./TerminalArea";
 
+function firstTerminalId(node: ApiLayoutNode): string | null {
+  if (node.type === "terminal") return node.terminal_id;
+  for (const child of node.children) {
+    const terminalId = firstTerminalId(child);
+    if (terminalId) return terminalId;
+  }
+  return null;
+}
+
 export function TabLayout({
   activeTab: initialActive,
   children,
@@ -14,18 +23,26 @@ export function TabLayout({
   project: ApiProject;
   path: number[];
 }) {
-  const [activeIdx, setActiveIdx] = useState(initialActive);
-  const clamped = Math.min(activeIdx, children.length - 1);
+  const initialIdx = Math.min(initialActive, Math.max(children.length - 1, 0));
+  const [activeTerminalId, setActiveTerminalId] = useState(() =>
+    children[initialIdx] ? firstTerminalId(children[initialIdx]) : null,
+  );
+  const identityIdx = activeTerminalId
+    ? children.findIndex((child) => firstTerminalId(child) === activeTerminalId)
+    : -1;
+  const clamped = identityIdx >= 0 ? identityIdx : initialIdx;
 
   useEffect(() => {
-    setActiveIdx(initialActive);
-  }, [initialActive]);
+    if (identityIdx < 0) {
+      setActiveTerminalId(children[initialIdx] ? firstTerminalId(children[initialIdx]) : null);
+    }
+  }, [children, identityIdx, initialIdx]);
 
   const selectTab = useCallback(
     (index: number) => {
-      setActiveIdx(index);
+      setActiveTerminalId(children[index] ? firstTerminalId(children[index]) : null);
     },
-    [],
+    [children],
   );
 
   const addTab = useCallback(() => {
@@ -46,7 +63,7 @@ export function TabLayout({
             : `Tab ${i + 1}`;
           return (
             <button
-              key={i}
+              key={firstTerminalId(child) ?? `tab-${i}`}
               onClick={() => selectTab(i)}
               className={`max-w-32 truncate border-r border-[var(--ok-border)] px-3 py-1.5 text-[11px] transition-colors
                 ${i === clamped

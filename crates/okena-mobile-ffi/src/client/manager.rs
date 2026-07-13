@@ -7,7 +7,7 @@ use okena_transport::client::{
     WsClientMessage,
 };
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 static MANAGER: OnceLock<ConnectionManager> = OnceLock::new();
@@ -26,29 +26,16 @@ struct MobileConnection {
 }
 
 fn merge_layout_presentation(server: &ApiLayoutNode, local: &ApiLayoutNode) -> ApiLayoutNode {
+    let mut merged = merge_layout_structure(server, local);
+    let mut presentation = HashMap::new();
+    collect_terminal_presentation(local, &mut presentation);
+    apply_terminal_presentation(&mut merged, &presentation);
+    merged
+}
+
+fn merge_layout_structure(server: &ApiLayoutNode, local: &ApiLayoutNode) -> ApiLayoutNode {
     match (server, local) {
-        (
-            ApiLayoutNode::Terminal {
-                terminal_id: server_id,
-                shell_type,
-                cols,
-                rows,
-                ..
-            },
-            ApiLayoutNode::Terminal {
-                terminal_id: local_id,
-                minimized,
-                detached,
-                ..
-            },
-        ) if server_id == local_id => ApiLayoutNode::Terminal {
-            terminal_id: server_id.clone(),
-            minimized: *minimized,
-            detached: *detached,
-            shell_type: shell_type.clone(),
-            cols: *cols,
-            rows: *rows,
-        },
+        (ApiLayoutNode::Terminal { .. }, _) => server.clone(),
         (
             ApiLayoutNode::Split {
                 direction,
@@ -56,48 +43,149 @@ fn merge_layout_presentation(server: &ApiLayoutNode, local: &ApiLayoutNode) -> A
                 children: server_children,
             },
             ApiLayoutNode::Split {
+                direction: local_direction,
                 sizes: local_sizes,
                 children: local_children,
-                ..
             },
-        ) if server_children.len() == local_children.len() => ApiLayoutNode::Split {
-            direction: *direction,
-            sizes: if server_sizes.len() == local_sizes.len() {
-                local_sizes.clone()
-            } else {
-                server_sizes.clone()
-            },
-            children: server_children
-                .iter()
-                .zip(local_children)
-                .map(|(server, local)| merge_layout_presentation(server, local))
-                .collect(),
-        },
+        ) if direction == local_direction => {
+            let mapping = matching_api_child_indices(server_children, local_children);
+            let children = merge_mapped_api_children(
+                server_children,
+                local_children,
+                mapping.as_deref(),
+            );
+            let sizes = mapping
+                .filter(|indices| local_sizes.len() == indices.len())
+                .map(|indices| {
+                    indices
+                        .into_iter()
+                        .map(|index| local_sizes[index])
+                        .collect()
+                })
+                .unwrap_or_else(|| server_sizes.clone());
+            ApiLayoutNode::Split {
+                direction: *direction,
+                sizes,
+                children,
+            }
+        }
         (
             ApiLayoutNode::Tabs {
                 children: server_children,
-                ..
+                active_tab: server_active,
             },
             ApiLayoutNode::Tabs {
                 children: local_children,
-                active_tab,
+                active_tab: local_active,
             },
-        ) if server_children.len() == local_children.len() => ApiLayoutNode::Tabs {
-            children: server_children
-                .iter()
-                .zip(local_children)
-                .map(|(server, local)| merge_layout_presentation(server, local))
-                .collect(),
-            active_tab: (*active_tab).min(server_children.len().saturating_sub(1)),
-        },
-        _ => {
-            let mut presentation = HashMap::new();
-            collect_terminal_presentation(local, &mut presentation);
-            let mut merged = server.clone();
-            apply_terminal_presentation(&mut merged, &presentation);
-            merged
+        ) => {
+            let mapping = matching_api_child_indices(server_children, local_children);
+            ApiLayoutNode::Tabs {
+                children: merge_mapped_api_children(
+                    server_children,
+                    local_children,
+                    mapping.as_deref(),
+                ),
+                active_tab: merged_api_active_tab(
+                    server_children,
+                    *server_active,
+                    local_children,
+                    *local_active,
+                ),
+            }
         }
+        _ => server.clone(),
     }
+}
+
+fn merge_mapped_api_children(
+    server: &[ApiLayoutNode],
+    local: &[ApiLayoutNode],
+    mapping: Option<&[usize]>,
+) -> Vec<ApiLayoutNode> {
+    server
+        .iter()
+        .enumerate()
+        .map(|(server_index, server_child)| {
+            mapping
+                .and_then(|indices| indices.get(server_index))
+                .and_then(|local_index| local.get(*local_index))
+                .map(|local_child| merge_layout_structure(server_child, local_child))
+                .unwrap_or_else(|| server_child.clone())
+        })
+        .collect()
+}
+
+fn matching_api_child_indices(
+    server: &[ApiLayoutNode],
+    local: &[ApiLayoutNode],
+) -> Option<Vec<usize>> {
+    let server_ids: Vec<HashSet<String>> = server
+        .iter()
+        .map(|child| child.collect_terminal_ids().into_iter().collect())
+        .collect();
+    let local_ids: Vec<HashSet<String>> = local
+        .iter()
+        .map(|child| child.collect_terminal_ids().into_iter().collect())
+        .collect();
+
+    let mut used = HashSet::new();
+    let exact: Option<Vec<usize>> = server_ids
+        .iter()
+        .map(|ids| {
+            if ids.is_empty() {
+                return None;
+            }
+            let index = local_ids
+                .iter()
+                .enumerate()
+                .find(|(index, candidate)| !used.contains(index) && *candidate == ids)
+                .map(|(index, _)| index)?;
+            used.insert(index);
+            Some(index)
+        })
+        .collect();
+    if exact.is_some() {
+        return exact;
+    }
+
+    server_ids
+        .iter()
+        .zip(&local_ids)
+        .all(|(server, local)| {
+            (server.is_empty() && local.is_empty())
+                || server.iter().any(|id| local.contains(id))
+        })
+        .then(|| (0..server.len()).collect())
+}
+
+fn merged_api_active_tab(
+    server_children: &[ApiLayoutNode],
+    server_active: usize,
+    local_children: &[ApiLayoutNode],
+    local_active: usize,
+) -> usize {
+    let fallback = server_active.min(server_children.len().saturating_sub(1));
+    let Some(local_child) = local_children.get(local_active) else {
+        return fallback;
+    };
+    let selected_ids: HashSet<String> = local_child
+        .collect_terminal_ids()
+        .into_iter()
+        .collect();
+    if selected_ids.is_empty() {
+        return local_active.min(server_children.len().saturating_sub(1));
+    }
+
+    server_children
+        .iter()
+        .position(|child| {
+            child
+                .collect_terminal_ids()
+                .iter()
+                .any(|id| selected_ids.contains(id))
+        })
+        .unwrap_or(fallback)
 }
 
 fn collect_terminal_presentation(
@@ -713,6 +801,7 @@ mod tests {
     use super::*;
     use okena_core::api::ApiProject;
     use okena_core::shell::ShellType;
+    use okena_core::types::SplitDirection;
 
     fn terminal(id: &str, minimized: bool, shell_type: ShellType) -> ApiLayoutNode {
         ApiLayoutNode::Terminal {
@@ -807,6 +896,68 @@ mod tests {
                 args: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn mobile_layout_merge_follows_reordered_terminal_identity() {
+        let server = ApiLayoutNode::Tabs {
+            children: vec![
+                terminal("two", false, ShellType::Default),
+                terminal("one", false, ShellType::Default),
+            ],
+            active_tab: 1,
+        };
+        let local = ApiLayoutNode::Tabs {
+            children: vec![
+                terminal("one", false, ShellType::Default),
+                terminal("two", true, ShellType::Default),
+            ],
+            active_tab: 0,
+        };
+
+        let merged = merge_layout_presentation(&server, &local);
+        let ApiLayoutNode::Tabs {
+            children,
+            active_tab,
+        } = merged
+        else {
+            panic!("expected tabs");
+        };
+        assert_eq!(active_tab, 1);
+        assert!(matches!(
+            &children[0],
+            ApiLayoutNode::Terminal {
+                terminal_id: Some(id),
+                minimized: true,
+                ..
+            } if id == "two"
+        ));
+    }
+
+    #[test]
+    fn mobile_layout_merge_does_not_reuse_sizes_across_direction_change() {
+        let server = ApiLayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![40.0, 60.0],
+            children: vec![
+                terminal("one", false, ShellType::Default),
+                terminal("two", false, ShellType::Default),
+            ],
+        };
+        let local = ApiLayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![25.0, 75.0],
+            children: vec![
+                terminal("one", false, ShellType::Default),
+                terminal("two", false, ShellType::Default),
+            ],
+        };
+
+        let merged = merge_layout_presentation(&server, &local);
+        let ApiLayoutNode::Split { sizes, .. } = merged else {
+            panic!("expected split");
+        };
+        assert_eq!(sizes, vec![40.0, 60.0]);
     }
 
     #[test]

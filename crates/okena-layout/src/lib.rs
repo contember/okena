@@ -642,66 +642,163 @@ impl LayoutNode {
     /// Merge server layout structure with locally-preserved visual state.
     ///
     /// Takes the structural layout from `server` (terminals, splits, tabs) but
-    /// preserves local visual state from `local` where the structure matches:
-    /// - **Terminal** with same ID → keep local presentation, server shell
-    /// - **Split** with same direction + child count → keep local `sizes`, recurse children
-    /// - **Tabs** with same child count → keep local `active_tab`, recurse children
-    /// - **Mismatch** → use server's structure but apply visual state from matching terminals
+    /// preserves local visual state from `local` where the structure matches.
+    /// Children and selected tabs are reconciled by terminal identity so a
+    /// daemon-side reorder cannot attach presentation to a different pane.
     pub fn merge_visual_state(server: &LayoutNode, local: &LayoutNode) -> LayoutNode {
+        let mut result = LayoutNode::merge_container_visual_state(server, local);
+        let mut visual_states = HashMap::new();
+        local.collect_terminal_visual_state(&mut visual_states);
+        result.apply_terminal_visual_state(&visual_states);
+        result
+    }
+
+    fn merge_container_visual_state(server: &LayoutNode, local: &LayoutNode) -> LayoutNode {
         match (server, local) {
+            (LayoutNode::Terminal { .. }, _) => server.clone(),
             (
-                LayoutNode::Terminal { terminal_id: s_id, shell_type, .. },
-                LayoutNode::Terminal {
-                    terminal_id: l_id,
-                    minimized,
-                    detached,
-                    zoom_level,
-                    ..
+                LayoutNode::Split {
+                    direction: s_dir,
+                    sizes: s_sizes,
+                    children: s_children,
                 },
-            ) if s_id == l_id => {
-                LayoutNode::Terminal {
-                    terminal_id: s_id.clone(),
-                    minimized: *minimized,
-                    detached: *detached,
-                    shell_type: shell_type.clone(),
-                    zoom_level: *zoom_level,
-                }
-            }
-            (
-                LayoutNode::Split { direction: s_dir, children: s_children, .. },
                 LayoutNode::Split { direction: l_dir, sizes: l_sizes, children: l_children, .. },
-            ) if s_dir == l_dir && s_children.len() == l_children.len() => {
-                let merged_children: Vec<LayoutNode> = s_children.iter()
-                    .zip(l_children.iter())
-                    .map(|(sc, lc)| LayoutNode::merge_visual_state(sc, lc))
-                    .collect();
+            ) if s_dir == l_dir => {
+                let mapping = LayoutNode::matching_child_indices(s_children, l_children);
+                let merged_children = LayoutNode::merge_mapped_children(
+                    s_children,
+                    l_children,
+                    mapping.as_deref(),
+                );
+                let sizes = mapping
+                    .filter(|indices| l_sizes.len() == indices.len())
+                    .map(|indices| indices.into_iter().map(|index| l_sizes[index]).collect())
+                    .unwrap_or_else(|| s_sizes.clone());
                 LayoutNode::Split {
                     direction: *s_dir,
-                    sizes: l_sizes.clone(),
+                    sizes,
                     children: merged_children,
                 }
             }
             (
-                LayoutNode::Tabs { children: s_children, .. },
+                LayoutNode::Tabs {
+                    children: s_children,
+                    active_tab: s_active,
+                },
                 LayoutNode::Tabs { children: l_children, active_tab: l_active, .. },
-            ) if s_children.len() == l_children.len() => {
-                let merged_children: Vec<LayoutNode> = s_children.iter()
-                    .zip(l_children.iter())
-                    .map(|(sc, lc)| LayoutNode::merge_visual_state(sc, lc))
-                    .collect();
+            ) => {
+                let mapping = LayoutNode::matching_child_indices(s_children, l_children);
+                let merged_children = LayoutNode::merge_mapped_children(
+                    s_children,
+                    l_children,
+                    mapping.as_deref(),
+                );
                 LayoutNode::Tabs {
                     children: merged_children,
-                    active_tab: *l_active,
+                    active_tab: LayoutNode::merged_active_tab(
+                        s_children,
+                        *s_active,
+                        l_children,
+                        *l_active,
+                    ),
                 }
             }
-            _ => {
-                let mut visual_states = HashMap::new();
-                local.collect_terminal_visual_state(&mut visual_states);
-                let mut result = server.clone();
-                result.apply_terminal_visual_state(&visual_states);
-                result
-            }
+            _ => server.clone(),
         }
+    }
+
+    fn merge_mapped_children(
+        server: &[LayoutNode],
+        local: &[LayoutNode],
+        mapping: Option<&[usize]>,
+    ) -> Vec<LayoutNode> {
+        server
+            .iter()
+            .enumerate()
+            .map(|(server_index, server_child)| {
+                mapping
+                    .and_then(|indices| indices.get(server_index))
+                    .and_then(|local_index| local.get(*local_index))
+                    .map(|local_child| {
+                        LayoutNode::merge_container_visual_state(server_child, local_child)
+                    })
+                    .unwrap_or_else(|| server_child.clone())
+            })
+            .collect()
+    }
+
+    /// Map every server child to the corresponding local child. Exact subtree
+    /// identities handle reorder; positional overlap handles a child that grew.
+    fn matching_child_indices(
+        server: &[LayoutNode],
+        local: &[LayoutNode],
+    ) -> Option<Vec<usize>> {
+        let server_ids: Vec<HashSet<String>> = server
+            .iter()
+            .map(|child| child.collect_terminal_ids().into_iter().collect())
+            .collect();
+        let local_ids: Vec<HashSet<String>> = local
+            .iter()
+            .map(|child| child.collect_terminal_ids().into_iter().collect())
+            .collect();
+
+        let mut used = HashSet::new();
+        let exact: Option<Vec<usize>> = server_ids
+            .iter()
+            .map(|ids| {
+                if ids.is_empty() {
+                    return None;
+                }
+                let index = local_ids
+                    .iter()
+                    .enumerate()
+                    .find(|(index, candidate)| !used.contains(index) && *candidate == ids)
+                    .map(|(index, _)| index)?;
+                used.insert(index);
+                Some(index)
+            })
+            .collect();
+        if exact.is_some() {
+            return exact;
+        }
+
+        server_ids
+            .iter()
+            .zip(&local_ids)
+            .all(|(server, local)| {
+                (server.is_empty() && local.is_empty())
+                    || server.iter().any(|id| local.contains(id))
+            })
+            .then(|| (0..server.len()).collect())
+    }
+
+    fn merged_active_tab(
+        server_children: &[LayoutNode],
+        server_active: usize,
+        local_children: &[LayoutNode],
+        local_active: usize,
+    ) -> usize {
+        let fallback = server_active.min(server_children.len().saturating_sub(1));
+        let Some(local_child) = local_children.get(local_active) else {
+            return fallback;
+        };
+        let selected_ids: HashSet<String> = local_child
+            .collect_terminal_ids()
+            .into_iter()
+            .collect();
+        if selected_ids.is_empty() {
+            return local_active.min(server_children.len().saturating_sub(1));
+        }
+
+        server_children
+            .iter()
+            .position(|child| {
+                child
+                    .collect_terminal_ids()
+                    .iter()
+                    .any(|id| selected_ids.contains(id))
+            })
+            .unwrap_or(fallback)
     }
 
     /// Collect client-owned terminal presentation from this tree.
@@ -1699,6 +1796,91 @@ mod tests {
             }
             _ => panic!("Expected tabs"),
         }
+    }
+
+    #[test]
+    fn merge_reordered_tabs_preserves_presentation_by_terminal_identity() {
+        let server = LayoutNode::Tabs {
+            children: vec![terminal("t2"), terminal("t1")],
+            active_tab: 1,
+        };
+        let local = LayoutNode::Tabs {
+            children: vec![
+                LayoutNode::Terminal {
+                    terminal_id: Some("t1".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: ShellType::Default,
+                    zoom_level: 1.75,
+                },
+                terminal_minimized("t2"),
+            ],
+            active_tab: 0,
+        };
+
+        let merged = LayoutNode::merge_visual_state(&server, &local);
+        let LayoutNode::Tabs {
+            children,
+            active_tab,
+        } = merged
+        else {
+            panic!("expected tabs");
+        };
+        assert_eq!(active_tab, 1, "selected terminal should follow the reorder");
+        assert!(matches!(
+            &children[0],
+            LayoutNode::Terminal {
+                terminal_id: Some(id),
+                minimized: true,
+                ..
+            } if id == "t2"
+        ));
+        assert!(matches!(
+            &children[1],
+            LayoutNode::Terminal {
+                terminal_id: Some(id),
+                zoom_level,
+                ..
+            } if id == "t1" && (*zoom_level - 1.75).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn merge_reordered_split_keeps_sizes_with_their_panes() {
+        let server = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal("t2"), terminal("t1")],
+        };
+        let local = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![25.0, 75.0],
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+
+        let merged = LayoutNode::merge_visual_state(&server, &local);
+        let LayoutNode::Split { sizes, .. } = merged else {
+            panic!("expected split");
+        };
+        assert_eq!(sizes, vec![75.0, 25.0]);
+    }
+
+    #[test]
+    fn merge_closed_tab_keeps_the_selected_terminal_active() {
+        let server = LayoutNode::Tabs {
+            children: vec![terminal("t1"), terminal("t3")],
+            active_tab: 0,
+        };
+        let local = LayoutNode::Tabs {
+            children: vec![terminal("t1"), terminal("t2"), terminal("t3")],
+            active_tab: 2,
+        };
+
+        let merged = LayoutNode::merge_visual_state(&server, &local);
+        let LayoutNode::Tabs { active_tab, .. } = merged else {
+            panic!("expected tabs");
+        };
+        assert_eq!(active_tab, 1);
     }
 
     #[test]
