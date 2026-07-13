@@ -60,9 +60,8 @@ impl WorkspaceData {
     ///
     /// Inserts the (project_id, width) pair into the targeted window's
     /// `project_widths` map, overwriting any prior value for the same id. The
-    /// pair-shaped API matches the runtime shape of a column-resize event
-    /// (one column moves at a time), in contrast to the legacy entity method
-    /// `update_project_widths` that takes a wholesale `HashMap<String, f32>`.
+    /// pair-shaped API matches a single-column update, while the entity-level
+    /// `update_project_widths` method batches multiple pairs in one notification.
     /// Unknown extra ids are a silent no-op, matching the `window_mut` lookup
     /// contract.
     pub fn set_project_width(&mut self, id: WindowId, project_id: &str, width: f32) {

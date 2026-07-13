@@ -30,6 +30,8 @@ pub enum DragState {
         /// Available space along the resize axis (width for columns, height
         /// for rows), minus divider thickness.
         available_size: f32,
+        /// Sum of the raw widths for the currently visible projects.
+        visible_widths_sum: f32,
         /// When true the projects are stacked as rows, so the drag tracks the
         /// vertical axis instead of the horizontal one.
         vertical: bool,
@@ -79,6 +81,23 @@ pub type ActiveDrag = Rc<RefCell<Option<DragState>>>;
 /// Create a new active drag handle.
 pub fn new_active_drag() -> ActiveDrag {
     Rc::new(RefCell::new(None))
+}
+
+fn resize_project_pair(
+    left_initial: f32,
+    right_initial: f32,
+    visible_widths_sum: f32,
+    delta_px: f32,
+    container_size: f32,
+    min_col_width: f32,
+) -> (f32, f32) {
+    let scale = if visible_widths_sum > 0.0 { visible_widths_sum } else { 100.0 };
+    let delta_width = delta_px / container_size * scale;
+    let min_width = (min_col_width / container_size * scale).max(scale * 0.05);
+    let combined_width = (left_initial + right_initial).max(2.0 * min_width);
+    let left_width = (left_initial + delta_width).clamp(min_width, combined_width - min_width);
+
+    (left_width, combined_width - left_width)
 }
 
 /// Helper to compute and apply resize based on mouse position.
@@ -154,7 +173,7 @@ pub fn compute_resize(
                 });
             }
         }
-        DragState::ProjectColumn { divider_index, project_ids, available_size, vertical, initial_mouse_pos, initial_widths, min_col_width } => {
+        DragState::ProjectColumn { divider_index, project_ids, available_size, visible_widths_sum, vertical, initial_mouse_pos, initial_widths, min_col_width } => {
             let container_size = *available_size;
             if container_size <= 0.0 {
                 return;
@@ -174,12 +193,14 @@ pub fn compute_resize(
             } else {
                 f32::from(mouse_pos.x) - f32::from(initial_mouse_pos.x)
             };
-            let delta_percent = delta_px / container_size * 100.0;
-
-            let min_width = (*min_col_width / container_size * 100.0).max(5.0);
-
-            let left_new = (left_initial + delta_percent).max(min_width);
-            let right_new = (right_initial - delta_percent).max(min_width);
+            let (left_new, right_new) = resize_project_pair(
+                left_initial,
+                right_initial,
+                *visible_widths_sum,
+                delta_px,
+                container_size,
+                *min_col_width,
+            );
 
             let mut new_widths = initial_widths.clone();
             new_widths.insert(left_id.clone(), left_new);
@@ -299,11 +320,13 @@ pub fn render_project_divider(
             let initial_widths: HashMap<String, f32> = project_ids.iter()
                 .map(|id| (id.clone(), ws.get_project_width(window_id, id, num_projects)))
                 .collect();
+            let visible_widths_sum = initial_widths.values().sum();
 
             *active_drag.borrow_mut() = Some(DragState::ProjectColumn {
                 divider_index,
                 project_ids: project_ids.clone(),
                 available_size,
+                visible_widths_sum,
                 vertical: is_rows,
                 initial_mouse_pos: mouse_pos,
                 initial_widths,
@@ -326,4 +349,64 @@ pub fn render_sidebar_divider(active_drag: &ActiveDrag, cx: &App) -> impl IntoEl
             *active_drag.borrow_mut() = Some(DragState::Sidebar);
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resize_project_pair;
+
+    fn rendered_width(weight: f32, total: f32, container_size: f32) -> f32 {
+        weight / total * container_size
+    }
+
+    #[test]
+    fn project_resize_tracks_mouse_when_visible_widths_sum_below_100() {
+        let container_size = 1_000.0;
+        let visible_sum = 50.0;
+        let initial_left = 20.0;
+        let initial_right = 30.0;
+
+        let (left, right) = resize_project_pair(
+            initial_left,
+            initial_right,
+            visible_sum,
+            100.0,
+            container_size,
+            50.0,
+        );
+
+        let initial_px = rendered_width(initial_left, visible_sum, container_size);
+        let resized_px = rendered_width(left, left + right, container_size);
+        assert!((resized_px - initial_px - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn project_resize_tracks_mouse_when_visible_widths_sum_above_100() {
+        let container_size = 1_000.0;
+        let visible_sum = 200.0;
+        let initial_left = 80.0;
+        let initial_right = 120.0;
+
+        let (left, right) = resize_project_pair(
+            initial_left,
+            initial_right,
+            visible_sum,
+            100.0,
+            container_size,
+            50.0,
+        );
+
+        let initial_px = rendered_width(initial_left, visible_sum, container_size);
+        let resized_px = rendered_width(left, left + right, container_size);
+        assert!((resized_px - initial_px - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn project_resize_preserves_pair_total_at_minimum_width() {
+        let (left, right) = resize_project_pair(60.0, 40.0, 100.0, 500.0, 1_000.0, 200.0);
+
+        assert_eq!(left, 80.0);
+        assert_eq!(right, 20.0);
+        assert_eq!(left + right, 100.0);
+    }
 }

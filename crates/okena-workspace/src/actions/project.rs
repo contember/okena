@@ -449,29 +449,17 @@ impl Workspace {
 
     /// Update project column widths on the targeted window.
     ///
-    /// Wholesale-replaces the targeted window's `project_widths` map with the
-    /// supplied map. The leading clear is routed through the `window_mut`
-    /// lookup pair so an unknown extra id (e.g. caller raced a close) is a
-    /// silent no-op for the clear; the per-entry `set_project_width` calls
-    /// then also no-op via the same lookup contract. `notify_data` still
-    /// bumps `data_version` so the auto-save observer's cadence is unchanged
-    /// in the close-race path -- consistent with the silent-no-op contract
-    /// the data-layer setters absorb.
+    /// Merges the supplied widths into the targeted window's `project_widths`
+    /// map. Omitted entries may belong to hidden projects and are preserved.
     ///
     /// Each entry is written via `data.set_project_width(window_id, ...)` so
-    /// a future migration off the wholesale shape inherits the per-entry
-    /// pair-shaped contract automatically. The runtime shape of a column-resize
-    /// is per-column; the wholesale shape on this entrypoint is a relic of the
-    /// prior data layout where `project_widths` was a top-level field.
+    /// future changes inherit the per-entry pair-shaped contract automatically.
     ///
     /// Bumps `data_version` exactly once per call (not per entry) -- the data
     /// layer setter does not notify, so the single trailing `notify_data` keeps
     /// the auto-save observer's debounce cadence identical to the pre-migration
     /// body.
     pub fn update_project_widths(&mut self, window_id: WindowId, widths: HashMap<String, f32>, cx: &mut impl WorkspaceCx) {
-        if let Some(w) = self.data.window_mut(window_id) {
-            w.project_widths.clear();
-        }
         for (id, w) in widths {
             self.data.set_project_width(window_id, &id, w);
         }
@@ -1158,12 +1146,9 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn update_project_widths_wholesale_replaces_existing_entries(cx: &mut gpui::TestAppContext) {
-        // Wholesale-replace contract: keys absent from the supplied map are
-        // removed from main_window.project_widths. Pins the semantic so a
-        // future refactor that drops the leading clear() (e.g. switching to a
-        // merge body) silently breaks here. Pre-populate p1, then call with a
-        // map containing only p2 -- p1 must be gone.
+    fn update_project_widths_preserves_unmentioned_entries(cx: &mut gpui::TestAppContext) {
+        // Hidden projects are absent from a resize update but must retain their
+        // width for when they become visible again.
         let mut data = make_workspace_data();
         data.main_window.project_widths.insert("p1".to_string(), 0.50);
         let workspace = cx.new(|_cx| Workspace::new(data));
@@ -1175,7 +1160,7 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(!ws.data().main_window.project_widths.contains_key("p1"));
+            assert_eq!(ws.data().main_window.project_widths.get("p1").copied(), Some(0.50));
             assert_eq!(ws.data().main_window.project_widths.get("p2").copied(), Some(0.40));
         });
     }
