@@ -6,12 +6,53 @@
 
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::focus::FocusManager;
-use crate::workspace::state::{WindowId, Workspace};
+use crate::workspace::state::{ProjectLayoutMode, WindowId, Workspace};
 
 use okena_core::api::ActionRequest;
 use okena_transport::client::{strip_prefix, RemoteConnectionConfig};
 
 use gpui::{AppContext, Entity};
+
+fn canonicalize_layout_action(
+    action: ActionRequest,
+    mode: ProjectLayoutMode,
+) -> ActionRequest {
+    if !mode.is_rows() {
+        return action;
+    }
+
+    match action {
+        ActionRequest::SplitTerminal {
+            project_id,
+            path,
+            direction,
+        } => ActionRequest::SplitTerminal {
+            project_id,
+            path,
+            direction: direction.flipped(),
+        },
+        ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+        } => ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone: match zone.as_str() {
+                "top" => "left".to_string(),
+                "bottom" => "right".to_string(),
+                "left" => "top".to_string(),
+                "right" => "bottom".to_string(),
+                _ => zone,
+            },
+        },
+        other => other,
+    }
+}
 
 /// Build an ActionDispatcher for the given project.
 ///
@@ -124,6 +165,8 @@ impl ActionDispatcher {
             focus_manager,
             window_id,
         } = self;
+        let mode = workspace.read_with(cx, |ws, _cx| ws.project_layout_mode(*window_id));
+        let action = canonicalize_layout_action(action, mode);
 
         // Visual/presentation actions are executed locally on the client
         // workspace. They never reach the server, so each client has
@@ -853,5 +896,50 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
         | ActionRequest::InvokeAction { .. }) => a,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::state::SplitDirection;
+
+    #[test]
+    fn rows_map_visual_split_axis_back_to_canonical_axis() {
+        let action = canonicalize_layout_action(
+            ActionRequest::SplitTerminal {
+                project_id: "project".to_string(),
+                path: vec![0],
+                direction: SplitDirection::Horizontal,
+            },
+            ProjectLayoutMode::Rows,
+        );
+
+        assert!(matches!(
+            action,
+            ActionRequest::SplitTerminal {
+                direction: SplitDirection::Vertical,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rows_map_visual_drop_zone_back_to_canonical_edge() {
+        let action = canonicalize_layout_action(
+            ActionRequest::MovePaneTo {
+                project_id: "source".to_string(),
+                terminal_id: "one".to_string(),
+                target_project_id: "target".to_string(),
+                target_terminal_id: "two".to_string(),
+                zone: "left".to_string(),
+            },
+            ProjectLayoutMode::Rows,
+        );
+
+        assert!(matches!(
+            action,
+            ActionRequest::MovePaneTo { zone, .. } if zone == "top"
+        ));
     }
 }

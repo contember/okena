@@ -583,7 +583,12 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.read(cx);
-        let layout = self.get_layout(workspace).cloned();
+        let mut layout = self.get_layout(workspace).cloned();
+        if let Some(LayoutNode::Split { direction, .. }) = &mut layout {
+            *direction = workspace
+                .project_layout_mode(self.window_id)
+                .presented_split_direction(*direction);
+        }
 
         match &layout {
             Some(LayoutNode::Terminal { .. }) => {

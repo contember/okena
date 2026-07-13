@@ -358,38 +358,18 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    /// Flip the targeted window's project grid between columns and rows, and
-    /// transpose every terminal split inside the projects shown in that window.
+    /// Flip the targeted window's project grid between columns and rows.
     ///
-    /// Flipping the grid axis without transposing the panes inside would leave
-    /// each project's internal splits running the "wrong" way relative to the
-    /// new grid orientation; transposing keeps the whole window's layout
-    /// visually consistent through the switch. Only projects visible in *this*
-    /// window are touched (using the window's persistent visibility, ignoring
-    /// transient focus narrowing), so a project shown in another window keeps
-    /// its own pane orientation.
+    /// Terminal splits are transposed at render time for this window. Their
+    /// canonical daemon-owned directions stay untouched, so another window can
+    /// present the same project with a different orientation and state syncs
+    /// cannot undo the local choice.
     ///
     /// Percentages in `project_widths` are axis-agnostic, so relative grid
     /// sizing is preserved across the flip. Persisted via `notify_data`.
     pub fn toggle_project_layout_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
-        let Some(window_state) = self.data.window(window_id) else {
+        if self.data.window(window_id).is_none() {
             return;
-        };
-
-        // Collect the IDs of projects shown in this window before mutating, so
-        // the borrow of `window_state` is released before we mutate layouts.
-        let visible_ids: Vec<String> =
-            compute_visible_projects(&self.data, None, false, window_state)
-                .into_iter()
-                .map(|p| p.id.clone())
-                .collect();
-
-        for project in &mut self.data.projects {
-            if visible_ids.iter().any(|id| id == &project.id)
-                && let Some(layout) = project.layout.as_mut()
-            {
-                layout.transpose();
-            }
         }
 
         if let Some(w) = self.data.window_mut(window_id) {
@@ -1741,7 +1721,10 @@ mod workspace_tests {
 #[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, WindowBounds, WindowId, WindowState, Workspace, WorkspaceData};
+    use crate::state::{
+        HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, ProjectLayoutMode,
+        WindowBounds, WindowId, WindowState, Workspace, WorkspaceData,
+    };
     use crate::settings::HooksConfig;
     use okena_terminal::shell_config::ShellType;
     use okena_core::theme::FolderColor;
@@ -2366,10 +2349,30 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn toggle_project_layout_mode_transposes_visible_project_splits(cx: &mut gpui::TestAppContext) {
-        // Flipping the grid orientation must also deeply transpose every split
-        // inside the window's visible projects: horizontal <-> vertical, nested
-        // and inside tab groups, while leaving sizes and tab structure intact.
+    fn toggle_project_layout_mode_is_scoped_to_its_window(cx: &mut gpui::TestAppContext) {
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_project_layout_mode(WindowId::Main, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.project_layout_mode(WindowId::Main), ProjectLayoutMode::Rows);
+            assert_eq!(
+                ws.project_layout_mode(WindowId::Extra(extra_id)),
+                ProjectLayoutMode::Columns
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_project_layout_mode_keeps_canonical_splits_unchanged(cx: &mut gpui::TestAppContext) {
+        // Orientation is per-window presentation; the shared daemon mirror must
+        // remain canonical so a state snapshot and another window cannot fight it.
         use crate::state::SplitDirection;
 
         let nested = LayoutNode::Split {
@@ -2399,42 +2402,12 @@ mod gpui_tests {
             let LayoutNode::Split { direction, sizes, children } = layout else {
                 panic!("expected outer split");
             };
-            assert_eq!(*direction, SplitDirection::Vertical, "outer flipped");
+            assert_eq!(*direction, SplitDirection::Horizontal, "outer stays canonical");
             assert_eq!(sizes, &vec![0.6, 0.4], "sizes preserved");
             let LayoutNode::Split { direction: inner, .. } = &children[1] else {
                 panic!("expected nested split");
             };
-            assert_eq!(*inner, SplitDirection::Horizontal, "nested flipped");
-        });
-    }
-
-    #[gpui::test]
-    fn toggle_project_layout_mode_leaves_hidden_projects_untouched(cx: &mut gpui::TestAppContext) {
-        // A project hidden in this window is not part of its grid, so toggling
-        // the window orientation must not transpose that project's panes (it
-        // may be shown — at its own orientation — in another window).
-        use crate::state::SplitDirection;
-
-        let mut hidden = make_project("hidden");
-        hidden.layout = Some(LayoutNode::Split {
-            direction: SplitDirection::Horizontal,
-            sizes: vec![0.5, 0.5],
-            children: vec![LayoutNode::new_terminal(), LayoutNode::new_terminal()],
-        });
-        let mut data = make_workspace_data(vec![make_project("p1"), hidden], vec!["p1", "hidden"]);
-        data.main_window.hidden_project_ids.insert("hidden".to_string());
-        let workspace = cx.new(|_cx| Workspace::new(data));
-
-        workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_layout_mode(WindowId::Main, cx);
-        });
-
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let layout = ws.project("hidden").unwrap().layout.as_ref().unwrap();
-            let LayoutNode::Split { direction, .. } = layout else {
-                panic!("expected split");
-            };
-            assert_eq!(*direction, SplitDirection::Horizontal, "hidden project untouched");
+            assert_eq!(*inner, SplitDirection::Vertical, "nested stays canonical");
         });
     }
 
