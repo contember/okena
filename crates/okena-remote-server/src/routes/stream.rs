@@ -159,6 +159,7 @@ async fn handle_ws(
 
     // Pin the writer handle for use in select!
     tokio::pin!(writer_handle);
+    let mut writer_finished = false;
 
     loop {
         tokio::select! {
@@ -581,6 +582,7 @@ async fn handle_ws(
 
             // Writer task died (socket write error) — stop the reader too
             _ = &mut writer_handle => {
+                writer_finished = true;
                 break;
             }
         }
@@ -611,7 +613,9 @@ async fn handle_ws(
 
     // Shutdown: dropping out_tx closes the writer's channel → writer exits.
     drop(out_tx);
-    let _ = writer_handle.await;
+    if !writer_finished {
+        let _ = writer_handle.await;
+    }
 }
 
 /// Writer task: pumps messages from the mpsc channel to the WebSocket sink.
