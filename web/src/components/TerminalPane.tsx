@@ -76,7 +76,7 @@ export function TerminalPane({
   // Actions
   const handleFocus = useCallback(() => {
     if (!terminalId) return;
-    postAction({ action: "focus_terminal", project_id: projectId, terminal_id: terminalId }).catch(() => {});
+    postAction({ action: "record_project_activity", project_id: projectId }).catch(() => {});
   }, [terminalId, projectId]);
 
   const handleSplit = useCallback((direction: "horizontal" | "vertical") => {

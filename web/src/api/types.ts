@@ -258,6 +258,7 @@ export type ActionRequest =
   | { action: "undo_soft_close"; terminal_id: string }
   | { action: "close_terminal_now"; terminal_id: string }
   | { action: "focus_terminal"; project_id: string; terminal_id: string; window?: string | null }
+  | { action: "record_project_activity"; project_id: string }
   | { action: "read_content"; terminal_id: string }
   | { action: "export_buffer"; terminal_id: string }
   | { action: "resize"; terminal_id: string; cols: number; rows: number }

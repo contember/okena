@@ -217,6 +217,7 @@ impl ActionDispatcher {
             }
             ActionRequest::FocusTerminal { project_id, terminal_id, .. } => {
                 let pid = project_id.clone();
+                let activity_pid = pid.clone();
                 let tid = terminal_id.clone();
                 let focus_manager = focus_manager.clone();
                 focus_manager.update(cx, |fm, cx| {
@@ -228,6 +229,16 @@ impl ActionDispatcher {
                             }
                     });
                     cx.notify();
+                });
+                let action = strip_remote_ids(
+                    ActionRequest::RecordProjectActivity {
+                        project_id: activity_pid,
+                    },
+                    connection_id,
+                );
+                let cid = connection_id.clone();
+                manager.update(cx, |rm, cx| {
+                    rm.send_action(&cid, action, cx);
                 });
                 return;
             }
@@ -490,6 +501,11 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             terminal_id: s(&terminal_id),
             window,
         },
+        ActionRequest::RecordProjectActivity { project_id } => {
+            ActionRequest::RecordProjectActivity {
+                project_id: s(&project_id),
+            }
+        }
         ActionRequest::ReadContent { terminal_id } => ActionRequest::ReadContent {
             terminal_id: s(&terminal_id),
         },

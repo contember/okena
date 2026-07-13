@@ -83,6 +83,14 @@ pub fn execute_action(
             // to `execute_action` is already the right one.
             terminal::focus(ws, focus_manager, project_id, terminal_id, cx)
         }
+        ActionRequest::RecordProjectActivity { project_id } => {
+            if ws.project(&project_id).is_none() {
+                ActionResult::Err(format!("project not found: {project_id}"))
+            } else {
+                ws.bump_activity(&project_id, cx);
+                ActionResult::Ok(None)
+            }
+        }
         ActionRequest::SendText { terminal_id, text } => {
             terminal::send_text(ws, terminal_id, text, backend, terminals)
         }

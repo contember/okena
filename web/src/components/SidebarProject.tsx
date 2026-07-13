@@ -35,7 +35,7 @@ export function SidebarProject({
       if (isMobile) {
         dispatch({ type: "set_sidebar_open", open: false });
       } else {
-        postAction({ action: "focus_terminal", project_id: projectId, terminal_id: terminalId }).catch(() => {});
+        postAction({ action: "record_project_activity", project_id: projectId }).catch(() => {});
       }
     },
     [dispatch, isMobile],
@@ -49,7 +49,7 @@ export function SidebarProject({
       if (isMobile) {
         dispatch({ type: "set_sidebar_open", open: false });
       } else if (firstTerminalId) {
-        postAction({ action: "focus_terminal", project_id: worktree.id, terminal_id: firstTerminalId }).catch(() => {});
+        postAction({ action: "record_project_activity", project_id: worktree.id }).catch(() => {});
       }
     },
     [dispatch, isMobile],

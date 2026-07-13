@@ -517,19 +517,18 @@ pub async fn rename_terminal(
     .await
 }
 
-/// Focus a terminal.
+/// Record activity for a terminal focused in the mobile client's local state.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn focus_terminal(
     conn_id: String,
     project_id: String,
     terminal_id: String,
 ) -> Result<(), MobileFfiError> {
+    let _ = terminal_id;
     send_mobile_action(
         &conn_id,
-        ActionRequest::FocusTerminal {
+        ActionRequest::RecordProjectActivity {
             project_id,
-            terminal_id,
-            window: None,
         },
     )
     .await

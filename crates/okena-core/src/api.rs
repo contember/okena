@@ -525,6 +525,10 @@ pub enum ActionRequest {
         #[serde(default)]
         window: Option<String>,
     },
+    /// Record project recency without changing daemon-side focus presentation.
+    RecordProjectActivity {
+        project_id: String,
+    },
     ReadContent {
         terminal_id: String,
     },
@@ -1283,6 +1287,9 @@ mod tests {
                 project_id: "p1".into(),
                 terminal_id: "t1".into(),
                 window: Some("main".into()),
+            },
+            ActionRequest::RecordProjectActivity {
+                project_id: "p1".into(),
             },
             ActionRequest::ReadContent {
                 terminal_id: "t1".into(),
