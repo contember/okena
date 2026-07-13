@@ -235,13 +235,19 @@ pub(super) fn render_lane_row(
                 .min_w_0()
                 .h(px(row_h))
                 .items_center()
+                .flex_nowrap()
+                .overflow_hidden()
                 .gap(px(6.0))
                 .child(
                     div()
+                        .h_full()
+                        .flex()
+                        .items_center()
                         .text_size(ui_text_md(cx))
                         .text_color(rgb(t.text_primary))
                         .text_ellipsis()
                         .overflow_hidden()
+                        .whitespace_nowrap()
                         .flex_shrink(1.0)
                         .min_w_0()
                         .child(entry.message.clone()),
@@ -252,6 +258,7 @@ pub(super) fn render_lane_row(
                         .text_size(ui_text_ms(cx))
                         .text_color(rgb(t.text_muted))
                         .flex_shrink_0()
+                        .ml_auto()
                         .child(entry.author.clone()),
                 ),
         );
