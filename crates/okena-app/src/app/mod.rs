@@ -128,6 +128,8 @@ pub struct Okena {
     /// `Entity<WindowView>` is created and inserted as part of the
     /// `cx.open_window` build closure (see `extras.rs`).
     extra_windows: HashMap<WindowId, Entity<WindowView>>,
+    /// Extras whose OS window is being created but is not registered yet.
+    opening_extra_windows: HashSet<WindowId>,
     /// OS window handles for extras, keyed by `WindowId::Extra(uuid)`. Populated
     /// alongside `extra_windows` in `extras.rs::open_extra_window`. Same
     /// purpose as `main_window_handle` — focused-window resolution at the
@@ -255,6 +257,7 @@ impl Okena {
             main_window,
             main_window_handle,
             extra_windows: HashMap::new(),
+            opening_extra_windows: HashSet::new(),
             extra_window_handles: HashMap::new(),
             workspace: workspace.clone(),
             terminals,
@@ -513,22 +516,16 @@ impl Okena {
         })
         .detach();
 
-        // Slice 07 cri 1: kick the extras observer once so persisted
-        // `WorkspaceData.extra_windows` entries reopen at launch. The observer
-        // above only fires when `workspace` notifies, but `Workspace::new` does
-        // not notify on construction — without an explicit kick, persisted
-        // extras would stay invisible until the user mutates the workspace.
-        // Deferred via `cx.spawn` because `open_extra_window` captures
-        // `cx.entity()` and calls `okena.update` inside `cx.open_window`'s
-        // build closure; running synchronously inside `Okena::new` would touch
-        // a half-constructed entity. By the time the spawned task body runs,
-        // the entity is fully wrapped and `update` is safe.
-        cx.spawn(async move |this: WeakEntity<Okena>, cx| {
-            let _ = this.update(cx, |this, cx| {
+        // Reconcile persisted extras after this constructor returns. App::defer
+        // runs at the end of the effect cycle, when the Okena entity is fully
+        // initialized; retaining a strong entity makes the restore mandatory
+        // instead of silently dropping a failed weak self-update.
+        let okena = cx.entity();
+        cx.defer(move |cx| {
+            okena.update(cx, |this, cx| {
                 this.handle_extra_windows_changed(cx);
             });
-        })
-        .detach();
+        });
 
         // Note: updater is now handled by the okena-ext-updater extension.
         // GlobalUpdateInfo is set in main.rs via okena_ext_updater::init().

@@ -37,11 +37,12 @@ use super::Okena;
 pub(super) fn extras_to_open(
     data: &WorkspaceData,
     opened: &HashSet<WindowId>,
+    opening: &HashSet<WindowId>,
 ) -> Vec<WindowId> {
     data.extra_windows
         .iter()
         .map(|w| WindowId::Extra(w.id))
-        .filter(|id| !opened.contains(id))
+        .filter(|id| !opened.contains(id) && !opening.contains(id))
         .collect()
 }
 
@@ -120,11 +121,15 @@ impl Okena {
             self.extra_windows.remove(&window_id);
         }
 
-        for window_id in extras_to_open(&data, &opened) {
+        let to_open = extras_to_open(&data, &opened, &self.opening_extra_windows);
+        if !to_open.is_empty() {
+            log::info!("Opening {} extra window(s)", to_open.len());
+        }
+        for window_id in to_open {
+            self.opening_extra_windows.insert(window_id);
             self.open_extra_window(window_id, cx);
         }
     }
-
 
     /// Route a [`WindowViewEvent`] raised by any window to the right handler.
     pub(super) fn handle_window_view_event(
@@ -311,6 +316,19 @@ impl Okena {
                 let okena_for_register = okena.clone();
                 cx.defer(move |cx| {
                     okena_for_register.update(cx, |this, cx| {
+                        this.opening_extra_windows.remove(&window_id);
+                        let still_desired = this
+                            .workspace
+                            .read(cx)
+                            .data()
+                            .window(window_id)
+                            .is_some();
+                        if !still_desired {
+                            let _ = handle.update(cx, |_, window, _| {
+                                window.remove_window();
+                            });
+                            return;
+                        }
                         this.extra_windows.insert(window_id, view_for_okena.clone());
                         // Track the OS window handle so the remote-bridge
                         // command loop can resolve actions to whichever window
@@ -354,6 +372,7 @@ impl Okena {
                         ws.close_extra_window(window_id, cx);
                     });
                     okena_for_close.update(cx, |this, _cx| {
+                        this.opening_extra_windows.remove(&window_id);
                         this.extra_windows.remove(&window_id);
                         this.extra_window_handles.remove(&window_id);
                     });
@@ -365,6 +384,7 @@ impl Okena {
         );
 
         if let Err(e) = result {
+            self.opening_extra_windows.remove(&window_id);
             log::error!("Failed to open extra window: {e}");
         }
     }
@@ -390,11 +410,15 @@ mod tests {
         }
     }
 
+    fn extras_not_opened(data: &WorkspaceData, opened: &HashSet<WindowId>) -> Vec<WindowId> {
+        extras_to_open(data, opened, &HashSet::new())
+    }
+
     #[test]
     fn empty_extras_returns_empty() {
         let data = empty_workspace();
         let opened = HashSet::new();
-        assert!(extras_to_open(&data, &opened).is_empty());
+        assert!(extras_not_opened(&data, &opened).is_empty());
     }
 
     #[test]
@@ -403,7 +427,7 @@ mod tests {
         let id1 = data.spawn_extra_window(None);
         let id2 = data.spawn_extra_window(None);
         let opened = HashSet::new();
-        let pending = extras_to_open(&data, &opened);
+        let pending = extras_not_opened(&data, &opened);
         assert_eq!(pending, vec![id1, id2]);
     }
 
@@ -414,7 +438,7 @@ mod tests {
         let id2 = data.spawn_extra_window(None);
         let mut opened = HashSet::new();
         opened.insert(id1);
-        let pending = extras_to_open(&data, &opened);
+        let pending = extras_not_opened(&data, &opened);
         assert_eq!(pending, vec![id2]);
     }
 
@@ -426,7 +450,17 @@ mod tests {
         let mut opened = HashSet::new();
         opened.insert(id1);
         opened.insert(id2);
-        assert!(extras_to_open(&data, &opened).is_empty());
+        assert!(extras_not_opened(&data, &opened).is_empty());
+    }
+
+    #[test]
+    fn skips_extras_being_opened() {
+        let mut data = empty_workspace();
+        let opening_id = data.spawn_extra_window(None);
+        let opened = HashSet::new();
+        let opening = HashSet::from([opening_id]);
+
+        assert!(extras_to_open(&data, &opened, &opening).is_empty());
     }
 
     #[test]
@@ -466,7 +500,7 @@ mod tests {
         // if the caller mistakenly passes an empty `opened` set.
         let data = empty_workspace();
         let opened = HashSet::new();
-        let pending = extras_to_open(&data, &opened);
+        let pending = extras_not_opened(&data, &opened);
         assert!(!pending.contains(&WindowId::Main));
     }
 
@@ -478,7 +512,7 @@ mod tests {
         let mut data = empty_workspace();
         let ids: Vec<WindowId> = (0..5).map(|_| data.spawn_extra_window(None)).collect();
         let opened = HashSet::new();
-        assert_eq!(extras_to_open(&data, &opened), ids);
+        assert_eq!(extras_not_opened(&data, &opened), ids);
     }
 
     #[test]
@@ -508,7 +542,7 @@ mod tests {
         );
         let opened = HashSet::new();
         assert!(
-            extras_to_open(&data, &opened).is_empty(),
+            extras_not_opened(&data, &opened).is_empty(),
             "restore-at-launch kickoff must find no extras to open on the default workspace"
         );
     }
@@ -582,7 +616,7 @@ mod tests {
         let ids: Vec<WindowId> = (0..25).map(|_| data.spawn_extra_window(None)).collect();
         assert_eq!(data.extra_windows.len(), 25, "data layer must accept every spawn");
         let opened = HashSet::new();
-        assert_eq!(extras_to_open(&data, &opened), ids, "helper must surface every pending entry");
+        assert_eq!(extras_not_opened(&data, &opened), ids, "helper must surface every pending entry");
     }
 
     // ── Restore-bounds resolver ──────────────────────────────────────────
