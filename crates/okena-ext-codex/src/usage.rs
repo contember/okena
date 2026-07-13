@@ -1,19 +1,22 @@
-use okena_extensions::ThemeColors;
-use okena_usage::{
-    effective_time_pct, read_working_days, render_usage_row, usage_body_container, usage_divider,
-    usage_kv_row, usage_popover_container, usage_popover_header, usage_trigger_items, SegmentUnit,
-    UsageRow,
-};
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::h_flex;
+use gpui_component::{h_flex, v_flex};
+use okena_extensions::ThemeColors;
+use okena_ui::expand::expand_toggle;
+use okena_ui::tokens::{ui_text_ms, ui_text_xs};
+use okena_usage::{
+    SegmentUnit, UsageRow, effective_time_pct, format_reset_time_epoch, read_working_days,
+    render_usage_row, usage_body_container, usage_divider, usage_kv_row, usage_popover_container,
+    usage_popover_header, usage_trigger_items,
+};
 use parking_lot::Mutex;
+use std::cmp::Ordering as CmpOrdering;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Refresh interval for usage data
@@ -30,6 +33,8 @@ const HOVER_REFETCH_THROTTLE: Duration = Duration::from_secs(60);
 
 /// Codex OAuth client ID (public, embedded in the Codex CLI binary)
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 fn theme(cx: &App) -> ThemeColors {
     okena_extensions::theme(cx)
@@ -60,6 +65,18 @@ struct CreditsInfo {
     balance: f64,
 }
 
+#[derive(Clone)]
+struct ResetCredit {
+    title: String,
+    expires_at: Option<f64>,
+}
+
+#[derive(Clone)]
+struct ResetCreditsInfo {
+    available_count: u64,
+    credits: Vec<ResetCredit>,
+}
+
 /// All fetched usage data
 #[derive(Clone)]
 struct UsageData {
@@ -68,6 +85,7 @@ struct UsageData {
     secondary_window: Option<RateLimitWindow>,
     review_primary: Option<RateLimitWindow>,
     credits: Option<CreditsInfo>,
+    reset_credits: Option<ResetCreditsInfo>,
 }
 
 /// Shared usage data + the single background poll task.
@@ -132,23 +150,24 @@ fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
 
     // Persist new tokens back to auth.json
     if let Ok(content) = std::fs::read_to_string(&auth.auth_path)
-        && let Ok(mut file_json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(tokens) = file_json.get_mut("tokens").and_then(|t| t.as_object_mut()) {
+        && let Ok(mut file_json) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        if let Some(tokens) = file_json.get_mut("tokens").and_then(|t| t.as_object_mut()) {
+            tokens.insert(
+                "access_token".to_string(),
+                serde_json::Value::String(new_access.to_string()),
+            );
+            if let Some(rt) = new_refresh {
                 tokens.insert(
-                    "access_token".to_string(),
-                    serde_json::Value::String(new_access.to_string()),
+                    "refresh_token".to_string(),
+                    serde_json::Value::String(rt.to_string()),
                 );
-                if let Some(rt) = new_refresh {
-                    tokens.insert(
-                        "refresh_token".to_string(),
-                        serde_json::Value::String(rt.to_string()),
-                    );
-                }
-            }
-            if let Ok(updated) = serde_json::to_string_pretty(&file_json) {
-                let _ = std::fs::write(&auth.auth_path, updated);
             }
         }
+        if let Ok(updated) = serde_json::to_string_pretty(&file_json) {
+            let _ = std::fs::write(&auth.auth_path, updated);
+        }
+    }
 
     Some(new_access.to_string())
 }
@@ -188,6 +207,45 @@ fn parse_window(v: &serde_json::Value) -> Option<RateLimitWindow> {
         window_seconds,
         reset_at,
         time_elapsed_pct,
+    })
+}
+
+fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
+    let timestamp: jiff::Timestamp = ts.parse().ok()?;
+    Some(timestamp.as_millisecond() as f64 / 1_000.0)
+}
+
+fn parse_reset_credits(body: &serde_json::Value) -> Option<ResetCreditsInfo> {
+    let raw_credits = body["credits"].as_array()?;
+    let mut credits: Vec<ResetCredit> = raw_credits
+        .iter()
+        .filter(|credit| credit["status"].as_str() == Some("available"))
+        .map(|credit| ResetCredit {
+            title: credit["title"]
+                .as_str()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or("Full reset")
+                .to_string(),
+            expires_at: credit["expires_at"]
+                .as_str()
+                .and_then(parse_iso8601_to_epoch),
+        })
+        .collect();
+
+    credits.sort_by(|left, right| match (left.expires_at, right.expires_at) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        (Some(_), None) => CmpOrdering::Less,
+        (None, Some(_)) => CmpOrdering::Greater,
+        (None, None) => CmpOrdering::Equal,
+    });
+
+    let available_count = body["available_count"]
+        .as_u64()
+        .unwrap_or(credits.len() as u64);
+
+    Some(ResetCreditsInfo {
+        available_count,
+        credits,
     })
 }
 
@@ -266,10 +324,7 @@ fn fetch_usage_from_local_sessions(auth: &CodexAuth) -> Option<UsageData> {
                     .get("unlimited")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
-                balance: c
-                    .get("balance")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
+                balance: c.get("balance").and_then(|v| v.as_f64()).unwrap_or(0.0),
             });
 
             if primary_window.is_some() || secondary_window.is_some() {
@@ -283,6 +338,7 @@ fn fetch_usage_from_local_sessions(auth: &CodexAuth) -> Option<UsageData> {
                     secondary_window,
                     review_primary: None,
                     credits,
+                    reset_credits: None,
                 });
             }
         }
@@ -295,7 +351,7 @@ fn fetch_usage_from_local_sessions(auth: &CodexAuth) -> Option<UsageData> {
     None
 }
 
-fn try_fetch_with_token(
+fn try_fetch_usage_with_token(
     access_token: &str,
     account_id: &str,
 ) -> Result<okena_transport::http::HttpResponse, Option<u16>> {
@@ -318,18 +374,65 @@ fn try_fetch_with_token(
     }
 }
 
+fn try_fetch_reset_credits_with_token(
+    access_token: &str,
+    account_id: &str,
+) -> Result<okena_transport::http::HttpResponse, Option<u16>> {
+    let resp = okena_transport::http::send(
+        okena_transport::http::HttpRequest::get(RESET_CREDITS_URL)
+            .bearer(access_token)
+            .header("chatgpt-account-id", account_id)
+            .timeout(Duration::from_secs(10))
+            .label("codex.reset-credits"),
+    )
+    .map_err(|_| None)?;
+
+    if resp.is_success() {
+        Ok(resp)
+    } else {
+        Err(Some(resp.status()))
+    }
+}
+
+fn fetch_reset_credits(access_token: &str, account_id: &str) -> Option<ResetCreditsInfo> {
+    let resp = match try_fetch_reset_credits_with_token(access_token, account_id) {
+        Ok(resp) => resp,
+        Err(status) => {
+            log::warn!("[codex-usage] reset credits API returned {:?}", status);
+            return None;
+        }
+    };
+    let body: serde_json::Value = match resp.json() {
+        Ok(body) => body,
+        Err(error) => {
+            log::warn!("[codex-usage] failed to decode reset credits: {error}");
+            return None;
+        }
+    };
+    let parsed = parse_reset_credits(&body);
+    if parsed.is_none() {
+        log::warn!("[codex-usage] reset credits response had an unexpected shape");
+    }
+    parsed
+}
+
 fn fetch_usage() -> Option<UsageData> {
     let auth = read_codex_auth()?;
+    let mut access_token = auth.access_token.clone();
 
     // Try cached access token first, refresh on 401
-    let resp = match try_fetch_with_token(&auth.access_token, &auth.account_id) {
+    let resp = match try_fetch_usage_with_token(&access_token, &auth.account_id) {
         Ok(resp) => resp,
         Err(Some(401)) => {
             let new_token = refresh_access_token(&auth)?;
-            match try_fetch_with_token(&new_token, &auth.account_id) {
+            access_token = new_token;
+            match try_fetch_usage_with_token(&access_token, &auth.account_id) {
                 Ok(resp) => resp,
                 Err(status) => {
-                    log::warn!("[codex-usage] API returned {:?} after token refresh", status);
+                    log::warn!(
+                        "[codex-usage] API returned {:?} after token refresh",
+                        status
+                    );
                     return fetch_usage_from_local_sessions(&auth);
                 }
             }
@@ -342,10 +445,7 @@ fn fetch_usage() -> Option<UsageData> {
 
     let body: serde_json::Value = resp.json().ok()?;
 
-    let plan_type = body["plan_type"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
+    let plan_type = body["plan_type"].as_str().unwrap_or("unknown").to_string();
 
     let primary_window = body["rate_limit"]["primary_window"]
         .as_object()
@@ -368,11 +468,10 @@ fn fetch_usage() -> Option<UsageData> {
             .get("unlimited")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        balance: c
-            .get("balance")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
+        balance: c.get("balance").and_then(|v| v.as_f64()).unwrap_or(0.0),
     });
+
+    let reset_credits = fetch_reset_credits(&access_token, &auth.account_id);
 
     Some(UsageData {
         plan_type,
@@ -380,6 +479,7 @@ fn fetch_usage() -> Option<UsageData> {
         secondary_window,
         review_primary,
         credits,
+        reset_credits,
     })
 }
 
@@ -483,6 +583,7 @@ impl CodexUsageData {
 pub struct CodexUsage {
     data: Entity<CodexUsageData>,
     popover_visible: bool,
+    resets_expanded: bool,
     trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
 }
@@ -495,6 +596,7 @@ impl CodexUsage {
         Self {
             data,
             popover_visible: false,
+            resets_expanded: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
         }
@@ -545,6 +647,7 @@ impl CodexUsage {
             let _ = this.update(cx, |this, cx| {
                 if hover_token.load(Ordering::SeqCst) == token && this.popover_visible {
                     this.popover_visible = false;
+                    this.resets_expanded = false;
                     cx.notify();
                 }
             });
@@ -552,16 +655,14 @@ impl CodexUsage {
         .detach();
     }
 
-    fn render_popover(
-        &self,
-        t: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let shared = self.data.read(cx);
-        let data = shared.data.lock();
-        let data = match data.as_ref() {
-            Some(d) if self.popover_visible => d.clone(),
-            _ => return div().size_0().into_any_element(),
+    fn render_popover(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        let data = {
+            let shared = self.data.read(cx);
+            let data = shared.data.lock();
+            match data.as_ref() {
+                Some(data) if self.popover_visible => data.clone(),
+                _ => return div().size_0().into_any_element(),
+            }
         };
 
         let working = read_working_days(cx);
@@ -636,13 +737,142 @@ impl CodexUsage {
                                             .child(usage_kv_row(t, cx, "Credits", text, color)),
                                         None => el,
                                     }
-                                }),
+                                })
+                                .when_some(
+                                    data.reset_credits.as_ref().filter(|resets| {
+                                        resets.available_count > 0 || !resets.credits.is_empty()
+                                    }),
+                                    |el, resets| {
+                                        el.child(usage_divider(t))
+                                            .child(self.render_reset_credits(t, resets, cx))
+                                    },
+                                ),
                         ),
                 ),
         )
         .with_priority(1)
         .into_any_element()
     }
+
+    fn render_reset_credits(
+        &self,
+        t: &ThemeColors,
+        resets: &ResetCreditsInfo,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let has_details = !resets.credits.is_empty();
+        let expanded = self.resets_expanded && has_details;
+        let summary = reset_count_label(resets.available_count);
+        let first_expiry = first_reset_expiry_label(resets);
+
+        v_flex()
+            .gap(px(5.0))
+            .child(
+                h_flex()
+                    .id("codex-reset-credits-toggle")
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .px(px(2.0))
+                    .py(px(2.0))
+                    .rounded(px(3.0))
+                    .when(has_details, |el| {
+                        el.cursor_pointer()
+                            .hover(|style| style.bg(rgb(t.bg_hover)))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.resets_expanded = !this.resets_expanded;
+                                cx.notify();
+                            }))
+                    })
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .child(expand_toggle(
+                                "codex-reset-credits-chevron",
+                                expanded,
+                                has_details,
+                                t,
+                            ))
+                            .child(
+                                div()
+                                    .text_size(ui_text_ms(cx))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(t.text_secondary))
+                                    .child(summary),
+                            ),
+                    )
+                    .when_some(first_expiry, |el, expiry| {
+                        el.child(
+                            div()
+                                .text_size(ui_text_xs(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(expiry),
+                        )
+                    }),
+            )
+            .when(expanded, |el| {
+                el.children(resets.credits.iter().map(|credit| {
+                    h_flex()
+                        .items_baseline()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .pl(px(19.0))
+                        .pr(px(2.0))
+                        .child(
+                            div()
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_secondary))
+                                .child(credit.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_text_xs(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(reset_expiry_label(credit)),
+                        )
+                }))
+                .when(
+                    resets.available_count > resets.credits.len() as u64,
+                    |el| {
+                        let hidden = resets.available_count - resets.credits.len() as u64;
+                        el.child(
+                            div()
+                                .pl(px(19.0))
+                                .text_size(ui_text_xs(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(format!("+{hidden} more")),
+                        )
+                    },
+                )
+            })
+    }
+}
+
+fn reset_count_label(count: u64) -> String {
+    if count == 1 {
+        "1 reset available".to_string()
+    } else {
+        format!("{count} resets available")
+    }
+}
+
+fn reset_expiry_label(credit: &ResetCredit) -> String {
+    let Some(expires_at) = credit.expires_at else {
+        return "no expiration".to_string();
+    };
+    let formatted = format_reset_time_epoch(expires_at, true);
+    if formatted.is_empty() {
+        "expiration unknown".to_string()
+    } else {
+        format!("expires {formatted}")
+    }
+}
+
+fn first_reset_expiry_label(resets: &ResetCreditsInfo) -> Option<String> {
+    let expires_at = resets.credits.iter().find_map(|credit| credit.expires_at)?;
+    let formatted = format_reset_time_epoch(expires_at, true);
+    (!formatted.is_empty()).then(|| format!("first expires {formatted}"))
 }
 
 /// Pick the grid granularity for a window: per-hour up to a day, per-day for
@@ -804,5 +1034,87 @@ mod tests {
         let w = parse_window(&v).expect("window should parse");
         assert_eq!(w.window_seconds, 604800);
         assert_eq!(w.reset_at, 1782371508);
+    }
+
+    #[test]
+    fn parse_reset_credits_filters_available_and_sorts_by_expiry() {
+        let body = serde_json::json!({
+            "available_count": 3,
+            "credits": [
+                {
+                    "status": "available",
+                    "title": "Later reset",
+                    "expires_at": "2026-08-11T21:08:50.081157Z"
+                },
+                {
+                    "status": "redeemed",
+                    "title": "Used reset",
+                    "expires_at": "2026-07-01T00:00:00Z"
+                },
+                {
+                    "status": "available",
+                    "title": "First reset",
+                    "expires_at": "2026-07-18T00:32:13.609604Z"
+                },
+                {
+                    "status": "available",
+                    "title": "",
+                    "expires_at": null
+                }
+            ]
+        });
+
+        let parsed = parse_reset_credits(&body).expect("reset credits should parse");
+        assert_eq!(parsed.available_count, 3);
+        assert_eq!(parsed.credits.len(), 3);
+        assert_eq!(parsed.credits[0].title, "First reset");
+        assert_eq!(parsed.credits[1].title, "Later reset");
+        assert_eq!(parsed.credits[2].title, "Full reset");
+        assert!(parsed.credits[0].expires_at.is_some());
+        assert!(parsed.credits[2].expires_at.is_none());
+    }
+
+    #[test]
+    fn parse_reset_credits_derives_missing_count() {
+        let body = serde_json::json!({
+            "credits": [
+                {
+                    "status": "available",
+                    "title": "Full reset",
+                    "expires_at": "2026-07-18T00:32:13Z"
+                },
+                {
+                    "status": "redeeming",
+                    "title": "In progress",
+                    "expires_at": "2026-07-19T00:32:13Z"
+                }
+            ]
+        });
+
+        let parsed = parse_reset_credits(&body).expect("reset credits should parse");
+        assert_eq!(parsed.available_count, 1);
+        assert_eq!(parsed.credits.len(), 1);
+    }
+
+    #[test]
+    fn reset_summary_uses_singular_plural_and_first_expiry() {
+        assert_eq!(reset_count_label(1), "1 reset available");
+        assert_eq!(reset_count_label(3), "3 resets available");
+
+        let resets = ResetCreditsInfo {
+            available_count: 1,
+            credits: vec![ResetCredit {
+                title: "Full reset".to_string(),
+                expires_at: parse_iso8601_to_epoch("2026-07-18T00:32:13Z"),
+            }],
+        };
+        let summary = first_reset_expiry_label(&resets).expect("expiry summary should render");
+        assert!(summary.starts_with("first expires "));
+
+        let no_expiry = ResetCredit {
+            title: "Full reset".to_string(),
+            expires_at: None,
+        };
+        assert_eq!(reset_expiry_label(&no_expiry), "no expiration");
     }
 }
