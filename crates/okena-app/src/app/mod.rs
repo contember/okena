@@ -125,11 +125,9 @@ pub struct Okena {
     /// Ephemeral extras spawned at runtime, keyed by `WindowId::Extra(uuid)`.
     /// Populated by the workspace observer in `handle_extra_windows_changed`
     /// when `WorkspaceData.extra_windows` gains a new entry; the matching
-    /// `Entity<WindowView>` is created and inserted as part of the
-    /// `cx.open_window` build closure (see `extras.rs`).
+    /// `Entity<WindowView>` is registered immediately after `cx.open_window`
+    /// succeeds (see `extras.rs`).
     extra_windows: HashMap<WindowId, Entity<WindowView>>,
-    /// Extras whose OS window is being created but is not registered yet.
-    opening_extra_windows: HashSet<WindowId>,
     /// OS window handles for extras, keyed by `WindowId::Extra(uuid)`. Populated
     /// alongside `extra_windows` in `extras.rs::open_extra_window`. Same
     /// purpose as `main_window_handle` — focused-window resolution at the
@@ -257,7 +255,6 @@ impl Okena {
             main_window,
             main_window_handle,
             extra_windows: HashMap::new(),
-            opening_extra_windows: HashSet::new(),
             extra_window_handles: HashMap::new(),
             workspace: workspace.clone(),
             terminals,
@@ -516,16 +513,19 @@ impl Okena {
         })
         .detach();
 
-        // Reconcile persisted extras after this constructor returns. App::defer
-        // runs at the end of the effect cycle, when the Okena entity is fully
-        // initialized; retaining a strong entity makes the restore mandatory
-        // instead of silently dropping a failed weak self-update.
+        // Linux starts its platform event loop only after the application
+        // startup callback returns. Use the foreground executor so restored
+        // Wayland windows are created on the first live event-loop turn, while
+        // retaining Okena strongly until the one-shot restore has completed.
         let okena = cx.entity();
-        cx.defer(move |cx| {
-            okena.update(cx, |this, cx| {
-                this.handle_extra_windows_changed(cx);
+        cx.spawn(async move |_, cx| {
+            cx.update(|cx| {
+                okena.update(cx, |this, cx| {
+                    this.handle_extra_windows_changed(cx);
+                });
             });
-        });
+        })
+        .detach();
 
         // Note: updater is now handled by the okena-ext-updater extension.
         // GlobalUpdateInfo is set in main.rs via okena_ext_updater::init().

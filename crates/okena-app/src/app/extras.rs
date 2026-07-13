@@ -37,12 +37,11 @@ use super::Okena;
 pub(super) fn extras_to_open(
     data: &WorkspaceData,
     opened: &HashSet<WindowId>,
-    opening: &HashSet<WindowId>,
 ) -> Vec<WindowId> {
     data.extra_windows
         .iter()
         .map(|w| WindowId::Extra(w.id))
-        .filter(|id| !opened.contains(id) && !opening.contains(id))
+        .filter(|id| !opened.contains(id))
         .collect()
 }
 
@@ -121,12 +120,11 @@ impl Okena {
             self.extra_windows.remove(&window_id);
         }
 
-        let to_open = extras_to_open(&data, &opened, &self.opening_extra_windows);
+        let to_open = extras_to_open(&data, &opened);
         if !to_open.is_empty() {
             log::info!("Opening {} extra window(s)", to_open.len());
         }
         for window_id in to_open {
-            self.opening_extra_windows.insert(window_id);
             self.open_extra_window(window_id, cx);
         }
     }
@@ -275,6 +273,7 @@ impl Okena {
             },
         );
 
+        let mut opened_view = None;
         let result = cx.open_window(
             WindowOptions {
                 titlebar: if cfg!(target_os = "windows") {
@@ -300,57 +299,14 @@ impl Okena {
                 app_id: Some("okena".to_string()),
                 ..Default::default()
             },
-            move |window, cx| {
+            |window, cx| {
                 let view = cx.new(|cx| {
                     WindowView::new(window_id, workspace.clone(), terminals.clone(), window, cx)
                 });
-                let view_for_okena = view.clone();
-                let handle = window.window_handle();
-                // Defer the registration: this build closure runs while Okena
-                // is already leased (the workspace observer that triggered
-                // `open_extra_window` holds the Okena update lease for the
-                // duration of `flush_effects`). Calling `okena.update` here
-                // synchronously would double-lease and panic. `cx.defer`
-                // schedules the registration to run after the current effect
-                // flush completes, when the lease has released.
-                let okena_for_register = okena.clone();
-                cx.defer(move |cx| {
-                    okena_for_register.update(cx, |this, cx| {
-                        this.opening_extra_windows.remove(&window_id);
-                        let still_desired = this
-                            .workspace
-                            .read(cx)
-                            .data()
-                            .window(window_id)
-                            .is_some();
-                        if !still_desired {
-                            let _ = handle.update(cx, |_, window, _| {
-                                window.remove_window();
-                            });
-                            return;
-                        }
-                        this.extra_windows.insert(window_id, view_for_okena.clone());
-                        // Track the OS window handle so the remote-bridge
-                        // command loop can resolve actions to whichever window
-                        // is focused (PRD cri 13). The handle is removed on
-                        // close below.
-                        this.extra_window_handles.insert(window_id, handle);
+                opened_view = Some(view.clone());
 
-                        // Same cross-window event channel main is wired with, so
-                        // a "jump into project" can target this window too.
-                        cx.subscribe(&view_for_okena, Okena::handle_window_view_event).detach();
-
-                        // Wire the per-window UI to the shared remote manager
-                        // main was wired with at startup. Without this, the
-                        // extra's ProjectColumns have no remote_manager (remote
-                        // actions don't route). Git status + services arrive via
-                        // the daemon snapshot, so there is nothing in-process to
-                        // wire here.
-                        let remote_manager = this.remote_manager.clone();
-                        view_for_okena.update(cx, |rv, cx| {
-                            rv.set_remote_manager(remote_manager, cx);
-                        });
-                    });
+                window.on_next_frame(move |_window, _cx| {
+                    log::info!("Extra window {window_id:?} received its first platform frame");
                 });
 
                 // Slice 07 cri 3 close-flow: when the user closes this OS
@@ -372,7 +328,6 @@ impl Okena {
                         ws.close_extra_window(window_id, cx);
                     });
                     okena_for_close.update(cx, |this, _cx| {
-                        this.opening_extra_windows.remove(&window_id);
                         this.extra_windows.remove(&window_id);
                         this.extra_window_handles.remove(&window_id);
                     });
@@ -383,9 +338,32 @@ impl Okena {
             },
         );
 
-        if let Err(e) = result {
-            self.opening_extra_windows.remove(&window_id);
-            log::error!("Failed to open extra window: {e}");
+        // open_window is synchronous, so register before observers can run again.
+        match result {
+            Ok(handle) => {
+                let Some(view) = opened_view else {
+                    log::error!("Extra window {window_id:?} opened without a WindowView");
+                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    return;
+                };
+                let handle: AnyWindowHandle = handle.into();
+                self.extra_windows.insert(window_id, view.clone());
+                self.extra_window_handles.insert(window_id, handle);
+                cx.subscribe(&view, Okena::handle_window_view_event)
+                    .detach();
+
+                let remote_manager = self.remote_manager.clone();
+                view.update(cx, |view, cx| {
+                    view.set_remote_manager(remote_manager, cx);
+                });
+                log::info!(
+                    "Registered extra window {window_id:?} as GPUI window {}",
+                    handle.window_id().as_u64()
+                );
+            }
+            Err(error) => {
+                log::error!("Failed to open extra window {window_id:?}: {error}");
+            }
         }
     }
 }
@@ -411,7 +389,7 @@ mod tests {
     }
 
     fn extras_not_opened(data: &WorkspaceData, opened: &HashSet<WindowId>) -> Vec<WindowId> {
-        extras_to_open(data, opened, &HashSet::new())
+        extras_to_open(data, opened)
     }
 
     #[test]
@@ -451,16 +429,6 @@ mod tests {
         opened.insert(id1);
         opened.insert(id2);
         assert!(extras_not_opened(&data, &opened).is_empty());
-    }
-
-    #[test]
-    fn skips_extras_being_opened() {
-        let mut data = empty_workspace();
-        let opening_id = data.spawn_extra_window(None);
-        let opened = HashSet::new();
-        let opening = HashSet::from([opening_id]);
-
-        assert!(extras_to_open(&data, &opened, &opening).is_empty());
     }
 
     #[test]
