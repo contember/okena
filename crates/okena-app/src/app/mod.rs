@@ -79,10 +79,15 @@ fn hand_off_ui_owned_daemon(mut spawned_child: Option<std::process::Child>) {
                 if let Some(child) = spawned_child.as_mut().filter(|_| owns_current_process) {
                     let _ = child.kill();
                 } else {
-                    log::warn!(
-                        "UI-owned daemon pid {} did not exit, but this GUI has no matching child handle",
+                    // No owned `Child` handle — e.g. a detached post-restart
+                    // successor we only know by the pid it advertises. Reap it by
+                    // pid, guarded by the is_okena_process recycle check, so a
+                    // UI-owned daemon we own the lifecycle of never lingers.
+                    log::info!(
+                        "UI-owned daemon pid {} did not exit gracefully; reaping by pid",
                         daemon.pid
                     );
+                    kill_process_by_pid(daemon.pid);
                 }
             }
             if let Some(child) = spawned_child.as_mut().filter(|_| owns_current_process) {

@@ -66,6 +66,10 @@ pub struct AppState {
     /// desktop quit requests.
     pub ui_owned: bool,
     pub shutdown_when_idle: Arc<AtomicBool>,
+    /// Set true once at least one authenticated client has connected. Gates the
+    /// idle-exit monitor (see [`shutdown::run_idle_exit_monitor`]) so a freshly
+    /// spawned UI-owned daemon isn't reaped before its GUI makes first contact.
+    pub had_client: Arc<AtomicBool>,
     /// Graceful process-shutdown trigger for `/v1/shutdown`. The shared daemon
     /// run loop awaits it and tears down the socket, discovery file, and
     /// instance lock through normal drops.
@@ -117,6 +121,7 @@ pub fn build_router(
     active_connections: Arc<AtomicU64>,
     process_shutdown: Arc<tokio::sync::Notify>,
     ui_owned: bool,
+    had_client: Arc<AtomicBool>,
     update_info: okena_ext_updater::UpdateInfo,
 ) -> Router {
     let state = AppState {
@@ -134,6 +139,7 @@ pub fn build_router(
         process_shutdown,
         ui_owned,
         shutdown_when_idle: Arc::new(AtomicBool::new(false)),
+        had_client,
         update_info,
     };
 

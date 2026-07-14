@@ -144,6 +144,8 @@ async fn handle_ws(
     // `/v1/shutdown` counts these to refuse while any client is still connected.
     // We register only after auth so unauthenticated dial attempts don't count.
     state.active_connections.fetch_add(1, Ordering::SeqCst);
+    // Record that this daemon has served a client, arming the idle-exit monitor.
+    state.had_client.store(true, Ordering::SeqCst);
 
     // Subscribe to state_version and git status changes
     let mut state_rx = state.state_version.subscribe();
