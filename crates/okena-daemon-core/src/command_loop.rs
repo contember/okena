@@ -628,7 +628,8 @@ pub async fn daemon_command_loop(
 }
 
 /// Materialize the PTYs for every restored project's uninitialized terminal
-/// slots at daemon startup.
+/// slots at daemon startup, then fire each restored project's `on_project_open`
+/// lifecycle hook.
 ///
 /// Persisted `workspace.json` layouts carry terminal slots with
 /// `terminal_id: None` (the normal saved state). In daemon-client mode nobody
@@ -679,12 +680,12 @@ pub fn materialize_uninitialized_terminals(
     // Snapshot settings once, mirroring the command loop's `execute_action` arm.
     let app_settings = settings.lock().clone();
 
-    for project_id in project_ids {
+    for project_id in &project_ids {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut ws = workspace.lock();
         match spawn_uninitialized_terminals(
             &mut ws,
-            &project_id,
+            project_id,
             backend,
             terminals,
             &app_settings,
@@ -698,6 +699,18 @@ pub fn materialize_uninitialized_terminals(
             }
             okena_app_core::workspace::actions::execute::ActionResult::Ok(_) => {}
         }
+    }
+
+    // Fire `on_project_open` for every restored project. `add_project` fires it
+    // for NEW projects, but the daemon restores existing projects via
+    // `Workspace::new` (never `add_project`), so without this their lifecycle
+    // open hook — global or per-project — never runs on restart. Runs AFTER
+    // terminal materialization so the hook sees a settled registry; the hook's
+    // own PTY (if any) is registered via `register_hook_results`.
+    for project_id in &project_ids {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut ws = workspace.lock();
+        ws.fire_project_open_hooks(project_id, &app_settings.hooks, &mut cx);
     }
 }
 
@@ -1138,6 +1151,298 @@ mod tests {
             version_before,
             "data_version untouched on empty workspace"
         );
+    }
+
+    // ── PROOF: does a lifecycle hook actually execute in the daemon path? ─────
+    //
+    // These two tests are a matched pair driving the SAME real HookRunner +
+    // HookMonitor + real LocalBackend/PtyManager the daemon builds at boot
+    // (daemon.rs:199/211). The only variable is the entrypoint.
+    //
+    //  * `restore_boot_path_does_not_fire_on_project_open` drives the actual
+    //    daemon-boot entrypoint (`materialize_uninitialized_terminals`, called
+    //    from `daemon.run()` at command_loop.rs:663) against a RESTORED project
+    //    that has `project.on_open` configured. Result: the monitor records
+    //    ZERO executions -> the on_project_open hook never fires on restore.
+    //
+    //  * `add_project_fires_on_project_open` drives `ws.add_project` (the sole
+    //    fire_on_project_open call site) with the SAME services. Result: the
+    //    monitor records exactly one `on_project_open` execution -> the firing
+    //    machinery works; only the restore entrypoint skips it.
+
+    /// Build a restored project that BOTH has an uninitialized terminal slot
+    /// AND a configured `project.on_open` hook, at a real cwd.
+    fn workspace_restored_with_on_open(path: &str, on_open: &str) -> WorkspaceData {
+        use okena_state::{HooksConfig, LayoutNode, ProjectData, ProjectHooks};
+        let project = ProjectData {
+            id: "p1".to_string(),
+            name: "Project p1".to_string(),
+            path: path.to_string(),
+            layout: Some(LayoutNode::Terminal {
+                terminal_id: None,
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            }),
+            terminal_names: Default::default(),
+            hidden_terminals: Default::default(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: HooksConfig {
+                project: ProjectHooks {
+                    on_open: Some(on_open.to_string()),
+                    on_close: None,
+                },
+                ..Default::default()
+            },
+            is_remote: false,
+            connection_id: None,
+            service_terminals: Default::default(),
+            default_shell: None,
+            hook_terminals: Default::default(),
+            pinned: false,
+            last_activity_at: None,
+        };
+        WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["p1".to_string()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
+    /// FIXED behavior: the daemon boot path materializes the restored project's
+    /// terminals AND fires its configured `on_project_open` hook. Uses a real
+    /// backend + real HookRunner/HookMonitor so the pass reflects genuine
+    /// execution, not a stub. (This is the same project the pre-fix proof used
+    /// to demonstrate the break — the assertion is flipped.)
+    #[test]
+    fn restore_boot_path_fires_on_project_open() {
+        use okena_hooks::{HookMonitor, HookRunner};
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+        use okena_workspace::state::LayoutNode;
+
+        let tmp = std::env::temp_dir();
+        let tmp_path = tmp.to_str().expect("temp dir is utf-8");
+
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+
+        // The real services the daemon threads through (daemon.rs:211).
+        let hook_runner = Some(HookRunner::new(backend.clone(), terminals.clone()));
+        let hook_monitor = Some(HookMonitor::new());
+
+        // Restored project carries a PER-PROJECT on_open (global settings empty),
+        // proving the fire resolves per-project hooks reloaded from workspace.json.
+        let workspace = Arc::new(Mutex::new(Workspace::new(
+            workspace_restored_with_on_open(tmp_path, "echo HOOK_MARKER"),
+        )));
+        let settings = Arc::new(Mutex::new(default_settings()));
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+
+        materialize_uninitialized_terminals(
+            &*backend,
+            &workspace,
+            &workspace_tick,
+            &hook_runner,
+            &hook_monitor,
+            &terminals,
+            &settings,
+        );
+
+        // The restored terminal slot was materialized (boot path ran)...
+        let assigned = {
+            let ws = workspace.lock();
+            match ws.project("p1").expect("p1").layout.as_ref().expect("layout") {
+                LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+                other => panic!("expected Terminal node, got {other:?}"),
+            }
+        };
+        let assigned = assigned.expect("restored terminal slot got a real id");
+        assert!(
+            terminals.lock().contains_key(&assigned),
+            "boot path spawned the layout terminal PTY"
+        );
+
+        // ...and the restored project's per-project on_project_open hook fired.
+        let history = hook_monitor.as_ref().unwrap().history();
+        assert_eq!(
+            history.len(),
+            1,
+            "restore must fire on_project_open exactly once, got: {:?}",
+            history.iter().map(|h| h.hook_type).collect::<Vec<_>>()
+        );
+        assert_eq!(history[0].hook_type, "on_project_open");
+
+        // The fire registered a live hook terminal in the project's map.
+        assert_eq!(
+            workspace.lock().project("p1").expect("p1").hook_terminals.len(),
+            1,
+            "one live hook terminal registered after boot fire"
+        );
+    }
+
+    /// Restored projects that carry NO `on_open` hook (and no global hook) must
+    /// NOT fire anything at boot — no spurious hook executions.
+    #[test]
+    fn restore_boot_path_no_hook_does_not_fire() {
+        use okena_hooks::{HookMonitor, HookRunner};
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+
+        let tmp = std::env::temp_dir();
+        let tmp_path = tmp.to_str().expect("temp dir is utf-8");
+
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let hook_runner = Some(HookRunner::new(backend.clone(), terminals.clone()));
+        let hook_monitor = Some(HookMonitor::new());
+
+        // Restored project with an uninitialized terminal slot but EMPTY hooks.
+        let workspace = Arc::new(Mutex::new(Workspace::new(
+            workspace_with_uninitialized_terminal(tmp_path),
+        )));
+        let settings = Arc::new(Mutex::new(default_settings())); // global hooks empty
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+
+        materialize_uninitialized_terminals(
+            &*backend,
+            &workspace,
+            &workspace_tick,
+            &hook_runner,
+            &hook_monitor,
+            &terminals,
+            &settings,
+        );
+
+        assert!(
+            hook_monitor.as_ref().unwrap().history().is_empty(),
+            "no hook configured → nothing fires on restore"
+        );
+        assert!(
+            workspace.lock().project("p1").expect("p1").hook_terminals.is_empty(),
+            "no hook terminals registered when no hook is configured"
+        );
+    }
+
+    /// Stale `hook_terminals` restored from disk (dead PTYs from a prior session)
+    /// are dropped on boot before the fresh fire registers a live entry — so the
+    /// map does not accumulate phantoms across restarts.
+    #[test]
+    fn restore_boot_path_clears_stale_hook_terminals() {
+        use okena_hooks::{HookMonitor, HookRunner};
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+        use okena_workspace::state::{HookTerminalEntry, HookTerminalStatus};
+
+        let tmp = std::env::temp_dir();
+        let tmp_path = tmp.to_str().expect("temp dir is utf-8");
+
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let hook_runner = Some(HookRunner::new(backend.clone(), terminals.clone()));
+        let hook_monitor = Some(HookMonitor::new());
+
+        // Restored project has BOTH a persisted (dead) hook terminal AND an
+        // on_open hook to re-fire.
+        let mut data = workspace_restored_with_on_open(tmp_path, "echo HOOK_MARKER");
+        data.projects[0].hook_terminals.insert(
+            "stale-dead-id".to_string(),
+            HookTerminalEntry {
+                label: "on_project_open".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo old".to_string(),
+                cwd: tmp_path.to_string(),
+            },
+        );
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let settings = Arc::new(Mutex::new(default_settings()));
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+
+        materialize_uninitialized_terminals(
+            &*backend,
+            &workspace,
+            &workspace_tick,
+            &hook_runner,
+            &hook_monitor,
+            &terminals,
+            &settings,
+        );
+
+        let ws = workspace.lock();
+        let hooks = &ws.project("p1").expect("p1").hook_terminals;
+        assert!(
+            !hooks.contains_key("stale-dead-id"),
+            "stale persisted hook terminal must be dropped on boot"
+        );
+        assert_eq!(hooks.len(), 1, "exactly one live hook terminal after re-fire");
+    }
+
+    /// CONTRAST (machinery works): calling `add_project` with the SAME real
+    /// services DOES fire `on_project_open` and records exactly one execution.
+    /// Proves the failure above is the missing restore trigger, not a broken
+    /// runner or gpui-gated code path.
+    #[test]
+    fn add_project_fires_on_project_open() {
+        use okena_hooks::{HookMonitor, HookRunner};
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+
+        let tmp = std::env::temp_dir();
+        let tmp_path = tmp.to_str().expect("temp dir is utf-8").to_string();
+
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+
+        let hook_runner = Some(HookRunner::new(backend.clone(), terminals.clone()));
+        let hook_monitor = Some(HookMonitor::new());
+
+        // Global settings carry the on_open hook (add_project builds the new
+        // ProjectData with empty per-project hooks and resolves against global).
+        let mut app_settings = default_settings();
+        app_settings.hooks.project.on_open = Some("echo HOOK_MARKER".to_string());
+
+        let mut workspace = Workspace::new(empty_workspace_data());
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+
+        workspace.add_project(
+            "Test".to_string(),
+            tmp_path,
+            true,
+            &app_settings.hooks,
+            WindowId::Main,
+            &mut cx,
+        );
+
+        let history = hook_monitor.as_ref().unwrap().history();
+        assert_eq!(
+            history.len(),
+            1,
+            "add_project must fire exactly one hook, got: {:?}",
+            history.iter().map(|h| h.hook_type).collect::<Vec<_>>()
+        );
+        assert_eq!(history[0].hook_type, "on_project_open");
     }
 
     /// `TerminalBackend` that records every `kill`ed id so a test can assert a

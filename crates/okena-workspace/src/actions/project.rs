@@ -215,6 +215,45 @@ impl Workspace {
         id
     }
 
+    /// Re-open an ALREADY-EXISTING project (e.g. one restored from
+    /// `workspace.json` at daemon boot): drop its stale hook terminals and fire
+    /// its `on_project_open` hook, reading the project's stored hooks/name/path.
+    ///
+    /// `add_project` runs the fire+register step for NEW projects, but restored
+    /// projects enter the workspace via `Workspace::new` (never `add_project`),
+    /// so without this their `project.on_open` hook — global or per-project —
+    /// would never run on restart. The stale-clear matters because
+    /// `hook_terminals` is persisted: the entries reloaded from disk point at
+    /// PTYs that died with the previous process, so they must be dropped both to
+    /// avoid phantom rows (whose rerun/dismiss fail with "hook terminal not
+    /// found") and to stop entries accumulating on every restart. No-ops the
+    /// fire when no `on_open` hook resolves.
+    pub fn fire_project_open_hooks(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
+        let Some(project) = self.project(project_id) else { return };
+        let project_hooks = project.hooks.clone();
+        let name = project.name.clone();
+        let path = project.path.clone();
+        // Immutable `project` borrow ends here (values cloned); the folder
+        // borrow below ends at the fire call, freeing `&mut self` for the
+        // mutations that follow.
+        let folder = self.folder_for_project_or_parent(project_id);
+        let folder_id = folder.map(|f| f.id.as_str());
+        let folder_name = folder.map(|f| f.name.as_str());
+        let runner = cx.hook_runner();
+        let monitor = cx.hook_monitor();
+        let hook_results = hooks::fire_on_project_open(&project_hooks, project_id, &name, &path, folder_id, folder_name, global_hooks, runner.as_ref(), monitor.as_ref());
+        // Drop stale (dead-PTY) hook terminals restored from disk before
+        // registering the freshly-fired ones, so the panel shows only live rows.
+        if let Some(p) = self.project_mut(project_id) {
+            let stale: Vec<String> = p.hook_terminals.keys().cloned().collect();
+            for tid in stale {
+                p.hook_terminals.remove(&tid);
+                p.terminal_names.remove(&tid);
+            }
+        }
+        self.register_hook_results(hook_results, cx);
+    }
+
     /// Add a new terminal to a project by splitting the root layout
     pub fn add_terminal(&mut self, focus_manager: &mut FocusManager, project_id: &str, cx: &mut impl WorkspaceCx) {
         if let Some(project) = self.project_mut(project_id) {
