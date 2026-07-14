@@ -463,6 +463,7 @@ mod tests {
             project_order: order,
             folders,
             windows: vec![],
+            hooks: Vec::new(),
         }
     }
 

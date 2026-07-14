@@ -1,3 +1,4 @@
+use okena_core::api::{ApiHookExecution, ApiHookStatus};
 use okena_state::Toast;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -27,6 +28,92 @@ pub struct HookExecution {
     pub started_at: Instant,
     pub status: HookStatus,
     pub terminal_id: Option<String>,
+}
+
+/// Intern a wire hook-type string back to the `&'static str` the domain type
+/// uses. The set is closed (every `hook_type` passed to `record_start` is a
+/// literal); an unrecognized value maps to `"unknown"` rather than leaking.
+fn intern_hook_type(s: &str) -> &'static str {
+    match s {
+        "on_project_open" => "on_project_open",
+        "on_project_close" => "on_project_close",
+        "on_worktree_create" => "on_worktree_create",
+        "on_worktree_close" => "on_worktree_close",
+        "pre_merge" => "pre_merge",
+        "post_merge" => "post_merge",
+        "before_worktree_remove" => "before_worktree_remove",
+        "worktree_removed" => "worktree_removed",
+        "on_rebase_conflict" => "on_rebase_conflict",
+        "on_dirty_worktree_close" => "on_dirty_worktree_close",
+        _ => "unknown",
+    }
+}
+
+/// Discriminant of a `HookStatus`, used for cheap change detection.
+fn status_kind(status: &HookStatus) -> u8 {
+    match status {
+        HookStatus::Running => 0,
+        HookStatus::Succeeded { .. } => 1,
+        HookStatus::Failed { .. } => 2,
+        HookStatus::SpawnError { .. } => 3,
+    }
+}
+
+impl HookExecution {
+    /// Project onto the wire mirror ([`ApiHookExecution`]). Durations collapse
+    /// to whole milliseconds; `started_at` is dropped (process-local `Instant`).
+    pub fn to_api(&self) -> ApiHookExecution {
+        let status = match &self.status {
+            HookStatus::Running => ApiHookStatus::Running,
+            HookStatus::Succeeded { duration } => ApiHookStatus::Succeeded {
+                duration_ms: duration.as_millis() as u64,
+            },
+            HookStatus::Failed { duration, exit_code, stderr } => ApiHookStatus::Failed {
+                duration_ms: duration.as_millis() as u64,
+                exit_code: *exit_code,
+                stderr: stderr.clone(),
+            },
+            HookStatus::SpawnError { message } => ApiHookStatus::SpawnError {
+                message: message.clone(),
+            },
+        };
+        ApiHookExecution {
+            id: self.id,
+            hook_type: self.hook_type.to_string(),
+            command: self.command.clone(),
+            project_name: self.project_name.clone(),
+            status,
+            terminal_id: self.terminal_id.clone(),
+        }
+    }
+
+    /// Rebuild from the wire mirror on a thin client. `started_at` is stamped
+    /// to now (see [`ApiHookExecution`]); `hook_type` is re-interned.
+    pub fn from_api(api: &ApiHookExecution) -> Self {
+        let status = match &api.status {
+            ApiHookStatus::Running => HookStatus::Running,
+            ApiHookStatus::Succeeded { duration_ms } => HookStatus::Succeeded {
+                duration: Duration::from_millis(*duration_ms),
+            },
+            ApiHookStatus::Failed { duration_ms, exit_code, stderr } => HookStatus::Failed {
+                duration: Duration::from_millis(*duration_ms),
+                exit_code: *exit_code,
+                stderr: stderr.clone(),
+            },
+            ApiHookStatus::SpawnError { message } => HookStatus::SpawnError {
+                message: message.clone(),
+            },
+        };
+        HookExecution {
+            id: api.id,
+            hook_type: intern_hook_type(&api.hook_type),
+            command: api.command.clone(),
+            project_name: api.project_name.clone(),
+            started_at: Instant::now(),
+            status,
+            terminal_id: api.terminal_id.clone(),
+        }
+    }
 }
 
 /// Internal mutable state behind the Arc<Mutex<...>>.
@@ -154,6 +241,35 @@ impl HookMonitor {
     pub fn push_toast(&self, toast: Toast) {
         let mut inner = self.0.lock();
         inner.pending_toasts.push(toast);
+    }
+
+    /// Replace the entire history from a daemon snapshot (thin-client ingest).
+    ///
+    /// `newest_first` is in the same order [`history`](Self::history) returns
+    /// (newest first) — the daemon builds it from its own `history()`. To keep
+    /// the log rendering unchanged, it is stored reversed (oldest-first) so
+    /// `history()`'s own `.rev()` yields newest-first again.
+    ///
+    /// A cheap `(id, status kind)` comparison skips the write (and the `version`
+    /// bump that would re-render the hook log) when the snapshot is unchanged.
+    pub fn replace_history(&self, newest_first: Vec<HookExecution>) {
+        let mut inner = self.0.lock();
+        let unchanged = inner.history.len() == newest_first.len()
+            && inner
+                .history
+                .iter()
+                .rev()
+                .zip(newest_first.iter())
+                .all(|(a, b)| a.id == b.id && status_kind(&a.status) == status_kind(&b.status));
+        if unchanged {
+            return;
+        }
+        inner.running_count = newest_first
+            .iter()
+            .filter(|e| matches!(e.status, HookStatus::Running))
+            .count();
+        inner.history = newest_first.into_iter().rev().collect();
+        inner.version += 1;
     }
 
     /// Get a snapshot of the execution history (newest first).
@@ -329,5 +445,106 @@ mod tests {
         let monitor = HookMonitor::new();
         // Should not panic
         monitor.notify_exit("nonexistent", Some(1));
+    }
+
+    #[test]
+    fn to_api_from_api_round_trips() {
+        let exec = HookExecution {
+            id: 7,
+            hook_type: "worktree_removed",
+            command: "echo bye".into(),
+            project_name: "proj".into(),
+            started_at: Instant::now(),
+            status: HookStatus::Failed {
+                duration: Duration::from_millis(1234),
+                exit_code: 3,
+                stderr: "boom".into(),
+            },
+            terminal_id: Some("t9".into()),
+        };
+        let api = exec.to_api();
+        assert_eq!(api.hook_type, "worktree_removed");
+        assert!(matches!(
+            api.status,
+            ApiHookStatus::Failed { duration_ms: 1234, exit_code: 3, .. }
+        ));
+
+        let back = HookExecution::from_api(&api);
+        assert_eq!(back.id, 7);
+        // hook_type re-interned to the same &'static str.
+        assert_eq!(back.hook_type, "worktree_removed");
+        assert_eq!(back.command, "echo bye");
+        assert_eq!(back.terminal_id.as_deref(), Some("t9"));
+        match back.status {
+            HookStatus::Failed { duration, exit_code, ref stderr } => {
+                assert_eq!(duration, Duration::from_millis(1234));
+                assert_eq!(exit_code, 3);
+                assert_eq!(stderr, "boom");
+            }
+            _ => panic!("status kind not preserved"),
+        }
+    }
+
+    #[test]
+    fn from_api_interns_unknown_hook_type() {
+        let api = ApiHookExecution {
+            id: 1,
+            hook_type: "totally_made_up".into(),
+            command: "x".into(),
+            project_name: "p".into(),
+            status: ApiHookStatus::Running,
+            terminal_id: None,
+        };
+        assert_eq!(HookExecution::from_api(&api).hook_type, "unknown");
+    }
+
+    fn api_exec(id: u64, status: ApiHookStatus) -> HookExecution {
+        HookExecution::from_api(&ApiHookExecution {
+            id,
+            hook_type: "pre_merge".into(),
+            command: format!("cmd-{id}"),
+            project_name: "p".into(),
+            status,
+            terminal_id: None,
+        })
+    }
+
+    #[test]
+    fn replace_history_preserves_newest_first_and_bumps_version() {
+        let monitor = HookMonitor::new();
+        let v0 = monitor.version();
+        // Daemon `history()` yields newest-first: id 2 then id 1.
+        monitor.replace_history(vec![
+            api_exec(2, ApiHookStatus::Running),
+            api_exec(1, ApiHookStatus::Succeeded { duration_ms: 5 }),
+        ]);
+
+        let hist = monitor.history();
+        assert_eq!(hist.len(), 2);
+        assert_eq!(hist[0].id, 2, "newest-first order must survive ingest");
+        assert_eq!(hist[1].id, 1);
+        assert!(monitor.version() > v0);
+        assert_eq!(monitor.running_count(), 1);
+    }
+
+    #[test]
+    fn replace_history_skips_bump_when_unchanged() {
+        let monitor = HookMonitor::new();
+        let snapshot = || vec![api_exec(1, ApiHookStatus::Succeeded { duration_ms: 5 })];
+        monitor.replace_history(snapshot());
+        let v = monitor.version();
+        // Same ids + status kinds → no write, no version bump (no needless re-render).
+        monitor.replace_history(snapshot());
+        assert_eq!(monitor.version(), v);
+    }
+
+    #[test]
+    fn replace_history_bumps_when_status_kind_changes() {
+        let monitor = HookMonitor::new();
+        monitor.replace_history(vec![api_exec(1, ApiHookStatus::Running)]);
+        let v = monitor.version();
+        // Same id, different status kind (Running → Succeeded) → must bump.
+        monitor.replace_history(vec![api_exec(1, ApiHookStatus::Succeeded { duration_ms: 9 })]);
+        assert!(monitor.version() > v);
     }
 }

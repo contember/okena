@@ -1681,6 +1681,7 @@ mod tests {
             project_order: Vec::new(),
             folders: Vec::new(),
             windows: Vec::new(),
+            hooks: Vec::new(),
         }));
 
         client.reconnect();

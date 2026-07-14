@@ -157,6 +157,7 @@ mod tests {
             project_order: vec![],
             folders: vec![],
             windows: vec![],
+            hooks: Vec::new(),
         }
     }
 

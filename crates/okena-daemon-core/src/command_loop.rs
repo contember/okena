@@ -551,6 +551,13 @@ pub async fn daemon_command_loop(
                     sidebar_open: None,
                 }];
 
+                // Hook execution history so thin clients can render the hook
+                // log (the hooks run here on the daemon, not on the client).
+                let hooks = hook_monitor
+                    .as_ref()
+                    .map(|m| m.history().iter().map(|e| e.to_api()).collect())
+                    .unwrap_or_default();
+
                 // Shared projection: ordered projects + folders + flat back-compat
                 // fields → `StateResponse` (identical to the GUI loop).
                 let resp = build_state_response(
@@ -561,6 +568,7 @@ pub async fn daemon_command_loop(
                     hidden_project_ids,
                     &size_map,
                     windows,
+                    hooks,
                 );
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
