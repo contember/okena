@@ -173,9 +173,17 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: project_path.to_string(),
-            // When hooks are deferred the worktree directory doesn't exist yet.
-            // Use None so no terminals are spawned until creation finishes.
-            layout: if fire_hooks { new_layout } else { None },
+            // When hooks are deferred the worktree directory doesn't exist yet,
+            // so use None (no terminals spawned until creation finishes). Otherwise
+            // clone the parent's structure; if the parent has NO layout, still seed
+            // a single terminal so the new worktree opens with an initial shell
+            // instead of an empty project (matches the deferred `fire_worktree_hooks`
+            // path). `spawn_uninitialized_terminals` materializes the seeded slot.
+            layout: if fire_hooks {
+                new_layout.or_else(|| Some(crate::state::LayoutNode::new_terminal()))
+            } else {
+                None
+            },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::state::WorktreeMetadata {

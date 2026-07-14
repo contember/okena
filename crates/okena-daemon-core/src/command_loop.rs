@@ -1579,4 +1579,198 @@ mod tests {
         );
         assert_eq!(*receiver.borrow(), 8);
     }
+
+    // ── PROOF: does the DAEMON side of quick-create-worktree work? ────────────
+    //
+    // Drives the REAL CreateWorktree action end-to-end through `execute_action`
+    // (the exact arm the daemon command loop dispatches at command_loop.rs:737)
+    // against a REAL temp git repo, a REAL LocalBackend over
+    // PtyManager(SessionBackend::None), and REAL HookRunner + HookMonitor (the
+    // same services daemon.rs:199/211 builds). The parent project HAS a layout
+    // with a terminal AND a `worktree.on_create` hook configured — mirroring an
+    // actively-used project the user quick-creates a worktree from.
+    //
+    // Asserts BOTH reported symptoms are daemon-side-clean:
+    //   (a) the new worktree project's layout carries a Terminal node with a
+    //       real (Some) terminal_id whose PTY is in the TerminalsRegistry;
+    //   (b) the on_worktree_create hook recorded exactly one execution in the
+    //       HookMonitor AND a live hook terminal was registered on the project.
+    #[test]
+    fn create_worktree_materializes_terminal_and_fires_on_worktree_create() {
+        use okena_hooks::{HookMonitor, HookRunner};
+        use okena_state::{HooksConfig, LayoutNode, ProjectData, WorktreeHooks};
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+        use std::process::Command;
+
+        // A real temp git repo with one commit — `git worktree add` needs a base.
+        let repo = std::env::temp_dir().join(format!(
+            "okena-wt-proof-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&repo).expect("mk repo dir");
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("run git");
+            assert!(ok.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&ok.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "proof@okena.test"]);
+        git(&["config", "user.name", "Proof"]);
+        std::fs::write(repo.join("README.md"), "seed\n").expect("seed file");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "seed"]);
+
+        // A bare origin remote, like a real user project — the daemon bases new
+        // worktree branches on origin/{default}, so origin/main must exist.
+        let origin = repo.with_extension("origin.git");
+        std::fs::create_dir_all(&origin).expect("mk origin dir");
+        assert!(Command::new("git")
+            .args(["init", "-q", "--bare", origin.to_str().unwrap()])
+            .status()
+            .expect("git init bare")
+            .success());
+        git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&["push", "-q", "-u", "origin", "main"]);
+        git(&["remote", "set-head", "origin", "main"]);
+
+        let repo_path = repo.to_str().expect("repo path utf-8").to_string();
+
+        // Parent project: real layout with a materialized terminal (simulating an
+        // actively-used project) + a per-project worktree.on_create hook.
+        let parent = ProjectData {
+            id: "p1".to_string(),
+            name: "Parent".to_string(),
+            path: repo_path.clone(),
+            layout: Some(LayoutNode::Terminal {
+                terminal_id: Some("parent-term".to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            }),
+            terminal_names: Default::default(),
+            hidden_terminals: Default::default(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: HooksConfig {
+                worktree: WorktreeHooks {
+                    on_create: Some("echo WT_HOOK_MARKER".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            is_remote: false,
+            connection_id: None,
+            service_terminals: Default::default(),
+            default_shell: None,
+            hook_terminals: Default::default(),
+            pinned: false,
+            last_activity_at: None,
+        };
+        let data = WorkspaceData {
+            version: 1,
+            projects: vec![parent],
+            project_order: vec!["p1".to_string()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        };
+
+        // Real daemon services.
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let hook_runner = Some(HookRunner::new(backend.clone(), terminals.clone()));
+        let hook_monitor = Some(HookMonitor::new());
+
+        let mut workspace = Workspace::new(data);
+        let mut focus_manager = FocusManager::new();
+        let settings = default_settings(); // default worktree.path_template
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+
+        // Drive the REAL action the daemon dispatches for quick-create.
+        let result = execute_action(
+            ActionRequest::CreateWorktree {
+                project_id: "p1".to_string(),
+                branch: "neumie/tezky-medovnik".to_string(),
+                create_branch: true,
+            },
+            &mut workspace,
+            WindowId::Main,
+            &mut focus_manager,
+            &*backend,
+            &terminals,
+            &settings,
+            &mut cx,
+        );
+        if let okena_app_core::workspace::actions::execute::ActionResult::Err(e) = &result {
+            panic!("CreateWorktree action failed: {e}");
+        }
+
+        // Find the new worktree project (the non-parent one).
+        let new_id = workspace
+            .data()
+            .projects
+            .iter()
+            .find(|p| p.id != "p1")
+            .map(|p| p.id.clone())
+            .expect("a new worktree project was created");
+
+        // (a) INITIAL TERMINAL: layout has a Terminal node with a real id whose
+        //     PTY is in the registry.
+        let assigned = {
+            let p = workspace.project(&new_id).expect("new project");
+            match p.layout.as_ref().expect("worktree layout present") {
+                LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+                other => panic!("expected Terminal layout node, got {other:?}"),
+            }
+        };
+        let assigned = assigned.expect("worktree initial terminal got a real id");
+        assert!(
+            terminals.lock().contains_key(&assigned),
+            "daemon spawned + registered the worktree's initial terminal PTY"
+        );
+
+        // (b) HOOK: on_worktree_create ran exactly once and a live hook terminal
+        //     was registered on the new project.
+        let history = hook_monitor.as_ref().unwrap().history();
+        let wt_hooks: Vec<_> = history.iter().filter(|h| h.hook_type == "on_worktree_create").collect();
+        assert_eq!(
+            wt_hooks.len(),
+            1,
+            "on_worktree_create must fire exactly once, full history: {:?}",
+            history.iter().map(|h| h.hook_type).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            workspace.project(&new_id).expect("new project").hook_terminals.len(),
+            1,
+            "one live on_worktree_create hook terminal registered on the worktree project"
+        );
+
+        // The hook PTY is a SEPARATE terminal from the initial shell (both live in
+        // the registry) — proving the hook does NOT consume the initial slot.
+        assert!(terminals.lock().len() >= 2, "initial terminal + hook terminal both in registry");
+
+        // cleanup
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&origin).ok();
+        if let Some(parent) = repo.parent() {
+            std::fs::remove_dir_all(parent.join(format!(
+                "{}-wt",
+                repo.file_name().unwrap().to_string_lossy()
+            )))
+            .ok();
+        }
+    }
 }
