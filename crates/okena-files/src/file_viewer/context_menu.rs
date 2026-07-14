@@ -201,10 +201,12 @@ impl FileViewer {
             .to_string_lossy()
             .to_string();
 
-        if self.project_fs.rename_file(&old_rel, &new_name).is_err() {
+        if let Err(error) = self.project_fs.rename_file(&old_rel, &new_name) {
+            self.tree_error_message = Some(format!("Failed to rename: {error}"));
             cx.notify();
             return;
         }
+        self.tree_error_message = None;
 
         self.update_tabs_after_rename(
             &old_path,
