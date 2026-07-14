@@ -1,7 +1,5 @@
-//! `POST /v1/terminals/{terminal_id}/paste-image` — accept a clipboard image
-//! pasted on a remote client, write it to a temp file on *this* (server) host,
-//! and bracketed-paste its path into the target terminal so a TUI like Claude
-//! Code can attach it.
+//! Materialize pasted images and dropped files on the daemon host, then paste
+//! their server-local paths into the target terminal.
 //!
 //! The image must live where the terminal's process runs: the client's local
 //! clipboard isn't reachable from here, and a client-local path would point at
@@ -15,13 +13,15 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header::CONTENT_TYPE};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Max accepted image upload (20 MiB). Clipboard screenshots — especially
 /// retina full-screen PNGs — routinely exceed the global 1 MiB body cap, so
 /// this route raises its own limit (see `build_router`).
 pub const IMAGE_UPLOAD_LIMIT: usize = 20 * 1024 * 1024;
+/// Max accepted dropped file upload (64 MiB).
+pub const FILE_UPLOAD_LIMIT: usize = 64 * 1024 * 1024;
 
 pub async fn post_paste_image(
     State(state): State<AppState>,
@@ -29,36 +29,66 @@ pub async fn post_paste_image(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if body.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "empty image body"})),
-        )
-            .into_response();
-    }
-
     let mime = headers
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("image/png");
     let ext = image_ext_for_mime(mime);
 
-    let filename = format!("okena-remote-paste-{}.{}", next_token(), ext);
+    materialize_and_paste(state, terminal_id, body, ext, false, "image").await
+}
+
+pub async fn post_paste_file(
+    State(state): State<AppState>,
+    Path(terminal_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let extension = headers
+        .get("x-okena-file-extension")
+        .and_then(|value| value.to_str().ok())
+        .and_then(safe_file_extension)
+        .unwrap_or("bin");
+    materialize_and_paste(state, terminal_id, body, extension, true, "file").await
+}
+
+async fn materialize_and_paste(
+    state: AppState,
+    terminal_id: String,
+    body: Bytes,
+    extension: &str,
+    append_space: bool,
+    kind: &str,
+) -> Response {
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("empty {kind} body")})),
+        )
+            .into_response();
+    }
+
+    let filename = format!("okena-remote-paste-{}.{}", next_token(), extension);
     let path = std::env::temp_dir().join(filename);
 
     if let Err(e) = tokio::fs::write(&path, &body).await {
-        log::error!("paste-image: failed to write {}: {}", path.display(), e);
+        log::error!("paste upload: failed to write {}: {}", path.display(), e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to write image: {e}")})),
+            Json(serde_json::json!({"error": format!("failed to write {kind}: {e}")})),
         )
             .into_response();
     }
 
     let path_str = path.to_string_lossy().into_owned();
-    let command = RemoteCommand::PasteImage {
+    let text = if append_space {
+        format!("{path_str} ")
+    } else {
+        path_str.clone()
+    };
+    let command = RemoteCommand::PastePath {
         terminal_id,
-        path: path_str.clone(),
+        text,
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -68,6 +98,7 @@ pub async fn post_paste_image(
     };
 
     if state.bridge_tx.send(msg).await.is_err() {
+        let _ = tokio::fs::remove_file(&path).await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "bridge unavailable"})),
@@ -82,14 +113,27 @@ pub async fn post_paste_image(
             (StatusCode::OK, Json(serde_json::json!({"path": path_str}))).into_response()
         }
         Ok(CommandResult::Err(e)) => {
+            let _ = tokio::fs::remove_file(&path).await;
             (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response()
         }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "command processing failed"})),
-        )
-            .into_response(),
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "command processing failed"})),
+            )
+                .into_response()
+        }
     }
+}
+
+fn safe_file_extension(extension: &str) -> Option<&str> {
+    (!extension.is_empty()
+        && extension.len() <= 16
+        && extension
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric()))
+    .then_some(extension)
 }
 
 /// File extension for a clipboard image MIME type. Mirrors the desktop
@@ -126,7 +170,7 @@ fn next_token() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::image_ext_for_mime;
+    use super::{image_ext_for_mime, safe_file_extension};
 
     #[test]
     fn maps_known_mime_types() {
@@ -146,5 +190,13 @@ mod tests {
     fn defaults_unknown_to_png() {
         assert_eq!(image_ext_for_mime("application/octet-stream"), "png");
         assert_eq!(image_ext_for_mime(""), "png");
+    }
+
+    #[test]
+    fn accepts_only_safe_file_extensions() {
+        assert_eq!(safe_file_extension("tar"), Some("tar"));
+        assert_eq!(safe_file_extension(""), None);
+        assert_eq!(safe_file_extension("../sh"), None);
+        assert_eq!(safe_file_extension("extension-way-too-long"), None);
     }
 }

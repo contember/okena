@@ -29,6 +29,8 @@ pub struct PathAutoCompleteState {
     suggestions_scroll: ScrollHandle,
     /// When true, suppress the next InputChangedEvent from triggering suggestions
     suppress_suggestions: bool,
+    /// Local completion is valid only when the selected daemon shares this disk.
+    local_completion_enabled: bool,
 }
 
 impl PathAutoCompleteState {
@@ -54,6 +56,19 @@ impl PathAutoCompleteState {
             focus_handle,
             suggestions_scroll: ScrollHandle::new(),
             suppress_suggestions: false,
+            local_completion_enabled: true,
+        }
+    }
+
+    pub fn set_local_completion_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.local_completion_enabled == enabled {
+            return;
+        }
+        self.local_completion_enabled = enabled;
+        if enabled {
+            self.update_suggestions(cx);
+        } else {
+            self.hide_suggestions(cx);
         }
     }
 
@@ -158,6 +173,10 @@ impl PathAutoCompleteState {
     }
 
     fn update_suggestions(&mut self, cx: &mut Context<Self>) {
+        if !self.local_completion_enabled {
+            self.hide_suggestions(cx);
+            return;
+        }
         let current_value = self.input.read(cx).value().to_string();
 
         // Don't show suggestions for empty input
@@ -184,6 +203,9 @@ impl PathAutoCompleteState {
                 // Guard against a stale result overwriting newer input: only apply
                 // if the input hasn't changed since this lookup was kicked off.
                 if this.input.read(cx).value() != current_value {
+                    return;
+                }
+                if !this.local_completion_enabled {
                     return;
                 }
                 this.suggestions = new_suggestions;

@@ -309,13 +309,12 @@ impl TerminalContent {
     fn project_relative_path(&self, raw: &str, cx: &App) -> Option<String> {
         let clean = super::url_detector::strip_line_col_suffix(raw);
         let project_path = self.workspace.read(cx).project(&self.project_id)?.path.clone();
-        if let Some(stripped) = clean.strip_prefix(&project_path) {
-            Some(stripped.trim_start_matches('/').to_string())
-        } else if clean.starts_with('/') || clean.starts_with('~') {
-            None // absolute path outside the project (or unresolved ~) — can't open via this project's daemon fs
-        } else {
-            Some(clean.to_string()) // already relative — best effort, treated as project-root-relative
-        }
+        let cwd = self
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.current_cwd())
+            .unwrap_or_else(|| project_path.clone());
+        remote_project_relative_path(clean, &project_path, &cwd)
     }
 
     fn handle_mouse_down(
@@ -594,7 +593,12 @@ impl Render for TerminalContent {
             None => base_bg,
         };
 
-        self.url_detector.update_matches(&self.terminal);
+        let validate_paths_locally = self
+            .workspace
+            .read(cx)
+            .is_local_daemon_project(&self.project_id);
+        self.url_detector
+            .update_matches(&self.terminal, validate_paths_locally);
 
         let Some(ref terminal) = self.terminal else {
             return div()
@@ -792,6 +796,64 @@ impl Drop for TerminalContent {
 
 impl EventEmitter<TerminalContentEvent> for TerminalContent {}
 
+fn remote_project_relative_path(raw: &str, project_path: &str, cwd: &str) -> Option<String> {
+    if raw.starts_with('~') {
+        return None;
+    }
+
+    let raw = raw.replace('\\', "/");
+    let project_path = project_path.replace('\\', "/");
+    let cwd = cwd.replace('\\', "/");
+    let raw_is_absolute = is_absolute_path(&raw);
+    let candidate = if raw_is_absolute {
+        raw
+    } else if cwd.is_empty() {
+        format!("{project_path}/{raw}")
+    } else {
+        format!("{cwd}/{raw}")
+    };
+
+    let project_parts = normalize_path_parts(&project_path)?;
+    let candidate_parts = normalize_path_parts(&candidate)?;
+    let windows_path = project_path.as_bytes().get(1) == Some(&b':') || project_path.starts_with("//");
+    if candidate_parts.len() <= project_parts.len()
+        || !candidate_parts
+            .iter()
+            .zip(&project_parts)
+            .all(|(candidate, project)| {
+                if windows_path {
+                    candidate.eq_ignore_ascii_case(project)
+                } else {
+                    candidate == project
+                }
+            })
+    {
+        return None;
+    }
+
+    Some(candidate_parts[project_parts.len()..].join("/"))
+}
+
+fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/')
+        || path.starts_with("//")
+        || (path.as_bytes().get(1) == Some(&b':') && path.as_bytes().get(2) == Some(&b'/'))
+}
+
+fn normalize_path_parts(path: &str) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    Some(parts)
+}
+
 /// Lines to scroll for drag-selection auto-scroll, given the pointer's `y` and
 /// the terminal content's `top`/`bottom` edges (all window-space pixels).
 ///
@@ -815,7 +877,7 @@ fn autoscroll_lines(y: f32, top: f32, bottom: f32, cell_height: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::autoscroll_lines;
+    use super::{autoscroll_lines, remote_project_relative_path};
 
     const CELL: f32 = 16.0;
     const TOP: f32 = 100.0;
@@ -853,5 +915,53 @@ mod tests {
     #[test]
     fn zero_cell_height_is_safe() {
         assert_eq!(autoscroll_lines(TOP - 50.0, TOP, BOTTOM, 0.0), 0);
+    }
+
+    #[test]
+    fn remote_absolute_path_is_made_project_relative() {
+        assert_eq!(
+            remote_project_relative_path(
+                "/srv/project/src/main.rs",
+                "/srv/project",
+                "/srv/project"
+            ),
+            Some("src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_relative_path_uses_terminal_cwd() {
+        assert_eq!(
+            remote_project_relative_path(
+                "../shared.rs",
+                "/srv/project",
+                "/srv/project/src/bin"
+            ),
+            Some("src/shared.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_windows_paths_are_normalized_without_client_path_rules() {
+        assert_eq!(
+            remote_project_relative_path(
+                r"C:\work\project\src\main.rs",
+                r"c:\work\project",
+                r"C:\work\project"
+            ),
+            Some("src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_path_outside_project_is_rejected() {
+        assert_eq!(
+            remote_project_relative_path("/etc/passwd", "/srv/project", "/srv/project"),
+            None
+        );
+        assert_eq!(
+            remote_project_relative_path("../../../etc/passwd", "/srv/project", "/srv/project"),
+            None
+        );
     }
 }

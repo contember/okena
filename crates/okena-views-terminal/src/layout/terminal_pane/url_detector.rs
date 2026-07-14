@@ -20,6 +20,8 @@ pub struct UrlDetector {
     path_exists_cache: HashMap<String, bool>,
     /// Last terminal content generation we processed (skip if unchanged)
     last_generation: u64,
+    /// Whether the current project shares the client's filesystem.
+    last_validate_paths_locally: bool,
     /// Cwd used for the entries currently in `path_exists_cache`. When the
     /// shell reports a new cwd (OSC 7), relative-path cache hits become
     /// wrong, so the cache is cleared.
@@ -40,6 +42,7 @@ impl UrlDetector {
             hovered_group: None,
             path_exists_cache: HashMap::new(),
             last_generation: u64::MAX, // force first update
+            last_validate_paths_locally: true,
             last_cwd: String::new(),
         }
     }
@@ -83,13 +86,23 @@ impl UrlDetector {
 
     /// Update URL matches from terminal content.
     /// Skips detection if terminal content hasn't changed since last call.
-    pub fn update_matches(&mut self, terminal: &Option<Arc<Terminal>>) {
+    pub fn update_matches(
+        &mut self,
+        terminal: &Option<Arc<Terminal>>,
+        validate_paths_locally: bool,
+    ) {
         if let Some(terminal) = terminal {
             let content_gen = terminal.content_generation();
-            if content_gen == self.last_generation {
+            if content_gen == self.last_generation
+                && validate_paths_locally == self.last_validate_paths_locally
+            {
                 return;
             }
             self.last_generation = content_gen;
+            if validate_paths_locally != self.last_validate_paths_locally {
+                self.path_exists_cache.clear();
+                self.last_validate_paths_locally = validate_paths_locally;
+            }
 
             let detected = terminal.detect_urls();
             let cwd = terminal.current_cwd();
@@ -122,8 +135,8 @@ impl UrlDetector {
                             link_group: current_group,
                         })
                     } else {
-                        // File path: verify existence before showing
-                        if self.path_exists_cached(&link.text, &cwd) {
+                        // A remote path can only be validated by the daemon.
+                        if !validate_paths_locally || self.path_exists_cached(&link.text, &cwd) {
                             Some(URLMatch {
                                 line: link.line,
                                 col: link.col,

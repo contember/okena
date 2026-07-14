@@ -126,10 +126,28 @@ pub(super) fn list_worktrees(ws: &Workspace, project_id: String) -> ActionResult
             let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(std::path::Path::new(&path));
             let norm_git_root = okena_git::repository::normalize_path(&git_root);
             let worktrees = okena_git::repository::list_git_worktrees(&git_root);
+            let entries: Vec<okena_core::api::ApiWorktreeEntry> = worktrees
+                .iter()
+                .map(|(worktree_path, branch)| {
+                    let normalized = okena_git::repository::normalize_path(
+                        std::path::Path::new(worktree_path),
+                    );
+                    okena_core::api::ApiWorktreeEntry {
+                        worktree_path: worktree_path.clone(),
+                        project_path: okena_git::repository::project_path_in_worktree(
+                            worktree_path,
+                            &subdir,
+                        ),
+                        branch: branch.clone(),
+                        is_main: normalized == norm_git_root,
+                    }
+                })
+                .collect();
             ActionResult::Ok(Some(serde_json::json!({
                 "git_root": norm_git_root.to_string_lossy(),
                 "subdir": subdir.to_string_lossy(),
                 "worktrees": worktrees,
+                "entries": entries,
             })))
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),

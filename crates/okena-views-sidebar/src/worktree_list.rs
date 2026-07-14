@@ -11,6 +11,7 @@ use gpui::*;
 use gpui::prelude::*;
 
 use crate::Cancel;
+use okena_core::api::ApiWorktreeEntry;
 
 /// Event emitted by WorktreeListPopover.
 pub enum WorktreeListPopoverEvent {
@@ -39,13 +40,9 @@ impl EventEmitter<WorktreeListPopoverEvent> for WorktreeListPopover {}
 pub struct WorktreeListPopover {
     workspace: Entity<Workspace>,
     project_id: String,
-    entries: Vec<(String, String)>,
+    entries: Vec<ApiWorktreeEntry>,
     position: Point<Pixels>,
     focus_handle: FocusHandle,
-    /// Normalized git root (for filtering out the main repo entry).
-    norm_git_root: std::path::PathBuf,
-    /// Subdirectory within the git repo (empty for non-monorepo projects).
-    subdir: std::path::PathBuf,
 }
 
 impl WorktreeListPopover {
@@ -58,8 +55,7 @@ impl WorktreeListPopover {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (norm_git_root, subdir, entries) =
-            Self::fetch_worktrees(&client, daemon_project_id);
+        let entries = Self::fetch_worktrees(&client, daemon_project_id);
         let focus_handle = cx.focus_handle();
         Self {
             workspace,
@@ -67,8 +63,6 @@ impl WorktreeListPopover {
             entries,
             position,
             focus_handle,
-            norm_git_root,
-            subdir,
         }
     }
 
@@ -79,30 +73,26 @@ impl WorktreeListPopover {
     fn fetch_worktrees(
         client: &okena_transport::remote_action::RemoteActionClient,
         project_id: String,
-    ) -> (std::path::PathBuf, std::path::PathBuf, Vec<(String, String)>) {
+    ) -> Vec<ApiWorktreeEntry> {
         let action = okena_core::api::ActionRequest::GitListWorktrees { project_id };
         match client.post_action(action) {
             Ok(Some(value)) => {
-                let git_root = value.get("git_root").and_then(|v| v.as_str()).unwrap_or_default();
-                let subdir = value.get("subdir").and_then(|v| v.as_str()).unwrap_or_default();
-                let worktrees: Vec<(String, String)> = value
-                    .get("worktrees")
+                value
+                    .get("entries")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                (std::path::PathBuf::from(git_root), std::path::PathBuf::from(subdir), worktrees)
+                    .unwrap_or_default()
             }
-            _ => (std::path::PathBuf::new(), std::path::PathBuf::new(), Vec::new()),
+            _ => Vec::new(),
         }
     }
 
     /// Find a tracked worktree project by its worktree root path.
     /// Checks both the expected project path (with monorepo subdir) and the
     /// bare worktree root for backwards compatibility with older workspace files.
-    fn find_tracked_project_id(&self, wt_path: &str, cx: &App) -> Option<String> {
-        let expected_path = okena_git::repository::project_path_in_worktree(wt_path, &self.subdir);
+    fn find_tracked_project_id(&self, entry: &ApiWorktreeEntry, cx: &App) -> Option<String> {
         let ws = self.workspace.read(cx);
         ws.data().projects.iter()
-            .find(|p| (p.path == expected_path || p.path == wt_path)
+            .find(|p| (p.path == entry.project_path || p.path == entry.worktree_path)
                 && p.worktree_info.as_ref()
                     .is_some_and(|wt| wt.parent_project_id == self.project_id))
             .map(|p| p.id.clone())
@@ -123,7 +113,6 @@ impl Render for WorktreeListPopover {
 
         let ws = self.workspace.read(cx);
         let project_id = &self.project_id;
-        let subdir = &self.subdir;
 
         let tracked_project_paths: std::collections::HashSet<String> = ws.data().projects.iter()
             .filter(|p| p.worktree_info.as_ref()
@@ -131,16 +120,12 @@ impl Render for WorktreeListPopover {
             .map(|p| p.path.clone())
             .collect();
 
-        let worktrees: Vec<(String, String, bool)> = self.entries.iter()
-            .filter(|(wt_path, _)| {
-                let norm_wt = okena_git::repository::normalize_path(std::path::Path::new(wt_path));
-                norm_wt != self.norm_git_root
-            })
-            .map(|(wt_path, branch)| {
-                let expected_path = okena_git::repository::project_path_in_worktree(wt_path, subdir);
-                let is_tracked = tracked_project_paths.contains(&expected_path)
-                    || tracked_project_paths.contains(wt_path);
-                (wt_path.clone(), branch.clone(), is_tracked)
+        let worktrees: Vec<(ApiWorktreeEntry, bool)> = self.entries.iter()
+            .filter(|entry| !entry.is_main)
+            .map(|entry| {
+                let is_tracked = tracked_project_paths.contains(&entry.project_path)
+                    || tracked_project_paths.contains(&entry.worktree_path);
+                (entry.clone(), is_tracked)
             })
             .collect();
 
@@ -174,13 +159,12 @@ impl Render for WorktreeListPopover {
                                 .child("No worktrees found")
                         )
                     })
-                    .children(worktrees.into_iter().map(|(wt_path, branch, is_tracked)| {
+                    .children(worktrees.into_iter().map(|(entry, is_tracked)| {
                 let project_id = self.project_id.clone();
-                let wt_path_clone = wt_path.clone();
-                let branch_clone = branch.clone();
+                let entry_for_click = entry.clone();
 
                 div()
-                    .id(ElementId::Name(format!("wt-list-{}", wt_path).into()))
+                    .id(ElementId::Name(format!("wt-list-{}", entry.worktree_path).into()))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -191,7 +175,7 @@ impl Render for WorktreeListPopover {
                     .hover(|s| s.bg(rgb(t.bg_hover)))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         if is_tracked {
-                            if let Some(id) = this.find_tracked_project_id(&wt_path_clone, cx) {
+                            if let Some(id) = this.find_tracked_project_id(&entry_for_click, cx) {
                                 // Daemon owns the project — emit an event so the
                                 // host dispatches DeleteProject; the removal
                                 // mirrors back. No direct mirror mutation here.
@@ -204,8 +188,8 @@ impl Render for WorktreeListPopover {
                             // mutation here.
                             cx.emit(WorktreeListPopoverEvent::AddDiscoveredWorktree {
                                 parent_project_id: project_id.clone(),
-                                worktree_path: wt_path_clone.clone(),
-                                branch: branch_clone.clone(),
+                                worktree_path: entry_for_click.worktree_path.clone(),
+                                branch: entry_for_click.branch.clone(),
                             });
                         }
                         cx.notify();
@@ -241,7 +225,7 @@ impl Render for WorktreeListPopover {
                                     .text_color(rgb(t.text_primary))
                                     .overflow_hidden()
                                     .text_ellipsis()
-                                    .child(branch.clone())
+                                    .child(entry.branch.clone())
                             )
                     )
             }))

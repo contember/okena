@@ -209,6 +209,15 @@ pub struct WorktreePullRequest {
     pub branch: String,
 }
 
+/// Daemon-resolved worktree paths for the worktree management popover.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiWorktreeEntry {
+    pub worktree_path: String,
+    pub project_path: String,
+    pub branch: String,
+    pub is_main: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ApiGitStatus {
     pub branch: Option<String>,

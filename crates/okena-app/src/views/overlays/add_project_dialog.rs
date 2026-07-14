@@ -212,6 +212,13 @@ impl AddProjectDialog {
                     .child(label)
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.selected_target = i;
+                        let local_completion_enabled = matches!(
+                            this.targets.get(i),
+                            Some(AddProjectTarget::Local)
+                        );
+                        this.path_input.update(cx, |input, cx| {
+                            input.set_local_completion_enabled(local_completion_enabled, cx);
+                        });
                         cx.notify();
                     }))
             }))

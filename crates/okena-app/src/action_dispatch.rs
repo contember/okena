@@ -134,9 +134,9 @@ pub enum ActionDispatcher {
 }
 
 impl ActionDispatcher {
-    #[allow(dead_code)]
-    pub fn is_remote(&self) -> bool {
-        matches!(self, Self::Remote { .. })
+    pub fn shares_local_filesystem(&self) -> bool {
+        let Self::Remote { connection_id, .. } = self;
+        connection_id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID
     }
 
     fn queue_focus_for_next_remote_terminal(
@@ -377,6 +377,24 @@ impl ActionDispatcher {
             rm.upload_paste_image(&cid, &remote_terminal_id, &mime, bytes, cx);
         });
     }
+
+    pub fn upload_remote_paste_files(
+        &self,
+        terminal_id: &str,
+        files: Vec<okena_views_terminal::RemotePasteFile>,
+        cx: &mut impl AppContext,
+    ) {
+        let Self::Remote { connection_id, manager, .. } = self;
+        let remote_terminal_id = strip_prefix(terminal_id, connection_id);
+        let cid = connection_id.clone();
+        let files = files
+            .into_iter()
+            .map(|file| (file.extension, file.bytes))
+            .collect();
+        manager.update(cx, |rm, cx| {
+            rm.upload_paste_files(&cid, &remote_terminal_id, files, cx);
+        });
+    }
 }
 
 impl okena_views_terminal::ActionDispatch for ActionDispatcher {
@@ -384,8 +402,8 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
         self.dispatch(action, cx);
     }
 
-    fn is_remote(&self) -> bool {
-        self.is_remote()
+    fn shares_local_filesystem(&self) -> bool {
+        self.shares_local_filesystem()
     }
 
     fn split_terminal(
@@ -416,6 +434,15 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
         cx: &mut gpui::App,
     ) {
         self.upload_remote_paste_image(terminal_id, mime, bytes, cx);
+    }
+
+    fn upload_remote_paste_files(
+        &self,
+        terminal_id: &str,
+        files: Vec<okena_views_terminal::RemotePasteFile>,
+        cx: &mut gpui::App,
+    ) {
+        self.upload_remote_paste_files(terminal_id, files, cx);
     }
 
     fn export_buffer(&self, terminal_id: &str, cx: &mut gpui::App) -> Option<std::path::PathBuf> {

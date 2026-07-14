@@ -25,6 +25,13 @@ struct QueuedAction {
     action: ActionRequest,
 }
 
+struct PasteUpload {
+    endpoint: &'static str,
+    content_type: String,
+    extension: Option<String>,
+    bytes: Vec<u8>,
+}
+
 struct ActionQueues {
     runtime: Arc<tokio::runtime::Runtime>,
     event_tx: async_channel::Sender<ConnectionEvent>,
@@ -562,10 +569,61 @@ impl RemoteConnectionManager {
         bytes: Vec<u8>,
         cx: &mut Context<Self>,
     ) {
+        self.upload_pastes(
+            connection_id,
+            terminal_id,
+            "Image paste",
+            vec![PasteUpload {
+                endpoint: "paste-image",
+                content_type: mime.to_string(),
+                extension: None,
+                bytes,
+            }],
+            cx,
+        );
+    }
+
+    /// Upload dropped files sequentially so their pasted paths preserve order.
+    pub fn upload_paste_files(
+        &self,
+        connection_id: &str,
+        terminal_id: &str,
+        files: Vec<(String, Vec<u8>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let uploads = files
+            .into_iter()
+            .map(|(extension, bytes)| PasteUpload {
+                endpoint: "paste-file",
+                content_type: "application/octet-stream".to_string(),
+                extension: Some(extension),
+                bytes,
+            })
+            .collect();
+        self.upload_pastes(
+            connection_id,
+            terminal_id,
+            "File drop",
+            uploads,
+            cx,
+        );
+    }
+
+    fn upload_pastes(
+        &self,
+        connection_id: &str,
+        terminal_id: &str,
+        label: &'static str,
+        uploads: Vec<PasteUpload>,
+        cx: &mut Context<Self>,
+    ) {
+        if uploads.is_empty() {
+            return;
+        }
         let config = match self.connections.get(connection_id) {
             Some(conn) => conn.config().clone(),
             None => {
-                log::error!("upload_paste_image: connection {} not found", connection_id);
+                log::error!("paste upload: connection {} not found", connection_id);
                 return;
             }
         };
@@ -573,7 +631,7 @@ impl RemoteConnectionManager {
             Some(t) => t,
             None => {
                 log::error!(
-                    "upload_paste_image: no auth token for connection {}",
+                    "paste upload: no auth token for connection {}",
                     connection_id
                 );
                 ToastManager::error("No auth token for remote connection".to_string(), cx);
@@ -583,46 +641,48 @@ impl RemoteConnectionManager {
 
         let name = config.name.clone();
         let event_tx = self.event_tx.clone();
+        let connection_id = connection_id.to_string();
         let terminal_id = terminal_id.to_string();
-        let mime = mime.to_string();
 
         self.runtime.spawn(async move {
-            let (client, url) = okena_transport::remote_http::async_client_and_url(
-                &config,
-                &format!("/v1/terminals/{terminal_id}/paste-image"),
-            );
-            let result = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", token))
-                .header("Content-Type", mime)
-                .body(bytes)
-                .timeout(std::time::Duration::from_secs(15))
-                .send()
-                .await;
+            let (client, base_url) =
+                okena_transport::remote_http::async_client_and_url(&config, "");
+            for upload in uploads {
+                let url = format!(
+                    "{base_url}/v1/terminals/{terminal_id}/{}",
+                    upload.endpoint
+                );
+                let mut request = client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header("Content-Type", upload.content_type)
+                    .body(upload.bytes)
+                    .timeout(std::time::Duration::from_secs(90));
+                if let Some(extension) = upload.extension {
+                    request = request.header("X-Okena-File-Extension", extension);
+                }
+                let result = request.send().await;
 
-            match result {
-                Ok(resp) if resp.status().is_success() => {
-                    log::debug!("upload_paste_image: success for {}", name);
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    log::error!(
-                        "upload_paste_image: failed ({}): {} for {}",
-                        status, body, name
-                    );
-                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
-                        connection_id: String::new(),
-                        message: format!("Image paste failed ({}): {}", status, body),
-                    });
-                }
-                Err(e) => {
-                    log::error!("upload_paste_image: request error for {}: {}", name, e);
-                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
-                        connection_id: String::new(),
-                        message: format!("Image paste request failed: {}", e),
-                    });
-                }
+                let message = match result {
+                    Ok(response) if response.status().is_success() => {
+                        log::debug!("paste upload: success for {}", name);
+                        continue;
+                    }
+                    Ok(response) => {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        log::error!("paste upload failed ({status}): {body} for {name}");
+                        format!("{label} failed ({status}): {body}")
+                    }
+                    Err(error) => {
+                        log::error!("paste upload request error for {name}: {error}");
+                        format!("{label} request failed: {error}")
+                    }
+                };
+                let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
+                    connection_id: connection_id.clone(),
+                    message,
+                });
             }
         });
     }

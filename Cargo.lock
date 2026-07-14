@@ -6669,7 +6669,6 @@ dependencies = [
  "gpui-component",
  "log",
  "okena-core",
- "okena-git",
  "okena-services",
  "okena-terminal",
  "okena-transport",

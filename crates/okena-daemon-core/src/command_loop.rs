@@ -600,16 +600,13 @@ pub async fn daemon_command_loop(
                 }
             }
 
-            // ── PasteImage ───────────────────────────────────────────────────
-            RemoteCommand::PasteImage { terminal_id, path } => {
+            // ── PastePath ────────────────────────────────────────────────────
+            RemoteCommand::PastePath { terminal_id, text } => {
                 let ws = workspace.lock();
                 match ensure_terminal(&terminal_id, &terminals, &*backend, &ws) {
                     Some(term) => {
-                        // Bracketed paste of the server-local image path — same as
-                        // a local image paste, so the focused TUI's own paste
-                        // handler attaches it.
-                        term.send_paste(&path);
-                        CommandResult::Ok(Some(serde_json::json!({ "path": path })))
+                        term.send_paste(&text);
+                        CommandResult::Ok(None)
                     }
                     None => CommandResult::Err(format!("terminal not found: {terminal_id}")),
                 }

@@ -146,6 +146,11 @@ pub fn build_router(
             axum::routing::post(paste_image::post_paste_image)
                 .layer(DefaultBodyLimit::max(paste_image::IMAGE_UPLOAD_LIMIT)),
         )
+        .route(
+            "/v1/terminals/{terminal_id}/paste-file",
+            axum::routing::post(paste_image::post_paste_file)
+                .layer(DefaultBodyLimit::max(paste_image::FILE_UPLOAD_LIMIT)),
+        )
         .route("/v1/stream", axum::routing::get(stream::ws_handler))
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))

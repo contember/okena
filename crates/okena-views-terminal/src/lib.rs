@@ -16,6 +16,12 @@ mod simple_input;
 use okena_core::api::ActionRequest;
 use okena_workspace::state::SplitDirection;
 
+/// Client-local file bytes to materialize beside a truly remote daemon.
+pub struct RemotePasteFile {
+    pub extension: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Trait for dispatching terminal actions (local or remote).
 ///
 /// This abstracts the `ActionDispatcher` enum from the main application,
@@ -25,8 +31,8 @@ pub trait ActionDispatch: Clone + 'static {
     /// Dispatch a standard action.
     fn dispatch(&self, action: ActionRequest, cx: &mut gpui::App);
 
-    /// Whether this dispatcher targets a remote project.
-    fn is_remote(&self) -> bool;
+    /// Whether the client and daemon see the same local filesystem.
+    fn shares_local_filesystem(&self) -> bool;
 
     /// Split a terminal.
     fn split_terminal(
@@ -61,6 +67,17 @@ pub trait ActionDispatch: Clone + 'static {
         cx: &mut gpui::App,
     ) {
         let _ = (terminal_id, mime, bytes, cx);
+    }
+
+    /// Materialize dropped client files on a truly remote daemon and paste
+    /// their server-local paths into the terminal.
+    fn upload_remote_paste_files(
+        &self,
+        terminal_id: &str,
+        files: Vec<RemotePasteFile>,
+        cx: &mut gpui::App,
+    ) {
+        let _ = (terminal_id, files, cx);
     }
 
     /// Export a terminal's scrollback buffer to a client-side temp file and
