@@ -27,7 +27,7 @@ impl SessionManager {
             })
             .await;
 
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     match result {
                         Ok(sessions) => this.sessions = sessions,
@@ -131,7 +131,7 @@ impl SessionManager {
                     })
                     .await;
 
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         let _ = this.update(cx, |this, cx| match result {
                             Ok(_) => this.refresh_sessions(cx),
                             Err(error) => {
@@ -173,7 +173,7 @@ impl SessionManager {
             })
             .await;
 
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(_) => this.refresh_sessions(cx),
                     Err(error) => {
