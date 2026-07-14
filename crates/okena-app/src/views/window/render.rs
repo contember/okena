@@ -834,8 +834,14 @@ impl Render for WindowView {
             // Handle show session manager action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
-                move |_this, _: &ShowSessionManager, _window, cx| {
-                    overlay_manager.update(cx, |om, cx| om.toggle_session_manager(cx));
+                move |this, _: &ShowSessionManager, _window, cx| {
+                    match this.local_daemon_action_client(cx) {
+                        Ok(client) => overlay_manager
+                            .update(cx, |om, cx| om.toggle_session_manager(client, cx)),
+                        Err(error) => {
+                            crate::views::panels::toast::ToastManager::error(error, cx);
+                        }
+                    }
                 }
             }))
             // Handle show theme selector action

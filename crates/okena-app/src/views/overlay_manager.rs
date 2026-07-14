@@ -611,11 +611,15 @@ impl OverlayManager {
     // ========================================================================
 
     /// Toggle session manager overlay.
-    pub fn toggle_session_manager(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_session_manager(
+        &mut self,
+        client: okena_transport::remote_action::RemoteActionClient,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_modal::<SessionManager>() {
             self.close_modal(cx);
         } else {
-            let manager = cx.new(SessionManager::new);
+            let manager = cx.new(|cx| SessionManager::new(client, cx));
             cx.subscribe(&manager, |this, _, event: &SessionManagerEvent, cx| {
                 match event {
                     SessionManagerEvent::Close => {

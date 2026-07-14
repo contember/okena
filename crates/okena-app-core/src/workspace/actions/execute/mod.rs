@@ -296,10 +296,15 @@ pub fn execute_action(
         }
 
         // ── Sessions (whole-workspace; daemon owns session files + state) ──
+        ActionRequest::ListSessions => session::list_sessions_action(),
         ActionRequest::LoadSession { name } => {
             session::load_session_action(ws, focus_manager, name, backend, terminals, settings, cx)
         }
         ActionRequest::SaveSession { name } => session::save_session_action(ws, name),
+        ActionRequest::RenameSession { old_name, new_name } => {
+            session::rename_session_action(old_name, new_name)
+        }
+        ActionRequest::DeleteSession { name } => session::delete_session_action(name),
         ActionRequest::ImportWorkspace { path } => {
             session::import_workspace_action(ws, focus_manager, path, backend, terminals, settings, cx)
         }

@@ -365,8 +365,11 @@ export type ActionRequest =
   | { action: "toggle_project_pinned"; project_id: string }
   | { action: "reorder_worktree"; parent_id: string; worktree_id: string; new_index: number }
   | { action: "set_worktree_color_override"; project_id: string; color?: FolderColor | null }
+  | { action: "list_sessions" }
   | { action: "load_session"; name: string }
   | { action: "save_session"; name: string }
+  | { action: "rename_session"; old_name: string; new_name: string }
+  | { action: "delete_session"; name: string }
   | { action: "import_workspace"; path: string }
   | { action: "export_workspace"; path: string }
   | { action: "get_settings" }

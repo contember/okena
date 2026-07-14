@@ -919,6 +919,8 @@ pub enum ActionRequest {
     },
 
     // ── Sessions (workspace-global; the daemon owns session files + state) ──
+    /// List saved sessions from the daemon's profile directory.
+    ListSessions,
     /// Load a saved session by name: the daemon reads its own session file
     /// (local ids), kills all terminals, replaces its workspace, and respawns.
     LoadSession {
@@ -926,6 +928,15 @@ pub enum ActionRequest {
     },
     /// Save the daemon's current workspace as a named session file.
     SaveSession {
+        name: String,
+    },
+    /// Rename a saved session in the daemon's profile directory.
+    RenameSession {
+        old_name: String,
+        new_name: String,
+    },
+    /// Delete a saved session from the daemon's profile directory.
+    DeleteSession {
         name: String,
     },
     /// Import a workspace file from `path` and switch to it (like LoadSession).
@@ -1558,8 +1569,14 @@ mod tests {
                 project_id: "p1".into(),
                 color: Some(FolderColor::Blue),
             },
+            ActionRequest::ListSessions,
             ActionRequest::LoadSession { name: "work".into() },
             ActionRequest::SaveSession { name: "work".into() },
+            ActionRequest::RenameSession {
+                old_name: "work".into(),
+                new_name: "renamed".into(),
+            },
+            ActionRequest::DeleteSession { name: "work".into() },
             ActionRequest::ImportWorkspace { path: "/tmp/ws.json".into() },
             ActionRequest::ExportWorkspace { path: "/tmp/ws.json".into() },
         ];

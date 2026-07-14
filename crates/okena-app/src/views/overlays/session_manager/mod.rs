@@ -2,7 +2,7 @@ mod actions;
 mod render;
 
 use crate::views::components::SimpleInputState;
-use crate::workspace::persistence::{list_sessions, SessionInfo};
+use crate::workspace::persistence::SessionInfo;
 use gpui::*;
 
 /// Session Manager overlay for managing multiple workspaces.
@@ -11,8 +11,10 @@ use gpui::*;
 /// action is dispatched (via `SessionManagerEvent::Action`) to the local daemon
 /// rather than read/written from the client mirror.
 pub struct SessionManager {
+    pub(crate) client: okena_transport::remote_action::RemoteActionClient,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) sessions: Vec<SessionInfo>,
+    pub(crate) loading_sessions: bool,
     /// Input for new session name
     pub(crate) new_session_input: Entity<SimpleInputState>,
     /// Input for renaming session (created when rename starts)
@@ -34,8 +36,10 @@ pub(crate) enum SessionManagerTab {
 }
 
 impl SessionManager {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let sessions = list_sessions().unwrap_or_default();
+    pub fn new(
+        client: okena_transport::remote_action::RemoteActionClient,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
 
         // Default export path
@@ -57,9 +61,11 @@ impl SessionManager {
             SimpleInputState::new(cx).placeholder("Enter path to import...")
         });
 
-        Self {
+        let mut manager = Self {
+            client,
             focus_handle,
-            sessions,
+            sessions: Vec::new(),
+            loading_sessions: true,
             new_session_input,
             rename_input: None,
             renaming_session: None,
@@ -68,7 +74,9 @@ impl SessionManager {
             export_path_input,
             import_path_input,
             active_tab: SessionManagerTab::Sessions,
-        }
+        };
+        manager.refresh_sessions(cx);
+        manager
     }
 }
 

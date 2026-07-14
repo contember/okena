@@ -12,6 +12,31 @@ use okena_core::api::ActionRequest;
 use super::WindowView;
 
 impl WindowView {
+    pub(super) fn local_daemon_action_client(
+        &self,
+        cx: &Context<Self>,
+    ) -> Result<okena_transport::remote_action::RemoteActionClient, String> {
+        let manager = self
+            .remote_manager
+            .as_ref()
+            .ok_or_else(|| "Local daemon connection is unavailable".to_string())?
+            .read(cx);
+        let config = manager
+            .connections()
+            .into_iter()
+            .find(|(config, _, _)| {
+                config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID
+            })
+            .map(|(config, _, _)| config.clone())
+            .ok_or_else(|| "Local daemon connection is unavailable".to_string())?;
+        let token = config
+            .effective_auth_token()
+            .ok_or_else(|| "Local daemon authentication is unavailable".to_string())?;
+        Ok(okena_transport::remote_action::RemoteActionClient::new(
+            config, token,
+        ))
+    }
+
     /// Build an ActionDispatcher for the given project. Returns `None` if the
     /// project is unknown or its daemon connection is unavailable.
     pub(super) fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> Option<ActionDispatcher> {

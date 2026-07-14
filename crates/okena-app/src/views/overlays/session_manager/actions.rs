@@ -1,4 +1,4 @@
-use crate::workspace::persistence::{delete_session, rename_session, session_exists};
+use crate::workspace::persistence::SessionInfo;
 use okena_core::api::ActionRequest;
 use gpui::*;
 
@@ -9,9 +9,36 @@ impl SessionManager {
         cx.emit(SessionManagerEvent::Close);
     }
 
-    pub(super) fn refresh_sessions(&mut self) {
-        self.sessions = crate::workspace::persistence::list_sessions().unwrap_or_default();
+    pub(super) fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
+        self.loading_sessions = true;
         self.error_message = None;
+        cx.notify();
+
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client
+                    .post_action(ActionRequest::ListSessions)
+                    .and_then(|value| value.ok_or_else(|| "Missing session list".to_string()))
+                    .and_then(|value| {
+                        serde_json::from_value::<Vec<SessionInfo>>(value)
+                            .map_err(|error| format!("Invalid session list: {error}"))
+                    })
+            })
+            .await;
+
+            let _ = cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    match result {
+                        Ok(sessions) => this.sessions = sessions,
+                        Err(error) => this.error_message = Some(error),
+                    }
+                    this.loading_sessions = false;
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
     }
 
     pub(super) fn save_new_session(&mut self, cx: &mut Context<Self>) {
@@ -22,7 +49,7 @@ impl SessionManager {
             return;
         }
 
-        if session_exists(&name) {
+        if self.sessions.iter().any(|session| session.name == name) {
             self.error_message = Some(format!("Session '{}' already exists", name));
             cx.notify();
             return;
@@ -35,7 +62,6 @@ impl SessionManager {
         self.new_session_input.update(cx, |input, cx| {
             input.set_value("", cx);
         });
-        self.refresh_sessions();
         self.error_message = None;
         cx.notify();
     }
@@ -83,7 +109,9 @@ impl SessionManager {
                 return;
             }
 
-            if new_name != old_name && session_exists(&new_name) {
+            if new_name != old_name
+                && self.sessions.iter().any(|session| session.name == new_name)
+            {
                 self.error_message = Some(format!("Session '{}' already exists", new_name));
                 self.rename_input = None;
                 cx.notify();
@@ -91,15 +119,30 @@ impl SessionManager {
             }
 
             if new_name != old_name {
-                match rename_session(&old_name, &new_name) {
-                    Ok(()) => {
-                        self.refresh_sessions();
-                        self.error_message = None;
-                    }
-                    Err(e) => {
-                        self.error_message = Some(format!("Failed to rename session: {}", e));
-                    }
-                }
+                self.loading_sessions = true;
+                self.error_message = None;
+                let client = self.client.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = smol::unblock(move || {
+                        client.post_action(ActionRequest::RenameSession {
+                            old_name,
+                            new_name,
+                        })
+                    })
+                    .await;
+
+                    let _ = cx.update(|cx| {
+                        let _ = this.update(cx, |this, cx| match result {
+                            Ok(_) => this.refresh_sessions(cx),
+                            Err(error) => {
+                                this.loading_sessions = false;
+                                this.error_message = Some(error);
+                                cx.notify();
+                            }
+                        });
+                    });
+                })
+                .detach();
             }
         }
         self.rename_input = None;
@@ -117,17 +160,31 @@ impl SessionManager {
     }
 
     pub(super) fn delete_session(&mut self, name: &str, cx: &mut Context<Self>) {
-        match delete_session(name) {
-            Ok(()) => {
-                self.show_delete_confirmation = None;
-                self.refresh_sessions();
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to delete session: {}", e));
-            }
-        }
+        self.show_delete_confirmation = None;
+        self.loading_sessions = true;
+        self.error_message = None;
         cx.notify();
+
+        let client = self.client.clone();
+        let name = name.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client.post_action(ActionRequest::DeleteSession { name })
+            })
+            .await;
+
+            let _ = cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| match result {
+                    Ok(_) => this.refresh_sessions(cx),
+                    Err(error) => {
+                        this.loading_sessions = false;
+                        this.error_message = Some(error);
+                        cx.notify();
+                    }
+                });
+            });
+        })
+        .detach();
     }
 
     pub(super) fn export_current(&mut self, cx: &mut Context<Self>) {

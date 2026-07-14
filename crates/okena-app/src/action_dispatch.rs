@@ -941,8 +941,11 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             color,
         },
         // Session + app-scoped actions carry no project/terminal ids to remap.
-        a @ (ActionRequest::LoadSession { .. }
+        a @ (ActionRequest::ListSessions
+        | ActionRequest::LoadSession { .. }
         | ActionRequest::SaveSession { .. }
+        | ActionRequest::RenameSession { .. }
+        | ActionRequest::DeleteSession { .. }
         | ActionRequest::ImportWorkspace { .. }
         | ActionRequest::ExportWorkspace { .. }
         | ActionRequest::GetSettings

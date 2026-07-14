@@ -16,7 +16,8 @@
 use super::{ActionResult, spawn_uninitialized_terminals};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::{
-    export_workspace, import_workspace, load_session, save_session,
+    delete_session, export_workspace, import_workspace, list_sessions, load_session,
+    rename_session, save_session, session_exists,
 };
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{Workspace, WorkspaceData};
@@ -74,10 +75,38 @@ pub(super) fn load_session_action(
     replace_workspace_with(ws, focus_manager, data, backend, terminals, settings, cx)
 }
 
+pub(super) fn list_sessions_action() -> ActionResult {
+    match list_sessions() {
+        Ok(sessions) => ActionResult::Ok(Some(
+            serde_json::to_value(sessions).expect("BUG: SessionInfo must serialize"),
+        )),
+        Err(e) => ActionResult::Err(format!("failed to list sessions: {e}")),
+    }
+}
+
 pub(super) fn save_session_action(ws: &Workspace, name: String) -> ActionResult {
+    if session_exists(&name) {
+        return ActionResult::Err(format!("session '{name}' already exists"));
+    }
     match save_session(&name, &ws.data().without_remote_projects()) {
         Ok(()) => ActionResult::Ok(None),
         Err(e) => ActionResult::Err(format!("failed to save session '{name}': {e}")),
+    }
+}
+
+pub(super) fn rename_session_action(old_name: String, new_name: String) -> ActionResult {
+    match rename_session(&old_name, &new_name) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(e) => ActionResult::Err(format!(
+            "failed to rename session '{old_name}' to '{new_name}': {e}"
+        )),
+    }
+}
+
+pub(super) fn delete_session_action(name: String) -> ActionResult {
+    match delete_session(&name) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(e) => ActionResult::Err(format!("failed to delete session '{name}': {e}")),
     }
 }
 
