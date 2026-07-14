@@ -4,6 +4,7 @@ use crate::code_view::{get_selected_text, start_scrollbar_drag, update_scrollbar
 use crate::selection::{copy_to_clipboard, Selection1DExtension, Selection2DNonEmpty};
 use gpui::*;
 use okena_core::send_payload::{CodeBlock, SendPayload};
+use std::path::PathBuf;
 
 use super::{DisplayMode, FileViewer, FileViewerEvent, PreviewBackground};
 
@@ -63,7 +64,11 @@ impl FileViewer {
             .join("\n");
 
         Some(SendPayload::Code(vec![CodeBlock {
-            absolute_path: tab.file_path.clone(),
+            absolute_path: self
+                .project_fs
+                .absolute_path(&tab.relative_path)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| tab.file_path.clone()),
             first: first_idx + 1,
             last: last_idx + 1,
             text,

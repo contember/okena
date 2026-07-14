@@ -110,7 +110,12 @@ impl Render for ContentSearchDialog {
         };
 
         // Results list
-        let results_area: AnyElement = if self.rows.is_empty() {
+        let results_area: AnyElement = if let Some(error) = &self.error_message {
+            div()
+                .flex_1()
+                .child(empty_state(error, &t, cx))
+                .into_any_element()
+        } else if self.rows.is_empty() {
             div()
                 .flex_1()
                 .child(empty_state(

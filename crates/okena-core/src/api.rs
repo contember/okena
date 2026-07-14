@@ -804,6 +804,8 @@ pub enum ActionRequest {
         file_glob: Option<String>,
         #[serde(default)]
         context_lines: usize,
+        #[serde(default)]
+        show_ignored: bool,
     },
     RenameFile {
         project_id: String,

@@ -75,6 +75,7 @@ pub struct ContentSearchDialog {
     pub(super) total_matches: usize,
     /// Whether a search is currently running.
     pub(super) searching: bool,
+    pub(super) error_message: Option<String>,
     /// Handle to cancel running search.
     pub(super) search_handle: Option<SearchHandle>,
     /// Search config toggles.
@@ -201,6 +202,7 @@ impl ContentSearchDialog {
             selected_index: 0,
             total_matches: 0,
             searching: false,
+            error_message: None,
             search_handle: None,
             case_sensitive,
             regex_mode,

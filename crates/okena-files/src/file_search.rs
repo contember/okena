@@ -63,6 +63,7 @@ pub struct FileSearchDialog {
     filter_popover_open: bool,
     filter_button_bounds: Option<Bounds<Pixels>>,
     loading: bool,
+    error_message: Option<String>,
 }
 
 impl FileSearchDialog {
@@ -116,16 +117,21 @@ impl FileSearchDialog {
         // Load files asynchronously to avoid blocking the UI thread (important for remote projects)
         let fs_for_scan = fs.clone();
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let files = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move { fs_for_scan.list_files(show_ignored) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
-                this.files = files;
                 this.loading = false;
-                this.filter_files(cx);
-                if restored_index < this.filtered_files.len() {
-                    this.selected_index = restored_index;
+                match result {
+                    Ok(files) => {
+                        this.files = files;
+                        this.filter_files(cx);
+                        if restored_index < this.filtered_files.len() {
+                            this.selected_index = restored_index;
+                        }
+                    }
+                    Err(error) => this.error_message = Some(error),
                 }
                 cx.notify();
             });
@@ -146,6 +152,7 @@ impl FileSearchDialog {
             filter_popover_open: false,
             filter_button_bounds: None,
             loading: true,
+            error_message: None,
         }
     }
 
@@ -186,11 +193,12 @@ impl FileSearchDialog {
         let fs = self.fs.clone();
         let show_ignored = self.show_ignored;
         self.loading = true;
+        self.error_message = None;
         self.files.clear();
         self.filtered_files.clear();
         self.selected_index = 0;
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let files = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move { fs.list_files(show_ignored) })
                 .await;
@@ -199,9 +207,14 @@ impl FileSearchDialog {
                 if this.show_ignored != show_ignored {
                     return;
                 }
-                this.files = files;
                 this.loading = false;
-                this.filter_files(cx);
+                match result {
+                    Ok(files) => {
+                        this.files = files;
+                        this.filter_files(cx);
+                    }
+                    Err(error) => this.error_message = Some(error),
+                }
                 cx.notify();
             });
         })
@@ -551,6 +564,11 @@ impl Render for FileSearchDialog {
                         div()
                             .flex_1()
                             .child(empty_state("Loading files…", &t, cx))
+                            .into_any_element()
+                    } else if let Some(error) = &self.error_message {
+                        div()
+                            .flex_1()
+                            .child(empty_state(error, &t, cx))
                             .into_any_element()
                     } else if self.filtered_files.is_empty() {
                         div()

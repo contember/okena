@@ -20,6 +20,7 @@ impl ContentSearchDialog {
             self.rows.clear();
             self.total_matches = 0;
             self.searching = false;
+            self.error_message = None;
             self.selected_index = 0;
             cx.notify();
             return;
@@ -44,6 +45,7 @@ impl ContentSearchDialog {
         let handle = SearchHandle::new();
         self.search_handle = Some(handle.clone());
         self.searching = true;
+        self.error_message = None;
         self.highlight_cache.clear();
         cx.notify();
 
@@ -79,7 +81,7 @@ impl ContentSearchDialog {
                         &mut |result| {
                             results.push(result);
                         },
-                    );
+                    )?;
                     // Sort files by best match score (highest first) for fuzzy mode,
                     // breaking ties by relative_path for stable order across runs
                     // (parallel walker emits in non-deterministic order).
@@ -88,7 +90,7 @@ impl ContentSearchDialog {
                             .cmp(&a.best_score)
                             .then_with(|| a.relative_path.cmp(&b.relative_path))
                     });
-                    results
+                    Ok::<_, String>(results)
                 })
                 .await;
 
@@ -99,10 +101,18 @@ impl ContentSearchDialog {
                         .as_ref()
                         .is_some_and(|h| !h.is_cancelled())
                     {
-                        this.apply_results(results);
                         this.searching = false;
-                        // Preload highlighting for files in search results
-                        this.preload_result_files(cx);
+                        match results {
+                            Ok(results) => {
+                                this.apply_results(results);
+                                this.preload_result_files(cx);
+                            }
+                            Err(error) => {
+                                this.rows.clear();
+                                this.total_matches = 0;
+                                this.error_message = Some(error);
+                            }
+                        }
                         cx.notify();
                     }
                 })

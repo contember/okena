@@ -251,6 +251,16 @@ impl FileViewer {
                     .overflow_y_scroll()
                     .track_scroll(&self.tree_scroll_handle)
                     .py(px(6.0))
+                    .when_some(self.tree_error_message.clone(), |d, error| {
+                        d.child(
+                            div()
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.error))
+                                .child(error)
+                        )
+                    })
                     .children(tree_elements),
             )
     }
@@ -383,10 +393,8 @@ impl FileViewer {
 
         let folder_for_click = folder_relative.to_string();
         let folder_for_ctx = folder_relative.to_string();
-        let abs_path_for_ctx = match self.project_fs.project_root() {
-            Some(root) => root.join(folder_relative),
-            None => PathBuf::from(folder_relative),
-        };
+        let abs_path_for_ctx =
+            PathBuf::from(self.project_fs.project_id()).join(folder_relative);
 
         elements.push(
             expandable_folder_row(&entry.name, depth, is_expanded, t, cx)
@@ -430,10 +438,7 @@ impl FileViewer {
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) {
-        let abs_path = match self.project_fs.project_root() {
-            Some(root) => root.join(file_relative),
-            None => PathBuf::from(file_relative),
-        };
+        let abs_path = PathBuf::from(self.project_fs.project_id()).join(file_relative);
         let is_renaming = self.is_renaming_file(&abs_path);
         let is_ctx_target = self.is_context_menu_target_file(&abs_path);
         let highlight = is_active || is_ctx_target;

@@ -215,8 +215,8 @@ pub fn execute_action(
         ActionRequest::FileSize { project_id, relative_path } => {
             files::file_size(ws, project_id, relative_path)
         }
-        ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines } => {
-            files::search_content(ws, project_id, query, case_sensitive, mode, max_results, file_glob, context_lines)
+        ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines, show_ignored } => {
+            files::search_content(ws, project_id, query, case_sensitive, mode, max_results, file_glob, context_lines, show_ignored)
         }
         ActionRequest::RenameFile { project_id, relative_path, new_name } => {
             files::rename_file(ws, project_id, relative_path, new_name)

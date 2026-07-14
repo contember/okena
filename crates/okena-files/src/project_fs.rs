@@ -3,13 +3,18 @@
 use crate::content_search::{ContentSearchConfig, FileSearchResult, SearchMode};
 use crate::file_scan::FileEntry;
 use crate::list_directory::DirEntry;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectFileMetadata {
+    pub size: u64,
+    pub modified_at_millis: Option<u64>,
+}
 
 /// Provides file system operations from either local disk or a remote server.
 pub trait ProjectFs: Send + Sync + 'static {
     /// List files in the project (for file search dialog).
-    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry>;
+    fn list_files(&self, show_ignored: bool) -> Result<Vec<FileEntry>, String>;
 
     /// List immediate children of a project-relative directory (for the lazy
     /// file viewer tree). `relative_path = ""` lists the project root.
@@ -25,8 +30,8 @@ pub trait ProjectFs: Send + Sync + 'static {
     /// Read file content as raw bytes. Used for binary previews (images).
     fn read_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>, String>;
 
-    /// Get file size in bytes.
-    fn file_size(&self, relative_path: &str) -> Result<u64, String>;
+    /// Get daemon-side file metadata used for size limits and freshness checks.
+    fn file_metadata(&self, relative_path: &str) -> Result<ProjectFileMetadata, String>;
 
     /// Rename a file or folder (project-relative path) to `new_name`.
     fn rename_file(&self, relative_path: &str, new_name: &str) -> Result<(), String>;
@@ -41,19 +46,13 @@ pub trait ProjectFs: Send + Sync + 'static {
         config: &ContentSearchConfig,
         cancelled: &AtomicBool,
         on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-    );
+    ) -> Result<(), String>;
 
     /// Project display name (directory name).
     fn project_name(&self) -> String;
 
     /// Unique project identifier (used for caching).
     fn project_id(&self) -> String;
-
-    /// Local absolute path to the project root, if available. Used to convert
-    /// project-relative paths into absolute `PathBuf`s for filesystem
-    /// operations (e.g. context-menu rename/delete). Remote projects return
-    /// `None` because the root only exists on the remote machine.
-    fn project_root(&self) -> Option<PathBuf>;
 
     /// Daemon-side absolute path for a project-relative path, for display/copy
     /// (e.g. the "Copy Absolute Path" context-menu action). The path lives on
@@ -85,18 +84,16 @@ impl RemoteProjectFs {
 }
 
 impl ProjectFs for RemoteProjectFs {
-    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry> {
+    fn list_files(&self, show_ignored: bool) -> Result<Vec<FileEntry>, String> {
         let action = okena_core::api::ActionRequest::ListFiles {
             project_id: self.project_id.clone(),
             show_ignored,
         };
-        match self.post_action(action) {
-            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
-                log::warn!("Failed to deserialize file list: {}", e);
-                Vec::new()
-            }),
-            _ => Vec::new(),
-        }
+        let value = self
+            .post_action(action)?
+            .ok_or_else(|| "Missing file list response".to_string())?;
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid file list response: {error}"))
     }
 
     fn list_directory(
@@ -152,17 +149,21 @@ impl ProjectFs for RemoteProjectFs {
         }
     }
 
-    fn file_size(&self, relative_path: &str) -> Result<u64, String> {
+    fn file_metadata(&self, relative_path: &str) -> Result<ProjectFileMetadata, String> {
         let action = okena_core::api::ActionRequest::FileSize {
             project_id: self.project_id.clone(),
             relative_path: relative_path.to_string(),
         };
         match self.post_action(action)? {
-            Some(value) => {
-                value.get("size")
+            Some(value) => Ok(ProjectFileMetadata {
+                size: value
+                    .get("size")
                     .and_then(|v| v.as_u64())
-                    .ok_or_else(|| "Missing size in response".to_string())
-            }
+                    .ok_or_else(|| "Missing size in response".to_string())?,
+                modified_at_millis: value
+                    .get("modified_at_millis")
+                    .and_then(|v| v.as_u64()),
+            }),
             None => Err("Empty response".to_string()),
         }
     }
@@ -190,7 +191,7 @@ impl ProjectFs for RemoteProjectFs {
         config: &ContentSearchConfig,
         cancelled: &AtomicBool,
         on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-    ) {
+    ) -> Result<(), String> {
         let mode = match config.mode {
             SearchMode::Literal => "literal",
             SearchMode::Regex => "regex",
@@ -204,19 +205,20 @@ impl ProjectFs for RemoteProjectFs {
             max_results: config.max_results,
             file_glob: config.file_glob.clone(),
             context_lines: config.context_lines,
+            show_ignored: config.show_ignored,
         };
-        if let Ok(Some(value)) = self.post_action(action) {
-            let results: Vec<FileSearchResult> = serde_json::from_value(value).unwrap_or_else(|e| {
-                log::warn!("Failed to deserialize search results: {}", e);
-                Vec::new()
-            });
-            for result in results {
-                if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                on_result(result);
+        let value = self
+            .post_action(action)?
+            .ok_or_else(|| "Missing content search response".to_string())?;
+        let results: Vec<FileSearchResult> = serde_json::from_value(value)
+            .map_err(|error| format!("Invalid content search response: {error}"))?;
+        for result in results {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
             }
+            on_result(result);
         }
+        Ok(())
     }
 
     fn project_name(&self) -> String {
@@ -225,10 +227,6 @@ impl ProjectFs for RemoteProjectFs {
 
     fn project_id(&self) -> String {
         self.project_id.clone()
-    }
-
-    fn project_root(&self) -> Option<PathBuf> {
-        None
     }
 
     fn absolute_path(&self, relative_path: &str) -> Option<String> {

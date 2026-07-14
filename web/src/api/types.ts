@@ -334,6 +334,7 @@ export type ActionRequest =
       max_results?: number;
       file_glob?: string | null;
       context_lines?: number;
+      show_ignored?: boolean;
     }
   | { action: "rename_file"; project_id: string; relative_path: string; new_name: string }
   | { action: "delete_file"; project_id: string; relative_path: string }

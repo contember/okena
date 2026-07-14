@@ -845,7 +845,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             relative_path,
         },
-        ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines } => {
+        ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines, show_ignored } => {
             ActionRequest::SearchContent {
                 project_id: s(&project_id),
                 query,
@@ -854,6 +854,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
                 max_results,
                 file_glob,
                 context_lines,
+                show_ignored,
             }
         }
         ActionRequest::RenameFile { project_id, relative_path, new_name } => ActionRequest::RenameFile {

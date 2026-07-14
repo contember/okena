@@ -429,9 +429,17 @@ impl FileViewer {
             .to_string_lossy()
             .to_string();
 
-        let abs_to_copy = self.project_fs.absolute_path(&rel_path).unwrap_or_else(|| abs_path.clone());
+        let daemon_path = self.project_fs.absolute_path(&rel_path).map(PathBuf::from);
+        let abs_to_copy = daemon_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| abs_path.clone());
 
-        let send_path = if is_folder { None } else { Some(abs_path_buf.clone()) };
+        let send_path = if is_folder {
+            None
+        } else {
+            Some(daemon_path.unwrap_or(abs_path_buf))
+        };
 
         Some(
             div()
@@ -540,7 +548,12 @@ impl FileViewer {
             .tabs
             .get(tab_index)
             .filter(|t| !t.is_empty())
-            .map(|tab| tab.file_path.clone());
+            .map(|tab| {
+                self.project_fs
+                    .absolute_path(&tab.relative_path)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| tab.file_path.clone())
+            });
 
         Some(
             div()

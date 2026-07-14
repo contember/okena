@@ -108,7 +108,17 @@ pub(super) fn file_size(ws: &Workspace, project_id: String, relative_path: Strin
                 Err(e) => return ActionResult::Err(e),
             };
             match std::fs::metadata(&canonical) {
-                Ok(m) => ActionResult::Ok(Some(serde_json::json!({ "size": m.len() }))),
+                Ok(m) => {
+                    let modified_at_millis = m
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+                    ActionResult::Ok(Some(serde_json::json!({
+                        "size": m.len(),
+                        "modified_at_millis": modified_at_millis,
+                    })))
+                }
                 Err(e) => ActionResult::Err(format!("Cannot read file: {}", e)),
             }
         }
@@ -126,6 +136,7 @@ pub(super) fn search_content(
     max_results: usize,
     file_glob: Option<String>,
     context_lines: usize,
+    show_ignored: bool,
 ) -> ActionResult {
     if let Some(ref glob) = file_glob
         && (glob.contains("..") || glob.starts_with('/')) {
@@ -148,7 +159,7 @@ pub(super) fn search_content(
                 max_results,
                 file_glob,
                 context_lines,
-                show_ignored: false,
+                show_ignored,
             };
             let cancelled = std::sync::atomic::AtomicBool::new(false);
             let mut results = Vec::new();

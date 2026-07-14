@@ -22,7 +22,6 @@ use okena_markdown::{MarkdownDocument, MarkdownSelection};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 use syntect::parsing::SyntaxSet;
 
 /// Maximum file size to load for text/markdown (5MB)
@@ -147,8 +146,8 @@ const SIDEBAR_WIDTH: f32 = 240.0;
 ///
 /// `relative_path` is the canonical identifier (project-relative, used for
 /// `fs.read_file`, tab equality, history, and tree highlighting). `file_path`
-/// is the derived absolute path used for filesystem-level context-menu
-/// operations (rename/delete) — it's only meaningful for local projects.
+/// is a client-only identity rooted at the project id; daemon paths come from
+/// `ProjectFs::absolute_path`.
 pub(super) struct FileViewerTab {
     pub file_path: PathBuf,
     pub relative_path: String,
@@ -172,8 +171,8 @@ pub(super) struct FileViewerTab {
     pub markdown_list_font: f32,
     pub source_scroll_handle: UniformListScrollHandle,
     pub scrollbar_drag: Option<ScrollbarDrag>,
-    /// Last known modification time of the file (for detecting external changes).
-    pub modified_at: Option<SystemTime>,
+    /// Last daemon-reported modification time in Unix milliseconds.
+    pub modified_at: Option<u64>,
     /// Whether the tab content is still being loaded asynchronously.
     pub loading: bool,
     /// Per-line git blame for this file. Lazy-loaded when the user toggles
@@ -514,6 +513,7 @@ pub struct FileViewer {
     pub(super) loaded_dirs: HashMap<String, Vec<DirEntry>>,
     /// Folder paths whose listing is currently in flight.
     pub(super) loading_dirs: HashSet<String>,
+    pub(super) tree_error_message: Option<String>,
     /// Which folder paths are currently expanded
     expanded_folders: HashSet<String>,
     /// Scroll handle for the file tree sidebar
@@ -566,17 +566,12 @@ pub struct FileViewer {
 }
 
 impl FileViewer {
-    /// Resolve a project-relative path to an absolute `PathBuf` for filesystem
-    /// ops. For remote projects the absolute path doesn't exist locally;
-    /// callers fall back to the relative path wrapped as a `PathBuf`.
-    fn resolve_absolute(
+    /// Build a stable client-side identity path without touching local disk.
+    fn tree_path(
         fs: &std::sync::Arc<dyn crate::project_fs::ProjectFs>,
         relative_path: &str,
     ) -> PathBuf {
-        match fs.project_root() {
-            Some(root) => root.join(relative_path),
-            None => PathBuf::from(relative_path),
-        }
+        PathBuf::from(fs.project_id()).join(relative_path)
     }
 
     /// Create a new file viewer with `relative_path` (project-relative) opened
@@ -594,7 +589,7 @@ impl FileViewer {
         let expanded_folders = Self::compute_expanded_for_relative(&relative_path);
         let syntax_set = load_syntax_set();
 
-        let file_path = Self::resolve_absolute(&project_fs, &relative_path);
+        let file_path = Self::tree_path(&project_fs, &relative_path);
         let tab = FileViewerTab::new_loading(relative_path.clone(), file_path.clone());
 
         let mut viewer = Self {
@@ -607,6 +602,7 @@ impl FileViewer {
             loading: true,
             loaded_dirs: HashMap::new(),
             loading_dirs: HashSet::new(),
+            tree_error_message: None,
             expanded_folders,
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
@@ -663,6 +659,7 @@ impl FileViewer {
             loading: true,
             loaded_dirs: HashMap::new(),
             loading_dirs: HashSet::new(),
+            tree_error_message: None,
             expanded_folders: HashSet::new(),
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
@@ -709,7 +706,7 @@ impl FileViewer {
     }
 
     /// Update configuration (font size and dark mode) from the host app.
-    /// Also refreshes the file tree and all tabs that were modified externally.
+    /// Also refreshes the daemon-backed file tree.
     pub fn update_config(&mut self, font_size: f32, is_dark: bool, cx: &mut Context<Self>) {
         let rehighlight = is_dark != self.is_dark;
         self.file_font_size = font_size;
@@ -718,14 +715,8 @@ impl FileViewer {
         // Re-fetch directory listings so the sidebar reflects added/removed files
         self.refresh_file_tree_async(cx);
 
-        let svg_renderer = cx.svg_renderer();
         for tab in &mut self.tabs {
             if tab.is_empty() {
-                continue;
-            }
-            // Reload externally modified files (also re-highlights)
-            if tab.reload_if_changed(&self.syntax_set, self.is_dark, &svg_renderer) {
-                tab.blame = BlameLoadState::NotLoaded;
                 continue;
             }
             // Theme changed — re-highlight without reloading. Raster image
@@ -740,11 +731,6 @@ impl FileViewer {
             }
         }
 
-        // Kick off blame load for the active tab if the gutter is visible and
-        // its blame got invalidated by the reload above.
-        if self.blame_visible {
-            self.spawn_blame_load_for_active(cx);
-        }
     }
 
     /// Invalidate the cached directory listings and re-fetch the ones that are
@@ -756,6 +742,7 @@ impl FileViewer {
             .collect();
         self.loaded_dirs.clear();
         self.loading_dirs.clear();
+        self.tree_error_message = None;
         for path in to_refetch {
             self.fetch_directory(path, cx);
         }
@@ -822,9 +809,12 @@ impl FileViewer {
                 match result {
                     Ok(entries) => {
                         this.loaded_dirs.insert(relative_path.clone(), entries);
+                        if relative_path.is_empty() {
+                            this.tree_error_message = None;
+                        }
                     }
                     Err(e) => {
-                        log::warn!("list_directory({}) failed: {}", relative_path, e);
+                        this.tree_error_message = Some(e);
                         // Cache an empty vec so we don't retry on every render.
                         this.loaded_dirs.insert(relative_path.clone(), Vec::new());
                     }
@@ -838,13 +828,7 @@ impl FileViewer {
         .detach();
     }
 
-    /// Check if the active tab's file was modified externally and reload it if
-    /// so. Throttled to at most once per second. The actual stat + (on change)
-    /// read + re-highlight runs on the background executor so it never blocks
-    /// the render/UI thread; results are swapped in via `entity.update`.
-    ///
-    /// Called cheaply from `render`: the render thread only checks the throttle
-    /// and (at most once/sec) schedules a background task — no filesystem I/O.
+    /// Poll daemon metadata and reload the active tab when it changes.
     pub(super) fn check_active_tab_freshness(&mut self, cx: &mut Context<Self>) {
         if self.freshness_check_in_flight
             || self.last_change_check.elapsed() < std::time::Duration::from_secs(1)
@@ -858,81 +842,27 @@ impl FileViewer {
             return;
         }
 
-        // Capture only the plain data the background work needs — no entity or
-        // tab borrows held across the await.
         let relative_path = tab.relative_path.clone();
-        let path = tab.file_path.clone();
         let old_mtime = tab.modified_at;
-        let is_markdown = tab.is_markdown;
-        let syntax_set = self.syntax_set.clone();
-        let is_dark = self.is_dark;
-        let svg_renderer = cx.svg_renderer();
+        let fs = self.project_fs.clone();
+        let path_for_request = relative_path.clone();
 
         self.freshness_check_in_flight = true;
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    loading::compute_freshness_reload(
-                        &path,
-                        old_mtime,
-                        is_markdown,
-                        &syntax_set,
-                        is_dark,
-                        &svg_renderer,
-                    )
-                })
+                .spawn(async move { fs.file_metadata(&path_for_request) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 this.freshness_check_in_flight = false;
-                let reloaded = matches!(result, loading::FreshnessOutcome::Reloaded(_));
-                // Register fresh font bytes with the platform text system
-                // before apply, mirroring spawn_tab_load. add_fonts is
-                // idempotent so a no-change font reload is a cheap no-op.
-                if let loading::FreshnessOutcome::Reloaded(reload) = &result
-                    && let loading::FreshnessKind::Font { ttf_bytes, .. } = &reload.kind
-                {
-                    register_font_bytes(cx, ttf_bytes);
-                }
-                // Re-find the tab by relative_path; concurrent reorders/closes
-                // mean the index may have shifted since we scheduled the check.
-                // Capture the previously-installed image so we can evict its
-                // sprite-atlas tile / asset-cache entry AFTER apply assigns
-                // the new one — apply runs on `&mut FileViewerTab` and can't
-                // see `cx: &mut App`.
-                let mut old_image: Option<DecodedImage> = None;
-                if let Some(tab) =
-                    this.tabs.iter_mut().find(|t| t.relative_path == relative_path)
-                {
-                    if reloaded {
-                        old_image = tab.image_data.take();
+                match result {
+                    Ok(metadata) if metadata.modified_at_millis != old_mtime => {
+                        this.spawn_tab_load(relative_path, cx);
                     }
-                    tab.apply_freshness_reload(result);
-                    if reloaded {
-                        tab.blame = BlameLoadState::NotLoaded;
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::warn!("File freshness check failed: {error}");
                     }
-                }
-                if let Some(decoded) = old_image {
-                    release_image_assets(decoded, cx);
-                }
-                if reloaded {
-                    if this.blame_visible {
-                        this.spawn_blame_load_for_active(cx);
-                    }
-                    // The freshness reload of an SVG always rebuilds the
-                    // bitmap at rendered_scale=1.0, but image_view.zoom
-                    // persists across the reload. Without this kick the
-                    // user's previously-tuned high-zoom view stays
-                    // pixelated until they touch the wheel.
-                    if let Some(tab) = this
-                        .tabs
-                        .iter()
-                        .find(|t| t.relative_path == relative_path)
-                        && tab.is_svg
-                    {
-                        this.maybe_rerender_svg_for(relative_path.clone(), cx);
-                    }
-                    cx.notify();
                 }
             });
         })
@@ -1160,7 +1090,7 @@ impl FileViewer {
 
         self.expand_ancestors_and_fetch(&relative_path, cx);
 
-        let file_path = Self::resolve_absolute(&self.project_fs, &relative_path);
+        let file_path = Self::tree_path(&self.project_fs, &relative_path);
         let new_tab = FileViewerTab::new_loading(relative_path.clone(), file_path);
 
         // If current tab is empty (no file loaded), replace it
@@ -1350,7 +1280,7 @@ impl FileViewer {
 
         self.expand_ancestors_and_fetch(&relative_path, cx);
 
-        let file_path = Self::resolve_absolute(&self.project_fs, &relative_path);
+        let file_path = Self::tree_path(&self.project_fs, &relative_path);
         let new_tab = FileViewerTab::new_loading(relative_path.clone(), file_path);
         let old_image = self.tabs[self.active_tab].image_data.take();
         self.tabs[self.active_tab] = new_tab;
@@ -1381,15 +1311,17 @@ impl FileViewer {
         let is_font = !is_image && font_format_for_path(&asset_path).is_some();
         let svg_renderer = cx.svg_renderer();
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let result: Result<loading::LoadedContent, String> = cx
+            let result: Result<(loading::LoadedContent, Option<u64>), String> = cx
                 .background_executor()
                 .spawn(async move {
-                    if is_image {
-                        // Don't do a separate file_size round-trip — the
-                        // server enforces MAX_IMAGE_FILE_SIZE inside
-                        // read_file_bytes (TOCTOU close), and for local
-                        // projects build_image_content rejects oversize
-                        // bytes too.
+                    let metadata = fs.file_metadata(&rel)?;
+                    let content = if is_image {
+                        if metadata.size > MAX_IMAGE_FILE_SIZE {
+                            return Err(format!(
+                                "Image too large ({} bytes). Maximum size is 20 MB.",
+                                metadata.size
+                            ));
+                        }
                         let bytes = fs.read_file_bytes(&rel)?;
                         if bytes.len() as u64 > MAX_IMAGE_FILE_SIZE {
                             return Err(format!(
@@ -1397,8 +1329,14 @@ impl FileViewer {
                                 bytes.len() as f64 / 1024.0 / 1024.0
                             ));
                         }
-                        loading::build_image_content(&asset_path, bytes, &svg_renderer)
+                        loading::build_image_content(&asset_path, bytes, &svg_renderer)?
                     } else if is_font {
+                        if metadata.size > loading::MAX_FONT_FILE_SIZE {
+                            return Err(format!(
+                                "Font too large ({} bytes). Maximum size is 20 MB.",
+                                metadata.size
+                            ));
+                        }
                         let bytes = fs.read_file_bytes(&rel)?;
                         if bytes.len() as u64 > loading::MAX_FONT_FILE_SIZE {
                             return Err(format!(
@@ -1406,17 +1344,17 @@ impl FileViewer {
                                 bytes.len() as f64 / 1024.0 / 1024.0
                             ));
                         }
-                        loading::build_font_content(&asset_path, bytes)
+                        loading::build_font_content(&asset_path, bytes)?
                     } else {
-                        let size = fs.file_size(&rel)?;
-                        if size > MAX_FILE_SIZE {
+                        if metadata.size > MAX_FILE_SIZE {
                             return Err(format!(
-                                "File too large ({:.1} MB). Maximum size is 5 MB.",
-                                size as f64 / 1024.0 / 1024.0
+                                "File too large ({} bytes). Maximum size is 5 MB.",
+                                metadata.size
                             ));
                         }
-                        fs.read_file(&rel).map(loading::LoadedContent::Text)
-                    }
+                        loading::LoadedContent::Text(fs.read_file(&rel)?)
+                    };
+                    Ok((content, metadata.modified_at_millis))
                 })
                 .await;
             let _ = entity.update(cx, |this, cx| {
@@ -1437,7 +1375,7 @@ impl FileViewer {
                     // a byte hash so a re-register of the same font is a
                     // no-op (without that, GPUI's add_fonts pushes every
                     // call into the platform font source and never frees).
-                    if let Ok(loading::LoadedContent::Font { ttf_bytes, .. }) = &result {
+                    if let Ok((loading::LoadedContent::Font { ttf_bytes, .. }, _)) = &result {
                         register_font_bytes(cx, ttf_bytes);
                     }
                     // Capture the previously-installed image so we can
@@ -1445,7 +1383,16 @@ impl FileViewer {
                     // place — apply_loaded_content runs on `&mut tab`
                     // alone and can't see `cx: &mut App`.
                     old_image = tab.image_data.take();
-                    tab.apply_loaded_content(result, &this.syntax_set, this.is_dark);
+                    let modified_at = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|(_, modified_at)| *modified_at);
+                    tab.apply_loaded_content(
+                        result.map(|(content, _)| content),
+                        modified_at,
+                        &this.syntax_set,
+                        this.is_dark,
+                    );
                     tab.blame = BlameLoadState::NotLoaded;
                     cx.notify();
                 }
