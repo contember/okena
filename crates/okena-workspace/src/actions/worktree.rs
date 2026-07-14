@@ -441,6 +441,10 @@ impl Workspace {
         let project_hooks = project.hooks.clone();
         let project_name = project.name.clone();
         let project_path = project.path.clone();
+        // Parent (main repo) path — resolved BEFORE removal while the worktree
+        // project is still in state. The `worktree_removed` hook runs here
+        // because `git worktree remove` deletes the worktree checkout.
+        let main_repo_path = self.worktree_parent_path(project_id).unwrap_or_default();
         // For monorepos the project path is a subdirectory inside the worktree checkout.
         // Resolve the actual worktree root via git so `git worktree remove` gets the right path.
         let project_pathbuf = std::path::PathBuf::from(&project_path);
@@ -452,6 +456,7 @@ impl Workspace {
 
         // Fire on_worktree_close hook BEFORE removal so the hook has a valid CWD
         let monitor = cx.hook_monitor();
+        let runner = cx.hook_runner();
         hooks::fire_on_worktree_close_with_services(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, monitor.as_ref());
 
         // Remove the git worktree
@@ -460,6 +465,28 @@ impl Workspace {
 
         // Delete the project from workspace (this also fires on_project_close)
         self.delete_project(focus_manager, project_id, global_hooks, cx);
+
+        // Fire the `worktree_removed` hook now that the worktree + project are
+        // gone. This is the single convergence point for every removal route —
+        // the RemoveWorktreeProject action, the CloseWorktree pipeline, and the
+        // daemon's deferred hook-close resolver all reach here — so the hook
+        // fires exactly once. The worktree checkout is deleted, so the hook runs
+        // from the main repo (`main_repo_path`); OKENA_BRANCH still carries the
+        // removed branch. Results are intentionally discarded (matching the GUI
+        // baseline — worktree_removed is a fire-and-forget notification hook).
+        let _ = hooks::fire_worktree_removed(
+            &project_hooks,
+            global_hooks,
+            project_id,
+            &project_name,
+            &main_repo_path,
+            &branch,
+            &main_repo_path,
+            hook_folder_id.as_deref(),
+            hook_folder_name.as_deref(),
+            monitor.as_ref(),
+            runner.as_ref(),
+        );
 
         Ok(())
     }
