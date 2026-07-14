@@ -493,6 +493,32 @@ pub(super) fn rerun_hook(
     ActionResult::Ok(Some(serde_json::json!({ "terminal_id": new_id })))
 }
 
+/// Stop and remove a lifecycle-hook terminal from authoritative daemon state.
+pub(super) fn dismiss_hook(
+    ws: &mut Workspace,
+    project_id: String,
+    terminal_id: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let exists = ws
+        .project(&project_id)
+        .is_some_and(|project| project.hook_terminals.contains_key(&terminal_id));
+    if !exists {
+        return ActionResult::Err(format!("hook terminal not found: {terminal_id}"));
+    }
+
+    backend.kill(&terminal_id);
+    if let Some(monitor) = cx.hook_monitor() {
+        monitor.notify_exit(&terminal_id, None);
+    }
+    ws.cancel_pending_worktree_close(&terminal_id);
+    ws.remove_hook_terminal(&terminal_id, cx);
+    terminals.lock().remove(&terminal_id);
+    ActionResult::Ok(None)
+}
+
 #[cfg(all(test, feature = "gpui"))]
 mod set_show_in_overview_tests {
     use super::{apply_set_project_show_in_overview, ActionResult};

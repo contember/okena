@@ -3,25 +3,14 @@
 //!
 //! The `Render` impl lives in `worktree_dialog/view.rs`.
 
-use okena_git as git;
-use okena_core::process::command;
-use okena_workspace::settings::{HooksConfig, WorktreeConfig};
-use okena_workspace::state::{WindowId, Workspace};
+use okena_core::api::{ActionRequest, WorktreePullRequest};
+use okena_transport::remote_action::RemoteActionClient;
 
 use crate::simple_input::SimpleInputState;
 
 use gpui::prelude::*;
 use gpui::*;
-use std::path::PathBuf;
-
 mod view;
-
-#[derive(Clone, Debug)]
-pub(super) struct PrInfo {
-    pub(super) number: u32,
-    pub(super) title: String,
-    pub(super) branch: String,
-}
 
 /// Events emitted by the worktree dialog
 #[derive(Clone)]
@@ -51,18 +40,20 @@ impl EventEmitter<WorktreeDialogEvent> for WorktreeDialog {}
 /// mirrors back. Hence the dialog holds no `workspace`, git-root, path-template
 /// or hooks state — only branch selection.
 pub struct WorktreeDialog {
+    client: RemoteActionClient,
+    daemon_project_id: String,
     pub(super) project_id: String,
-    pub(super) project_path: String,
     pub(super) branches: Vec<String>,
     pub(super) filtered_branches: Vec<usize>,
     pub(super) selected_branch_index: Option<usize>,
     pub(super) branch_search_input: Entity<SimpleInputState>,
     pub(super) error_message: Option<String>,
+    pub(super) loading_branches: bool,
     pub(super) focus_handle: FocusHandle,
     pub(super) initialized: bool,
     pub(super) last_search_query: String,
     pub(super) pr_mode: bool,
-    pub(super) pr_list: Vec<PrInfo>,
+    pub(super) pr_list: Vec<WorktreePullRequest>,
     pub(super) loading_prs: bool,
     pub(super) pr_error: Option<String>,
     pub(super) selected_pr_branch: Option<String>,
@@ -71,50 +62,29 @@ pub struct WorktreeDialog {
 
 impl WorktreeDialog {
     pub fn new(
-        workspace: Entity<Workspace>,
+        client: RemoteActionClient,
+        daemon_project_id: String,
         project_id: String,
-        project_path: String,
-        _worktree_config: WorktreeConfig,
-        _hooks_config: HooksConfig,
-        _window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Determine git repo root for branch listing / name suggestion: if the
-        // parent is already a worktree use its stored main_repo_path; otherwise
-        // detect via `git rev-parse --show-toplevel`. (The daemon recomputes
-        // paths on its side at create time; this is only for the picker.)
-        let project_pathbuf = PathBuf::from(&project_path);
-        let parent_main_repo = workspace.read(cx).worktree_parent_path(&project_id)
-            .map(PathBuf::from);
-        let git_root = parent_main_repo
-            .or_else(|| git::get_repo_root(&project_pathbuf))
-            .unwrap_or_else(|| project_pathbuf.clone());
-
-        // Get available branches using the git root
-        let branches = git::get_available_branches_for_worktree(&git_root);
-
-        // Pre-generate a branch name suggestion
-        let generated_branch = okena_git::branch_names::generate_branch_name(&git_root);
-
         let branch_search_input = cx.new(|cx| {
-            let mut input = SimpleInputState::new(cx)
+            SimpleInputState::new(cx)
                 .placeholder("Search or create branch...")
-                .icon("icons/search.svg");
-            input.set_value(&generated_branch, cx);
-            input
+                .icon("icons/search.svg")
         });
 
-        let filtered_branches: Vec<usize> = (0..branches.len()).collect();
         let focus_handle = cx.focus_handle();
 
-        Self {
+        let mut dialog = Self {
+            client,
+            daemon_project_id,
             project_id,
-            project_path,
-            branches,
-            filtered_branches,
+            branches: Vec::new(),
+            filtered_branches: Vec::new(),
             selected_branch_index: None,
             branch_search_input,
             error_message: None,
+            loading_branches: true,
             focus_handle,
             initialized: false,
             last_search_query: String::new(),
@@ -124,7 +94,68 @@ impl WorktreeDialog {
             pr_error: None,
             selected_pr_branch: None,
             prs_loaded_once: false,
-        }
+        };
+        dialog.load_initial_data(cx);
+        dialog
+    }
+
+    fn load_initial_data(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let project_id = self.daemon_project_id.clone();
+        cx.spawn(async move |this, cx| {
+            let (branches, generated_branch) = smol::unblock(move || {
+                let branches = client
+                    .post_action(ActionRequest::GitBranches {
+                        project_id: project_id.clone(),
+                    })
+                    .and_then(|value| value.ok_or_else(|| "Missing branch list".to_string()))
+                    .and_then(|value| {
+                        serde_json::from_value::<Vec<String>>(value)
+                            .map_err(|error| format!("Invalid branch list: {error}"))
+                    });
+                let generated_branch = client
+                    .post_action(ActionRequest::GenerateWorktreeBranchName { project_id })
+                    .and_then(|value| value.ok_or_else(|| "Missing generated branch name".to_string()))
+                    .and_then(|value| {
+                        value
+                            .get("branch")
+                            .and_then(serde_json::Value::as_str)
+                            .map(String::from)
+                            .ok_or_else(|| "Invalid generated branch name".to_string())
+                    });
+                (branches, generated_branch)
+            })
+            .await;
+
+            let _ = cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    let mut errors = Vec::new();
+                    match branches {
+                        Ok(branches) => {
+                            this.filtered_branches = (0..branches.len()).collect();
+                            this.branches = branches;
+                        }
+                        Err(error) => errors.push(error),
+                    }
+                    match generated_branch {
+                        Ok(branch) => {
+                            if this.branch_search_input.read(cx).value().is_empty() {
+                                this.branch_search_input.update(cx, |input, cx| {
+                                    input.set_value(&branch, cx);
+                                });
+                            }
+                        }
+                        Err(error) => errors.push(error),
+                    }
+                    if !errors.is_empty() {
+                        this.error_message = Some(errors.join("; "));
+                    }
+                    this.loading_branches = false;
+                    cx.notify();
+                })
+            });
+        })
+        .detach();
     }
 
     pub(super) fn filter_branches(&mut self, cx: &App) {
@@ -213,42 +244,20 @@ impl WorktreeDialog {
         self.pr_error = None;
         cx.notify();
 
-        let project_path = self.project_path.clone();
+        let client = self.client.clone();
+        let project_id = self.daemon_project_id.clone();
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
-                let output = okena_core::process::safe_output(
-                    command("gh")
-                        .args(["pr", "list", "--json", "number,title,headRefName", "--limit", "20"])
-                        .current_dir(&project_path),
-                );
-
-                match output {
-                    Ok(output) if output.status.success() => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(&stdout);
-                        match parsed {
-                            Ok(items) => {
-                                let prs: Vec<PrInfo> = items
-                                    .into_iter()
-                                    .filter_map(|v| {
-                                        Some(PrInfo {
-                                            number: v.get("number")?.as_u64()? as u32,
-                                            title: v.get("title")?.as_str()?.to_string(),
-                                            branch: v.get("headRefName")?.as_str()?.to_string(),
-                                        })
-                                    })
-                                    .collect();
-                                Ok(prs)
-                            }
-                            Err(e) => Err(format!("Failed to parse PR data: {}", e)),
-                        }
-                    }
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        Err(stderr.trim().to_string())
-                    }
-                    Err(_) => Err("GitHub CLI not found. Install gh: https://cli.github.com".to_string()),
-                }
+                client
+                    .post_action(ActionRequest::GitListPullRequests {
+                        project_id,
+                        limit: 20,
+                    })
+                    .and_then(|value| value.ok_or_else(|| "Missing pull request list".to_string()))
+                    .and_then(|value| {
+                        serde_json::from_value::<Vec<WorktreePullRequest>>(value)
+                            .map_err(|error| format!("Invalid pull request list: {error}"))
+                    })
             })
             .await;
 

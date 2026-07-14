@@ -241,21 +241,29 @@ impl HookPanel {
         }
     }
 
-    /// Dismiss a hook terminal.
+    /// Ask the daemon to stop and remove a hook terminal.
     fn dismiss_hook(&mut self, terminal_id: &str, cx: &mut Context<Self>) {
-        if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
-            monitor.notify_exit(terminal_id, None);
+        let next = self
+            .get_hook_list(cx)
+            .into_iter()
+            .find(|(id, _)| id != terminal_id)
+            .map(|(id, _)| id);
+
+        if let Some(ref dispatcher) = self.action_dispatcher {
+            dispatcher.dispatch(
+                okena_core::api::ActionRequest::DismissHook {
+                    project_id: self.project_id.clone(),
+                    terminal_id: terminal_id.to_string(),
+                },
+                cx,
+            );
+        } else {
+            log::warn!("Cannot dismiss hook: no action dispatcher wired");
+            return;
         }
-        self.workspace.update(cx, |ws, cx| {
-            ws.cancel_pending_worktree_close(terminal_id);
-            ws.remove_hook_terminal(terminal_id, cx);
-        });
-        self.terminals.lock().remove(terminal_id);
 
         // If we just dismissed the active terminal, switch to another or close
         if self.active_terminal_id.as_deref() == Some(terminal_id) {
-            let next = self.workspace.read(cx).project(&self.project_id)
-                .and_then(|p| p.hook_terminals.keys().next().cloned());
             if let Some(next_tid) = next {
                 self.show_hook(&next_tid, cx);
             } else {

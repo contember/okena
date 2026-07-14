@@ -111,6 +111,15 @@ impl WorktreeDialog {
         t: ThemeColors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if self.loading_branches {
+            return div()
+                .p(px(12.0))
+                .text_size(ui_text_md(cx))
+                .text_color(rgb(t.text_muted))
+                .child("Loading branches...")
+                .into_any_element();
+        }
+
         let search_empty = self.branch_search_input.read(cx).value().is_empty();
 
         if self.filtered_branches.is_empty() {

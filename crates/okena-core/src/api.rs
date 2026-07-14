@@ -201,6 +201,14 @@ pub struct PrInfo {
     pub base: Option<String>,
 }
 
+/// Open pull request offered as a worktree source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreePullRequest {
+    pub number: u32,
+    pub title: String,
+    pub branch: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ApiGitStatus {
     pub branch: Option<String>,
@@ -624,6 +632,11 @@ pub enum ActionRequest {
     GitBranches {
         project_id: String,
     },
+    GitListPullRequests {
+        project_id: String,
+        #[serde(default = "default_pull_request_limit")]
+        limit: usize,
+    },
     GitFileContents {
         project_id: String,
         file_path: String,
@@ -737,6 +750,11 @@ pub enum ActionRequest {
     /// fresh shell at the hook's cwd, and re-types the stored command — command
     /// + cwd are read daemon-side from the hook terminal entry.
     RerunHook {
+        project_id: String,
+        terminal_id: String,
+    },
+    /// Stop and remove a lifecycle-hook terminal on the daemon.
+    DismissHook {
         project_id: String,
         terminal_id: String,
     },
@@ -989,6 +1007,8 @@ impl ActionRequest {
 
 fn default_search_mode() -> String { "literal".to_string() }
 fn default_max_results() -> usize { 1000 }
+
+fn default_pull_request_limit() -> usize { 20 }
 
 /// POST /v1/pair request
 #[derive(Serialize, Deserialize)]
@@ -1375,6 +1395,10 @@ mod tests {
             ActionRequest::GitBranches {
                 project_id: "p1".into(),
             },
+            ActionRequest::GitListPullRequests {
+                project_id: "p1".into(),
+                limit: 20,
+            },
             ActionRequest::GitFileContents {
                 project_id: "p1".into(),
                 file_path: "src/main.rs".into(),
@@ -1477,6 +1501,10 @@ mod tests {
                 branch: "feature/x".into(),
             },
             ActionRequest::RerunHook {
+                project_id: "p1".into(),
+                terminal_id: "h1".into(),
+            },
+            ActionRequest::DismissHook {
                 project_id: "p1".into(),
                 terminal_id: "h1".into(),
             },

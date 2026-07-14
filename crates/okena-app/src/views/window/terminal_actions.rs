@@ -43,22 +43,26 @@ impl WindowView {
 
             project_id.and_then(|id| {
                 ws.project(&id).map(|p| {
-                    let project_path = p.path.clone();
                     let is_worktree = p.worktree_info.is_some();
                     let is_git = ws
                         .remote_snapshot(&id)
                         .and_then(|s| s.git_status.as_ref())
                         .is_some();
-                    (id, project_path, is_git, is_worktree)
+                    let connection_id = p.connection_id.clone();
+                    (id, connection_id, is_git, is_worktree)
                 })
             })
         };
 
-        if let Some((project_id, project_path, is_git, is_worktree)) = project_info {
+        if let Some((project_id, connection_id, is_git, is_worktree)) = project_info {
             if is_git && !is_worktree {
-                self.overlay_manager.update(cx, |om, cx| {
-                    om.show_worktree_dialog(project_id, project_path, cx);
-                });
+                let params = connection_id
+                    .and_then(|connection_id| self.remote_params(&project_id, &connection_id, cx));
+                if let Some(params) = params {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_worktree_dialog(project_id, params, cx);
+                    });
+                }
             } else {
                 log::info!("Cannot create worktree: project is not a git repo or is already a worktree");
             }

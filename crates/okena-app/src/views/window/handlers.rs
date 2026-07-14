@@ -46,7 +46,7 @@ impl WindowView {
     }
 
     /// Resolve the shared action client and daemon-side id for a project.
-    fn remote_params(
+    pub(super) fn remote_params(
         &self,
         project_id: &str,
         connection_id: &str,
@@ -285,10 +285,15 @@ impl WindowView {
                     }, cx);
                 }
             }
-            OverlayManagerEvent::CreateWorktree { project_id, project_path } => {
-                self.overlay_manager.update(cx, |om, cx| {
-                    om.show_worktree_dialog(project_id.clone(), project_path.clone(), cx);
-                });
+            OverlayManagerEvent::CreateWorktree { project_id } => {
+                let params = self.workspace.read(cx).project(project_id)
+                    .and_then(|project| project.connection_id.clone())
+                    .and_then(|connection_id| self.remote_params(project_id, &connection_id, cx));
+                if let Some(params) = params {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_worktree_dialog(project_id.clone(), params, cx);
+                    });
+                }
             }
             OverlayManagerEvent::RenameProject { project_id, project_name } => {
                 self.request_broker.update(cx, |broker, cx| {

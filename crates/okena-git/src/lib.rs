@@ -40,6 +40,7 @@ pub use repository::{
     count_ahead_behind,
     list_branches,
     list_branches_classified,
+    list_pull_requests,
     BranchList,
     checkout_local_branch,
     checkout_remote_branch,

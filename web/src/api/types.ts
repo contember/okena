@@ -291,6 +291,7 @@ export type ActionRequest =
   | { action: "git_diff_summary"; project_id: string }
   | { action: "git_diff"; project_id: string; mode?: DiffMode; ignore_whitespace?: boolean }
   | { action: "git_branches"; project_id: string }
+  | { action: "git_list_pull_requests"; project_id: string; limit?: number }
   | { action: "git_file_contents"; project_id: string; file_path: string; mode?: DiffMode }
   | { action: "git_commit_graph"; project_id: string; count: number; branch?: string | null }
   | { action: "git_list_branches"; project_id: string }
@@ -318,6 +319,7 @@ export type ActionRequest =
   | { action: "create_worktree"; project_id: string; branch: string; create_branch?: boolean }
   | { action: "add_discovered_worktree"; parent_project_id: string; worktree_path: string; branch: string }
   | { action: "rerun_hook"; project_id: string; terminal_id: string }
+  | { action: "dismiss_hook"; project_id: string; terminal_id: string }
   | { action: "list_files"; project_id: string; show_ignored?: boolean }
   | { action: "list_directory"; project_id: string; relative_path?: string; show_ignored?: boolean }
   | { action: "read_file"; project_id: string; relative_path: string }

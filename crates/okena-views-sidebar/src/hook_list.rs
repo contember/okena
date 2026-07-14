@@ -154,15 +154,7 @@ impl Sidebar {
                                 let terminal_id = terminal_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    if let Some(monitor) = cx.try_global::<okena_workspace::hook_monitor::HookMonitor>() {
-                                        monitor.notify_exit(&terminal_id, None);
-                                    }
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.cancel_pending_worktree_close(&terminal_id);
-                                        ws.remove_hook_terminal(&terminal_id, cx);
-                                    });
-                                    let terminals = this.terminals.clone();
-                                    terminals.lock().remove(&terminal_id);
+                                    this.dismiss_hook_terminal(&project_id, &terminal_id, cx);
                                 }
                             })),
                     ),
@@ -177,6 +169,18 @@ impl Sidebar {
         self.dispatch_action_for_project(
             project_id,
             ActionRequest::RerunHook {
+                project_id: project_id.to_string(),
+                terminal_id: terminal_id.to_string(),
+            },
+            cx,
+        );
+    }
+
+    /// Ask the authoritative daemon to stop and remove a hook terminal.
+    pub fn dismiss_hook_terminal(&self, project_id: &str, terminal_id: &str, cx: &mut Context<Self>) {
+        self.dispatch_action_for_project(
+            project_id,
+            ActionRequest::DismissHook {
                 project_id: project_id.to_string(),
                 terminal_id: terminal_id.to_string(),
             },

@@ -127,6 +127,9 @@ pub fn execute_action(
         ActionRequest::RerunHook { project_id, terminal_id } => {
             project::rerun_hook(ws, project_id, terminal_id, backend, terminals, cx)
         }
+        ActionRequest::DismissHook { project_id, terminal_id } => {
+            project::dismiss_hook(ws, project_id, terminal_id, backend, terminals, cx)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             terminal::read_content(ws, terminal_id, backend, terminals)
         }
@@ -158,6 +161,9 @@ pub fn execute_action(
             git::diff(ws, project_id, mode, ignore_whitespace)
         }
         ActionRequest::GitBranches { project_id } => git::branches(ws, project_id),
+        ActionRequest::GitListPullRequests { project_id, limit } => {
+            git::list_pull_requests(ws, project_id, limit)
+        }
         ActionRequest::GitFileContents { project_id, file_path, mode } => {
             git::file_contents(ws, project_id, file_path, mode)
         }

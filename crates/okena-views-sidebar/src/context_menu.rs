@@ -59,7 +59,7 @@ mod tests {
 pub enum ContextMenuEvent {
     Close,
     AddTerminal { project_id: String },
-    CreateWorktree { project_id: String, project_path: String },
+    CreateWorktree { project_id: String },
     QuickCreateWorktree { project_id: String },
     ManageWorktrees { project_id: String, position: gpui::Point<gpui::Pixels> },
     RenameProject { project_id: String, project_name: String },
@@ -120,10 +120,9 @@ impl ContextMenu {
         });
     }
 
-    fn create_worktree(&self, project_path: String, cx: &mut Context<Self>) {
+    fn create_worktree(&self, cx: &mut Context<Self>) {
         cx.emit(ContextMenuEvent::CreateWorktree {
             project_id: self.request.project_id.clone(),
-            project_path,
         });
     }
 
@@ -247,7 +246,6 @@ impl Render for ContextMenu {
             .remote_snapshot(&self.request.project_id)
             .and_then(|s| s.git_status.as_ref())
             .is_some();
-        let project_path_for_worktree = project_path.clone();
         let project_path_for_rename_dir = project_path.clone();
         let project_name_for_rename = project_name.clone();
         let extras_exist = !ws.data().extra_windows.is_empty();
@@ -354,11 +352,8 @@ impl Render for ContextMenu {
                     .when(is_git_repo && !is_worktree, |d| {
                         d.child(
                             menu_item("context-menu-create-worktree", "icons/git-branch.svg", "Create Worktree...", &t)
-                                .on_click(cx.listener({
-                                    let project_path = project_path_for_worktree.clone();
-                                    move |this, _, _window, cx| {
-                                        this.create_worktree(project_path.clone(), cx);
-                                    }
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.create_worktree(cx);
                                 })),
                         )
                     })

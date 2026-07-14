@@ -108,7 +108,7 @@ pub enum OverlayManagerEvent {
     AddTerminal { project_id: String },
 
     /// Context menu: Create worktree from project
-    CreateWorktree { project_id: String, project_path: String },
+    CreateWorktree { project_id: String },
 
     /// Context menu: Rename project
     RenameProject { project_id: String, project_name: String },
@@ -702,14 +702,12 @@ impl OverlayManager {
     pub fn show_worktree_dialog(
         &mut self,
         project_id: String,
-        project_path: String,
+        params: (okena_transport::remote_action::RemoteActionClient, String),
         cx: &mut Context<Self>,
     ) {
-        let workspace = self.workspace.clone();
-        let window_id = self.window_id;
-        let app_settings = crate::settings::settings(cx);
+        let (client, daemon_project_id) = params;
         let dialog = cx.new(|cx| {
-            WorktreeDialog::new(workspace, project_id, project_path, app_settings.worktree, app_settings.hooks, window_id, cx)
+            WorktreeDialog::new(client, daemon_project_id, project_id, cx)
         });
         cx.subscribe(&dialog, |this, _, event: &WorktreeDialogEvent, cx| {
             match event {
@@ -810,11 +808,10 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
-                ContextMenuEvent::CreateWorktree { project_id, project_path } => {
+                ContextMenuEvent::CreateWorktree { project_id } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::CreateWorktree {
                         project_id: project_id.clone(),
-                        project_path: project_path.clone(),
                     });
                 }
                 ContextMenuEvent::RenameProject { project_id, project_name } => {

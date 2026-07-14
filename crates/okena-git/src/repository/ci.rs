@@ -17,6 +17,62 @@ use super::status::get_pushed_sha;
 /// elapses so one stuck repo can never wedge the git-status loop.
 const GH_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPullRequest {
+    number: u32,
+    title: String,
+    head_ref_name: String,
+}
+
+/// List open pull requests that can be checked out as worktrees.
+pub fn list_pull_requests(
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<okena_core::api::WorktreePullRequest>, String> {
+    let limit = limit.clamp(1, 100).to_string();
+    let output = safe_output_with_timeout(
+        command("gh")
+            .args([
+                "pr",
+                "list",
+                "--json",
+                "number,title,headRefName",
+                "--limit",
+                &limit,
+            ])
+            .current_dir(path),
+        GH_TIMEOUT,
+    )
+    .map_err(|error| format!("Failed to run GitHub CLI: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "GitHub CLI failed to list pull requests".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    parse_pull_request_list(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_pull_request_list(
+    json: &str,
+) -> Result<Vec<okena_core::api::WorktreePullRequest>, String> {
+    let pull_requests: Vec<GhPullRequest> = serde_json::from_str(json)
+        .map_err(|error| format!("Failed to parse pull requests: {error}"))?;
+    Ok(pull_requests
+        .into_iter()
+        .map(|pull_request| okena_core::api::WorktreePullRequest {
+            number: pull_request.number,
+            title: pull_request.title,
+            branch: pull_request.head_ref_name,
+        })
+        .collect())
+}
+
 /// Whether the repo has any remote pointing at github.com (https or ssh).
 ///
 /// Used to gate `gh` PR/CI polling: repos with no GitHub remote (local-only,
@@ -490,6 +546,21 @@ pub(crate) fn parse_branch_ci(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_worktree_pull_requests() {
+        let json = r#"[{"number":12,"title":"Remote worktree","headRefName":"feature/remote"}]"#;
+        let pull_requests = super::parse_pull_request_list(json).expect("should parse");
+        assert_eq!(pull_requests.len(), 1);
+        assert_eq!(pull_requests[0].number, 12);
+        assert_eq!(pull_requests[0].title, "Remote worktree");
+        assert_eq!(pull_requests[0].branch, "feature/remote");
+    }
+
+    #[test]
+    fn malformed_worktree_pull_requests_are_rejected() {
+        assert!(super::parse_pull_request_list("not json").is_err());
+    }
+
     // ─── PR list TSV parsing tests ─────────────────────────────────────
 
     #[test]
