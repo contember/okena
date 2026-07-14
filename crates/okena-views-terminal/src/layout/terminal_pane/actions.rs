@@ -222,7 +222,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 if files.is_empty() {
                     return;
                 }
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     dispatcher.upload_remote_paste_files(&terminal_id, files, cx);
                 });
             })
