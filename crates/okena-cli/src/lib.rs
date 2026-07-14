@@ -12,7 +12,7 @@ use parser::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use okena_transport::client::LocalEndpoint;
+use okena_transport::client::{LocalEndpoint, RemoteConnectionConfig};
 
 /// CLI config stored in `~/.config/okena/cli.json`.
 #[derive(Serialize, Deserialize)]
@@ -330,26 +330,26 @@ fn api_get(path: &str, token: &str) -> Result<String, String> {
     resp.text().map_err(|e| format!("Failed to read body: {e}"))
 }
 
-fn api_post(path: &str, token: &str, body: &str) -> Result<String, String> {
+fn api_action(token: &str, body: &str) -> Result<String, String> {
     let server = discover_server()?;
-    let (client, url) = server.client_and_url(path)?;
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Content-Type", "application/json")
-        .body(body.to_string())
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("Token expired or revoked. Delete ~/.config/okena/cli.json and retry.".into());
+    let action: okena_core::api::ActionRequest =
+        serde_json::from_str(body).map_err(|e| format!("Invalid action: {e}"))?;
+    let config = RemoteConnectionConfig {
+        id: okena_transport::client::LOCAL_DAEMON_CONNECTION_ID.to_string(),
+        name: "Local daemon".to_string(),
+        host: server.host,
+        port: server.port,
+        saved_token: Some(token.to_string()),
+        token_obtained_at: None,
+        tls: false,
+        pinned_cert_sha256: None,
+        local_endpoint: server.local_endpoint,
+    };
+    match okena_transport::remote_action::RemoteActionClient::new(config, token.to_string())
+        .post_action(action)?
+    {
+        Some(value) => serde_json::to_string(&value)
+            .map_err(|e| format!("Failed to serialize response: {e}")),
+        None => Ok(String::new()),
     }
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("Server returned {}: {}", status, body));
-    }
-
-    resp.text().map_err(|e| format!("Failed to read body: {e}"))
 }

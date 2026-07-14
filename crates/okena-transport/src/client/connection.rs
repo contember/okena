@@ -138,21 +138,15 @@ async fn fetch_remote_settings(
     base_url: &str,
     token: &str,
 ) -> Result<serde_json::Value, String> {
-    let response = client
-        .post(format!("{base_url}/v1/actions"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&ActionRequest::GetSettings)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
+    crate::remote_action::post_action_async_with_client(
+        client,
+        base_url,
+        token,
+        ActionRequest::GetSettings,
+    )
         .await
-        .map_err(|error| format!("Failed to fetch settings: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!("Settings fetch failed: HTTP {}", response.status()));
-    }
-    response
-        .json()
-        .await
-        .map_err(|error| format!("Failed to parse settings: {error}"))
+        .map_err(|error| format!("Failed to fetch settings: {error}"))?
+        .ok_or_else(|| "Settings fetch returned no payload".to_string())
 }
 
 /// Reconnect budget after an established WS drops. The local daemon connection

@@ -42,10 +42,7 @@ pub(super) enum ProcessingState {
 /// Confirmation dialog shown when closing a worktree.
 /// Checks for dirty state and optionally merges the branch back.
 pub struct CloseWorktreeDialog {
-    pub(super) host: String,
-    pub(super) port: u16,
-    pub(super) token: String,
-    pub(super) local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+    pub(super) client: okena_transport::remote_action::RemoteActionClient,
     pub(super) daemon_project_id: String,
     pub(super) focus_handle: FocusHandle,
     pub(super) project_name: String,
@@ -66,10 +63,7 @@ pub struct CloseWorktreeDialog {
 impl CloseWorktreeDialog {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        host: String,
-        port: u16,
-        token: String,
-        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+        client: okena_transport::remote_action::RemoteActionClient,
         daemon_project_id: String,
         workspace: Entity<Workspace>,
         // The daemon owns worktree removal; the dialog no longer scrubs focus
@@ -89,13 +83,10 @@ impl CloseWorktreeDialog {
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
 
         let (is_dirty, branch, default_branch, unpushed_count) =
-            Self::fetch_close_info(&host, port, &token, local_endpoint.as_ref(), daemon_project_id.clone());
+            Self::fetch_close_info(&client, daemon_project_id.clone());
 
         Self {
-            host,
-            port,
-            token,
-            local_endpoint,
+            client,
             daemon_project_id,
             focus_handle: cx.focus_handle(),
             project_name,
@@ -119,22 +110,13 @@ impl CloseWorktreeDialog {
     /// git. Kept synchronous on purpose — the old code did blocking local git
     /// here, so a blocking HTTP call is no worse.
     fn fetch_close_info(
-        host: &str,
-        port: u16,
-        token: &str,
-        local_endpoint: Option<&okena_transport::client::LocalEndpoint>,
+        client: &okena_transport::remote_action::RemoteActionClient,
         project_id: String,
     )
         -> (bool, Option<String>, Option<String>, usize)
     {
         let action = okena_core::api::ActionRequest::WorktreeCloseInfo { project_id };
-        match okena_transport::remote_action::post_action_with_endpoint(
-            host,
-            port,
-            token,
-            local_endpoint,
-            action,
-        ) {
+        match client.post_action(action) {
             Ok(Some(v)) => {
                 let is_dirty = v.get("is_dirty").and_then(|x| x.as_bool()).unwrap_or(false);
                 let branch = v.get("branch").and_then(|x| x.as_str()).map(String::from);

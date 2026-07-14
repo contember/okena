@@ -9,7 +9,6 @@ use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
 use okena_core::soft_close::{
     decode_action, encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX,
 };
-use okena_transport::client::LocalEndpoint;
 use okena_transport::client::{
     make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
     LOCAL_DAEMON_CONNECTION_ID,
@@ -105,25 +104,12 @@ async fn send_queued_action(
         action,
     } = queued;
     let name = config.name.clone();
-    let (client, url) = http_client_and_url(&config, "/v1/actions");
-    let result = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&action)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
+    let result = okena_transport::remote_action::post_action_async(&config, &token, action).await;
 
     let message = match result {
-        Ok(resp) if resp.status().is_success() => {
+        Ok(_) => {
             log::debug!("send_action: success for {name}");
             return;
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            log::error!("send_action: failed ({status}): {body} for {name}");
-            format!("Action failed ({status}): {body}")
         }
         Err(error) => {
             log::error!("send_action: request error for {name}: {error}");
@@ -136,32 +122,6 @@ async fn send_queued_action(
             message,
         })
         .await;
-}
-
-fn http_client_and_url(config: &RemoteConnectionConfig, path: &str) -> (reqwest::Client, String) {
-    #[cfg(unix)]
-    if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = &config.local_endpoint {
-        let client = reqwest::Client::builder()
-            .unix_socket(socket_path.as_str())
-            .build()
-            .unwrap_or_else(|e| {
-                log::error!("Failed to build Unix socket HTTP client for {socket_path}: {e}");
-                reqwest::Client::new()
-            });
-        return (client, config.http_url(path));
-    }
-
-    // A TLS remote uses a self-signed cert pinned by fingerprint (TOFU). A plain
-    // `reqwest::Client::new()` validates against the system trust store and
-    // rejects it with "error sending request", so every action would fail even
-    // though the WS stream (which uses the pinned connector) works. Build the
-    // same pinned client here.
-    let client = okena_transport::client::tls::build_reqwest_client(
-        config.tls,
-        config.pinned_cert_sha256.clone(),
-        okena_transport::client::tls::new_observed(),
-    );
-    (client, config.http_url(path))
 }
 
 /// Lightweight events emitted by [`RemoteConnectionManager`] that must NOT go
@@ -627,7 +587,7 @@ impl RemoteConnectionManager {
         let mime = mime.to_string();
 
         self.runtime.spawn(async move {
-            let (client, url) = http_client_and_url(
+            let (client, url) = okena_transport::remote_http::async_client_and_url(
                 &config,
                 &format!("/v1/terminals/{terminal_id}/paste-image"),
             );

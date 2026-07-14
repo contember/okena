@@ -6,7 +6,7 @@ pub mod terminal;
 pub mod tls;
 pub mod types;
 
-pub use config::{LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
+pub use crate::{LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
 pub use connection::{ConnectionHandler, RemoteClient};
 pub use id::{is_remote_terminal, make_prefixed_id, strip_prefix};
 pub use state::{

@@ -6419,7 +6419,6 @@ dependencies = [
  "okena-core",
  "okena-transport",
  "parking_lot",
- "reqwest",
  "serde_json",
  "tokio",
  "uniffi",

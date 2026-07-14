@@ -19,10 +19,7 @@ impl CloseWorktreeDialog {
         self.processing = ProcessingState::Working;
         cx.notify();
 
-        let host = self.host.clone();
-        let port = self.port;
-        let token = self.token.clone();
-        let local_endpoint = self.local_endpoint.clone();
+        let client = self.client.clone();
         let project_id = self.daemon_project_id.clone();
         let merge = self.merge_enabled;
         let stash = self.stash_enabled;
@@ -32,15 +29,9 @@ impl CloseWorktreeDialog {
 
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
-                okena_transport::remote_action::post_action_with_endpoint(
-                    &host,
-                    port,
-                    &token,
-                    local_endpoint.as_ref(),
-                    okena_core::api::ActionRequest::CloseWorktree {
-                        project_id, merge, stash, fetch, push, delete_branch,
-                    },
-                )
+                client.post_action(okena_core::api::ActionRequest::CloseWorktree {
+                    project_id, merge, stash, fetch, push, delete_branch,
+                })
             })
             .await;
 

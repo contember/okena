@@ -56,34 +56,22 @@ pub trait GitProvider: Send + Sync + 'static {
 
 /// Remote git provider — fetches git data via HTTP from a remote server.
 pub struct RemoteGitProvider {
-    host: String,
-    port: u16,
-    token: String,
-    local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+    client: okena_transport::remote_action::RemoteActionClient,
     project_id: String,
     root: String,
 }
 
 impl RemoteGitProvider {
     pub fn new(
-        host: String,
-        port: u16,
-        token: String,
-        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+        client: okena_transport::remote_action::RemoteActionClient,
         project_id: String,
         root: String,
     ) -> Self {
-        Self { host, port, token, local_endpoint, project_id, root }
+        Self { client, project_id, root }
     }
 
     fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
-        okena_transport::remote_action::post_action_with_endpoint(
-            &self.host,
-            self.port,
-            &self.token,
-            self.local_endpoint.as_ref(),
-            action,
-        )
+        self.client.post_action(action)
     }
 
     fn post_json_or_default<T>(&self, action: okena_core::api::ActionRequest, label: &str) -> T

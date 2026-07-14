@@ -51,10 +51,7 @@ pub struct WorktreeListPopover {
 impl WorktreeListPopover {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        host: String,
-        port: u16,
-        token: String,
-        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+        client: okena_transport::remote_action::RemoteActionClient,
         daemon_project_id: String,
         workspace: Entity<Workspace>,
         project_id: String,
@@ -62,7 +59,7 @@ impl WorktreeListPopover {
         cx: &mut Context<Self>,
     ) -> Self {
         let (norm_git_root, subdir, entries) =
-            Self::fetch_worktrees(&host, port, &token, local_endpoint.as_ref(), daemon_project_id);
+            Self::fetch_worktrees(&client, daemon_project_id);
         let focus_handle = cx.focus_handle();
         Self {
             workspace,
@@ -80,20 +77,11 @@ impl WorktreeListPopover {
     /// local filesystem. Kept synchronous on purpose — the old code did a
     /// blocking local git scan here, so a blocking HTTP call is no worse.
     fn fetch_worktrees(
-        host: &str,
-        port: u16,
-        token: &str,
-        local_endpoint: Option<&okena_transport::client::LocalEndpoint>,
+        client: &okena_transport::remote_action::RemoteActionClient,
         project_id: String,
     ) -> (std::path::PathBuf, std::path::PathBuf, Vec<(String, String)>) {
         let action = okena_core::api::ActionRequest::GitListWorktrees { project_id };
-        match okena_transport::remote_action::post_action_with_endpoint(
-            host,
-            port,
-            token,
-            local_endpoint,
-            action,
-        ) {
+        match client.post_action(action) {
             Ok(Some(value)) => {
                 let git_root = value.get("git_root").and_then(|v| v.as_str()).unwrap_or_default();
                 let subdir = value.get("subdir").and_then(|v| v.as_str()).unwrap_or_default();

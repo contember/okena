@@ -63,10 +63,7 @@ pub trait ProjectFs: Send + Sync + 'static {
 
 /// Remote file system provider — fetches data via HTTP from a remote server.
 pub struct RemoteProjectFs {
-    host: String,
-    port: u16,
-    token: String,
-    local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+    client: okena_transport::remote_action::RemoteActionClient,
     project_id: String,
     project_name: String,
     root: String,
@@ -74,25 +71,16 @@ pub struct RemoteProjectFs {
 
 impl RemoteProjectFs {
     pub fn new(
-        host: String,
-        port: u16,
-        token: String,
-        local_endpoint: Option<okena_transport::client::LocalEndpoint>,
+        client: okena_transport::remote_action::RemoteActionClient,
         project_id: String,
         project_name: String,
         root: String,
     ) -> Self {
-        Self { host, port, token, local_endpoint, project_id, project_name, root }
+        Self { client, project_id, project_name, root }
     }
 
     fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
-        okena_transport::remote_action::post_action_with_endpoint(
-            &self.host,
-            self.port,
-            &self.token,
-            self.local_endpoint.as_ref(),
-            action,
-        )
+        self.client.post_action(action)
     }
 }
 

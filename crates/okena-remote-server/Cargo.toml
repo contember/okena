@@ -61,5 +61,6 @@ sysinfo = "0.33"
 rust-embed = { version = "8.5", features = ["interpolate-folder-path"] }
 
 [dev-dependencies]
+okena-transport = { path = "../okena-transport", features = ["blocking-http"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 tempfile = "3"

@@ -9,21 +9,21 @@ use gpui::*;
 use okena_core::api::ActionRequest;
 
 impl Sidebar {
-    /// Resolve the remote connection params for a project:
-    /// `(host, port, token, daemon-side project id)`. Returns `None` if the
+    /// Resolve the remote action client for a project. Returns `None` if the
     /// project has no connection, no matching remote connection, or no saved
     /// token.
     fn resolve_remote_params(
         &self,
         project_id: &str,
         cx: &App,
-    ) -> Option<(String, u16, String, Option<okena_transport::client::LocalEndpoint>, String)> {
+    ) -> Option<(okena_transport::remote_action::RemoteActionClient, String)> {
         let conn_id = self.workspace.read(cx).project(project_id)?.connection_id.clone()?;
         let get = self.get_remote_connections.as_ref()?;
         let config = get(cx).into_iter().find(|s| s.config.id == conn_id)?.config;
-        let token = config.saved_token?;
+        let token = config.effective_auth_token()?;
         let daemon_id = okena_transport::client::strip_prefix(project_id, &conn_id);
-        Some((config.host, config.port, token, config.local_endpoint, daemon_id))
+        let client = okena_transport::remote_action::RemoteActionClient::new(config, token);
+        Some((client, daemon_id))
     }
 
     /// Spawn quick worktree creation. The branch name is generated on the daemon
@@ -41,7 +41,7 @@ impl Sidebar {
 
         // Resolve remote connection params on the main thread before spawning.
         // The daemon owns path resolution and branch-name generation.
-        let Some((host, port, token, local_endpoint, daemon_id)) = self.resolve_remote_params(project_id, cx) else {
+        let Some((client, daemon_id)) = self.resolve_remote_params(project_id, cx) else {
             log::error!("Quick worktree creation failed: could not resolve remote connection");
             self.creating_worktree.remove(project_id);
             return;
@@ -53,13 +53,7 @@ impl Sidebar {
             // (visibility is keyed on it).
             let branch_result = smol::unblock(move || -> Result<String, String> {
                 let action = ActionRequest::GenerateWorktreeBranchName { project_id: daemon_id };
-                match okena_transport::remote_action::post_action_with_endpoint(
-                    &host,
-                    port,
-                    &token,
-                    local_endpoint.as_ref(),
-                    action,
-                ) {
+                match client.post_action(action) {
                     Ok(Some(v)) => v
                         .get("branch")
                         .and_then(|b| b.as_str())

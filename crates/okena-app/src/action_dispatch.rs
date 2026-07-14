@@ -9,7 +9,7 @@ use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{ProjectLayoutMode, WindowId, Workspace};
 
 use okena_core::api::ActionRequest;
-use okena_transport::client::{strip_prefix, RemoteConnectionConfig};
+use okena_transport::client::strip_prefix;
 
 use gpui::{AppContext, Entity};
 
@@ -423,7 +423,7 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
         let remote_terminal_id = strip_prefix(terminal_id, connection_id);
         // Resolve the connection's HTTP params, then drop the borrow before the
         // blocking request.
-        let (config, token): (RemoteConnectionConfig, String) = {
+        let (config, token) = {
             let rm = manager.read(cx);
             let (config, _, _) = rm
                 .connections()
@@ -434,7 +434,8 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
         let action = okena_core::api::ActionRequest::ExportBuffer {
             terminal_id: remote_terminal_id,
         };
-        let value = okena_transport::remote_action::post_action_with_config(&config, &token, action)
+        let value = okena_transport::remote_action::RemoteActionClient::new(config, token)
+            .post_action(action)
             .ok()??;
         let content = value.get("content").and_then(|v| v.as_str())?;
         // Write the client-side copy (same naming as the in-process capture).

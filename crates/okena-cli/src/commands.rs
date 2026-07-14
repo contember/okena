@@ -1,5 +1,5 @@
 use crate::resolve;
-use crate::{api_get, api_post, discover_server, ensure_token};
+use crate::{api_action, api_get, discover_server, ensure_token};
 use okena_remote_server::auth::{generate_pairing_code, pair_code_path};
 use okena_core::api::{ApiProject, StateResponse};
 
@@ -139,7 +139,7 @@ pub fn cli_action(json: &str) -> i32 {
         }
     };
 
-    match api_post("/v1/actions", &token, json) {
+    match api_action(&token, json) {
         Ok(body) => {
             if !body.is_empty() {
                 println!("{body}");
@@ -311,7 +311,7 @@ pub fn cli_service(
         "service_name": service_name,
     });
 
-    if let Err(e) = api_post("/v1/actions", &token, &body.to_string()) {
+    if let Err(e) = api_action(&token, &body.to_string()) {
         eprintln!("{e}");
         return 1;
     }
@@ -598,7 +598,7 @@ where
 
 /// POST an action body and print any non-empty response on stdout.
 fn post_action(token: &str, body: &serde_json::Value) -> i32 {
-    match api_post("/v1/actions", token, &body.to_string()) {
+    match api_action(token, &body.to_string()) {
         Ok(resp) => {
             if !resp.trim().is_empty() {
                 println!("{}", resp.trim());
@@ -616,7 +616,7 @@ fn post_action(token: &str, body: &serde_json::Value) -> i32 {
 /// `id_fields` are response keys to print (each on its own line) — used for
 /// commands that return new ids (e.g. `project_id`, `terminal_ids`).
 fn post_action_print_ids(token: &str, body: &serde_json::Value, id_fields: &[&str]) -> i32 {
-    match api_post("/v1/actions", token, &body.to_string()) {
+    match api_action(token, &body.to_string()) {
         Ok(resp) => {
             print_response_ids(&resp, id_fields);
             0
@@ -1132,7 +1132,7 @@ pub fn cli_project_add(
         "name": project_name,
         "path": abs_str,
     });
-    let resp = match api_post("/v1/actions", &token, &body.to_string()) {
+    let resp = match api_action(&token, &body.to_string()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{e}");
@@ -1162,7 +1162,7 @@ pub fn cli_project_add(
             eprintln!("{e}");
             return 1;
         }
-        if let Err(e) = api_post("/v1/actions", &token, &hide_body.to_string()) {
+        if let Err(e) = api_action(&token, &hide_body.to_string()) {
             eprintln!("Warning: failed to hide project: {e}");
             return 1;
         }
@@ -1189,7 +1189,7 @@ pub fn cli_project_add(
             "project_id": project_id,
             "folder_id": folder_id,
         });
-        if let Err(e) = api_post("/v1/actions", &token, &move_body.to_string()) {
+        if let Err(e) = api_action(&token, &move_body.to_string()) {
             eprintln!("Warning: failed to move project into folder: {e}");
             return 1;
         }
@@ -1321,7 +1321,7 @@ pub fn cli_worktree_add(project: &str, branch: &str, new_branch: bool) -> i32 {
         "branch": branch,
         "create_branch": new_branch,
     });
-    match api_post("/v1/actions", &token, &body.to_string()) {
+    match api_action(&token, &body.to_string()) {
         Ok(resp) => {
             // Returns {project_id, terminal_id, path} — print project_id and path.
             print_response_ids(&resp, &["project_id", "path"]);
@@ -1645,7 +1645,7 @@ pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64
         "terminal_id": terminal_id,
         "command": full,
     });
-    if let Err(e) = api_post("/v1/actions", &token, &body.to_string()) {
+    if let Err(e) = api_action(&token, &body.to_string()) {
         eprintln!("{e}");
         return 1;
     }
@@ -1680,7 +1680,7 @@ pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64
 /// Post a `read_content` action and return the terminal's visible content.
 fn fetch_terminal_content(token: &str, terminal_id: &str) -> Result<String, String> {
     let body = serde_json::json!({ "action": "read_content", "terminal_id": terminal_id });
-    let resp = api_post("/v1/actions", token, &body.to_string())?;
+    let resp = api_action(token, &body.to_string())?;
     let v: serde_json::Value =
         serde_json::from_str(&resp).map_err(|e| format!("bad read response: {e}"))?;
     Ok(v
@@ -1745,7 +1745,7 @@ pub fn cli_skill_install(_user: bool, project: bool) -> i32 {
 /// Authenticate and POST an action body, returning the raw response.
 fn post_action_body(body: &serde_json::Value) -> Result<String, String> {
     let token = ensure_token()?;
-    api_post("/v1/actions", &token, &body.to_string())
+    api_action(&token, &body.to_string())
 }
 
 /// Pretty-print a JSON response (raw fallback on parse failure).
@@ -2024,7 +2024,7 @@ pub fn cli_read(terminal: &str, json_mode: bool) -> i32 {
         }
     };
     let body = serde_json::json!({ "action": "read_content", "terminal_id": terminal_id });
-    match api_post("/v1/actions", &token, &body.to_string()) {
+    match api_action(&token, &body.to_string()) {
         Ok(resp) => {
             if json_mode {
                 println!("{}", resp.trim());

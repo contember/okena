@@ -3,7 +3,7 @@
 //! The server uses a **persisted self-signed certificate**. There is no CA in
 //! the picture — clients establish trust by pinning the certificate's SHA-256
 //! fingerprint on first connect (TOFU) and verifying it out-of-band against the
-//! fingerprint shown here on the host. See `okena-core::client::tls` for the
+//! fingerprint shown here on the host. See `okena_transport::tls` for the
 //! client-side pinned verifier.
 //!
 //! The cert is generated once and reused across restarts so the pinned
@@ -174,7 +174,7 @@ mod tests {
 mod handshake_tests {
     use super::*;
     use axum::Router;
-    use axum::routing::get;
+    use axum::routing::{get, post};
 
     /// Start the real dual-stack server (both http + TLS on one port).
     async fn spawn_dual_stack(material: &TlsMaterial) -> std::net::SocketAddr {
@@ -198,7 +198,12 @@ mod handshake_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let tls = super::server_config(material).unwrap();
-        let app = Router::new().route("/health", get(|| async { "ok" }));
+        let app = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .route(
+                "/v1/actions",
+                post(|| async { axum::Json(serde_json::json!({ "actions": [] })) }),
+            );
         tokio::spawn(async move {
             let _ = crate::serve::serve_tls(
                 listener,
@@ -309,5 +314,48 @@ mod handshake_tests {
             reqwest::Client::new().get(http_url).send().await.is_err(),
             "TLS-only listeners must close plaintext HTTP connections"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_actions_use_pinned_tls_in_async_and_blocking_clients() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let dir = tempfile::tempdir().unwrap();
+        let material = load_or_generate(dir.path()).unwrap();
+        let addr = spawn_tls_only(&material).await;
+        let config = okena_transport::RemoteConnectionConfig {
+            id: "tls-test".to_string(),
+            name: "TLS test".to_string(),
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            saved_token: Some("test-token".to_string()),
+            token_obtained_at: None,
+            tls: true,
+            pinned_cert_sha256: Some(material.fingerprint.clone()),
+            local_endpoint: None,
+        };
+
+        let async_result = okena_transport::remote_action::post_action_async(
+            &config,
+            "test-token",
+            okena_core::api::ActionRequest::ListActions,
+        )
+        .await
+        .unwrap();
+        assert_eq!(async_result, Some(serde_json::json!({ "actions": [] })));
+
+        let client = okena_transport::remote_action::RemoteActionClient::new(
+            config,
+            "test-token".to_string(),
+        );
+
+        let result = tokio::task::spawn_blocking(move || {
+            client.post_action(okena_core::api::ActionRequest::ListActions)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result, Some(serde_json::json!({ "actions": [] })));
     }
 }

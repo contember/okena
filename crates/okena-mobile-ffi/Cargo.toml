@@ -28,7 +28,6 @@ uniffi = { version = "0.31", features = ["tokio"] }
 # its direct dependencies — no flutter_rust_bridge.
 alacritty_terminal = "0.25"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 async-channel = "2.3"
 parking_lot = "0.12"
 uuid = { version = "1.10", features = ["v4"] }

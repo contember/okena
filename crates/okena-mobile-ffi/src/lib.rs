@@ -59,10 +59,8 @@ pub fn init_app() {
 /// at the binding boundary so the RN UI and persisted server config can carry
 /// the TLS flag.
 ///
-/// `tls` is forwarded to `ConnectionManager::add_connection`. The pinned cert,
-/// however, is established via TOFU during the handshake (the manager has no
-/// param to pre-seed a fingerprint — it records it from the `TlsUpgraded` /
-/// pairing events), so `pinned_cert_fingerprint` is not forwarded yet.
+/// Existing pins are enforced immediately; first-use connections capture and
+/// report their fingerprint through the normal connection events.
 #[uniffi::export]
 pub fn connect(
     host: String,
@@ -71,12 +69,14 @@ pub fn connect(
     tls: bool,
     pinned_cert_fingerprint: Option<String>,
 ) -> String {
-    // `pinned_cert_fingerprint` is intentionally not forwarded yet — the
-    // manager pins via TOFU events rather than an up-front fingerprint. Touch it
-    // so the unused-var lint stays quiet and the intent is explicit.
-    let _ = pinned_cert_fingerprint;
     let mgr = ConnectionManager::get();
-    let conn_id = mgr.add_connection(&host, port, saved_token, tls);
+    let conn_id = mgr.add_connection(
+        &host,
+        port,
+        saved_token,
+        tls,
+        pinned_cert_fingerprint,
+    );
     mgr.connect(&conn_id);
     conn_id
 }

@@ -8,9 +8,17 @@
 
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+mod connection_config;
+#[cfg(any(feature = "client", feature = "blocking-http"))]
+pub mod tls;
+
 #[cfg(feature = "client")]
 pub mod client;
 #[cfg(feature = "blocking-http")]
 pub mod http;
-#[cfg(feature = "blocking-http")]
+#[cfg(any(feature = "client", feature = "blocking-http"))]
 pub mod remote_action;
+#[cfg(any(feature = "client", feature = "blocking-http"))]
+pub mod remote_http;
+
+pub use connection_config::{LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};

@@ -124,6 +124,9 @@ pub enum OverlayManagerEvent {
     /// Context menu: Close worktree project (opens the confirm dialog)
     CloseWorktree { project_id: String },
 
+    /// Context menu: Open the daemon-backed worktree list.
+    ManageWorktrees { project_id: String, position: Point<Pixels> },
+
     /// Worktree list: track an already-on-disk worktree. The host dispatches
     /// `ActionRequest::AddDiscoveredWorktree`; the new project mirrors back.
     AddDiscoveredWorktree {
@@ -735,15 +738,15 @@ impl OverlayManager {
     pub fn show_close_worktree_dialog(
         &mut self,
         project_id: String,
-        params: Option<(String, u16, String, Option<okena_transport::client::LocalEndpoint>, String)>,
+        params: (okena_transport::remote_action::RemoteActionClient, String),
         cx: &mut Context<Self>,
     ) {
-        let (host, port, token, local_endpoint, daemon_id) = params.unwrap_or_else(|| (String::new(), 0, String::new(), None, project_id.clone()));
+        let (client, daemon_id) = params;
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
         let app_settings = crate::settings::settings(cx);
         let entity = cx.new(|cx| {
-            CloseWorktreeDialog::new(host, port, token, local_endpoint, daemon_id, workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
+            CloseWorktreeDialog::new(client, daemon_id, workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
         });
         cx.subscribe(&entity, |this, _, event: &CloseWorktreeDialogEvent, cx| {
             match event {
@@ -860,7 +863,10 @@ impl OverlayManager {
                 }
                 ContextMenuEvent::ManageWorktrees { project_id, position } => {
                     this.hide_context_menu(cx);
-                    this.show_worktree_list(project_id.clone(), *position, None, cx);
+                    cx.emit(OverlayManagerEvent::ManageWorktrees {
+                        project_id: project_id.clone(),
+                        position: *position,
+                    });
                 }
                 ContextMenuEvent::ReloadServices { project_id } => {
                     this.hide_context_menu(cx);
@@ -1228,12 +1234,18 @@ impl OverlayManager {
     }
 
     /// Show worktree list popover.
-    pub fn show_worktree_list(&mut self, project_id: String, position: Point<Pixels>, params: Option<(String, u16, String, Option<okena_transport::client::LocalEndpoint>, String)>, cx: &mut Context<Self>) {
+    pub fn show_worktree_list(
+        &mut self,
+        project_id: String,
+        position: Point<Pixels>,
+        params: (okena_transport::remote_action::RemoteActionClient, String),
+        cx: &mut Context<Self>,
+    ) {
         self.close_all_context_menus();
 
-        let (host, port, token, local_endpoint, daemon_id) = params.unwrap_or_else(|| (String::new(), 0, String::new(), None, project_id.clone()));
+        let (client, daemon_id) = params;
         let workspace = self.workspace.clone();
-        let popover = cx.new(|cx| WorktreeListPopover::new(host, port, token, local_endpoint, daemon_id, workspace, project_id, position, cx));
+        let popover = cx.new(|cx| WorktreeListPopover::new(client, daemon_id, workspace, project_id, position, cx));
 
         cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
             match event {

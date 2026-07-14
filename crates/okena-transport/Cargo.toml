@@ -9,8 +9,9 @@ default = []
 # Async client engine: WS connection manager, TLS certificate pinning (TOFU).
 client = ["dep:tokio", "dep:reqwest", "dep:tokio-tungstenite", "dep:async-channel", "dep:futures", "dep:rustls", "dep:rustls-pki-types", "dep:sha2"]
 # Blocking HTTP helper + remote_action over it (used by extensions and the
-# file/git read paths).
-blocking-http = ["dep:reqwest", "reqwest/blocking"]
+# file/git read paths). TLS deps are shared with the async client so blocking
+# remote actions enforce the same pinned-certificate policy.
+blocking-http = ["dep:reqwest", "reqwest/blocking", "dep:rustls", "dep:rustls-pki-types", "dep:sha2"]
 # Exposes the in-memory HTTP mock to downstream crates' tests.
 test-support = []
 

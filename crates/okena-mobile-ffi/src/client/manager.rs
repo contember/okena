@@ -376,6 +376,7 @@ impl ConnectionManager {
         port: u16,
         saved_token: Option<String>,
         tls: bool,
+        pinned_cert_sha256: Option<String>,
     ) -> String {
         // Replace any existing connection targeting the same server. We collect
         // matching ids first (read lock), then remove them (which takes its own
@@ -404,7 +405,7 @@ impl ConnectionManager {
             saved_token,
             token_obtained_at: None,
             tls,
-            pinned_cert_sha256: None,
+            pinned_cert_sha256,
             local_endpoint: None,
         };
         let conn_id = config.id.clone();
@@ -668,36 +669,25 @@ impl ConnectionManager {
         conn_id: &str,
         action: ActionRequest,
     ) -> anyhow::Result<String> {
-        let (host, port, token) = {
+        let (config, token) = {
             let connections = self.connections.read();
             let conn = connections
                 .get(conn_id)
                 .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", conn_id))?;
             let config = conn.client.read().config().clone();
             let token = config
-                .saved_token
+                .effective_auth_token()
                 .ok_or_else(|| anyhow::anyhow!("No auth token for connection: {}", conn_id))?;
-            (config.host, config.port, token)
+            (config, token)
         };
 
-        let url = format!("http://{}:{}/v1/actions", host, port);
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&action)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Action failed ({}): {}", status, body);
+        let response = okena_transport::remote_action::post_action_async(&config, &token, action)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        match response {
+            Some(value) => Ok(serde_json::to_string(&value)?),
+            None => Ok(String::new()),
         }
-
-        let body = resp.text().await.unwrap_or_default();
-        Ok(body)
     }
 
     /// Background task that drains the event channel and updates connection state.
