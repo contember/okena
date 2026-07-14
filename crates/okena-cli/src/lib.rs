@@ -235,6 +235,7 @@ fn save_cli_config(config: &CliConfig) -> Result<(), String> {
 pub(crate) struct DiscoveredServer {
     pub host: String,
     pub port: u16,
+    tls: bool,
     local_endpoint: Option<LocalEndpoint>,
 }
 
@@ -249,10 +250,14 @@ impl DiscoveredServer {
             return Ok((client, format!("http://okena.local{path}")));
         }
 
-        Ok((
-            reqwest::blocking::Client::new(),
-            format!("http://{}:{}{}", self.host, self.port, path),
-        ))
+        let client = okena_transport::client::tls::build_blocking_reqwest_client(
+            self.tls,
+            None,
+            okena_transport::client::tls::new_observed(),
+            std::time::Duration::from_secs(10),
+        )?;
+        let scheme = if self.tls { "https" } else { "http" };
+        Ok((client, format!("{scheme}://{}:{}{path}", self.host, self.port)))
     }
 }
 
@@ -278,13 +283,14 @@ fn discover_server() -> Result<DiscoveredServer, String> {
     let local_endpoint = json
         .get("local_endpoint")
         .and_then(|value| serde_json::from_value::<LocalEndpoint>(value.clone()).ok());
+    let tls = json.get("tls").and_then(|value| value.as_bool()).unwrap_or(false);
 
     let pid = json.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     if pid != 0 && !is_process_alive(pid) {
         return Err("Okena is not running (stale remote.json).".to_string());
     }
 
-    Ok(DiscoveredServer { host, port, local_endpoint })
+    Ok(DiscoveredServer { host, port, tls, local_endpoint })
 }
 
 /// Ensure we have a valid token, auto-registering if needed.
@@ -341,7 +347,7 @@ fn api_action(token: &str, body: &str) -> Result<String, String> {
         port: server.port,
         saved_token: Some(token.to_string()),
         token_obtained_at: None,
-        tls: false,
+        tls: server.tls,
         pinned_cert_sha256: None,
         local_endpoint: server.local_endpoint,
     };

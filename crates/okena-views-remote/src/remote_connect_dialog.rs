@@ -68,15 +68,19 @@ async fn detect_scheme(
         let observed = observed.clone();
         let probe = runtime
             .spawn(async move {
-                let client =
-                    okena_transport::client::tls::build_reqwest_client(tls, None, observed);
                 let scheme = if tls { "https" } else { "http" };
                 let base_url = format!("{}://{}:{}", scheme, host, port);
-                let resp = client
-                    .get(format!("{}/health", base_url))
-                    .timeout(std::time::Duration::from_secs(5))
-                    .send()
-                    .await;
+                let resp = match okena_transport::client::tls::build_reqwest_client(
+                    tls, None, observed,
+                ) {
+                    Ok(client) => client
+                        .get(format!("{}/health", base_url))
+                        .timeout(std::time::Duration::from_secs(5))
+                        .send()
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
                 (base_url, resp)
             })
             .await;
@@ -264,7 +268,7 @@ impl RemoteConnectDialog {
                     async move {
                         let client = okena_transport::client::tls::build_reqwest_client(
                             use_tls, None, observed,
-                        );
+                        )?;
                         let pair_body = serde_json::json!({ "code": code });
                         client
                             .post(format!("{}/v1/pair", base_url))
@@ -272,6 +276,7 @@ impl RemoteConnectDialog {
                             .timeout(std::time::Duration::from_secs(10))
                             .send()
                             .await
+                            .map_err(|error| error.to_string())
                     }
                 })
                 .await;

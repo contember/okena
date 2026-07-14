@@ -183,18 +183,15 @@ pub fn build_reqwest_client(
     tls: bool,
     pinned: Option<String>,
     observed: ObservedFingerprint,
-) -> reqwest::Client {
+) -> Result<reqwest::Client, String> {
     if !tls {
-        return reqwest::Client::new();
+        return Ok(reqwest::Client::new());
     }
     let config = pinned_client_config(pinned, observed);
     reqwest::Client::builder()
         .use_preconfigured_tls(config)
         .build()
-        .unwrap_or_else(|e| {
-            log::error!("Failed to build pinned TLS client, falling back to default: {e}");
-            reqwest::Client::new()
-        })
+        .map_err(|error| format!("Cannot initialise pinned TLS client: {error}"))
 }
 
 /// Build a blocking reqwest client for a connection. This applies the same

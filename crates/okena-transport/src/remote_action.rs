@@ -87,7 +87,7 @@ pub async fn post_action_async(
     token: &str,
     action: ActionRequest,
 ) -> Result<Option<serde_json::Value>, String> {
-    let (client, base_url) = crate::remote_http::async_client_and_url(config, "");
+    let (client, base_url) = crate::remote_http::async_client_and_url(config, "")?;
     post_action_async_with_client(&client, &base_url, token, action).await
 }
 

@@ -731,17 +731,7 @@ impl WindowView {
             match outcome {
                 Ok(daemon) => {
                     let _ = rm.update(cx, |rm, cx| {
-                        let next_config = okena_transport::client::RemoteConnectionConfig {
-                            id: LOCAL_DAEMON_CONNECTION_ID.to_string(),
-                            name: "Local".to_string(),
-                            host: daemon.host().to_string(),
-                            port: daemon.port,
-                            saved_token: token.clone(),
-                            token_obtained_at: None,
-                            tls: daemon.tls,
-                            pinned_cert_sha256: None,
-                            local_endpoint: daemon.local_endpoint,
-                        };
+                        let next_config = daemon.connection_config(token.clone());
                         rm.redirect_and_reconnect(
                             LOCAL_DAEMON_CONNECTION_ID,
                             next_config,

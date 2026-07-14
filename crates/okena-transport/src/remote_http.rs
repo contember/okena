@@ -8,25 +8,22 @@ use crate::RemoteConnectionConfig;
 pub fn async_client_and_url(
     config: &RemoteConnectionConfig,
     path: &str,
-) -> (reqwest::Client, String) {
+) -> Result<(reqwest::Client, String), String> {
     #[cfg(unix)]
     if let Some(crate::LocalEndpoint::UnixSocket { path: socket_path }) = &config.local_endpoint {
         let client = reqwest::Client::builder()
             .unix_socket(socket_path.as_str())
             .build()
-            .unwrap_or_else(|e| {
-                log::error!("Failed to build Unix socket HTTP client for {socket_path}: {e}");
-                reqwest::Client::new()
-            });
-        return (client, config.http_url(path));
+            .map_err(|error| format!("Cannot initialise Unix socket HTTP client: {error}"))?;
+        return Ok((client, config.http_url(path)));
     }
 
     let client = crate::tls::build_reqwest_client(
         config.tls,
         config.pinned_cert_sha256.clone(),
         crate::tls::new_observed(),
-    );
-    (client, config.http_url(path))
+    )?;
+    Ok((client, config.http_url(path)))
 }
 
 /// Build a blocking HTTP client and URL with the same transport policy as the
@@ -79,7 +76,7 @@ mod tests {
     #[cfg(feature = "client")]
     #[test]
     fn async_remote_url_uses_tls_from_connection_config() {
-        let (_, url) = async_client_and_url(&config(true, None), "/v1/actions");
+        let (_, url) = async_client_and_url(&config(true, None), "/v1/actions").unwrap();
         assert_eq!(url, "https://remote.example:19100/v1/actions");
     }
 

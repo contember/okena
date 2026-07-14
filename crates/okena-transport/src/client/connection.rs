@@ -73,19 +73,16 @@ impl Sink<tungstenite::Message> for AnyWsStream {
 }
 
 #[cfg(unix)]
-fn unix_http_client(path: &str) -> reqwest::Client {
+fn unix_http_client(path: &str) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .unix_socket(path)
         .build()
-        .unwrap_or_else(|e| {
-            log::error!("Failed to build Unix socket HTTP client for {path}: {e}");
-            reqwest::Client::new()
-        })
+        .map_err(|error| format!("Cannot initialise Unix socket HTTP client: {error}"))
 }
 
 #[cfg(not(unix))]
-fn unix_http_client(_path: &str) -> reqwest::Client {
-    reqwest::Client::new()
+fn unix_http_client(_path: &str) -> Result<reqwest::Client, String> {
+    Err("Unix socket HTTP transport is not supported on this platform".to_string())
 }
 
 fn local_unix_path(config: &RemoteConnectionConfig) -> Option<&str> {
@@ -371,16 +368,25 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 }
 
                 for &tls in schemes {
-                    let (client, base_url) = if let Some(path) = local_unix.as_deref() {
-                        (unix_http_client(path), config.http_origin())
+                    let client_and_url = if let Some(path) = local_unix.as_deref() {
+                        unix_http_client(path).map(|client| (client, config.http_origin()))
                     } else {
-                        let client = crate::client::tls::build_reqwest_client(
+                        crate::client::tls::build_reqwest_client(
                             tls,
                             config.pinned_cert_sha256.clone(),
                             observed.clone(),
-                        );
-                        let scheme = if tls { "https" } else { "http" };
-                        (client, format!("{}://{}:{}", scheme, config.host, config.port))
+                        )
+                        .map(|client| {
+                            let scheme = if tls { "https" } else { "http" };
+                            (client, format!("{}://{}:{}", scheme, config.host, config.port))
+                        })
+                    };
+                    let (client, base_url) = match client_and_url {
+                        Ok(client_and_url) => client_and_url,
+                        Err(error) => {
+                            last_connect_failure = Some(error);
+                            continue;
+                        }
                     };
                     let health_result = client
                         .get(format!("{}/health", base_url))
@@ -564,6 +570,19 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     config.pinned_cert_sha256.clone(),
                     observed.clone(),
                 )
+            };
+            let client = match client {
+                Ok(client) => client,
+                Err(error) => {
+                    let msg = format!("Pairing client initialisation failed: {error}");
+                    let _ = event_tx
+                        .send(ConnectionEvent::StatusChanged {
+                            connection_id: config.id.clone(),
+                            status: ConnectionStatus::Error(msg),
+                        })
+                        .await;
+                    return;
+                }
             };
 
             // POST /v1/pair with the code
@@ -904,7 +923,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 config.pinned_cert_sha256.clone(),
                 observed.clone(),
             )
-        };
+        }
+        .map_err(SessionError::Transient)?;
         let state_resp = client
             .get(format!("{}/v1/state", base_url))
             .header("Authorization", format!("Bearer {}", token))
@@ -1446,6 +1466,13 @@ pub async fn try_refresh_token(
             config.pinned_cert_sha256.clone(),
             crate::client::tls::new_observed(),
         )
+    };
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => {
+            log::warn!("Token refresh client initialisation failed: {error}");
+            return;
+        }
     };
 
     match client

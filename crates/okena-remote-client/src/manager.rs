@@ -645,8 +645,18 @@ impl RemoteConnectionManager {
         let terminal_id = terminal_id.to_string();
 
         self.runtime.spawn(async move {
-            let (client, base_url) =
-                okena_transport::remote_http::async_client_and_url(&config, "");
+            let (client, base_url) = match okena_transport::remote_http::async_client_and_url(
+                &config, "",
+            ) {
+                Ok(client_and_url) => client_and_url,
+                Err(error) => {
+                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
+                        connection_id,
+                        message: format!("{label} client initialisation failed: {error}"),
+                    });
+                    return;
+                }
+            };
             for upload in uploads {
                 let url = format!(
                     "{base_url}/v1/terminals/{terminal_id}/{}",

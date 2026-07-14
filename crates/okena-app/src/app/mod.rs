@@ -213,17 +213,7 @@ impl Okena {
         // site (`OverlayManagerEvent::RemoteConnected`) is never fired for it.
         let spawned_daemon = {
             let ensured = local_daemon;
-            let cfg = okena_transport::client::RemoteConnectionConfig {
-                id: okena_transport::client::LOCAL_DAEMON_CONNECTION_ID.to_string(),
-                name: "Local".to_string(),
-                host: ensured.daemon.host().to_string(),
-                port: ensured.daemon.port,
-                saved_token: ensured.token.clone(),
-                token_obtained_at: None,
-                tls: false,
-                pinned_cert_sha256: None,
-                local_endpoint: ensured.daemon.local_endpoint.clone(),
-            };
+            let cfg = ensured.daemon.connection_config(ensured.token.clone());
             if let Err(e) = remote_manager.update(cx, |rm, cx| rm.add_connection(cfg, cx)) {
                 eprintln!("Failed to register local-daemon loopback connection: {e}");
                 std::process::exit(1);
@@ -762,17 +752,7 @@ impl Okena {
             return;
         }
 
-        let cfg = okena_transport::client::RemoteConnectionConfig {
-            id: okena_transport::client::LOCAL_DAEMON_CONNECTION_ID.to_string(),
-            name: "Local".to_string(),
-            host: ensured.daemon.host().to_string(),
-            port: ensured.daemon.port,
-            saved_token: ensured.token.clone(),
-            token_obtained_at: None,
-            tls: ensured.daemon.tls,
-            pinned_cert_sha256: None,
-            local_endpoint: ensured.daemon.local_endpoint.clone(),
-        };
+        let cfg = ensured.daemon.connection_config(ensured.token.clone());
         self.remote_manager.update(cx, |rm, cx| {
             rm.redirect_and_reconnect(
                 okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,

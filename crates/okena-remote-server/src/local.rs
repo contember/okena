@@ -15,7 +15,9 @@
 use crate::auth::{self, PersistedToken};
 use base64::Engine as _;
 pub use okena_core::process::is_process_alive;
-use okena_transport::client::LocalEndpoint;
+use okena_transport::client::{
+    LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID,
+};
 use okena_workspace::persistence::config_dir;
 use rand::Rng as _;
 use serde::Deserialize;
@@ -48,6 +50,21 @@ impl LocalDaemon {
     /// Loopback host to dial.
     pub fn host(&self) -> &str {
         &self.host
+    }
+
+    /// Build the canonical implicit local-daemon client configuration.
+    pub fn connection_config(&self, token: Option<String>) -> RemoteConnectionConfig {
+        RemoteConnectionConfig {
+            id: LOCAL_DAEMON_CONNECTION_ID.to_string(),
+            name: "Local".to_string(),
+            host: self.host.clone(),
+            port: self.port,
+            saved_token: token,
+            token_obtained_at: None,
+            tls: self.tls,
+            pinned_cert_sha256: None,
+            local_endpoint: self.local_endpoint.clone(),
+        }
     }
 }
 
@@ -966,6 +983,29 @@ mod tests {
         .unwrap();
         let d = discover_in(&dir).expect("should parse");
         assert_eq!(d.host(), "::1");
+    }
+
+    #[test]
+    fn connection_config_preserves_discovered_transport() {
+        let daemon = LocalDaemon {
+            port: 19123,
+            host: "::1".to_string(),
+            pid: 4242,
+            tls: true,
+            ui_owned: true,
+            local_endpoint: Some(LocalEndpoint::UnixSocket {
+                path: "/tmp/okena.sock".to_string(),
+            }),
+        };
+
+        let config = daemon.connection_config(Some("token".to_string()));
+
+        assert_eq!(config.id, LOCAL_DAEMON_CONNECTION_ID);
+        assert_eq!(config.host, "::1");
+        assert_eq!(config.port, 19123);
+        assert!(config.tls);
+        assert_eq!(config.saved_token.as_deref(), Some("token"));
+        assert_eq!(config.local_endpoint, daemon.local_endpoint);
     }
 
     #[test]

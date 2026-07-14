@@ -257,7 +257,12 @@ mod handshake_tests {
         // 1) TOFU (no pin): handshake succeeds and the client captures exactly
         //    the server's cert fingerprint.
         let observed = okena_transport::client::tls::new_observed();
-        let client = okena_transport::client::tls::build_reqwest_client(true, None, observed.clone());
+        let client = okena_transport::client::tls::build_reqwest_client(
+            true,
+            None,
+            observed.clone(),
+        )
+        .unwrap();
         let resp = get_with_retry(&client, &url).await.expect("TOFU connect should succeed");
         assert!(resp.status().is_success());
         assert_eq!(
@@ -271,7 +276,8 @@ mod handshake_tests {
             true,
             Some(material.fingerprint.clone()),
             okena_transport::client::tls::new_observed(),
-        );
+        )
+        .unwrap();
         assert!(
             get_with_retry(&client_ok, &url).await.is_ok(),
             "matching pin must connect"
@@ -282,7 +288,8 @@ mod handshake_tests {
             true,
             Some("00".repeat(32)),
             okena_transport::client::tls::new_observed(),
-        );
+        )
+        .unwrap();
         assert!(
             client_bad.get(&url).send().await.is_err(),
             "mismatched pin must be rejected"
@@ -300,7 +307,8 @@ mod handshake_tests {
             true,
             Some(material.fingerprint.clone()),
             okena_transport::client::tls::new_observed(),
-        );
+        )
+        .unwrap();
         let https_url = format!("https://{addr}/health");
         assert!(
             get_with_retry(&https_client, &https_url)
