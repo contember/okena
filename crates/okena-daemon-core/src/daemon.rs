@@ -463,14 +463,22 @@ impl DaemonCore {
         // Cancel every LocalSet task first, then stop accepting new requests.
         // The reactor Arc remains available for the final authoritative save.
         drop(local);
-        remote_server.stop();
-
+        // Flush BEFORE stopping the server so `remote.json` stays present for the
+        // whole teardown. Otherwise `RemoteServer::stop` removes the discovery
+        // file up front, leaving a window where the daemon is alive and still
+        // holding the instance lock but undiscoverable — a GUI reopening in that
+        // window can't attach, spawns a fresh daemon that collides on the lock,
+        // and surfaces "Another Okena instance is already running". The command
+        // loop is already gone (drop(local)), so no client can mutate state
+        // during the flush; `stop()` (below) removes the discovery file last,
+        // right before the instance lock drops as `run()` returns.
         flush_shutdown_state(
             &shutdown_workspace,
             &*shutdown_backend,
             &shutdown_terminals,
             persistence::save_workspace,
         )?;
+        remote_server.stop();
         Ok(())
     }
 }
