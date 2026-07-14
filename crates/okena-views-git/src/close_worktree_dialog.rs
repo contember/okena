@@ -10,6 +10,7 @@ use okena_workspace::state::Workspace;
 
 use gpui::prelude::*;
 use gpui::*;
+use serde::Deserialize;
 
 mod execute;
 mod view;
@@ -39,6 +40,14 @@ pub(super) enum ProcessingState {
     Working,
 }
 
+#[derive(Deserialize)]
+struct CloseInfo {
+    is_dirty: bool,
+    branch: Option<String>,
+    default_branch: Option<String>,
+    unpushed_count: usize,
+}
+
 /// Confirmation dialog shown when closing a worktree.
 /// Checks for dirty state and optionally merges the branch back.
 pub struct CloseWorktreeDialog {
@@ -56,6 +65,7 @@ pub struct CloseWorktreeDialog {
     pub(super) delete_branch_enabled: bool,
     pub(super) push_enabled: bool,
     pub(super) unpushed_count: usize,
+    pub(super) loading_info: bool,
     pub(super) error_message: Option<String>,
     pub(super) processing: ProcessingState,
 }
@@ -82,50 +92,61 @@ impl CloseWorktreeDialog {
         let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
 
-        let (is_dirty, branch, default_branch, unpushed_count) =
-            Self::fetch_close_info(&client, daemon_project_id.clone());
-
-        Self {
+        let mut dialog = Self {
             client,
             daemon_project_id,
             focus_handle: cx.focus_handle(),
             project_name,
             project_path,
-            branch,
-            default_branch,
-            is_dirty,
+            branch: None,
+            default_branch: None,
+            is_dirty: false,
             merge_enabled: worktree_config.default_merge,
             stash_enabled: worktree_config.default_stash,
             fetch_enabled: worktree_config.default_fetch,
             delete_branch_enabled: worktree_config.default_delete_branch,
             push_enabled: worktree_config.default_push,
-            unpushed_count,
+            unpushed_count: 0,
+            loading_info: true,
             error_message: None,
             processing: ProcessingState::Idle,
-        }
+        };
+        dialog.load_close_info(cx);
+        dialog
     }
 
-    /// Fetch the git-derived close info from the daemon. The repo lives on the
-    /// daemon, so we post a `WorktreeCloseInfo` action rather than reading local
-    /// git. Kept synchronous on purpose — the old code did blocking local git
-    /// here, so a blocking HTTP call is no worse.
+    fn load_close_info(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let project_id = self.daemon_project_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || Self::fetch_close_info(&client, project_id)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading_info = false;
+                match result {
+                    Ok(info) => {
+                        this.is_dirty = info.is_dirty;
+                        this.branch = info.branch;
+                        this.default_branch = info.default_branch;
+                        this.unpushed_count = info.unpushed_count;
+                    }
+                    Err(error) => this.error_message = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn fetch_close_info(
         client: &okena_transport::remote_action::RemoteActionClient,
         project_id: String,
-    )
-        -> (bool, Option<String>, Option<String>, usize)
-    {
+    ) -> Result<CloseInfo, String> {
         let action = okena_core::api::ActionRequest::WorktreeCloseInfo { project_id };
-        match client.post_action(action) {
-            Ok(Some(v)) => {
-                let is_dirty = v.get("is_dirty").and_then(|x| x.as_bool()).unwrap_or(false);
-                let branch = v.get("branch").and_then(|x| x.as_str()).map(String::from);
-                let default_branch = v.get("default_branch").and_then(|x| x.as_str()).map(String::from);
-                let unpushed_count = v.get("unpushed_count").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                (is_dirty, branch, default_branch, unpushed_count)
-            }
-            _ => (false, None, None, 0),
-        }
+        let value = client
+            .post_action(action)?
+            .ok_or_else(|| "Missing worktree close info response".to_string())?;
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid worktree close info response: {error}"))
     }
 
     pub(super) fn close(&mut self, cx: &mut Context<Self>) {

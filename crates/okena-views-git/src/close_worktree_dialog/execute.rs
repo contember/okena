@@ -10,7 +10,7 @@ use gpui::Context;
 
 impl CloseWorktreeDialog {
     pub(super) fn execute(&mut self, cx: &mut Context<Self>) {
-        if self.processing != ProcessingState::Idle {
+        if self.processing != ProcessingState::Idle || self.loading_info {
             return;
         }
         self.error_message = None;

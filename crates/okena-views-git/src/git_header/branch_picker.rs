@@ -56,11 +56,19 @@ impl GitHeader {
 
         let provider = self.git_provider.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let list = smol::unblock(move || provider.list_branches_classified()).await;
+            let result = smol::unblock(move || provider.list_branches_classified()).await;
             let _ = this.update(cx, |this, cx| {
-                this.branch_picker_list = list;
-                if matches!(this.branch_picker_status, BranchPickerStatus::Loading) {
-                    this.branch_picker_status = BranchPickerStatus::Idle;
+                match result {
+                    Ok(list) => {
+                        this.branch_picker_list = list;
+                        if matches!(this.branch_picker_status, BranchPickerStatus::Loading) {
+                            this.branch_picker_status = BranchPickerStatus::Idle;
+                        }
+                    }
+                    Err(error) => {
+                        this.branch_picker_list = BranchList::default();
+                        this.branch_picker_status = BranchPickerStatus::Error(error);
+                    }
                 }
                 this.recompute_branch_filtered(cx);
                 cx.notify();

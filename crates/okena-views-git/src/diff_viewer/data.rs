@@ -103,8 +103,9 @@ impl DiffViewer {
         let is_dark = self.is_dark;
 
         cx.spawn(async move |this, cx| {
-            let (old_content, new_content, display_file, max_line_num) = smol::unblock(move || {
-                let (old_content, new_content) = provider.get_file_contents(&file_path, diff_mode);
+            let result = smol::unblock(move || {
+                let (old_content, new_content) =
+                    provider.get_file_contents(&file_path, diff_mode)?;
                 let mut max_line_num = 0usize;
                 let display_file = process_file(
                     &raw_file,
@@ -114,16 +115,24 @@ impl DiffViewer {
                     new_content.clone(),
                     is_dark,
                 );
-                (old_content, new_content, display_file, max_line_num)
+                Ok::<_, String>((old_content, new_content, display_file, max_line_num))
             }).await;
 
             let _ = this.update(cx, |this, cx| {
-                this.current_file_old_content = old_content;
-                this.current_file_new_content = new_content;
-                this.line_num_width = max_line_num.to_string().len().max(3);
-                this.max_line_chars = Self::calc_max_line_chars(&display_file);
-                this.current_file = Some(display_file);
-                this.update_side_by_side_cache();
+                match result {
+                    Ok((old_content, new_content, display_file, max_line_num)) => {
+                        this.current_file_old_content = old_content;
+                        this.current_file_new_content = new_content;
+                        this.line_num_width = max_line_num.to_string().len().max(3);
+                        this.max_line_chars = Self::calc_max_line_chars(&display_file);
+                        this.current_file = Some(display_file);
+                        this.update_side_by_side_cache();
+                    }
+                    Err(error) => {
+                        this.current_file = None;
+                        this.error_message = Some(error);
+                    }
+                }
                 cx.notify();
             });
         }).detach();

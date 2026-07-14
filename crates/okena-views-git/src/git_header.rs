@@ -91,6 +91,7 @@ pub struct GitHeader {
     // ── Diff popover state ──────────────────────────────────────────
     diff_popover_visible: bool,
     diff_file_summaries: Vec<FileDiffSummary>,
+    diff_popover_error: Option<String>,
     hover_token: Arc<AtomicU64>,
     diff_stats_bounds: Bounds<Pixels>,
 
@@ -98,6 +99,7 @@ pub struct GitHeader {
     commit_log_visible: bool,
     commit_log_entries: Vec<CommitLogEntry>,
     commit_log_loading: bool,
+    commit_log_error: Option<String>,
     commit_log_bounds: Bounds<Pixels>,
     commit_log_count: usize,
     commit_log_has_more: bool,
@@ -175,11 +177,13 @@ impl GitHeader {
             current_branch: None,
             diff_popover_visible: false,
             diff_file_summaries: Vec::new(),
+            diff_popover_error: None,
             hover_token: Arc::new(AtomicU64::new(0)),
             diff_stats_bounds: Bounds::default(),
             commit_log_visible: false,
             commit_log_entries: Vec::new(),
             commit_log_loading: false,
+            commit_log_error: None,
             commit_log_bounds: Bounds::default(),
             commit_log_count: 0,
             commit_log_has_more: false,
@@ -218,10 +222,12 @@ impl GitHeader {
     pub fn set_git_provider(&mut self, provider: Arc<dyn GitProvider>, cx: &mut Context<Self>) {
         self.git_provider = provider;
         self.diff_file_summaries.clear();
+        self.diff_popover_error = None;
         self.commit_log_entries.clear();
         self.commit_log_count = 0;
         self.commit_log_has_more = false;
         self.commit_log_loading = false;
+        self.commit_log_error = None;
         self.commit_log_branches.clear();
         cx.notify();
     }

@@ -13,18 +13,26 @@ pub trait GitProvider: Send + Sync + 'static {
         true
     }
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String>;
-    fn get_file_contents(&self, file_path: &str, mode: DiffMode) -> (Option<String>, Option<String>);
-    fn get_diff_file_summary(&self) -> Vec<FileDiffSummary>;
-    fn get_commit_graph(&self, count: usize, branch: Option<&str>) -> Vec<CommitLogEntry>;
-    fn list_branches(&self) -> Vec<String>;
+    fn get_file_contents(
+        &self,
+        file_path: &str,
+        mode: DiffMode,
+    ) -> Result<(Option<String>, Option<String>), String>;
+    fn get_diff_file_summary(&self) -> Result<Vec<FileDiffSummary>, String>;
+    fn get_commit_graph(
+        &self,
+        count: usize,
+        branch: Option<&str>,
+    ) -> Result<Vec<CommitLogEntry>, String>;
+    fn list_branches(&self) -> Result<Vec<String>, String>;
     /// List branches split into local/remote with the current branch name.
     /// Default implementation falls back to [`list_branches`] and classifies
     /// remote refs as anything containing a `/`.
-    fn list_branches_classified(&self) -> BranchList {
-        let all = self.list_branches();
+    fn list_branches_classified(&self) -> Result<BranchList, String> {
+        let all = self.list_branches()?;
         let (remote, local): (Vec<String>, Vec<String>) =
             all.into_iter().partition(|n| n.contains('/'));
-        BranchList { local, remote, current: None }
+        Ok(BranchList { local, remote, current: None })
     }
 
     // ── Mutations (Phase 1: per-file) ──────────────────────────────────────
@@ -74,17 +82,15 @@ impl RemoteGitProvider {
         self.client.post_action(action)
     }
 
-    fn post_json_or_default<T>(&self, action: okena_core::api::ActionRequest, label: &str) -> T
+    fn post_json<T>(&self, action: okena_core::api::ActionRequest, label: &str) -> Result<T, String>
     where
-        T: DeserializeOwned + Default,
+        T: DeserializeOwned,
     {
-        match self.post_action(action) {
-            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
-                log::warn!("Failed to deserialize {label}: {e}");
-                T::default()
-            }),
-            _ => T::default(),
-        }
+        let value = self
+            .post_action(action)?
+            .ok_or_else(|| format!("Missing {label} response"))?;
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid {label} response: {error}"))
     }
 
     fn post_unit(&self, action: okena_core::api::ActionRequest) -> Result<(), String> {
@@ -107,57 +113,59 @@ impl GitProvider for RemoteGitProvider {
             mode,
             ignore_whitespace,
         };
-        let result = self.post_action(action)?;
-        match result {
-            Some(value) => serde_json::from_value(value).map_err(|e| format!("Failed to deserialize DiffResult: {}", e)),
-            None => Ok(DiffResult::default()),
-        }
+        self.post_json(action, "diff")
     }
 
-    fn get_file_contents(&self, file_path: &str, mode: DiffMode) -> (Option<String>, Option<String>) {
+    fn get_file_contents(
+        &self,
+        file_path: &str,
+        mode: DiffMode,
+    ) -> Result<(Option<String>, Option<String>), String> {
         let action = okena_core::api::ActionRequest::GitFileContents {
             project_id: self.project_id.clone(),
             file_path: file_path.to_string(),
             mode,
         };
-        match self.post_action(action) {
-            Ok(Some(value)) => {
-                let old = value.get("old_content").and_then(|v| v.as_str()).map(String::from);
-                let new = value.get("new_content").and_then(|v| v.as_str()).map(String::from);
-                (old, new)
-            }
-            _ => (None, None),
-        }
+        let value = self
+            .post_action(action)?
+            .ok_or_else(|| "Missing file contents response".to_string())?;
+        let old = value.get("old_content").and_then(|v| v.as_str()).map(String::from);
+        let new = value.get("new_content").and_then(|v| v.as_str()).map(String::from);
+        Ok((old, new))
     }
 
-    fn get_diff_file_summary(&self) -> Vec<FileDiffSummary> {
+    fn get_diff_file_summary(&self) -> Result<Vec<FileDiffSummary>, String> {
         let action = okena_core::api::ActionRequest::GitDiffSummary {
             project_id: self.project_id.clone(),
         };
-        self.post_json_or_default(action, "diff summary")
+        self.post_json(action, "diff summary")
     }
 
-    fn get_commit_graph(&self, count: usize, branch: Option<&str>) -> Vec<CommitLogEntry> {
+    fn get_commit_graph(
+        &self,
+        count: usize,
+        branch: Option<&str>,
+    ) -> Result<Vec<CommitLogEntry>, String> {
         let action = okena_core::api::ActionRequest::GitCommitGraph {
             project_id: self.project_id.clone(),
             count,
             branch: branch.map(String::from),
         };
-        self.post_json_or_default(action, "commit graph")
+        self.post_json(action, "commit graph")
     }
 
-    fn list_branches(&self) -> Vec<String> {
+    fn list_branches(&self) -> Result<Vec<String>, String> {
         let action = okena_core::api::ActionRequest::GitListBranches {
             project_id: self.project_id.clone(),
         };
-        self.post_json_or_default(action, "branch list")
+        self.post_json(action, "branch list")
     }
 
-    fn list_branches_classified(&self) -> BranchList {
+    fn list_branches_classified(&self) -> Result<BranchList, String> {
         let action = okena_core::api::ActionRequest::GitListBranchesClassified {
             project_id: self.project_id.clone(),
         };
-        self.post_json_or_default(action, "classified branch list")
+        self.post_json(action, "classified branch list")
     }
 
     fn stage_file(&self, file_path: &str) -> Result<(), String> {

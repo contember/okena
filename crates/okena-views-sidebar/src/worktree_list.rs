@@ -41,6 +41,8 @@ pub struct WorktreeListPopover {
     workspace: Entity<Workspace>,
     project_id: String,
     entries: Vec<ApiWorktreeEntry>,
+    loading: bool,
+    error_message: Option<String>,
     position: Point<Pixels>,
     focus_handle: FocusHandle,
 }
@@ -55,35 +57,56 @@ impl WorktreeListPopover {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let entries = Self::fetch_worktrees(&client, daemon_project_id);
         let focus_handle = cx.focus_handle();
-        Self {
+        let mut popover = Self {
             workspace,
             project_id,
-            entries,
+            entries: Vec::new(),
+            loading: true,
+            error_message: None,
             position,
             focus_handle,
-        }
+        };
+        popover.load_worktrees(client, daemon_project_id, cx);
+        popover
+    }
+
+    fn load_worktrees(
+        &mut self,
+        client: okena_transport::remote_action::RemoteActionClient,
+        project_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || Self::fetch_worktrees(&client, project_id)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                match result {
+                    Ok(entries) => this.entries = entries,
+                    Err(error) => this.error_message = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Fetch the worktree listing from the daemon. The git repo lives on the
     /// daemon, so we post a `GitListWorktrees` action rather than scanning the
-    /// local filesystem. Kept synchronous on purpose — the old code did a
-    /// blocking local git scan here, so a blocking HTTP call is no worse.
     fn fetch_worktrees(
         client: &okena_transport::remote_action::RemoteActionClient,
         project_id: String,
-    ) -> Vec<ApiWorktreeEntry> {
+    ) -> Result<Vec<ApiWorktreeEntry>, String> {
         let action = okena_core::api::ActionRequest::GitListWorktrees { project_id };
-        match client.post_action(action) {
-            Ok(Some(value)) => {
-                value
-                    .get("entries")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default()
-            }
-            _ => Vec::new(),
-        }
+        let value = client
+            .post_action(action)?
+            .ok_or_else(|| "Missing worktree list response".to_string())?;
+        let entries = value
+            .get("entries")
+            .cloned()
+            .ok_or_else(|| "Invalid worktree list response".to_string())?;
+        serde_json::from_value(entries)
+            .map_err(|error| format!("Invalid worktree list response: {error}"))
     }
 
     /// Find a tracked worktree project by its worktree root path.
@@ -106,6 +129,8 @@ impl WorktreeListPopover {
 impl Render for WorktreeListPopover {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let loading = self.loading;
+        let error_message = self.error_message.clone();
 
         if !self.focus_handle.is_focused(window) {
             window.focus(&self.focus_handle, cx);
@@ -150,7 +175,25 @@ impl Render for WorktreeListPopover {
                     .id("worktree-list-scroll")
                     .max_h(scroll_max_h)
                     .overflow_y_scroll()
-                    .when(worktrees.is_empty(), |d| {
+                    .when(loading, |d| {
+                        d.child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.text_muted))
+                                .py(px(8.0))
+                                .child("Loading\u{2026}")
+                        )
+                    })
+                    .when_some(error_message, |d, error| {
+                        d.child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.error))
+                                .py(px(8.0))
+                                .child(error)
+                        )
+                    })
+                    .when(worktrees.is_empty() && !loading && self.error_message.is_none(), |d| {
                         d.child(
                             div()
                                 .text_size(ui_text_md(cx))
