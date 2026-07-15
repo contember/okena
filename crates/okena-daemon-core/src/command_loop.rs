@@ -380,6 +380,102 @@ pub async fn daemon_command_loop(
                     }
                 }
 
+                // ── Create worktree: run the blocking git off the reactor ────
+                // `git fetch` + `git worktree add` are network/disk-heavy (up to
+                // seconds on a cold fetch). Routing them through the synchronous
+                // `execute_action` path holds the workspace lock the whole time,
+                // stalling EVERY other daemon action. Split it (mirroring the
+                // `CloseTerminal` busy-probe): resolve paths under a brief lock,
+                // run the git on a blocking thread with NO lock held, then do the
+                // fast workspace mutation (register project + fire on_worktree_create
+                // + spawn PTYs) under the lock.
+                ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
+                    // Phase 0: resolve paths. Read settings first, then the
+                    // workspace (settings-before-workspace lock order), and drop
+                    // both before the blocking git runs.
+                    let template = settings.lock().worktree.path_template.clone();
+                    let prepared = {
+                        let ws = workspace.lock();
+                        ws.project(&project_id).map(|p| {
+                            let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(
+                                std::path::Path::new(&p.path),
+                            );
+                            let (worktree_path, wt_project_path) =
+                                okena_git::compute_target_paths(&git_root, &subdir, &template, &branch);
+                            (git_root, worktree_path, wt_project_path)
+                        })
+                    };
+
+                    match prepared {
+                        None => CommandResult::Err(format!("project not found: {project_id}")),
+                        Some((git_root, worktree_path, wt_project_path)) => {
+                            // Phase 1: the blocking git worktree creation, OFF the
+                            // command-loop thread with NO workspace lock held.
+                            let git = {
+                                let git_root = git_root.clone();
+                                let branch = branch.clone();
+                                let target = std::path::PathBuf::from(&worktree_path);
+                                runtime
+                                    .spawn_blocking(move || {
+                                        okena_git::create_worktree(&git_root, &branch, &target, create_branch)
+                                    })
+                                    .await
+                            };
+
+                            match git {
+                                Err(join) => {
+                                    CommandResult::Err(format!("worktree creation task failed: {join}"))
+                                }
+                                Ok(Err(e)) => CommandResult::Err(match &e {
+                                    okena_git::GitError::WorktreeExists { path } => format!(
+                                        "Directory '{}' is already an active worktree",
+                                        path.display()
+                                    ),
+                                    other => other.to_string(),
+                                }),
+                                Ok(Ok(())) => {
+                                    // Phase 2: fast workspace mutation UNDER the lock
+                                    // (register + fire hooks + spawn the initial PTY).
+                                    let app_settings = settings.lock().clone();
+                                    let mut cx = DaemonWorkspaceCx::new(
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                    );
+                                    let mut ws = workspace.lock();
+                                    match ws.register_worktree_project(
+                                        &project_id,
+                                        &branch,
+                                        &git_root,
+                                        &worktree_path,
+                                        &wt_project_path,
+                                        &app_settings.hooks,
+                                        WindowId::Main,
+                                        &mut cx,
+                                    ) {
+                                        Ok(new_id) => {
+                                            let _ = spawn_uninitialized_terminals(
+                                                &mut ws,
+                                                &new_id,
+                                                &*backend,
+                                                &terminals,
+                                                &app_settings,
+                                                None,
+                                                &mut cx,
+                                            );
+                                            CommandResult::Ok(Some(serde_json::json!({
+                                                "project_id": new_id,
+                                                "path": wt_project_path,
+                                            })))
+                                        }
+                                        Err(e) => CommandResult::Err(e),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── Default: workspace-scoped action ─────────────────────────
                 action => {
                     let git_poll_trigger = git_poll_trigger_for_action(&action);
