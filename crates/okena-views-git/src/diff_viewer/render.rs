@@ -475,6 +475,7 @@ impl DiffViewer {
             .children(tree_elements);
 
         let entity = cx.entity().downgrade();
+        let entity_for_end = entity.clone();
         resizable_sidebar(
             self.sidebar_resize.width(),
             t.bg_primary,
@@ -486,6 +487,11 @@ impl DiffViewer {
                     entity.update(cx, |this, _| {
                         this.sidebar_resize.start_resize(f32::from(mouse_pos.x));
                     });
+                }
+            },
+            move |cx| {
+                if let Some(entity) = entity_for_end.upgrade() {
+                    entity.update(cx, |this, _| this.sidebar_resize.end_resize());
                 }
             },
         )
@@ -1060,7 +1066,6 @@ impl Render for DiffViewer {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
-                    this.sidebar_resize.end_resize();
                     if this.scrollbar_drag.is_some() {
                         this.end_scrollbar_drag(cx);
                     }

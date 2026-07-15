@@ -66,8 +66,10 @@ pub fn resizable_sidebar(
     border_active_color: u32,
     children: Vec<AnyElement>,
     on_drag_start: impl FnOnce(Point<Pixels>, &mut App) + 'static,
+    on_drag_end: impl FnOnce(&mut App) + 'static,
 ) -> Div {
     div()
+        .relative()
         .h_full()
         .flex()
         .flex_shrink_0()
@@ -86,6 +88,24 @@ pub fn resizable_sidebar(
             border_active_color,
             on_drag_start,
         ))
+        // Window-level mouse-up survives the divider's blocking hitbox.
+        .child(
+            canvas(
+                |_bounds, _window, _cx| {},
+                move |_bounds, _state, window, _cx| {
+                    let mut on_drag_end = Some(on_drag_end);
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
+                        if phase == DispatchPhase::Bubble && event.button == MouseButton::Left
+                            && let Some(callback) = on_drag_end.take()
+                        {
+                            callback(cx);
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_full(),
+        )
 }
 
 #[cfg(test)]
