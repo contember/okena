@@ -206,6 +206,18 @@ impl Sidebar {
             cx.notify();
         }).detach();
 
+        // The Sidebar renders inside a `.cached()` view (window render), so it
+        // only repaints when a notify comes from an entity it observes. It
+        // derives per-project state straight from the Workspace — project data,
+        // git status, and transient lifecycle flags (`is_closing`/`is_creating`)
+        // read via `is_project_closing`/`is_creating_project`. Without observing
+        // the Workspace, a workspace-only mutation (e.g. `mark_closing_project`,
+        // which notifies the Workspace but pushes no remote snapshot) never
+        // invalidates the cache, so the row stays stale until an unrelated
+        // snapshot happens to repaint. Matches status_bar/project_column, which
+        // observe the workspace for the same reason.
+        cx.observe(&workspace, |_this, _ws, cx| cx.notify()).detach();
+
         // Hook terminals are displayed in the dedicated HookPanel, so we no
         // longer auto-expand the sidebar project when hooks appear.
 
