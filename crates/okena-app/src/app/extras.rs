@@ -24,8 +24,62 @@ use gpui_component::Root;
 #[cfg(target_os = "linux")]
 use crate::simple_root::SimpleRoot as Root;
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use super::Okena;
+
+/// Grace before an OS-level extra-window close is committed as a "forget"
+/// (removed from the persisted layout). Quit flows deliver a close event to
+/// every window (GNOME dock Quit, logout, Alt+F4-ing each window to exit);
+/// committing the forget immediately made those quits wipe the multi-window
+/// layout before the final quit-time save. Deliberate single-window closes
+/// survive the delay: the app keeps running and the forget lands after it.
+const EXTRA_FORGET_GRACE: Duration = Duration::from_secs(5);
+
+/// Deferred forgets for OS-closed extra windows. Every OS close re-arms the
+/// whole pending set onto a fresh generation: a burst of closes is what
+/// "quitting by closing every window" looks like, so earlier timers go stale
+/// and only the last close's timer commits — after ITS full grace. Pure
+/// bookkeeping (no GPUI) so the re-arm semantics are unit-testable.
+#[derive(Default)]
+pub(super) struct PendingExtraForgets {
+    pending: HashSet<WindowId>,
+    generation: u64,
+}
+
+impl PendingExtraForgets {
+    /// Record an OS close for `id`, re-arming every pending forget. Returns
+    /// the generation the caller's grace timer must present to
+    /// [`take_due`](Self::take_due).
+    pub(super) fn note_close(&mut self, id: WindowId) -> u64 {
+        self.generation += 1;
+        self.pending.insert(id);
+        self.generation
+    }
+
+    /// Drain every pending forget if `generation` is still the latest; a
+    /// stale generation (some later close re-armed the set) drains nothing —
+    /// the later close's timer owns the set now. Sorted for deterministic
+    /// commit order.
+    pub(super) fn take_due(&mut self, generation: u64) -> Vec<WindowId> {
+        if generation != self.generation {
+            return Vec::new();
+        }
+        let mut due: Vec<WindowId> = self.pending.drain().collect();
+        due.sort_by_key(window_sort_key);
+        due
+    }
+}
+
+/// Stable sort key for window ids (uuid bytes; Main first). Ordering matters
+/// when two pending closes touch shared state — see `extras_to_close`.
+fn window_sort_key(id: &WindowId) -> [u8; 16] {
+    match id {
+        WindowId::Extra(uuid) => *uuid.as_bytes(),
+        WindowId::Main => [0u8; 16],
+    }
+}
 
 /// Compute which `WindowId::Extra` entries in `data.extra_windows` are NOT yet
 /// present in `opened`. Returned in `extra_windows` Vec order so the caller
@@ -67,12 +121,7 @@ pub(super) fn extras_to_close(
         .copied()
         .filter(|id| matches!(id, WindowId::Extra(_)) && !desired.contains(id))
         .collect();
-    result.sort_by_key(|id| match id {
-        WindowId::Extra(uuid) => *uuid.as_bytes(),
-        // Filter above guarantees Extra(_) only; the arm is unreachable in
-        // practice but keeps the match total without an unwrap.
-        WindowId::Main => [0u8; 16],
-    });
+    result.sort_by_key(window_sort_key);
     result
 }
 
@@ -127,6 +176,51 @@ impl Okena {
         for window_id in to_open {
             self.open_extra_window(window_id, cx);
         }
+    }
+
+    /// React to an OS-level close of an extra window: arm a deferred forget
+    /// instead of committing it now. If the app is quitting, do nothing at all
+    /// — the final quit-time save must keep the window so the next launch
+    /// restores it. While the forget is pending the window stays in
+    /// `WorkspaceData.extra_windows` AND in the Okena-side maps: dead handles
+    /// are tolerated by every consumer, and keeping `extra_windows` populated
+    /// stops `handle_extra_windows_changed` from reopening the entry.
+    pub(super) fn handle_extra_window_os_close(
+        &mut self,
+        window_id: WindowId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        let generation = self.pending_extra_forgets.note_close(window_id);
+        cx.spawn(async move |this, cx| {
+            smol::Timer::after(EXTRA_FORGET_GRACE).await;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_due_extra_forgets(generation, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Commit the deferred forgets armed on `generation`. Bails when the app
+    /// is quitting (quit-time closes must survive into the final save) or when
+    /// a later close re-armed the entries (that close's timer owns them). The
+    /// workspace mutation fires the extras observer, which sweeps the
+    /// forgotten ids out of `extra_windows` / `extra_window_handles`.
+    fn apply_due_extra_forgets(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        let due = self.pending_extra_forgets.take_due(generation);
+        if due.is_empty() {
+            return;
+        }
+        self.workspace.update(cx, |ws, cx| {
+            for window_id in due {
+                ws.close_extra_window(window_id, cx);
+            }
+        });
     }
 
     /// Route a [`WindowViewEvent`] raised by any window to the right handler.
@@ -309,27 +403,23 @@ impl Okena {
                     log::info!("Extra window {window_id:?} received its first platform frame");
                 });
 
-                // Slice 07 cri 3 close-flow: when the user closes this OS
-                // window, drop the entry from `WorkspaceData.extra_windows`
-                // (so persistence forgets it -- PRD user story 22) and from
-                // `Okena.extra_windows` + `extra_window_handles` (so the
-                // remote-bridge resolver and the spawn-side observer stop
-                // seeing it). Order matters: the workspace mutation runs
-                // FIRST so save/observers fire on a still-alive
-                // `Entity<WindowView>` (the strong handle in
-                // `Okena.extra_windows` keeps it alive until the second
-                // step). The Okena-side removes drop the strong handle so
-                // the entity then drops with the OS window. Returning
-                // `true` allows the OS close to proceed.
-                let workspace_for_close = workspace.clone();
+                // Slice 07 cri 3 close-flow, quit-aware: an OS-level close
+                // (X button, Alt+F4, compositor quit-all) does NOT commit
+                // the "forget" (PRD user story 22) immediately — quit flows
+                // deliver a close to every window and an eager forget wiped
+                // the multi-window layout right before the quit-time save
+                // (the recurring restore-only-one-window bug). Instead the
+                // forget is deferred via `handle_extra_window_os_close`;
+                // the Okena-side maps stay populated until it commits so
+                // the extras observer can't mistake the still-persisted
+                // entry for a fresh one and reopen a zombie window. The
+                // explicit in-app CloseWindow action keeps its immediate
+                // forget (see views/window/render.rs). Returning `true`
+                // allows the OS close to proceed.
                 let okena_for_close = okena.clone();
                 window.on_window_should_close(cx, move |_window, cx| {
-                    workspace_for_close.update(cx, |ws, cx| {
-                        ws.close_extra_window(window_id, cx);
-                    });
-                    okena_for_close.update(cx, |this, _cx| {
-                        this.extra_windows.remove(&window_id);
-                        this.extra_window_handles.remove(&window_id);
+                    okena_for_close.update(cx, |this, cx| {
+                        this.handle_extra_window_os_close(window_id, cx);
                     });
                     true
                 });
@@ -370,7 +460,9 @@ impl Okena {
 
 #[cfg(test)]
 mod tests {
-    use super::{extras_to_close, extras_to_open, resolve_extra_window_bounds};
+    use super::{
+        extras_to_close, extras_to_open, resolve_extra_window_bounds, PendingExtraForgets,
+    };
     use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WindowState, WorkspaceData};
     use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
@@ -585,6 +677,54 @@ mod tests {
         assert_eq!(data.extra_windows.len(), 25, "data layer must accept every spawn");
         let opened = HashSet::new();
         assert_eq!(extras_not_opened(&data, &opened), ids, "helper must surface every pending entry");
+    }
+
+    // ── Deferred OS-close forgets ────────────────────────────────────────
+
+    #[test]
+    fn single_close_commits_on_its_own_generation() {
+        // The plain case: one extra is OS-closed, nothing else happens, its
+        // grace timer fires with the generation note_close returned — the
+        // forget commits.
+        let mut forgets = PendingExtraForgets::default();
+        let id = WindowId::Extra(Uuid::new_v4());
+        let generation = forgets.note_close(id);
+        assert_eq!(forgets.take_due(generation), vec![id]);
+        // Drained: a duplicate timer fire (or a retry) finds nothing.
+        assert!(forgets.take_due(generation).is_empty());
+    }
+
+    #[test]
+    fn later_close_rearms_earlier_pending_forgets() {
+        // Quit-by-closing-windows: extra A closes, then extra B closes before
+        // A's grace expires. A's timer must find nothing (its generation went
+        // stale) and B's timer must commit BOTH — so a close burst always gets
+        // the full grace of its last close, during which the quit signal can
+        // arrive and cancel everything.
+        let mut forgets = PendingExtraForgets::default();
+        let a = WindowId::Extra(Uuid::new_v4());
+        let b = WindowId::Extra(Uuid::new_v4());
+        let gen_a = forgets.note_close(a);
+        let gen_b = forgets.note_close(b);
+
+        assert!(forgets.take_due(gen_a).is_empty(), "stale timer must not commit");
+        let due: HashSet<WindowId> = forgets.take_due(gen_b).into_iter().collect();
+        assert_eq!(due, HashSet::from([a, b]), "last close owns every pending forget");
+    }
+
+    #[test]
+    fn commit_order_is_deterministic_by_uuid() {
+        // Mirrors extras_to_close's contract: shared-state teardown order must
+        // not depend on HashMap iteration order.
+        let mut forgets = PendingExtraForgets::default();
+        let ids: Vec<WindowId> = (0..5).map(|_| WindowId::Extra(Uuid::new_v4())).collect();
+        let mut generation = 0;
+        for id in &ids {
+            generation = forgets.note_close(*id);
+        }
+        let mut expected = ids.clone();
+        expected.sort_by_key(super::window_sort_key);
+        assert_eq!(forgets.take_due(generation), expected);
     }
 
     // ── Restore-bounds resolver ──────────────────────────────────────────

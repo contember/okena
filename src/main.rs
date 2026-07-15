@@ -799,14 +799,6 @@ fn main() {
                     })
                     .detach();
 
-                // Main owns the Okena coordinator. If it closes while extras
-                // are still open, LastWindowClosed would otherwise leave
-                // orphaned WindowViews running without the app root.
-                window.on_window_should_close(cx, |_window, cx| {
-                    cx.quit();
-                    true
-                });
-
                 // Wire up content pane registration so PTY events can notify terminal views
                 okena_views_terminal::set_register_content_pane_fn(Box::new(|terminal_id, weak_content| {
                     let mut registry = okena_app::views::window::content_pane_registry().lock();
@@ -832,6 +824,20 @@ fn main() {
                         cx,
                     )
                 });
+
+                // Main owns the Okena coordinator. If it closes while extras
+                // are still open, LastWindowClosed would otherwise leave
+                // orphaned WindowViews running without the app root. Flag the
+                // quit BEFORE cx.quit(): compositor quit-alls deliver a close
+                // to every window, and pending extra-window forgets must not
+                // commit during teardown or the final layout save loses them.
+                let okena_for_close = okena.clone();
+                window.on_window_should_close(cx, move |_window, cx| {
+                    okena_for_close.read(cx).note_quitting();
+                    cx.quit();
+                    true
+                });
+
                 cx.new(|cx| Root::new(okena, window, cx))
             },
         )

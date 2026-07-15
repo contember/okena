@@ -155,7 +155,12 @@ pub struct Okena {
     /// recovery bails instead of resurrecting the connection or spawning a
     /// daemon we'd immediately orphan. Guards the part-B quit path's
     /// `remove_connection` from being mistaken for a recoverable failure.
+    /// Also set from the main window's close handler (see main.rs) so pending
+    /// extra-window forgets never commit during app teardown.
     quitting: Arc<AtomicBool>,
+    /// Deferred forgets for OS-closed extra windows — see
+    /// `extras.rs::handle_extra_window_os_close` for the quit-vs-close story.
+    pending_extra_forgets: extras::PendingExtraForgets,
 }
 
 impl Okena {
@@ -254,6 +259,7 @@ impl Okena {
             spawned_daemon,
             recovering: Arc::new(AtomicBool::new(false)),
             quitting: Arc::new(AtomicBool::new(false)),
+            pending_extra_forgets: extras::PendingExtraForgets::default(),
         };
 
         // Route clicked desktop notifications back to their originating pane.
@@ -521,6 +527,17 @@ impl Okena {
         // GlobalUpdateInfo is set in main.rs via okena_ext_updater::init().
 
         manager
+    }
+}
+
+impl Okena {
+    /// Mark the app as quitting before the platform loop stops. Called from
+    /// the main window's close handler (main.rs) ahead of `cx.quit()` so
+    /// deferred extra-window forgets and daemon recovery bail immediately —
+    /// on_app_quit alone would set this only after close events for every
+    /// window have already been processed.
+    pub fn note_quitting(&self) {
+        self.quitting.store(true, Ordering::SeqCst);
     }
 }
 
