@@ -482,86 +482,92 @@ pub async fn daemon_command_loop(
                     match prepared {
                         None => CommandResult::Err(format!("project not found: {project_id}")),
                         Some((git_root, worktree_path, wt_project_path)) => {
-                            // Phase 1: create the worktree OFF the command-loop
-                            // thread (no workspace lock held). For a NEW branch, base
-                            // it on the LOCAL `origin/<default>` — NO blocking network
-                            // fetch — so the window appears immediately, and return
-                            // the default branch so phase 3 can freshen it to the true
-                            // remote tip in the background.
-                            let git = {
-                                let git_root = git_root.clone();
-                                let branch = branch.clone();
-                                let target = std::path::PathBuf::from(&worktree_path);
-                                runtime
-                                    .spawn_blocking(move || {
-                                        if create_branch {
-                                            let default = okena_git::get_default_branch(&git_root);
-                                            okena_git::create_worktree_with_start_point(
-                                                &git_root,
-                                                &branch,
-                                                &target,
-                                                default.as_deref(),
-                                            )
-                                            .map(|()| default)
-                                        } else {
-                                            okena_git::create_worktree(&git_root, &branch, &target, false)
-                                                .map(|()| None)
-                                        }
-                                    })
-                                    .await
-                            };
-
-                            match git {
-                                Err(join) => {
-                                    CommandResult::Err(format!("worktree creation task failed: {join}"))
+                            // OPTIMISTIC CREATE (symmetric with the optimistic close):
+                            // register the worktree row NOW — deferred hooks, no
+                            // terminals, layout stays None so the client renders the
+                            // "Setting up worktree…" placeholder — then return Ok and
+                            // run the slow `git worktree add` checkout in the
+                            // BACKGROUND. Previously the checkout was awaited before the
+                            // row was even created, so its (repo-scaling) duration WAS
+                            // the perceived latency. When the checkout finishes we seed
+                            // the layout + spawn the PTY + fire on_worktree_create; on
+                            // failure we roll the row back + toast.
+                            let app_settings = settings.lock().clone();
+                            let new_id = {
+                                let mut cx = DaemonWorkspaceCx::new(
+                                    &workspace_tick,
+                                    &hook_runner,
+                                    &hook_monitor,
+                                );
+                                let mut ws = workspace.lock();
+                                match ws.register_worktree_project_deferred_hooks(
+                                    &project_id,
+                                    &branch,
+                                    &git_root,
+                                    &worktree_path,
+                                    &wt_project_path,
+                                    &app_settings.hooks,
+                                    WindowId::Main,
+                                    &mut cx,
+                                ) {
+                                    Ok(id) => {
+                                        ws.mark_creating_project(&id);
+                                        Some(id)
+                                    }
+                                    Err(_) => None,
                                 }
-                                Ok(Err(e)) => CommandResult::Err(match &e {
-                                    okena_git::GitError::WorktreeExists { path } => format!(
-                                        "Directory '{}' is already an active worktree",
-                                        path.display()
-                                    ),
-                                    other => other.to_string(),
-                                }),
-                                Ok(Ok(default_branch)) => {
-                                    // Phase 2: fast workspace mutation UNDER the lock
-                                    // (register + fire hooks + spawn the initial PTY).
-                                    let app_settings = settings.lock().clone();
-                                    let mut cx = DaemonWorkspaceCx::new(
-                                        &workspace_tick,
-                                        &hook_runner,
-                                        &hook_monitor,
-                                    );
-                                    let mut ws = workspace.lock();
-                                    match ws.register_worktree_project(
-                                        &project_id,
-                                        &branch,
-                                        &git_root,
-                                        &worktree_path,
-                                        &wt_project_path,
-                                        &app_settings.hooks,
-                                        WindowId::Main,
-                                        &mut cx,
-                                    ) {
-                                        Ok(new_id) => {
-                                            let _ = spawn_uninitialized_terminals(
-                                                &mut ws,
-                                                &new_id,
-                                                &*backend,
-                                                &terminals,
-                                                &app_settings,
-                                                None,
-                                                &mut cx,
-                                            );
-                                            drop(ws);
-                                            // Phase 3: freshen in the background — fetch
-                                            // origin/<default> and fast-forward the new
-                                            // branch to the true remote tip (ff-only,
-                                            // never clobbers). The window is already up;
-                                            // this runs off the reactor.
-                                            if let Some(default_branch) = default_branch {
-                                                let git_root = git_root.clone();
-                                                let worktree_path = worktree_path.clone();
-                                                tokio::task::spawn_local(async move {
+                            };
+                            match new_id {
+                                None => CommandResult::Err(format!("project not found: {project_id}")),
+                                Some(new_id) => {
+                                    let workspace = workspace.clone();
+                                    let workspace_tick = workspace_tick.clone();
+                                    let hook_runner = hook_runner.clone();
+                                    let hook_monitor = hook_monitor.clone();
+                                    let backend = backend.clone();
+                                    let terminals = terminals.clone();
+                                    let app_settings = app_settings.clone();
+                                    let git_root = git_root.clone();
+                                    let branch = branch.clone();
+                                    let worktree_path = worktree_path.clone();
+                                    let new_id_task = new_id.clone();
+                                    tokio::task::spawn_local(async move {
+                                        let git = {
+                                            let git_root = git_root.clone();
+                                            let branch = branch.clone();
+                                            let target = std::path::PathBuf::from(&worktree_path);
+                                            tokio::task::spawn_blocking(move || {
+                                                if create_branch {
+                                                    let default = okena_git::get_default_branch(&git_root);
+                                                    okena_git::create_worktree_with_start_point(
+                                                        &git_root, &branch, &target, default.as_deref(),
+                                                    )
+                                                    .map(|()| default)
+                                                } else {
+                                                    okena_git::create_worktree(&git_root, &branch, &target, false)
+                                                        .map(|()| None)
+                                                }
+                                            })
+                                            .await
+                                        };
+                                        match git {
+                                            Ok(Ok(default_branch)) => {
+                                                {
+                                                    let mut cx = DaemonWorkspaceCx::new(
+                                                        &workspace_tick, &hook_runner, &hook_monitor,
+                                                    );
+                                                    let mut ws = workspace.lock();
+                                                    // Seeds the layout from the parent, then fires on_worktree_create.
+                                                    ws.fire_worktree_hooks(&new_id_task, &app_settings.hooks, &mut cx);
+                                                    let _ = spawn_uninitialized_terminals(
+                                                        &mut ws, &new_id_task, &*backend, &terminals,
+                                                        &app_settings, None, &mut cx,
+                                                    );
+                                                    ws.finish_creating_project(&new_id_task);
+                                                    ws.notify_data(&mut cx);
+                                                }
+                                                // Freshen (ff-only) in the background.
+                                                if let Some(default_branch) = default_branch {
                                                     let _ = tokio::task::spawn_blocking(move || {
                                                         okena_git::fetch_and_fast_forward(
                                                             &git_root,
@@ -570,15 +576,41 @@ pub async fn daemon_command_loop(
                                                         )
                                                     })
                                                     .await;
-                                                });
+                                                }
                                             }
-                                            CommandResult::Ok(Some(serde_json::json!({
-                                                "project_id": new_id,
-                                                "path": wt_project_path,
-                                            })))
+                                            result => {
+                                                let msg = match result {
+                                                    Ok(Err(okena_git::GitError::WorktreeExists { path })) => format!(
+                                                        "Directory '{}' is already an active worktree",
+                                                        path.display()
+                                                    ),
+                                                    Ok(Err(e)) => e.to_string(),
+                                                    Err(join) => format!("worktree creation task failed: {join}"),
+                                                    Ok(Ok(_)) => unreachable!("success handled above"),
+                                                };
+                                                // Roll the optimistic row back. Clear creating
+                                                // FIRST — remove_stale_worktree skips creating
+                                                // projects.
+                                                {
+                                                    let mut cx = DaemonWorkspaceCx::new(
+                                                        &workspace_tick, &hook_runner, &hook_monitor,
+                                                    );
+                                                    let mut ws = workspace.lock();
+                                                    ws.finish_creating_project(&new_id_task);
+                                                    ws.remove_stale_worktree(&new_id_task);
+                                                    ws.notify_data(&mut cx);
+                                                }
+                                                log::error!("worktree-create: {branch} failed: {msg}");
+                                                if let Some(hm) = &hook_monitor {
+                                                    hm.push_toast(okena_state::Toast::error(msg));
+                                                }
+                                            }
                                         }
-                                        Err(e) => CommandResult::Err(e),
-                                    }
+                                    });
+                                    CommandResult::Ok(Some(serde_json::json!({
+                                        "project_id": new_id,
+                                        "path": wt_project_path,
+                                    })))
                                 }
                             }
                         }

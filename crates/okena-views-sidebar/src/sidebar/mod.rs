@@ -733,7 +733,11 @@ impl SidebarProjectInfo {
                 }
             }).collect(),
             is_closing: false,
-            is_creating: false,
+            // A worktree project mirrored with no layout is mid-create (the
+            // daemon registers the row before the git checkout, layout stays
+            // None until it finishes). Derived from mirrored data — the
+            // client-local mark_creating flag is never set for remote projects.
+            is_creating: project.worktree_info.is_some() && project.layout.is_none(),
             is_worktree: project.worktree_info.is_some(),
             pinned: project.pinned,
         }

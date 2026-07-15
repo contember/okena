@@ -557,6 +557,13 @@ impl Workspace {
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
         }
+        // Scrub the child id from its parent's worktree_ids, or the sidebar keeps
+        // a dangling phantom child (both for externally-deleted worktrees and the
+        // optimistic-create rollback path). `delete_project` already does this; a
+        // stale removal must too.
+        for parent in &mut self.data.projects {
+            parent.worktree_ids.retain(|id| id != project_id);
+        }
         // Scrub the worktree id from every window's per-project storage
         // (hidden set + widths map on main + every extra). Same fan-out as
         // the primary `delete_project` path.

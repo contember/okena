@@ -977,7 +977,12 @@ impl Render for ProjectColumn {
             Some(project) => {
                 let has_layout = project.layout.is_some();
 
-                let is_creating = workspace.is_creating_project(&self.project_id);
+                // A worktree mirrored with no layout is mid-create: the daemon
+                // registers the row before the git checkout (layout stays None
+                // until it finishes), so we show the "Setting up worktree…"
+                // placeholder. Derived from mirrored data — the client-local
+                // mark_creating flag is never set for remote projects.
+                let is_creating = project.worktree_info.is_some() && !has_layout;
 
                 // Soft tinted background based on folder color (when enabled)
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {
