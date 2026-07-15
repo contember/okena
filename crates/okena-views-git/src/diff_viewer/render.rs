@@ -1,7 +1,7 @@
 //! Render trait impl and helper methods for the diff viewer.
 
 use super::types::{DiffViewMode, FileTreeNode};
-use super::{Cancel, DiffViewer, SIDEBAR_WIDTH};
+use super::{Cancel, DiffViewer};
 use okena_core::theme::ThemeColors;
 use okena_files::selection::Selection2DNonEmpty;
 use okena_files::theme::theme;
@@ -9,6 +9,7 @@ use okena_ui::modal::{
     detached_needs_controls, fullscreen_overlay, fullscreen_panel, window_drag_spacer,
     window_min_max_controls,
 };
+use okena_ui::resizable_sidebar::resizable_sidebar;
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl, ui_text};
 use okena_git::DiffMode;
@@ -453,37 +454,41 @@ impl DiffViewer {
         &self,
         t: &ThemeColors,
         tree_elements: Vec<AnyElement>,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .w(px(SIDEBAR_WIDTH))
-            .h_full()
-            .border_r_1()
+        let header = div()
+            .px(px(16.0))
+            .py(px(10.0))
+            .border_b_1()
             .border_color(rgb(t.border))
-            .bg(rgb(t.bg_primary))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .text_size(ui_text_ms(cx))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(t.text_muted))
-                    .line_height(px(11.0))
-                    .child("Files"),
-            )
-            .child(
-                div()
-                    .id("file-tree")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.tree_scroll_handle)
-                    .py(px(6.0))
-                    .children(tree_elements),
-            )
+            .text_size(ui_text_ms(cx))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(t.text_muted))
+            .line_height(px(11.0))
+            .child("Files");
+        let tree = div()
+            .id("file-tree")
+            .flex_1()
+            .overflow_y_scroll()
+            .track_scroll(&self.tree_scroll_handle)
+            .py(px(6.0))
+            .children(tree_elements);
+
+        let entity = cx.entity().downgrade();
+        resizable_sidebar(
+            self.sidebar_resize.width(),
+            t.bg_primary,
+            t.border,
+            t.border_active,
+            vec![header.into_any_element(), tree.into_any_element()],
+            move |mouse_pos, cx| {
+                if let Some(entity) = entity.upgrade() {
+                    entity.update(cx, |this, _| {
+                        this.sidebar_resize.start_resize(f32::from(mouse_pos.x));
+                    });
+                }
+            },
+        )
     }
 
     // GPUI render helper: params are render inputs (theme, flags, callbacks).
@@ -1033,6 +1038,10 @@ impl Render for DiffViewer {
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                let x = f32::from(event.position.x);
+                if this.sidebar_resize.update_resize(x) {
+                    cx.notify();
+                }
                 if this.scrollbar_drag.is_some() {
                     let y = f32::from(event.position.y);
                     this.update_scrollbar_drag(y, cx);
@@ -1051,6 +1060,7 @@ impl Render for DiffViewer {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
+                    this.sidebar_resize.end_resize();
                     if this.scrollbar_drag.is_some() {
                         this.end_scrollbar_drag(cx);
                     }

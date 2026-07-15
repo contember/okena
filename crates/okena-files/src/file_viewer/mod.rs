@@ -19,6 +19,7 @@ use crate::syntax::{load_syntax_set, HighlightedLine};
 use context_menu::{DeleteConfirmState, FileRenameState, FileTreeContextMenu, TabContextMenu};
 use gpui::*;
 use okena_markdown::{MarkdownDocument, MarkdownSelection};
+use okena_ui::resizable_sidebar::ResizableSidebarState;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -138,9 +139,6 @@ impl ImageViewState {
 
 /// Type alias for source view selection (line, column).
 type Selection = SelectionState<(usize, usize)>;
-
-/// Width of file tree sidebar.
-const SIDEBAR_WIDTH: f32 = 240.0;
 
 /// Per-file state for a single tab in the file viewer.
 ///
@@ -520,6 +518,8 @@ pub struct FileViewer {
     tree_scroll_handle: ScrollHandle,
     /// Whether the sidebar is visible
     sidebar_visible: bool,
+    /// Width and active resize gesture for the file tree sidebar.
+    pub(super) sidebar_resize: ResizableSidebarState,
     /// Open tabs
     pub(super) tabs: Vec<FileViewerTab>,
     /// Index of the active tab
@@ -606,6 +606,7 @@ impl FileViewer {
             expanded_folders,
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
+            sidebar_resize: ResizableSidebarState::default(),
             tabs: vec![tab],
             active_tab: 0,
             history: NavigationHistory::new(),
@@ -663,6 +664,7 @@ impl FileViewer {
             expanded_folders: HashSet::new(),
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
+            sidebar_resize: ResizableSidebarState::default(),
             tabs: vec![FileViewerTab::new_empty()],
             active_tab: 0,
             history: NavigationHistory::new(),

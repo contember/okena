@@ -17,6 +17,7 @@ use okena_core::theme::ThemeColors;
 use std::path::PathBuf;
 use okena_markdown::RenderedNode;
 use okena_ui::code_block::code_block_container;
+use okena_ui::resizable_sidebar::resizable_sidebar;
 use okena_ui::modal::{detached_needs_controls, fullscreen_overlay, fullscreen_panel, window_drag_spacer, window_min_max_controls};
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::file_icon::file_icon;
@@ -24,7 +25,7 @@ use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use std::sync::Arc;
 
 use super::context_menu::TreeNodeTarget;
-use super::{DisplayMode, FileViewer, FontData, PreviewBackground, SIDEBAR_WIDTH};
+use super::{DisplayMode, FileViewer, FontData, PreviewBackground};
 
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
@@ -198,71 +199,76 @@ impl FileViewer {
         let active_count = self.show_ignored as u8;
         let _is_open = self.filter_popover_open;
 
-        div()
-            .w(px(SIDEBAR_WIDTH))
-            .h_full()
-            .border_r_1()
+        let header = div()
+            .px(px(12.0))
+            .py(px(10.0))
+            .border_b_1()
             .border_color(rgb(t.border))
-            .bg(rgb(t.bg_primary))
             .flex()
-            .flex_col()
+            .items_center()
+            .justify_between()
             .child(
                 div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(t.text_secondary))
-                            .line_height(px(11.0))
-                            .child("Files"),
-                    )
-                    .child({
-                        let entity = cx.entity().downgrade();
-                        let entity2 = entity.clone();
-                        crate::list_overlay::file_filter_button(
-                            "fv-filter-btn", active_count, t, cx,
-                            move |_, _, cx| {
-                                if let Some(e) = entity.upgrade() {
-                                    e.update(cx, |this, cx| {
-                                        this.filter_popover_open = !this.filter_popover_open;
-                                        cx.notify();
-                                    });
-                                }
-                            },
-                            move |bounds, _, cx| {
-                                if let Some(e) = entity2.upgrade() {
-                                    e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
-                                }
-                            },
-                        )
-                    }),
+                    .text_size(ui_text_ms(cx))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(t.text_secondary))
+                    .line_height(px(11.0))
+                    .child("Files"),
             )
-            .child(
-                div()
-                    .id("file-viewer-tree")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.tree_scroll_handle)
-                    .py(px(6.0))
-                    .when_some(self.tree_error_message.clone(), |d, error| {
-                        d.child(
-                            div()
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(t.error))
-                                .child(error)
-                        )
-                    })
-                    .children(tree_elements),
-            )
+            .child({
+                let entity = cx.entity().downgrade();
+                let entity2 = entity.clone();
+                crate::list_overlay::file_filter_button(
+                    "fv-filter-btn", active_count, t, cx,
+                    move |_, _, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                this.filter_popover_open = !this.filter_popover_open;
+                                cx.notify();
+                            });
+                        }
+                    },
+                    move |bounds, _, cx| {
+                        if let Some(e) = entity2.upgrade() {
+                            e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
+                        }
+                    },
+                )
+            });
+
+        let tree = div()
+            .id("file-viewer-tree")
+            .flex_1()
+            .overflow_y_scroll()
+            .track_scroll(&self.tree_scroll_handle)
+            .py(px(6.0))
+            .when_some(self.tree_error_message.clone(), |d, error| {
+                d.child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.error))
+                        .child(error),
+                )
+            })
+            .children(tree_elements);
+
+        let entity = cx.entity().downgrade();
+        resizable_sidebar(
+            self.sidebar_resize.width(),
+            t.bg_primary,
+            t.border,
+            t.border_active,
+            vec![header.into_any_element(), tree.into_any_element()],
+            move |mouse_pos, cx| {
+                if let Some(entity) = entity.upgrade() {
+                    entity.update(cx, |this, _| {
+                        this.sidebar_resize.start_resize(f32::from(mouse_pos.x));
+                    });
+                }
+            },
+        )
     }
 
 
@@ -1381,6 +1387,10 @@ impl Render for FileViewer {
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                let x = f32::from(event.position.x);
+                if this.sidebar_resize.update_resize(x) {
+                    cx.notify();
+                }
                 if this.active_tab().scrollbar_drag.is_some() {
                     let y = f32::from(event.position.y);
                     this.update_scrollbar_drag(y, cx);
@@ -1389,6 +1399,7 @@ impl Render for FileViewer {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
+                    this.sidebar_resize.end_resize();
                     if this.active_tab().scrollbar_drag.is_some() {
                         this.end_scrollbar_drag(cx);
                     }

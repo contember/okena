@@ -22,6 +22,7 @@ use okena_core::types::DiffViewMode;
 use okena_files::syntax::load_syntax_set;
 use gpui::prelude::*;
 use gpui::*;
+use okena_ui::resizable_sidebar::ResizableSidebarState;
 use std::collections::HashSet;
 use std::sync::Arc;
 use syntect::parsing::SyntaxSet;
@@ -52,9 +53,6 @@ type DiffSearchSig = (
     bool,
 );
 
-/// Width of file tree sidebar.
-const SIDEBAR_WIDTH: f32 = 240.0;
-
 use crate::settings::git_settings;
 
 /// Git diff viewer overlay.
@@ -80,6 +78,8 @@ pub struct DiffViewer {
     pub(super) selection: Selection,
     pub(super) scroll_handle: UniformListScrollHandle,
     pub(super) tree_scroll_handle: ScrollHandle,
+    /// Width and active resize gesture for the file tree sidebar.
+    pub(super) sidebar_resize: ResizableSidebarState,
     pub(super) error_message: Option<String>,
     pub(super) line_num_width: usize,
     pub(super) syntax_set: std::sync::Arc<SyntaxSet>,
@@ -164,6 +164,7 @@ impl DiffViewer {
             selection: Selection::default(),
             scroll_handle: UniformListScrollHandle::new(),
             tree_scroll_handle: ScrollHandle::new(),
+            sidebar_resize: ResizableSidebarState::default(),
             error_message: None,
             line_num_width: 4,
             syntax_set: load_syntax_set(),
