@@ -104,7 +104,7 @@ impl HookPanel {
             cx.notify();
         }).detach();
 
-        Self {
+        let mut this = Self {
             project_id,
             workspace,
             focus_manager,
@@ -120,7 +120,29 @@ impl HookPanel {
             panel_height: initial_height,
             last_hook_count: initial_count,
             action_dispatcher: None,
+        };
+
+        // Headless timing: a freshly-created project (e.g. a new worktree with an
+        // on_worktree_create hook) mirrors back from the daemon with its hook
+        // terminals ALREADY present, so the panel is constructed with count>0 and
+        // the count-increase observe above never sees the 0->N transition that
+        // auto-opens it (in-process, the panel existed first, then the hook
+        // fired). Restore the auto-open by opening here when hooks are already
+        // present at construction. Auto-close on all-succeeded still applies.
+        let newest_tid = if initial_count > 0 {
+            this.workspace
+                .read(cx)
+                .project(&this.project_id)
+                .and_then(|p| p.hook_terminals.keys().last().cloned())
+        } else {
+            None
+        };
+        if let Some(tid) = newest_tid {
+            this.auto_opened = true;
+            this.show_hook(&tid, cx);
         }
+
+        this
     }
 
     /// Set the action dispatcher used to route hook actions to the daemon.
