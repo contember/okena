@@ -20,7 +20,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
@@ -48,6 +48,9 @@ pub struct AppState {
     /// receiver and forwards [`WsOutbound::Toast`] frames; events sent with no
     /// receivers are simply dropped (fire-and-forget, like git status).
     pub toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
+    /// One-shot exact-terminal focus requests produced by successful external
+    /// actions and consumed by connected desktop clients.
+    pub terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
     /// Per-connection set of subscribed terminal IDs (connection_id → terminal_ids).
     /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
@@ -115,6 +118,7 @@ pub fn build_router(
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
     toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
+    terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
     next_connection_id: Arc<AtomicU64>,
@@ -132,6 +136,7 @@ pub fn build_router(
         start_time,
         git_status,
         toast_tx,
+        terminal_focus_tx,
         remote_subscribed_terminals,
         git_poll_trigger_tx,
         next_connection_id,

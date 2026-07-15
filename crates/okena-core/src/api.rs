@@ -294,6 +294,18 @@ pub struct ApiToastAction {
     pub style: String,
 }
 
+/// One-shot desktop presentation request emitted after an external
+/// `FocusTerminal` action succeeds on the daemon. Unlike workspace state, this
+/// is intentionally transient: connected desktop clients focus and raise the
+/// requested pane once without repeatedly stealing focus on later state syncs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiTerminalFocusRequest {
+    pub project_id: String,
+    pub terminal_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ApiProject {
     pub id: String,

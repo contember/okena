@@ -766,7 +766,8 @@ impl ConnectionManager {
                         }
                     }
                 }
-                ConnectionEvent::SystemStatsChanged { .. } => {}
+                ConnectionEvent::SystemStatsChanged { .. }
+                | ConnectionEvent::TerminalFocusRequested { .. } => {}
                 ConnectionEvent::ServerWarning { message, .. } => {
                     log::warn!("Server warning for {}: {}", conn_id, message);
                 }

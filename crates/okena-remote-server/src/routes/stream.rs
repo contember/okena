@@ -152,9 +152,11 @@ async fn handle_ws(
     let mut git_rx = state.git_status.subscribe();
     // Subscribe to daemon-originated toasts (fire-and-forget broadcast).
     let mut toast_rx = state.toast_tx.subscribe();
-    // Once the toast sender is gone we disable that select arm, otherwise its
-    // `recv()` would resolve `Err(Closed)` instantly and busy-spin the loop.
+    let mut terminal_focus_rx = state.terminal_focus_tx.subscribe();
+    // Once a sender is gone we disable its select arm, otherwise `recv()` would
+    // resolve `Err(Closed)` instantly and busy-spin the loop.
     let mut toast_open = true;
+    let mut terminal_focus_open = true;
     let mut system_stats = SystemStatsCache::new();
     let mut system_stats_interval = tokio::time::interval(SYSTEM_STATS_REFRESH_INTERVAL);
     system_stats_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -556,6 +558,25 @@ async fn handle_ws(
                 }).expect("BUG: WsOutbound must serialize");
                 if out_tx.send(Message::Text(resp.into())).await.is_err() {
                     break;
+                }
+            }
+
+            // One-shot exact-terminal focus request for connected desktop clients.
+            result = terminal_focus_rx.recv(), if terminal_focus_open => {
+                match result {
+                    Ok(request) => {
+                        let resp = serde_json::to_string(&WsOutbound::TerminalFocusRequested(request))
+                            .expect("BUG: WsOutbound must serialize");
+                        if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::debug!("terminal-focus broadcast lagged, dropped {n} request(s) for a client");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        terminal_focus_open = false;
+                    }
                 }
             }
 

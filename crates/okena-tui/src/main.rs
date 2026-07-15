@@ -472,7 +472,8 @@ fn handle_connection_event(
                 }
             }
         }
-        ConnectionEvent::SystemStatsChanged { .. } => {}
+        ConnectionEvent::SystemStatsChanged { .. }
+        | ConnectionEvent::TerminalFocusRequested { .. } => {}
         ConnectionEvent::Toast { toast, .. } => {
             state.message = Some(format!("{}: {}", toast.level, toast.message));
         }

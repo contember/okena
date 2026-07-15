@@ -55,7 +55,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use async_channel::Receiver;
-use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_remote_server::auth::AuthStore;
@@ -247,6 +247,9 @@ impl DaemonCore {
         // producer; each connected client subscribes a receiver. Capacity bounds
         // the per-client backlog — a lagging client drops non-critical toasts.
         let toast_tx = Arc::new(tokio::sync::broadcast::channel::<ApiToast>(64).0);
+        let terminal_focus_tx = Arc::new(
+            tokio::sync::broadcast::channel::<ApiTerminalFocusRequest>(64).0,
+        );
         let auth_store = Arc::new(AuthStore::new());
         let remote_subscribed_terminals = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let next_connection_id = Arc::new(AtomicU64::new(0));
@@ -267,6 +270,7 @@ impl DaemonCore {
             params.listen_addrs,
             git_status_tx.clone(),
             toast_tx.clone(),
+            terminal_focus_tx,
             remote_subscribed_terminals.clone(),
             Some(git_poll_trigger_tx.clone()),
             next_connection_id,

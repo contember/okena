@@ -104,6 +104,12 @@ pub enum ConnectionEvent {
         connection_id: String,
         toast: okena_core::api::ApiToast,
     },
+    /// One-shot request for the desktop client to focus and raise an exact
+    /// terminal. IDs are server-local and are prefixed by the manager.
+    TerminalFocusRequested {
+        connection_id: String,
+        request: okena_core::api::ApiTerminalFocusRequest,
+    },
     /// Token was refreshed — save new token and update timestamp
     TokenRefreshed {
         connection_id: String,

@@ -306,7 +306,7 @@ impl Okena {
     /// column, folder filter, or a window zoomed into another project — fall
     /// back to zooming into it in the active (or main) window, which pierces
     /// all three so the click always lands on the terminal.
-    fn jump_to_terminal(&mut self, project_id: &str, terminal_id: &str, cx: &mut Context<Self>) {
+    pub(super) fn jump_to_terminal(&mut self, project_id: &str, terminal_id: &str, cx: &mut Context<Self>) {
         // Tier 1: a window where the project is actually visible right now.
         let mut order = vec![WindowId::Main];
         order.extend(self.extra_window_handles.keys().copied());

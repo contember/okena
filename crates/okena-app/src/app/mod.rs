@@ -321,6 +321,13 @@ impl Okena {
                         this.process_clipboard_reads(terminal_ids, cx);
                     }
                 }
+                RemoteManagerEvent::TerminalFocusRequested {
+                    project_id,
+                    terminal_id,
+                    window: _,
+                } => {
+                    this.jump_to_terminal(project_id, terminal_id, cx);
+                }
                 // Local daemon connection dead-ended — re-run discovery/ensure so
                 // the GUI recovers instead of staying wedged on a dead socket.
                 RemoteManagerEvent::LocalConnectionFailed => {
