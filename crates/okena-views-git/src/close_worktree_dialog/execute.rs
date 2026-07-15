@@ -19,6 +19,16 @@ impl CloseWorktreeDialog {
         self.processing = ProcessingState::Working;
         cx.notify();
 
+        // Optimistically mark the project "closing" so the sidebar row shows a
+        // busy/dimmed state immediately, covering the daemon-side before_remove
+        // hook + removal window. On success the mirror drops the project (the
+        // row vanishes); on dispatch failure we clear the flag below.
+        let client_project_id = self.client_project_id.clone();
+        self.workspace.update(cx, |ws, wcx| {
+            ws.mark_closing_project(&client_project_id);
+            wcx.notify();
+        });
+
         let client = self.client.clone();
         let project_id = self.daemon_project_id.clone();
         let merge = self.merge_enabled;
@@ -42,6 +52,13 @@ impl CloseWorktreeDialog {
                     this.close(cx);
                 }
                 Err(e) => {
+                    // Dispatch never reached the daemon — clear the optimistic
+                    // closing flag so the row isn't stuck busy.
+                    let pid = this.client_project_id.clone();
+                    this.workspace.update(cx, |ws, wcx| {
+                        ws.finish_closing_project(&pid);
+                        wcx.notify();
+                    });
                     this.error_message = Some(e);
                     this.processing = ProcessingState::Idle;
                     cx.notify();

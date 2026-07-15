@@ -480,6 +480,10 @@ impl Workspace {
         self.lifecycle.finish_worktree_removing(path);
     }
 
+    pub fn mark_closing_project(&mut self, project_id: &str) {
+        self.lifecycle.mark_closing(project_id);
+    }
+
     pub fn finish_closing_project(&mut self, project_id: &str) {
         self.lifecycle.finish_closing(project_id);
     }
