@@ -136,6 +136,45 @@ pub fn create_worktree_with_start_point(
     require_success(output)
 }
 
+/// Best-effort freshen a just-created worktree to the latest remote default:
+/// `git fetch origin <default_branch>`, then fast-forward the worktree's branch
+/// to `origin/<default_branch>` with `merge --ff-only`.
+///
+/// This lets the worktree window appear immediately (created from the LOCAL
+/// `origin/<default>` with no blocking fetch) and then catch up to the true
+/// remote tip in the background. `--ff-only` NEVER rewrites local work: if the
+/// branch has diverged (a commit was made) or the tree is dirty in a conflicting
+/// way, git declines and this is a safe no-op. All failures are non-fatal (the
+/// worktree simply stays on the local base) — logged, not returned.
+pub fn fetch_and_fast_forward(repo_path: &Path, worktree_path: &Path, default_branch: &str) {
+    let (Ok(repo_str), Ok(wt_str)) = (path_str(repo_path), path_str(worktree_path)) else {
+        return;
+    };
+    match safe_output(command("git").args(["-C", repo_str, "fetch", "origin", default_branch])) {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            log::warn!(
+                "worktree freshen: fetch origin {default_branch} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return;
+        }
+        Err(e) => {
+            log::warn!("worktree freshen: fetch origin {default_branch} failed: {e}");
+            return;
+        }
+    }
+    let start = format!("origin/{}", default_branch);
+    match safe_output(command("git").args(["-C", wt_str, "merge", "--ff-only", &start])) {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => log::info!(
+            "worktree freshen: fast-forward to {start} skipped (branch diverged or dirty): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => log::warn!("worktree freshen: fast-forward merge failed: {e}"),
+    }
+}
+
 /// Remove a worktree.
 pub fn remove_worktree(worktree_path: &Path, force: bool) -> GitResult<()> {
     let wt_str = path_str(worktree_path)?;

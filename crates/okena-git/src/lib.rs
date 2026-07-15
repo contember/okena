@@ -14,6 +14,8 @@ pub use commit_graph::fetch_commit_log;
 pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, get_file_contents_for_diff};
 pub use repository::{
     create_worktree,
+    create_worktree_with_start_point,
+    fetch_and_fast_forward,
     remove_worktree,
     remove_worktree_fast,
     get_available_branches_for_worktree,

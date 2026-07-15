@@ -409,15 +409,31 @@ pub async fn daemon_command_loop(
                     match prepared {
                         None => CommandResult::Err(format!("project not found: {project_id}")),
                         Some((git_root, worktree_path, wt_project_path)) => {
-                            // Phase 1: the blocking git worktree creation, OFF the
-                            // command-loop thread with NO workspace lock held.
+                            // Phase 1: create the worktree OFF the command-loop
+                            // thread (no workspace lock held). For a NEW branch, base
+                            // it on the LOCAL `origin/<default>` — NO blocking network
+                            // fetch — so the window appears immediately, and return
+                            // the default branch so phase 3 can freshen it to the true
+                            // remote tip in the background.
                             let git = {
                                 let git_root = git_root.clone();
                                 let branch = branch.clone();
                                 let target = std::path::PathBuf::from(&worktree_path);
                                 runtime
                                     .spawn_blocking(move || {
-                                        okena_git::create_worktree(&git_root, &branch, &target, create_branch)
+                                        if create_branch {
+                                            let default = okena_git::get_default_branch(&git_root);
+                                            okena_git::create_worktree_with_start_point(
+                                                &git_root,
+                                                &branch,
+                                                &target,
+                                                default.as_deref(),
+                                            )
+                                            .map(|()| default)
+                                        } else {
+                                            okena_git::create_worktree(&git_root, &branch, &target, false)
+                                                .map(|()| None)
+                                        }
                                     })
                                     .await
                             };
@@ -433,7 +449,7 @@ pub async fn daemon_command_loop(
                                     ),
                                     other => other.to_string(),
                                 }),
-                                Ok(Ok(())) => {
+                                Ok(Ok(default_branch)) => {
                                     // Phase 2: fast workspace mutation UNDER the lock
                                     // (register + fire hooks + spawn the initial PTY).
                                     let app_settings = settings.lock().clone();
@@ -463,6 +479,26 @@ pub async fn daemon_command_loop(
                                                 None,
                                                 &mut cx,
                                             );
+                                            drop(ws);
+                                            // Phase 3: freshen in the background — fetch
+                                            // origin/<default> and fast-forward the new
+                                            // branch to the true remote tip (ff-only,
+                                            // never clobbers). The window is already up;
+                                            // this runs off the reactor.
+                                            if let Some(default_branch) = default_branch {
+                                                let git_root = git_root.clone();
+                                                let worktree_path = worktree_path.clone();
+                                                tokio::task::spawn_local(async move {
+                                                    let _ = tokio::task::spawn_blocking(move || {
+                                                        okena_git::fetch_and_fast_forward(
+                                                            &git_root,
+                                                            std::path::Path::new(&worktree_path),
+                                                            &default_branch,
+                                                        )
+                                                    })
+                                                    .await;
+                                                });
+                                            }
                                             CommandResult::Ok(Some(serde_json::json!({
                                                 "project_id": new_id,
                                                 "path": wt_project_path,

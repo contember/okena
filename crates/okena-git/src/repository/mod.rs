@@ -40,8 +40,8 @@ pub use status::{
 };
 pub(crate) use status::worktree_diff;
 pub use worktree::{
-    create_worktree, create_worktree_with_start_point, list_git_worktrees, remove_worktree,
-    remove_worktree_fast,
+    create_worktree, create_worktree_with_start_point, fetch_and_fast_forward, list_git_worktrees,
+    remove_worktree, remove_worktree_fast,
 };
 
 /// Run a git command and return `Ok(())` if it exits successfully,
