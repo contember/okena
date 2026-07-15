@@ -476,6 +476,76 @@ pub async fn daemon_command_loop(
                     }
                 }
 
+                // ── Close worktree: run the blocking git removal off the reactor ─
+                // A plain (non-merge) close of a worktree with NO before_remove
+                // hook does a bare `git worktree remove`, whose expensive status
+                // checks + directory delete can block for SECONDS on a busy
+                // worktree (Docker holding files, a large tree), freezing the whole
+                // UI. Run that git off the command-loop thread: snapshot inputs +
+                // fire on_worktree_close under a brief lock, remove the git worktree
+                // on spawn_blocking with NO lock held, then finalize state under the
+                // lock. Merge closes and before_remove-hook closes (which defer
+                // removal to the PTY-exit handler) keep the existing sync path.
+                ActionRequest::CloseWorktree { project_id, merge, stash, fetch, push, delete_branch } => {
+                    let global_hooks = settings.lock().hooks.clone();
+                    let plan = {
+                        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                        let mut ws = workspace.lock();
+                        let fast = !merge
+                            && ws.project(&project_id).is_some_and(|p| {
+                                p.worktree_info.is_some()
+                                    && p.hooks.worktree.before_remove.is_none()
+                                    && global_hooks.worktree.before_remove.is_none()
+                            });
+                        if fast {
+                            Some(ws.begin_worktree_removal(&project_id, &global_hooks, &mut cx))
+                        } else {
+                            None
+                        }
+                    };
+                    match plan {
+                        // Not the fast path — run the full close pipeline synchronously.
+                        None => {
+                            let app_settings = settings.lock().clone();
+                            let mut ws = workspace.lock();
+                            run_main_workspace_action(
+                                ActionRequest::CloseWorktree { project_id, merge, stash, fetch, push, delete_branch },
+                                &mut ws,
+                                &mut focus_manager,
+                                &backend,
+                                &terminals,
+                                &app_settings,
+                                &workspace_tick,
+                                &hook_runner,
+                                &hook_monitor,
+                            )
+                        }
+                        Some(Err(e)) => CommandResult::Err(e),
+                        Some(Ok(plan)) => {
+                            // Off-reactor `git worktree remove` (force: the user
+                            // confirmed the close). NO lock held during the git.
+                            let git = {
+                                let worktree_path = plan.worktree_path.clone();
+                                runtime
+                                    .spawn_blocking(move || okena_git::remove_worktree(&worktree_path, true))
+                                    .await
+                            };
+                            match git {
+                                Err(join) => {
+                                    CommandResult::Err(format!("worktree removal task failed: {join}"))
+                                }
+                                Ok(Err(e)) => CommandResult::Err(e.to_string()),
+                                Ok(Ok(())) => {
+                                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                                    let mut ws = workspace.lock();
+                                    ws.finish_worktree_removal(&mut focus_manager, &plan, &global_hooks, &mut cx);
+                                    CommandResult::Ok(None)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── Default: workspace-scoped action ─────────────────────────
                 action => {
                     let git_poll_trigger = git_poll_trigger_for_action(&action);

@@ -11,6 +11,24 @@ use crate::persistence::HooksConfig;
 use crate::state::{LayoutNode, PendingWorktreeClose, ProjectData, Workspace, WindowId};
 use std::collections::HashMap;
 
+/// Captured inputs for a two-phase worktree removal. [`Workspace::begin_worktree_removal`]
+/// snapshots everything the finalize step needs (branch, paths, hooks) BEFORE the
+/// git worktree checkout is deleted, so the daemon can run the slow, blocking
+/// `git worktree remove` off the command-loop thread and then
+/// [`Workspace::finish_worktree_removal`] applies the state change from this
+/// snapshot — the checkout is gone by then, so branch/paths can't be re-read.
+pub struct WorktreeRemovalPlan {
+    pub project_id: String,
+    /// The git worktree root to remove (may differ from project.path for monorepos).
+    pub worktree_path: std::path::PathBuf,
+    main_repo_path: String,
+    branch: String,
+    project_hooks: HooksConfig,
+    project_name: String,
+    folder_id: Option<String>,
+    folder_name: Option<String>,
+}
+
 impl Workspace {
     /// Toggle visibility for a single worktree (no propagation to children).
     ///
@@ -432,71 +450,87 @@ impl Workspace {
         ))
     }
 
-    /// Remove a worktree project and its git worktree
+    /// Remove a worktree project and its git worktree (synchronous). Fires the
+    /// `on_worktree_close` hook, runs `git worktree remove`, then finalizes state.
+    /// Single entry point for in-process / GUI / test callers; the daemon splits
+    /// it via [`begin_worktree_removal`](Self::begin_worktree_removal) + an
+    /// off-reactor `git worktree remove` + [`finish_worktree_removal`](Self::finish_worktree_removal)
+    /// so the (slow, blocking) git call doesn't stall the command loop.
     pub fn remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) -> Result<(), String> {
+        let plan = self.begin_worktree_removal(project_id, global_hooks, cx)?;
+        okena_git::remove_worktree(&plan.worktree_path, force)
+            .map_err(|e| e.to_string())?;
+        self.finish_worktree_removal(focus_manager, &plan, global_hooks, cx);
+        Ok(())
+    }
+
+    /// Phase 1 of worktree removal: validate, snapshot the inputs the finalize
+    /// step needs, and fire `on_worktree_close` (which needs the worktree to
+    /// still exist for a valid CWD). Returns the plan; the caller then runs
+    /// `git worktree remove` (off-reactor on the daemon) and calls
+    /// [`finish_worktree_removal`](Self::finish_worktree_removal).
+    pub fn begin_worktree_removal(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) -> Result<WorktreeRemovalPlan, String> {
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
-
-        // Ensure it's a worktree project
         if project.worktree_info.is_none() {
             return Err("Not a worktree project".to_string());
         }
 
-        // Capture info before removal for the hook
+        // Snapshot everything BEFORE removal, while the project is still in state
+        // and its checkout exists on disk (git worktree remove deletes it).
         let folder = self.folder_for_project_or_parent(project_id);
-        let hook_folder_id = folder.map(|f| f.id.clone());
-        let hook_folder_name = folder.map(|f| f.name.clone());
+        let folder_id = folder.map(|f| f.id.clone());
+        let folder_name = folder.map(|f| f.name.clone());
         let project_hooks = project.hooks.clone();
         let project_name = project.name.clone();
         let project_path = project.path.clone();
-        // Parent (main repo) path — resolved BEFORE removal while the worktree
-        // project is still in state. The `worktree_removed` hook runs here
-        // because `git worktree remove` deletes the worktree checkout.
         let main_repo_path = self.worktree_parent_path(project_id).unwrap_or_default();
-        // For monorepos the project path is a subdirectory inside the worktree checkout.
-        // Resolve the actual worktree root via git so `git worktree remove` gets the right path.
+        // For monorepos the project path is a subdirectory inside the checkout;
+        // resolve the actual worktree root so `git worktree remove` gets it right.
         let project_pathbuf = std::path::PathBuf::from(&project_path);
         let worktree_path = okena_git::get_repo_root(&project_pathbuf)
             .unwrap_or(project_pathbuf);
-
-        // Resolve branch BEFORE removal (git worktree remove deletes the checkout)
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
 
-        // Fire on_worktree_close hook BEFORE removal so the hook has a valid CWD
+        // Fire on_worktree_close BEFORE removal so the hook has a valid CWD.
         let monitor = cx.hook_monitor();
+        hooks::fire_on_worktree_close_with_services(&project_hooks, project_id, &project_name, &project_path, &branch, folder_id.as_deref(), folder_name.as_deref(), global_hooks, monitor.as_ref());
+
+        Ok(WorktreeRemovalPlan {
+            project_id: project_id.to_string(),
+            worktree_path,
+            main_repo_path,
+            branch,
+            project_hooks,
+            project_name,
+            folder_id,
+            folder_name,
+        })
+    }
+
+    /// Phase 2 of worktree removal (after `git worktree remove` has run): delete
+    /// the project from workspace state (which fires `on_project_close`) and fire
+    /// the `worktree_removed` hook from the `plan` snapshot. This is the single
+    /// convergence point for every removal route, so the hook fires exactly once;
+    /// the checkout is gone, so it runs from `main_repo_path` (OKENA_BRANCH still
+    /// carries the removed branch). Results are discarded (fire-and-forget).
+    pub fn finish_worktree_removal(&mut self, focus_manager: &mut FocusManager, plan: &WorktreeRemovalPlan, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
         let runner = cx.hook_runner();
-        hooks::fire_on_worktree_close_with_services(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, monitor.as_ref());
-
-        // Remove the git worktree
-        okena_git::remove_worktree(&worktree_path, force)
-            .map_err(|e| e.to_string())?;
-
-        // Delete the project from workspace (this also fires on_project_close)
-        self.delete_project(focus_manager, project_id, global_hooks, cx);
-
-        // Fire the `worktree_removed` hook now that the worktree + project are
-        // gone. This is the single convergence point for every removal route —
-        // the RemoveWorktreeProject action, the CloseWorktree pipeline, and the
-        // daemon's deferred hook-close resolver all reach here — so the hook
-        // fires exactly once. The worktree checkout is deleted, so the hook runs
-        // from the main repo (`main_repo_path`); OKENA_BRANCH still carries the
-        // removed branch. Results are intentionally discarded (matching the GUI
-        // baseline — worktree_removed is a fire-and-forget notification hook).
+        let monitor = cx.hook_monitor();
+        self.delete_project(focus_manager, &plan.project_id, global_hooks, cx);
         let _ = hooks::fire_worktree_removed(
-            &project_hooks,
+            &plan.project_hooks,
             global_hooks,
-            project_id,
-            &project_name,
-            &main_repo_path,
-            &branch,
-            &main_repo_path,
-            hook_folder_id.as_deref(),
-            hook_folder_name.as_deref(),
+            &plan.project_id,
+            &plan.project_name,
+            &plan.main_repo_path,
+            &plan.branch,
+            &plan.main_repo_path,
+            plan.folder_id.as_deref(),
+            plan.folder_name.as_deref(),
             monitor.as_ref(),
             runner.as_ref(),
         );
-
-        Ok(())
     }
 
     /// Close a worktree project: optionally stash/fetch/rebase/merge/push/
