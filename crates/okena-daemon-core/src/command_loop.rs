@@ -540,7 +540,114 @@ pub async fn daemon_command_loop(
                         }
                     };
                     match plan {
-                        // Not the fast path — run the full close pipeline synchronously.
+                        // Not the fast path.
+                        None if merge => {
+                            // Merge close: run the merge pipeline (fetch / pre_merge
+                            // hook / push — network + up to a 300s hook) OFF the
+                            // reactor, then delegate the removal to the sync path with
+                            // merge DISABLED. That path recomputes is_dirty — clean
+                            // after a successful merge/stash — so `force_remove` stays
+                            // correct without threading `did_stash`, and a before_remove
+                            // hook there still defers removal to the (off-reactor)
+                            // PTY-exit handler.
+                            use okena_workspace::actions::worktree::{
+                                close_worktree_merge_git, CloseWorktreeGitOutcome,
+                            };
+                            let prep = {
+                                let ws = workspace.lock();
+                                ws.project(&project_id)
+                                    .filter(|p| p.worktree_info.is_some())
+                                    .map(|p| {
+                                        let folder = ws.folder_for_project_or_parent(&project_id);
+                                        (
+                                            p.name.clone(),
+                                            p.path.clone(),
+                                            p.hooks.clone(),
+                                            ws.worktree_parent_path(&project_id).unwrap_or_default(),
+                                            folder.map(|f| f.id.clone()),
+                                            folder.map(|f| f.name.clone()),
+                                        )
+                                    })
+                            };
+                            match prep {
+                                None => {
+                                    CommandResult::Err(format!("not a worktree project: {project_id}"))
+                                }
+                                Some((project_name, project_path, project_hooks, main_repo_path, folder_id, folder_name)) => {
+                                    // Phase 1: git reads + merge pipeline OFF the reactor.
+                                    let merge_outcome = {
+                                        let project_id = project_id.clone();
+                                        let global_hooks = global_hooks.clone();
+                                        let monitor = hook_monitor.clone();
+                                        let runner = hook_runner.clone();
+                                        runtime
+                                            .spawn_blocking(move || {
+                                                use std::path::Path;
+                                                let branch = okena_git::get_current_branch(Path::new(&project_path)).unwrap_or_default();
+                                                let default_branch = okena_git::get_default_branch(Path::new(&main_repo_path)).unwrap_or_default();
+                                                let is_dirty = okena_git::has_uncommitted_changes(Path::new(&project_path));
+                                                let merge_enabled = (!is_dirty || stash) && !branch.is_empty() && !default_branch.is_empty();
+                                                if merge_enabled {
+                                                    let stash_enabled = stash && is_dirty;
+                                                    close_worktree_merge_git(
+                                                        stash_enabled, fetch, push, delete_branch,
+                                                        &project_id, &project_name, &project_path,
+                                                        &branch, &default_branch, &main_repo_path,
+                                                        &project_hooks, &global_hooks,
+                                                        folder_id.as_deref(), folder_name.as_deref(),
+                                                        monitor.as_ref(), runner.as_ref(),
+                                                    )
+                                                } else {
+                                                    CloseWorktreeGitOutcome::Ok { did_stash: false }
+                                                }
+                                            })
+                                            .await
+                                    };
+                                    match merge_outcome {
+                                        Err(join) => {
+                                            CommandResult::Err(format!("worktree close task failed: {join}"))
+                                        }
+                                        Ok(CloseWorktreeGitOutcome::Err(e)) => CommandResult::Err(e),
+                                        Ok(CloseWorktreeGitOutcome::RebaseConflict { error, terminal_actions, hook_results }) => {
+                                            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                                            let mut ws = workspace.lock();
+                                            for (cmd, env) in terminal_actions {
+                                                ws.add_terminal_with_command(&project_id, &cmd, &env, &mut cx);
+                                            }
+                                            ws.register_hook_results(hook_results, &mut cx);
+                                            CommandResult::Err(error)
+                                        }
+                                        Ok(CloseWorktreeGitOutcome::Ok { .. }) => {
+                                            // Phase 2: removal (+ any before_remove hook)
+                                            // via the sync path, merge already applied.
+                                            let app_settings = settings.lock().clone();
+                                            let mut ws = workspace.lock();
+                                            run_main_workspace_action(
+                                                ActionRequest::CloseWorktree {
+                                                    project_id,
+                                                    merge: false,
+                                                    stash: false,
+                                                    fetch: false,
+                                                    push: false,
+                                                    delete_branch: false,
+                                                },
+                                                &mut ws,
+                                                &mut focus_manager,
+                                                &backend,
+                                                &terminals,
+                                                &app_settings,
+                                                &workspace_tick,
+                                                &hook_runner,
+                                                &hook_monitor,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // merge=false with a before_remove hook (or not a worktree):
+                        // the sync close registers the pending close fast; removal is
+                        // deferred to the (off-reactor) PTY-exit handler.
                         None => {
                             let app_settings = settings.lock().clone();
                             let mut ws = workspace.lock();

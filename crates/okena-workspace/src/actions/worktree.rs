@@ -30,6 +30,133 @@ pub struct WorktreeRemovalPlan {
     folder_name: Option<String>,
 }
 
+/// Result of the worktree-close merge pipeline ([`close_worktree_merge_git`]).
+/// The pipeline is pure git + headless hooks (no workspace access), so it can run
+/// off the daemon reactor; the caller applies the workspace-side effects.
+pub enum CloseWorktreeGitOutcome {
+    /// Merge (or a no-op merge) succeeded. `did_stash` gates `force_remove`.
+    Ok { did_stash: bool },
+    /// Rebase hit a conflict. The `on_rebase_conflict` hook produced these
+    /// terminal commands + hook results for the caller to apply under the lock,
+    /// then abort the close with `error`.
+    RebaseConflict {
+        error: String,
+        terminal_actions: Vec<(String, HashMap<String, String>)>,
+        hook_results: Vec<crate::hooks::HookTerminalResult>,
+    },
+    /// A git step (or the `pre_merge` hook) failed; stash-pop recovery already ran.
+    Err(String),
+}
+
+/// Restore a stash after a failed merge step (best-effort; a failed pop only warns).
+fn stash_pop_recover(did_stash: bool, project_path: &str, branch: &str, step: &str) {
+    if did_stash
+        && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(project_path))
+    {
+        log::warn!(
+            "Failed to restore stashed changes for worktree '{}' at {} after {} failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+            branch, project_path, step, pop_err
+        );
+    }
+}
+
+/// The worktree-close merge pipeline: stash → fetch → pre_merge hook → rebase →
+/// merge → post_merge hook → push → delete-branch, with stash-pop recovery on any
+/// failing step. PURE: only git subprocesses + headless hooks (monitor, no PTY
+/// runner), no `&mut Workspace` — so the daemon runs it on a blocking thread with
+/// no lock held. `on_rebase_conflict` is fired headless (no runner) and its
+/// terminal/hook results are RETURNED for the caller to apply, not spawned here.
+/// Call only when the merge is actually enabled.
+#[allow(clippy::too_many_arguments)] // cohesive close-pipeline inputs
+pub fn close_worktree_merge_git(
+    stash_enabled: bool,
+    fetch_enabled: bool,
+    push_enabled: bool,
+    delete_branch_enabled: bool,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    branch: &str,
+    default_branch: &str,
+    main_repo_path: &str,
+    project_hooks: &HooksConfig,
+    global_hooks: &HooksConfig,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    monitor: Option<&okena_hooks::HookMonitor>,
+    runner: Option<&okena_hooks::HookRunner>,
+) -> CloseWorktreeGitOutcome {
+    use std::path::Path;
+    let mut did_stash = false;
+
+    if stash_enabled {
+        if let Err(e) = okena_git::stash_changes(Path::new(project_path)) {
+            return CloseWorktreeGitOutcome::Err(format!("Stash failed: {}", e));
+        }
+        did_stash = true;
+    }
+
+    if fetch_enabled
+        && let Err(e) = okena_git::fetch_all(Path::new(project_path))
+    {
+        stash_pop_recover(did_stash, project_path, branch, "fetch");
+        return CloseWorktreeGitOutcome::Err(format!("Fetch failed: {}", e));
+    }
+
+    // pre_merge hook (sync, headless — no PTY runner).
+    if let Err(e) = hooks::fire_pre_merge(
+        project_hooks, global_hooks, project_id, project_name, project_path,
+        branch, default_branch, main_repo_path, folder_id, folder_name, monitor, None,
+    ) {
+        stash_pop_recover(did_stash, project_path, branch, "pre_merge hook");
+        return CloseWorktreeGitOutcome::Err(format!("pre_merge hook failed: {}", e));
+    }
+
+    // Rebase; on conflict, fire on_rebase_conflict headless and return its data.
+    if let Err(e) = okena_git::rebase_onto(Path::new(project_path), default_branch) {
+        let error_msg = e.to_string();
+        let (terminal_actions, hook_results) = hooks::fire_on_rebase_conflict(
+            project_hooks, global_hooks, project_id, project_name, project_path,
+            branch, default_branch, main_repo_path, &error_msg, folder_id, folder_name, monitor, runner,
+        );
+        stash_pop_recover(did_stash, project_path, branch, "rebase");
+        return CloseWorktreeGitOutcome::RebaseConflict {
+            error: format!("Rebase failed: {}", e),
+            terminal_actions,
+            hook_results,
+        };
+    }
+
+    // Merge (ff-only) in the main repo.
+    if let Err(e) = okena_git::merge_branch(Path::new(main_repo_path), branch, true) {
+        stash_pop_recover(did_stash, project_path, branch, "merge");
+        return CloseWorktreeGitOutcome::Err(format!("Merge failed: {}", e));
+    }
+
+    // post_merge hook (headless, fire-and-forget).
+    let _ = hooks::fire_post_merge(
+        project_hooks, global_hooks, project_id, project_name, project_path,
+        branch, default_branch, main_repo_path, folder_id, folder_name, monitor, runner,
+    );
+
+    if push_enabled
+        && let Err(e) = okena_git::push_branch(Path::new(main_repo_path), default_branch)
+    {
+        log::warn!("Push failed (continuing): {}", e);
+    }
+
+    if delete_branch_enabled {
+        if let Err(e) = okena_git::delete_local_branch(Path::new(main_repo_path), branch) {
+            log::warn!("Delete local branch failed (continuing): {}", e);
+        }
+        if let Err(e) = okena_git::delete_remote_branch(Path::new(main_repo_path), branch) {
+            log::warn!("Delete remote branch failed (continuing): {}", e);
+        }
+    }
+
+    CloseWorktreeGitOutcome::Ok { did_stash }
+}
+
 impl Workspace {
     /// Toggle visibility for a single worktree (no propagation to children).
     ///
@@ -584,137 +711,40 @@ impl Workspace {
         let monitor = cx.hook_monitor();
         let runner = cx.hook_runner();
 
-        let mut did_stash = false;
-
-        // Step 1: If merge enabled, run merge flow
-        if merge_enabled {
-            // Stash (if stash_enabled and is_dirty)
-            if stash_enabled {
-                if let Err(e) = okena_git::stash_changes(std::path::Path::new(&project_path)) {
-                    return Err(format!("Stash failed: {}", e));
-                }
-                did_stash = true;
-            }
-
-            // Fetch (if fetch_enabled)
-            if fetch_enabled
-                && let Err(e) = okena_git::fetch_all(std::path::Path::new(&project_path)) {
-                if did_stash
-                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
-                    log::warn!(
-                        "Failed to restore stashed changes for worktree '{}' at {} after fetch failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
-                        branch, project_path, pop_err
-                    );
-                }
-                return Err(format!("Fetch failed: {}", e));
-            }
-
-            // pre_merge hook (sync, headless — no PTY runner)
-            let pre_merge_result = hooks::fire_pre_merge(
-                &project_hooks,
-                global_hooks,
+        // Step 1: If merge enabled, run the merge pipeline (pure git + headless
+        // hooks — see `close_worktree_merge_git`; the daemon runs it off-reactor).
+        let did_stash = if merge_enabled {
+            match close_worktree_merge_git(
+                stash_enabled,
+                fetch_enabled,
+                push_enabled,
+                delete_branch_enabled,
                 project_id,
                 &project_name,
                 &project_path,
                 &branch,
                 &default_branch,
                 &main_repo_path,
-                folder_id.as_deref(),
-                folder_name.as_deref(),
-                monitor.as_ref(),
-                None,
-            );
-
-            if let Err(e) = pre_merge_result {
-                if did_stash
-                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
-                    log::warn!(
-                        "Failed to restore stashed changes for worktree '{}' at {} after pre_merge hook failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
-                        branch, project_path, pop_err
-                    );
-                }
-                return Err(format!("pre_merge hook failed: {}", e));
-            }
-
-            // Rebase
-            if let Err(e) = okena_git::rebase_onto(std::path::Path::new(&project_path), &default_branch) {
-                // Fire on_rebase_conflict hook
-                let error_msg = e.to_string();
-                let (terminal_actions, hook_results) = hooks::fire_on_rebase_conflict(
-                    &project_hooks,
-                    global_hooks,
-                    project_id,
-                    &project_name,
-                    &project_path,
-                    &branch,
-                    &default_branch,
-                    &main_repo_path,
-                    &error_msg,
-                    folder_id.as_deref(),
-                    folder_name.as_deref(),
-                    monitor.as_ref(),
-                    runner.as_ref(),
-                );
-                for (cmd, env) in terminal_actions {
-                    self.add_terminal_with_command(project_id, &cmd, &env, cx);
-                }
-                self.register_hook_results(hook_results, cx);
-
-                if did_stash
-                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
-                    log::warn!(
-                        "Failed to restore stashed changes for worktree '{}' at {} after rebase failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
-                        branch, project_path, pop_err
-                    );
-                }
-                return Err(format!("Rebase failed: {}", e));
-            }
-
-            // Merge (ff-only) in the main repo
-            if let Err(e) = okena_git::merge_branch(std::path::Path::new(&main_repo_path), &branch, true) {
-                if did_stash
-                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
-                    log::warn!(
-                        "Failed to restore stashed changes for worktree '{}' at {} after merge failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
-                        branch, project_path, pop_err
-                    );
-                }
-                return Err(format!("Merge failed: {}", e));
-            }
-
-            // post_merge hook (async)
-            let _ = hooks::fire_post_merge(
                 &project_hooks,
                 global_hooks,
-                project_id,
-                &project_name,
-                &project_path,
-                &branch,
-                &default_branch,
-                &main_repo_path,
                 folder_id.as_deref(),
                 folder_name.as_deref(),
                 monitor.as_ref(),
                 runner.as_ref(),
-            );
-
-            // Push default branch (if push_enabled)
-            if push_enabled
-                && let Err(e) = okena_git::push_branch(std::path::Path::new(&main_repo_path), &default_branch) {
-                log::warn!("Push failed (continuing): {}", e);
-            }
-
-            // Delete branch (if delete_branch_enabled)
-            if delete_branch_enabled {
-                if let Err(e) = okena_git::delete_local_branch(std::path::Path::new(&main_repo_path), &branch) {
-                    log::warn!("Delete local branch failed (continuing): {}", e);
+            ) {
+                CloseWorktreeGitOutcome::Ok { did_stash } => did_stash,
+                CloseWorktreeGitOutcome::RebaseConflict { error, terminal_actions, hook_results } => {
+                    for (cmd, env) in terminal_actions {
+                        self.add_terminal_with_command(project_id, &cmd, &env, cx);
+                    }
+                    self.register_hook_results(hook_results, cx);
+                    return Err(error);
                 }
-
-                if let Err(e) = okena_git::delete_remote_branch(std::path::Path::new(&main_repo_path), &branch) {
-                    log::warn!("Delete remote branch failed (continuing): {}", e);
-                }
+                CloseWorktreeGitOutcome::Err(e) => return Err(e),
             }
-        }
+        } else {
+            false
+        };
 
         let force_remove = is_dirty && !did_stash;
 
