@@ -40,6 +40,7 @@ use okena_hooks::{HookMonitor, HookRunner};
 use okena_services::manager::ServiceManager;
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_terminal::TerminalsRegistry;
+use okena_workspace::context::WorkspaceCx;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
 use okena_workspace::state::{HookTerminalStatus, Workspace};
@@ -547,6 +548,19 @@ fn handle_hook_terminal_exits(
                 // state (delete_project + worktree_removed) when it completes.
                 match ws.begin_worktree_removal(&pending.project_id, &global_hooks, &mut cx) {
                     Ok(plan) => {
+                        // OPTIMISTIC REMOVAL: delete the project from state NOW,
+                        // under the lock we already hold, so the client's row
+                        // vanishes immediately. Previously the removal ran the git
+                        // delete FIRST and only then `delete_project`, so the row
+                        // sat there (dimmed "Closing…") for the entire
+                        // `remove_dir_all` of the checkout — node_modules / build
+                        // output make that take seconds. Nothing re-adds worktree
+                        // projects from a scan (only explicit user create), so
+                        // early removal is safe; `on_worktree_removed` fires below,
+                        // once the checkout is physically gone.
+                        let mut focus_manager = FocusManager::new();
+                        ws.delete_project(&mut focus_manager, &plan.project_id, &global_hooks, &mut cx);
+
                         let workspace = reactor.workspace.clone();
                         let workspace_tick = reactor.workspace_tick.clone();
                         let hook_runner = reactor.hook_runner.clone();
@@ -559,17 +573,20 @@ fn handle_hook_terminal_exits(
                                 okena_git::remove_worktree_fast(&worktree_path, &main_repo_path)
                             })
                             .await;
-                            let mut focus_manager = FocusManager::new();
-                            let mut cx =
-                                DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                            let mut ws = workspace.lock();
                             match git {
-                                Ok(Ok(())) => ws.finish_worktree_removal(
-                                    &mut focus_manager,
-                                    &plan,
-                                    &global_hooks,
-                                    &mut cx,
-                                ),
+                                Ok(Ok(())) => {
+                                    // Checkout physically gone — fire the removed
+                                    // hook + notify so any resulting state reaches
+                                    // clients.
+                                    let mut cx = DaemonWorkspaceCx::new(
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                    );
+                                    let ws = workspace.lock();
+                                    ws.fire_worktree_removed_hook(&plan, &global_hooks, &mut cx);
+                                    cx.notify();
+                                }
                                 Ok(Err(e)) => log::error!(
                                     "worktree-close: git removal failed for {}: {e}",
                                     plan.project_id

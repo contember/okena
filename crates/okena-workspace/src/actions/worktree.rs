@@ -643,9 +643,19 @@ impl Workspace {
     /// the checkout is gone, so it runs from `main_repo_path` (OKENA_BRANCH still
     /// carries the removed branch). Results are discarded (fire-and-forget).
     pub fn finish_worktree_removal(&mut self, focus_manager: &mut FocusManager, plan: &WorktreeRemovalPlan, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
+        self.delete_project(focus_manager, &plan.project_id, global_hooks, cx);
+        self.fire_worktree_removed_hook(plan, global_hooks, cx);
+    }
+
+    /// Fire the `on_worktree_removed` hook. Split out of
+    /// [`finish_worktree_removal`](Self::finish_worktree_removal) so the
+    /// optimistic deferred-close path can `delete_project` immediately (the
+    /// client's row vanishes at once) and fire this only after the physical
+    /// directory delete finishes — preserving the hook's "actually removed"
+    /// semantics without making the row hang around for the whole `remove_dir_all`.
+    pub fn fire_worktree_removed_hook(&self, plan: &WorktreeRemovalPlan, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
         let runner = cx.hook_runner();
         let monitor = cx.hook_monitor();
-        self.delete_project(focus_manager, &plan.project_id, global_hooks, cx);
         let _ = hooks::fire_worktree_removed(
             &plan.project_hooks,
             global_hooks,
