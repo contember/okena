@@ -117,6 +117,9 @@ fn icon_style_for(filename: &str) -> Option<FileIconStyle> {
 /// Check for special filenames (case-insensitive) before falling back to extension.
 fn icon_style_for_special(filename: &str) -> Option<FileIconStyle> {
     let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".test.ts") {
+        return Some(FileIconStyle { color: 0x3178c6, label: "✓" });
+    }
     if lower == "dockerfile" || lower.starts_with("dockerfile.") {
         return Some(FileIconStyle { color: 0x2496ed, label: "dk" });
     }
@@ -185,5 +188,27 @@ pub fn file_icon(filename: &str, t: &ThemeColors, cx: &App) -> Div {
                         .child(label.to_ascii_uppercase()),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{icon_style_for, icon_style_for_special};
+
+    #[test]
+    fn typescript_test_file_uses_test_icon() {
+        let style = icon_style_for_special("file.test.ts").expect("test style");
+
+        assert_eq!(style.color, 0x3178c6);
+        assert_eq!(style.label, "✓");
+    }
+
+    #[test]
+    fn regular_typescript_file_keeps_typescript_icon() {
+        assert!(icon_style_for_special("file.ts").is_none());
+        let style = icon_style_for("file.ts").expect("TypeScript style");
+
+        assert_eq!(style.color, 0x3178c6);
+        assert_eq!(style.label, "ts");
     }
 }
