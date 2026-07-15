@@ -9,6 +9,8 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub(crate) const DIRECTORY_NOT_FOUND_ERROR: &str = "Directory no longer exists";
+
 /// One direct child of a directory.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirEntry {
@@ -43,7 +45,7 @@ pub fn list_directory(
         let joined = canonical_root.join(relative_path);
         let canonical = joined
             .canonicalize()
-            .map_err(|e| format!("Cannot read directory: {}", e))?;
+            .map_err(directory_read_error)?;
         if !canonical.starts_with(&canonical_root) {
             return Err("path traversal not allowed".to_string());
         }
@@ -51,7 +53,7 @@ pub fn list_directory(
     };
 
     let metadata = std::fs::metadata(&target)
-        .map_err(|e| format!("Cannot read directory: {}", e))?;
+        .map_err(directory_read_error)?;
     if !metadata.is_dir() {
         return Err(format!("Not a directory: {}", target.display()));
     }
@@ -108,6 +110,14 @@ pub fn list_directory(
     });
 
     Ok(entries)
+}
+
+fn directory_read_error(error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        DIRECTORY_NOT_FOUND_ERROR.to_string()
+    } else {
+        format!("Cannot read directory: {error}")
+    }
 }
 
 #[cfg(test)]
@@ -240,7 +250,7 @@ mod tests {
     fn errors_on_missing_path() {
         let tmp = TempDir::new().unwrap();
         let err = list_directory(tmp.path(), "nope/nada", false).unwrap_err();
-        assert!(err.contains("Cannot read directory"), "err = {}", err);
+        assert_eq!(err, DIRECTORY_NOT_FOUND_ERROR);
     }
 
     #[test]

@@ -41,6 +41,35 @@ const MAX_TABS: usize = 50;
 /// Maximum navigation history stack size
 const MAX_HISTORY: usize = 50;
 
+fn is_missing_directory_error(error: &str) -> bool {
+    error.contains(crate::list_directory::DIRECTORY_NOT_FOUND_ERROR)
+        // Keep recovery working while a client is connected to an older daemon.
+        || error.contains("(os error 2)")
+        || error.contains("(os error 3)")
+}
+
+fn is_path_or_descendant(path: &str, ancestor: &str) -> bool {
+    path == ancestor
+        || path
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn prune_missing_directory(
+    relative_path: &str,
+    loaded_dirs: &mut HashMap<String, Vec<DirEntry>>,
+    loading_dirs: &mut HashSet<String>,
+    expanded_folders: &mut HashSet<String>,
+) -> String {
+    loaded_dirs.retain(|path, _| !is_path_or_descendant(path, relative_path));
+    loading_dirs.retain(|path| !is_path_or_descendant(path, relative_path));
+    expanded_folders.retain(|path| !is_path_or_descendant(path, relative_path));
+
+    relative_path
+        .rsplit_once('/')
+        .map_or_else(String::new, |(parent, _)| parent.to_string())
+}
+
 /// Display mode for file viewer.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum DisplayMode {
@@ -815,8 +844,27 @@ impl FileViewer {
                             this.tree_error_message = None;
                         }
                     }
-                    Err(e) => {
-                        this.tree_error_message = Some(e);
+                    Err(error)
+                        if !relative_path.is_empty()
+                            && is_missing_directory_error(&error) =>
+                    {
+                        let parent = prune_missing_directory(
+                            &relative_path,
+                            &mut this.loaded_dirs,
+                            &mut this.loading_dirs,
+                            &mut this.expanded_folders,
+                        );
+                        let parent_is_current = parent.is_empty()
+                            || this.loaded_dirs.contains_key(&parent)
+                            || this.loading_dirs.contains(&parent)
+                            || this.expanded_folders.contains(&parent);
+                        if parent_is_current {
+                            this.loaded_dirs.remove(&parent);
+                            this.fetch_directory(parent, cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.tree_error_message = Some(error);
                         // Cache an empty vec so we don't retry on every render.
                         this.loaded_dirs.insert(relative_path.clone(), Vec::new());
                     }
@@ -1526,7 +1574,12 @@ impl Focusable for FileViewer {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileViewer, FileViewerTab, NavigationHistory, MAX_TABS};
+    use super::{
+        FileViewer, FileViewerTab, NavigationHistory, MAX_TABS, is_missing_directory_error,
+        prune_missing_directory,
+    };
+    use crate::list_directory::{DIRECTORY_NOT_FOUND_ERROR, DirEntry};
+    use std::collections::{HashMap, HashSet};
 
     fn tab(name: &str) -> FileViewerTab {
         FileViewerTab::new_loading(name.to_string(), name.into())
@@ -1678,5 +1731,64 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 50);
+    }
+
+    #[::core::prelude::v1::test]
+    fn recognizes_missing_directory_errors_from_current_and_older_daemons() {
+        assert!(is_missing_directory_error(DIRECTORY_NOT_FOUND_ERROR));
+        assert!(is_missing_directory_error(
+            "Server returned 400 Bad Request: {\"error\":\"Cannot read directory: No such file or directory (os error 2)\"}"
+        ));
+        assert!(!is_missing_directory_error(
+            "Server returned 500 Internal Server Error"
+        ));
+    }
+
+    #[::core::prelude::v1::test]
+    fn missing_directory_prunes_only_its_subtree() {
+        let mut loaded_dirs: HashMap<String, Vec<DirEntry>> = [
+            (String::new(), Vec::new()),
+            ("apps".to_string(), Vec::new()),
+            ("apps/deleted".to_string(), Vec::new()),
+            ("apps/deleted/nested".to_string(), Vec::new()),
+            ("apps/kept".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let mut loading_dirs = HashSet::from([
+            "apps/deleted/other".to_string(),
+            "apps/kept/other".to_string(),
+        ]);
+        let mut expanded_folders = HashSet::from([
+            "apps".to_string(),
+            "apps/deleted".to_string(),
+            "apps/deleted/nested".to_string(),
+            "apps/kept".to_string(),
+        ]);
+
+        let parent = prune_missing_directory(
+            "apps/deleted",
+            &mut loaded_dirs,
+            &mut loading_dirs,
+            &mut expanded_folders,
+        );
+
+        assert_eq!(parent, "apps");
+        assert_eq!(
+            loaded_dirs.keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([
+                String::new(),
+                "apps".to_string(),
+                "apps/kept".to_string(),
+            ])
+        );
+        assert_eq!(
+            loading_dirs,
+            HashSet::from(["apps/kept/other".to_string()])
+        );
+        assert_eq!(
+            expanded_folders,
+            HashSet::from(["apps".to_string(), "apps/kept".to_string()])
+        );
     }
 }
