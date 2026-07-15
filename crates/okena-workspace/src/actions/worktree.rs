@@ -21,7 +21,8 @@ pub struct WorktreeRemovalPlan {
     pub project_id: String,
     /// The git worktree root to remove (may differ from project.path for monorepos).
     pub worktree_path: std::path::PathBuf,
-    main_repo_path: String,
+    /// The main repo path — used for `git worktree prune` in the fast removal.
+    pub main_repo_path: String,
     branch: String,
     project_hooks: HooksConfig,
     project_name: String,

@@ -517,12 +517,6 @@ fn handle_hook_terminal_exits(
         }
 
         // Set hook status + resolve any pending worktree close.
-        //
-        // On a successful close the project deletion is done DIRECTLY here (the
-        // daemon owns the workspace). `delete_project` needs a `&mut
-        // FocusManager`; daemon focus state is dormant (never drives a render),
-        // so an ephemeral one is fine.
-        let mut focus_manager = FocusManager::new();
         let mut cx = reactor.workspace_cx();
         let mut ws = reactor.workspace.lock();
 
@@ -536,34 +530,61 @@ fn handle_hook_terminal_exits(
 
         if let Some(pending) = ws.take_pending_worktree_close(&tid) {
             if success {
-                // Drop the hook terminal record, then run the canonical
-                // worktree removal — the SAME path the normal
-                // `ActionRequest::RemoveWorktreeProject` action takes:
-                // fire `on_worktree_close`, `git worktree remove`, then
-                // `delete_project` (which fires `on_project_close`).
-                //
-                // The exited hook terminal is the `before_worktree_remove`
-                // hook (the one registered with this pending close), NOT
-                // `on_worktree_close`, so this does not double-fire any hook.
-                //
-                // `force = true`: this close was already gated by the user
-                // confirming AND the `before_worktree_remove` hook succeeding,
-                // so it must not be blocked by a dirty/locked working tree —
-                // matching the GUI's hook-close path, which removed the
-                // worktree unconditionally (`remove_worktree_fast`).
+                // The exited hook terminal is the `before_worktree_remove` hook
+                // registered with this pending close, NOT `on_worktree_close`, so
+                // firing `on_worktree_close` (in begin_worktree_removal) does not
+                // double-fire any hook.
                 ws.remove_hook_terminal(&tid, &mut cx);
-                if let Err(e) = ws.remove_worktree_project(
-                    &mut focus_manager,
-                    &pending.project_id,
-                    true,
-                    &global_hooks,
-                    &mut cx,
-                ) {
-                    log::error!(
-                        "worktree-close hook succeeded but remove_worktree_project failed for {}: {}",
-                        pending.project_id,
-                        e
-                    );
+
+                // Snapshot inputs + fire `on_worktree_close` under the lock, then
+                // run the removal OFF the reactor. Previously the whole removal —
+                // including `git worktree remove`, whose expensive status checks +
+                // directory delete take SECONDS on a busy worktree (Docker holding
+                // files) — ran synchronously here holding the workspace lock,
+                // freezing every other daemon action until it finished. Now we hold
+                // the lock only for the snapshot, run the git on a blocking thread
+                // (fast removal, matching the GUI's hook-close path), and finalize
+                // state (delete_project + worktree_removed) when it completes.
+                match ws.begin_worktree_removal(&pending.project_id, &global_hooks, &mut cx) {
+                    Ok(plan) => {
+                        let workspace = reactor.workspace.clone();
+                        let workspace_tick = reactor.workspace_tick.clone();
+                        let hook_runner = reactor.hook_runner.clone();
+                        let hook_monitor = reactor.hook_monitor.clone();
+                        let global_hooks = global_hooks.clone();
+                        tokio::task::spawn_local(async move {
+                            let worktree_path = plan.worktree_path.clone();
+                            let main_repo_path = std::path::PathBuf::from(&plan.main_repo_path);
+                            let git = tokio::task::spawn_blocking(move || {
+                                okena_git::remove_worktree_fast(&worktree_path, &main_repo_path)
+                            })
+                            .await;
+                            let mut focus_manager = FocusManager::new();
+                            let mut cx =
+                                DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                            let mut ws = workspace.lock();
+                            match git {
+                                Ok(Ok(())) => ws.finish_worktree_removal(
+                                    &mut focus_manager,
+                                    &plan,
+                                    &global_hooks,
+                                    &mut cx,
+                                ),
+                                Ok(Err(e)) => log::error!(
+                                    "worktree-close: git removal failed for {}: {e}",
+                                    plan.project_id
+                                ),
+                                Err(e) => log::error!(
+                                    "worktree-close: removal task failed for {}: {e}",
+                                    plan.project_id
+                                ),
+                            }
+                        });
+                    }
+                    Err(e) => log::error!(
+                        "worktree-close: begin_worktree_removal failed for {}: {e}",
+                        pending.project_id
+                    ),
                 }
             } else {
                 // Hook failed → abort the close: unmark the project as closing.
