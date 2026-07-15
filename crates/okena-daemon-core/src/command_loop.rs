@@ -54,6 +54,8 @@ use okena_terminal::TerminalsRegistry;
 use okena_workspace::actions::soft_close::{
     begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow,
 };
+use okena_workspace::actions::worktree::WorktreeRemovalPlan;
+use okena_workspace::context::WorkspaceCx;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
 use okena_workspace::state::{WindowId, Workspace};
@@ -113,6 +115,77 @@ fn publish_config_change_after_success(
     if matches!(result, CommandResult::Ok(_)) {
         state_version.send_modify(|version| *version = version.wrapping_add(1));
     }
+}
+
+/// Optimistic worktree removal, shared by the non-merge fast-close arm and the
+/// merge phase-2 close. `plan` must come from a completed `begin_worktree_removal`
+/// (so `on_worktree_close` has already fired).
+///
+/// Deletes the project from state + drains its queued terminal kills under a
+/// BRIEF lock, so the client's row vanishes immediately, then runs the slow
+/// `remove_dir_all` + `git worktree prune` on a blocking thread with NO lock
+/// held — this is what keeps a busy checkout (node_modules / Docker) from either
+/// freezing the daemon (lock held during the delete) or leaving the row dimmed
+/// for seconds (delete before removal, not after). `on_worktree_removed` fires
+/// once the checkout is physically gone. Returns `Ok(None)` right away so the
+/// client dialog closes without waiting for the disk delete.
+#[allow(clippy::too_many_arguments)]
+fn spawn_optimistic_worktree_removal(
+    plan: WorktreeRemovalPlan,
+    global_hooks: &okena_workspace::persistence::HooksConfig,
+    focus_manager: &mut FocusManager,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+) -> CommandResult {
+    // Brief lock: drop the project from state (row vanishes) + tear down its
+    // PTYs. delete_project only QUEUES kills, and this path bypasses the
+    // run_main_workspace_action drain, so we must drain them here or leak the
+    // worktree's dtach/tmux processes.
+    {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut ws = workspace.lock();
+        ws.delete_project(focus_manager, &plan.project_id, global_hooks, &mut cx);
+        for id in ws.drain_pending_terminal_kills() {
+            backend.kill(&id);
+            terminals.lock().remove(&id);
+        }
+    }
+
+    // Background: the slow directory delete + prune off the reactor, then fire
+    // on_worktree_removed now that the checkout is physically gone.
+    let workspace = workspace.clone();
+    let workspace_tick = workspace_tick.clone();
+    let hook_runner = hook_runner.clone();
+    let hook_monitor = hook_monitor.clone();
+    let global_hooks = global_hooks.clone();
+    tokio::task::spawn_local(async move {
+        let worktree_path = plan.worktree_path.clone();
+        let main_repo_path = std::path::PathBuf::from(&plan.main_repo_path);
+        let git = tokio::task::spawn_blocking(move || {
+            okena_git::remove_worktree_fast(&worktree_path, &main_repo_path)
+        })
+        .await;
+        match git {
+            Ok(Ok(())) => {
+                let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                let ws = workspace.lock();
+                ws.fire_worktree_removed_hook(&plan, &global_hooks, &mut cx);
+                cx.notify();
+            }
+            Ok(Err(e)) => {
+                log::error!("worktree-close: git removal failed for {}: {e}", plan.project_id)
+            }
+            Err(e) => {
+                log::error!("worktree-close: removal task failed for {}: {e}", plan.project_id)
+            }
+        }
+    });
+
+    CommandResult::Ok(None)
 }
 
 /// GPUI-free remote command loop for the headless daemon.
@@ -618,28 +691,65 @@ pub async fn daemon_command_loop(
                                             CommandResult::Err(error)
                                         }
                                         Ok(CloseWorktreeGitOutcome::Ok { .. }) => {
-                                            // Phase 2: removal (+ any before_remove hook)
-                                            // via the sync path, merge already applied.
-                                            let app_settings = settings.lock().clone();
-                                            let mut ws = workspace.lock();
-                                            run_main_workspace_action(
-                                                ActionRequest::CloseWorktree {
-                                                    project_id,
-                                                    merge: false,
-                                                    stash: false,
-                                                    fetch: false,
-                                                    push: false,
-                                                    delete_branch: false,
-                                                },
-                                                &mut ws,
-                                                &mut focus_manager,
-                                                &backend,
-                                                &terminals,
-                                                &app_settings,
-                                                &workspace_tick,
-                                                &hook_runner,
-                                                &hook_monitor,
-                                            )
+                                            // Phase 2: removal, merge already applied.
+                                            // Detect the fast path (no before_remove
+                                            // hook) under a BRIEF lock; if fast, remove
+                                            // OPTIMISTICALLY off the reactor. Previously
+                                            // this re-dispatched into remove_worktree_project
+                                            // while holding the workspace lock — a
+                                            // whole-daemon freeze for the entire git
+                                            // delete. With a before_remove hook, defer to
+                                            // the sync path (registers a pending close
+                                            // behind the hook PTY and returns fast).
+                                            let plan = {
+                                                let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                                                let mut ws = workspace.lock();
+                                                let fast = ws.project(&project_id).is_some_and(|p| {
+                                                    p.hooks.worktree.before_remove.is_none()
+                                                        && global_hooks.worktree.before_remove.is_none()
+                                                });
+                                                if fast {
+                                                    Some(ws.begin_worktree_removal(&project_id, &global_hooks, &mut cx))
+                                                } else {
+                                                    None
+                                                }
+                                            };
+                                            match plan {
+                                                Some(Ok(plan)) => spawn_optimistic_worktree_removal(
+                                                    plan,
+                                                    &global_hooks,
+                                                    &mut focus_manager,
+                                                    &workspace,
+                                                    &workspace_tick,
+                                                    &hook_runner,
+                                                    &hook_monitor,
+                                                    &backend,
+                                                    &terminals,
+                                                ),
+                                                Some(Err(e)) => CommandResult::Err(e),
+                                                None => {
+                                                    let app_settings = settings.lock().clone();
+                                                    let mut ws = workspace.lock();
+                                                    run_main_workspace_action(
+                                                        ActionRequest::CloseWorktree {
+                                                            project_id,
+                                                            merge: false,
+                                                            stash: false,
+                                                            fetch: false,
+                                                            push: false,
+                                                            delete_branch: false,
+                                                        },
+                                                        &mut ws,
+                                                        &mut focus_manager,
+                                                        &backend,
+                                                        &terminals,
+                                                        &app_settings,
+                                                        &workspace_tick,
+                                                        &hook_runner,
+                                                        &hook_monitor,
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -664,28 +774,21 @@ pub async fn daemon_command_loop(
                             )
                         }
                         Some(Err(e)) => CommandResult::Err(e),
-                        Some(Ok(plan)) => {
-                            // Off-reactor `git worktree remove` (force: the user
-                            // confirmed the close). NO lock held during the git.
-                            let git = {
-                                let worktree_path = plan.worktree_path.clone();
-                                runtime
-                                    .spawn_blocking(move || okena_git::remove_worktree(&worktree_path, true))
-                                    .await
-                            };
-                            match git {
-                                Err(join) => {
-                                    CommandResult::Err(format!("worktree removal task failed: {join}"))
-                                }
-                                Ok(Err(e)) => CommandResult::Err(e.to_string()),
-                                Ok(Ok(())) => {
-                                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                                    let mut ws = workspace.lock();
-                                    ws.finish_worktree_removal(&mut focus_manager, &plan, &global_hooks, &mut cx);
-                                    CommandResult::Ok(None)
-                                }
-                            }
-                        }
+                        // Fast path: plain non-merge close of a hook-less worktree.
+                        // Remove optimistically — drop the row now, delete the
+                        // checkout off the reactor — so the dialog closes instantly
+                        // instead of spinning for the full `remove_dir_all`.
+                        Some(Ok(plan)) => spawn_optimistic_worktree_removal(
+                            plan,
+                            &global_hooks,
+                            &mut focus_manager,
+                            &workspace,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                            &backend,
+                            &terminals,
+                        ),
                     }
                 }
 
