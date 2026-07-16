@@ -559,11 +559,15 @@ pub async fn daemon_command_loop(
                                                     let mut ws = workspace.lock();
                                                     // Seeds the layout from the parent, then fires on_worktree_create.
                                                     ws.fire_worktree_hooks(&new_id_task, &app_settings.hooks, &mut cx);
+                                                    // Clear creating BEFORE spawning — spawn_uninitialized_terminals
+                                                    // no-ops while is_creating (guards against spawning into a
+                                                    // not-yet-checked-out worktree). The checkout is done here, so the
+                                                    // dir exists and the PTYs must actually spawn.
+                                                    ws.finish_creating_project(&new_id_task);
                                                     let _ = spawn_uninitialized_terminals(
                                                         &mut ws, &new_id_task, &*backend, &terminals,
                                                         &app_settings, None, &mut cx,
                                                     );
-                                                    ws.finish_creating_project(&new_id_task);
                                                     ws.notify_data(&mut cx);
                                                 }
                                                 // Freshen (ff-only) in the background.
