@@ -583,13 +583,19 @@ pub async fn daemon_command_loop(
                                                 }
                                             }
                                             result => {
-                                                let msg = match result {
-                                                    Ok(Err(okena_git::GitError::WorktreeExists { path })) => format!(
-                                                        "Directory '{}' is already an active worktree",
-                                                        path.display()
+                                                // is_collision = the target is ALREADY an active
+                                                // worktree; never clean that up (it belongs to
+                                                // someone else), only partial checkouts we started.
+                                                let (msg, is_collision) = match result {
+                                                    Ok(Err(okena_git::GitError::WorktreeExists { path })) => (
+                                                        format!(
+                                                            "Directory '{}' is already an active worktree",
+                                                            path.display()
+                                                        ),
+                                                        true,
                                                     ),
-                                                    Ok(Err(e)) => e.to_string(),
-                                                    Err(join) => format!("worktree creation task failed: {join}"),
+                                                    Ok(Err(e)) => (e.to_string(), false),
+                                                    Err(join) => (format!("worktree creation task failed: {join}"), false),
                                                     Ok(Ok(_)) => unreachable!("success handled above"),
                                                 };
                                                 // Roll the optimistic row back. Clear creating
@@ -607,6 +613,20 @@ pub async fn daemon_command_loop(
                                                 log::error!("worktree-create: {branch} failed: {msg}");
                                                 if let Some(hm) = &hook_monitor {
                                                     hm.push_toast(okena_state::Toast::error(msg));
+                                                }
+                                                // Clean up any partial checkout git left on disk
+                                                // (dir + stale registration) so a failed create
+                                                // never leaves an empty orphaned worktree folder —
+                                                // but NOT when the target was already an active
+                                                // worktree (that dir isn't ours to delete).
+                                                if !is_collision {
+                                                    let _ = tokio::task::spawn_blocking(move || {
+                                                        let _ = okena_git::remove_worktree_fast(
+                                                            std::path::Path::new(&worktree_path),
+                                                            &git_root,
+                                                        );
+                                                    })
+                                                    .await;
                                                 }
                                             }
                                         }
