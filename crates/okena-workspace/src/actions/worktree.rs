@@ -775,6 +775,14 @@ impl Workspace {
         global_hooks: &HooksConfig,
         cx: &mut impl WorkspaceCx,
     ) -> Result<(), String> {
+        // Reject up front while the worktree is still being created — before a
+        // before_remove hook is spawned and a pending close (with its mirrored
+        // `is_closing` marker) is registered. `begin_worktree_removal` has the
+        // same guard as the backstop for every removal route, but by then the
+        // hook has already run and the closing state would need unwinding.
+        if self.lifecycle.is_creating(project_id) {
+            return Err("worktree is still being created".to_string());
+        }
         // Recompute the git-derived values authoritatively (don't trust the client).
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;

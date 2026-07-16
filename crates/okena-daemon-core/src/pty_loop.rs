@@ -628,10 +628,29 @@ fn handle_hook_terminal_exits(
                             }
                         });
                     }
-                    Err(e) => log::error!(
-                        "worktree-close: begin_worktree_removal failed for {}: {e}",
-                        pending.project_id
-                    ),
+                    Err(e) => {
+                        // The removal was rejected after the hook already ran
+                        // (e.g. the worktree is still mid-create). Abort like the
+                        // hook-failure arm below: clear the mirrored `is_closing`
+                        // marker so no client sticks at "Closing…" (and so the
+                        // create-failure rollback isn't blocked by a closing
+                        // project), notify, and toast why.
+                        log::error!(
+                            "worktree-close: begin_worktree_removal failed for {}: {e}",
+                            pending.project_id
+                        );
+                        let project_name = ws
+                            .project(&pending.project_id)
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| pending.project_id.clone());
+                        ws.finish_closing_project(&pending.project_id);
+                        cx.notify();
+                        if let Some(hm) = reactor.hook_monitor.as_ref() {
+                            hm.push_toast(okena_state::Toast::error(format!(
+                                "\"{project_name}\" was not closed: {e}"
+                            )));
+                        }
+                    }
                 }
             } else {
                 // Hook failed → abort the close: unmark the project as closing
