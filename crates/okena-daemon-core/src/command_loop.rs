@@ -2135,6 +2135,112 @@ mod tests {
         );
     }
 
+    /// A parent project plus a worktree child whose row is present but whose
+    /// checkout is still being created (marked via `mark_creating_project` by
+    /// the caller). Mirrors the optimistic-create window where the row exists
+    /// but `git worktree add` hasn't finished.
+    fn workspace_with_worktree_child() -> WorkspaceData {
+        use okena_state::{LayoutNode, ProjectData, WorktreeMetadata};
+        let mk = |id: &str, worktree_info: Option<WorktreeMetadata>, worktree_ids: Vec<String>| {
+            ProjectData {
+                id: id.to_string(),
+                name: format!("Project {id}"),
+                path: "/tmp".to_string(),
+                layout: Some(LayoutNode::Terminal {
+                    terminal_id: None,
+                    minimized: false,
+                    detached: false,
+                    shell_type: ShellType::Default,
+                    zoom_level: 1.0,
+                }),
+                terminal_names: Default::default(),
+                hidden_terminals: Default::default(),
+                worktree_info,
+                worktree_ids,
+                folder_color: Default::default(),
+                hooks: Default::default(),
+                is_remote: false,
+                connection_id: None,
+                service_terminals: Default::default(),
+                default_shell: None,
+                hook_terminals: Default::default(),
+                pinned: false,
+                last_activity_at: None,
+                is_creating: false,
+                is_closing: false,
+            }
+        };
+        let parent = mk("p1", None, vec!["wt1".to_string()]);
+        let child = mk(
+            "wt1",
+            Some(WorktreeMetadata {
+                parent_project_id: "p1".to_string(),
+                color_override: None,
+                main_repo_path: "/tmp".to_string(),
+                worktree_path: "/tmp/worktrees/wt1".to_string(),
+                branch_name: String::new(),
+            }),
+            Vec::new(),
+        );
+        WorkspaceData {
+            version: 1,
+            projects: vec![parent, child],
+            project_order: vec!["p1".to_string()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
+    /// A worktree row whose optimistic create is still in flight (`is_creating`)
+    /// must reject a generic `DeleteProject` action rather than dropping the row
+    /// mid-checkout — otherwise the delete races the background `git worktree
+    /// add` and strands an orphaned, git-registered worktree with no row. The
+    /// guard lives in the generic `delete_project` execute wrapper, so it must
+    /// hold on this daemon path too.
+    #[test]
+    fn delete_project_rejected_while_worktree_creating() {
+        let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let mut workspace = Workspace::new(workspace_with_worktree_child());
+        // Seed the transient creating state the way the daemon does — a freshly
+        // constructed `Workspace` starts with an empty lifecycle tracker, so the
+        // persisted `is_creating` mirror alone would not trip the guard.
+        workspace.mark_creating_project("wt1");
+        let mut focus_manager = FocusManager::new();
+        let settings = default_settings();
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+
+        let result = run_main_workspace_action(
+            ActionRequest::DeleteProject {
+                project_id: "wt1".to_string(),
+            },
+            &mut workspace,
+            &mut focus_manager,
+            &backend,
+            &terminals,
+            &settings,
+            &workspace_tick,
+            &None,
+            &None,
+        );
+
+        assert!(
+            matches!(&result, CommandResult::Err(e) if e == "worktree is still being created"),
+            "mid-create delete must be rejected: {result:?}"
+        );
+        assert!(
+            workspace.project("wt1").is_some(),
+            "the worktree row survives the rejected delete"
+        );
+        assert!(
+            workspace.is_creating_project("wt1"),
+            "creating flag untouched by the rejected delete"
+        );
+    }
+
     #[test]
     fn successful_config_changes_advance_state_version() {
         let (state_version, receiver) = watch::channel(7);

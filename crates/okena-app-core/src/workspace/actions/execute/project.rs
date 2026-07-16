@@ -181,10 +181,23 @@ pub(super) fn delete_project(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return project_not_found(&project_id);
+    }
+    // Reject while the worktree is still being created: the optimistic create
+    // registers the row and returns before its background `git worktree add`
+    // finishes, so dropping the row now would race the in-flight checkout and
+    // strand an orphaned, git-registered worktree with no workspace entry.
+    // Mirrors the `is_creating` guard on the close/removal routes
+    // (`close_worktree`, `begin_worktree_removal`). Guarded here, not inside
+    // `Workspace::delete_project` — its finalize/rollback callers invoke that
+    // AFTER their own guards.
+    if ws.is_creating_project(&project_id) {
+        return ActionResult::Err("worktree is still being created".to_string());
+    }
     let global_hooks = settings.hooks.clone();
-    with_existing_project(ws, &project_id, |ws| {
-        ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
-    })
+    ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
+    ActionResult::Ok(None)
 }
 
 pub(super) fn set_show_in_overview(
