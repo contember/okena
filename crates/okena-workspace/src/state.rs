@@ -466,10 +466,18 @@ impl Workspace {
 
     pub fn mark_creating_project(&mut self, project_id: &str) {
         self.lifecycle.mark_creating(project_id);
+        // Mirror onto the persisted/wire-facing marker so the flag survives a
+        // daemon restart and reaches clients (the in-memory tracker does neither).
+        if let Some(p) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+            p.is_creating = true;
+        }
     }
 
     pub fn finish_creating_project(&mut self, project_id: &str) {
         self.lifecycle.finish_creating(project_id);
+        if let Some(p) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+            p.is_creating = false;
+        }
     }
 
     pub fn mark_worktree_removing(&mut self, path: &str) {
@@ -480,12 +488,30 @@ impl Workspace {
         self.lifecycle.finish_worktree_removing(path);
     }
 
+    /// Client-side optimistic mark: sets only the in-memory tracker so the
+    /// initiating client dims the row instantly. The authoritative daemon flag
+    /// arrives via the mirror (`ProjectData::is_closing`); do NOT set the
+    /// wire-facing marker here or a stale local set could out-live the mirror.
     pub fn mark_closing_project(&mut self, project_id: &str) {
         self.lifecycle.mark_closing(project_id);
     }
 
     pub fn finish_closing_project(&mut self, project_id: &str) {
         self.lifecycle.finish_closing(project_id);
+        // Clear the wire-facing marker too: on the daemon this is the abort path
+        // (before-remove hook failed), and mirroring the cleared flag is what
+        // heals the client's "Closing…" row.
+        self.set_project_closing_flag(project_id, false);
+    }
+
+    /// Mirror the closing lifecycle state onto the wire-facing `is_closing`
+    /// marker on `ProjectData` so the daemon's authoritative closing state
+    /// reaches thin clients (the in-memory lifecycle tracker is neither
+    /// persisted nor mirrored).
+    fn set_project_closing_flag(&mut self, project_id: &str, closing: bool) {
+        if let Some(p) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+            p.is_closing = closing;
+        }
     }
 
     // === Terminal kill queue ===
@@ -680,6 +706,10 @@ impl Workspace {
 
     /// Register a pending worktree close that will execute when the hook terminal exits.
     pub fn register_pending_worktree_close(&mut self, pending: PendingWorktreeClose) {
+        // Set the wire-facing marker so clients render "Closing…" authoritatively
+        // for the whole before-remove hook window (not just off their optimistic
+        // flag), and so an abort that clears it heals the row.
+        self.set_project_closing_flag(&pending.project_id, true);
         self.lifecycle.register_pending_close(pending);
     }
 
@@ -690,7 +720,9 @@ impl Workspace {
 
     /// Cancel a pending worktree close: remove it and unmark the project as closing.
     pub fn cancel_pending_worktree_close(&mut self, terminal_id: &str) {
-        self.lifecycle.cancel_pending_close(terminal_id);
+        if let Some(project_id) = self.lifecycle.cancel_pending_close(terminal_id) {
+            self.set_project_closing_flag(&project_id, false);
+        }
     }
 
     /// Check if a project is currently being closed (hook running or removal in progress).
@@ -919,6 +951,23 @@ impl Workspace {
             window_id,
         );
 
+        // Heal the optimistic client-side "closing" flag against the daemon's
+        // authoritative mirror. The dialog marks a project closing locally before
+        // dispatch for instant feedback; the daemon then sets `is_closing` on the
+        // mirrored project while the before-remove hook runs and clears it on
+        // abort. Keep the local flag only while the mirror still reports closing —
+        // any project the mirror reports as not-closing (hook aborted) or that
+        // vanished when the close completed drops its local flag, so an aborted
+        // close no longer strands the row dimmed "Closing…" forever.
+        let still_closing: std::collections::HashSet<String> = self
+            .data
+            .projects
+            .iter()
+            .filter(|p| p.is_closing)
+            .map(|p| p.id.clone())
+            .collect();
+        self.lifecycle.retain_closing(&still_closing);
+
         for target in outcome.focus_targets {
             self.set_focused_terminal(focus_manager, target.project_id, target.layout_path, cx);
         }
@@ -995,6 +1044,8 @@ mod workspace_tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -1761,6 +1812,8 @@ mod gpui_tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 

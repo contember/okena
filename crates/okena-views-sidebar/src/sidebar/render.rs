@@ -197,7 +197,10 @@ impl Sidebar {
             let mut idx_map = HashMap::new();
             for (idx, project) in workspace.data().projects.iter().enumerate() {
                 let mut info = SidebarProjectInfo::from_project(project, workspace, self.window_id);
-                info.is_closing = workspace.is_project_closing(&project.id);
+                // Mirrored daemon flag OR the client-local optimistic flag: the
+                // mirror is authoritative (and heals on abort), the local flag
+                // gives instant feedback before the daemon acknowledges.
+                info.is_closing = project.is_closing || workspace.is_project_closing(&project.id);
                 let has_attention = info.terminal_ids.iter().any(|tid| {
                     terminals.get(tid.as_str()).is_some_and(|t| t.has_bell() || t.has_notification())
                 });
@@ -680,7 +683,7 @@ impl Render for Sidebar {
                 for wt_id in &parent.worktree_ids {
                     if let Some(&p) = all_projects.get(wt_id.as_str()) {
                         let mut info = SidebarProjectInfo::from_project(p, workspace, self.window_id);
-                        info.is_closing = workspace.is_project_closing(&p.id);
+                        info.is_closing = p.is_closing || workspace.is_project_closing(&p.id);
                         // Inherit parent project's color for visual association
                         info.folder_color = parent.folder_color;
                         children.push(info);
@@ -710,7 +713,7 @@ impl Render for Sidebar {
                         info.is_orphan = p.worktree_info.as_ref().is_some_and(|wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
-                        info.is_closing = workspace.is_project_closing(&p.id);
+                        info.is_closing = p.is_closing || workspace.is_project_closing(&p.id);
                         info
                     })
                     .collect();
@@ -750,7 +753,7 @@ impl Render for Sidebar {
                 project_info.is_orphan = project.worktree_info.as_ref().is_some_and(|wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
-                project_info.is_closing = workspace.is_project_closing(&project.id);
+                project_info.is_closing = project.is_closing || workspace.is_project_closing(&project.id);
                 project_info.worktree_count = wt_children.len();
 
                 if !wt_children.is_empty() {

@@ -1323,8 +1323,22 @@ pub fn cli_worktree_add(project: &str, branch: &str, new_branch: bool) -> i32 {
     });
     match api_action(&token, &body.to_string()) {
         Ok(resp) => {
-            // Returns {project_id, terminal_id, path} — print project_id and path.
+            // Returns {project_id, path, pending} — print project_id and path to
+            // stdout (scripting). The create is OPTIMISTIC: `pending: true` means
+            // the checkout is still running in the background, so `path` does not
+            // exist on disk yet — warn on stderr so a script does not `cd` into it
+            // immediately. On a later background failure the row is removed from
+            // state (observable via `okena ls` / `okena state`) plus a toast.
             print_response_ids(&resp, &["project_id", "path"]);
+            let pending = serde_json::from_str::<serde_json::Value>(&resp)
+                .ok()
+                .and_then(|v| v.get("pending").and_then(|p| p.as_bool()))
+                .unwrap_or(false);
+            if pending {
+                eprintln!(
+                    "worktree creation started in the background; the path will exist once the checkout completes"
+                );
+            }
             0
         }
         Err(e) => {

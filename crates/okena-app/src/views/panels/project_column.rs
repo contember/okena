@@ -977,12 +977,13 @@ impl Render for ProjectColumn {
             Some(project) => {
                 let has_layout = project.layout.is_some();
 
-                // A worktree mirrored with no layout is mid-create: the daemon
-                // registers the row before the git checkout (layout stays None
-                // until it finishes), so we show the "Setting up worktree…"
-                // placeholder. Derived from mirrored data — the client-local
-                // mark_creating flag is never set for remote projects.
-                let is_creating = project.worktree_info.is_some() && !has_layout;
+                // Explicit mid-create marker set by the daemon while the git
+                // checkout runs and mirrored over the wire — shows the "Setting
+                // up worktree…" placeholder. NOT derived from `!has_layout`: a
+                // worktree whose last terminal the user closed is a legitimate
+                // bookmark (layout None) and must fall through to the empty state
+                // with its Start Terminal button, not the creating placeholder.
+                let is_creating = project.is_creating;
 
                 // Soft tinted background based on folder color (when enabled)
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {
@@ -1118,6 +1119,8 @@ mod tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 

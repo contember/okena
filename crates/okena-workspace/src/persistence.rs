@@ -932,12 +932,23 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
     // If the checkout dir now EXISTS (so it isn't stale above), seed a terminal
     // so it opens a shell instead of hanging on the "Setting up worktree…"
     // placeholder forever.
+    //
+    // Gated on the persisted `is_creating` marker so we only touch worktrees
+    // genuinely interrupted mid-create. A worktree the user deliberately emptied
+    // (closed its last terminal -> layout:None bookmark) has is_creating == false
+    // and is left untouched — seeding a shell there would silently un-bookmark it
+    // and resurrect a shell on every restart.
     for p in data.projects.iter_mut() {
-        if p.worktree_info.is_some()
+        if p.is_creating
+            && p.worktree_info.is_some()
             && p.layout.is_none()
             && Path::new(&p.path).exists()
         {
             p.layout = Some(LayoutNode::new_terminal());
+            // Checkout exists and the layout is now seeded — the create is
+            // effectively finalized, so clear the marker (materialize spawns the
+            // PTY and the row renders as a normal worktree, not "creating").
+            p.is_creating = false;
         }
     }
 }
@@ -969,6 +980,8 @@ pub fn default_workspace() -> WorkspaceData {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }],
         project_order: vec![project_id],
         service_panel_heights: HashMap::new(),
@@ -1374,6 +1387,8 @@ mod tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -2106,13 +2121,15 @@ mod tests {
 
     #[test]
     fn sync_worktrees_seeds_layout_for_mid_create_worktree() {
-        // Optimistic create registers a worktree with layout:None before the git
-        // checkout; a daemon kill could persist that. On reload, if the checkout
-        // dir now exists, seed a layout so it opens a shell instead of hanging on
-        // the "Setting up worktree…" placeholder.
+        // Optimistic create registers a worktree with layout:None and the
+        // is_creating marker before the git checkout; a daemon kill could persist
+        // that. On reload, if the checkout dir now exists, seed a layout so it
+        // opens a shell instead of hanging on the "Setting up worktree…"
+        // placeholder — and clear the now-stale marker.
         let mut wt = make_project("wt1");
         wt.path = std::env::temp_dir().to_string_lossy().to_string();
         wt.layout = None;
+        wt.is_creating = true;
         wt.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -2126,6 +2143,32 @@ mod tests {
 
         let wt = data.projects.iter().find(|p| p.id == "wt1").expect("worktree kept");
         assert!(wt.layout.is_some(), "mid-create worktree with an existing dir gets a seeded layout");
+        assert!(!wt.is_creating, "the mid-create marker is cleared once the layout is seeded");
+    }
+
+    #[test]
+    fn sync_worktrees_leaves_deliberate_bookmark_untouched() {
+        // A worktree the user deliberately emptied (closed its last terminal ->
+        // layout:None bookmark) has is_creating == false. The self-heal must NOT
+        // seed a terminal for it, or every restart would silently un-bookmark it
+        // and resurrect a shell. Only genuinely mid-create worktrees self-heal.
+        let mut wt = make_project("wt1");
+        wt.path = std::env::temp_dir().to_string_lossy().to_string();
+        wt.layout = None;
+        wt.is_creating = false;
+        wt.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
+        });
+
+        let mut data = make_workspace(vec![make_project("p1"), wt], vec!["p1", "wt1"], vec![]);
+        sync_worktrees(&mut data);
+
+        let wt = data.projects.iter().find(|p| p.id == "wt1").expect("bookmark kept");
+        assert!(wt.layout.is_none(), "a deliberate bookmark (is_creating false) keeps layout None");
     }
 
     #[test]

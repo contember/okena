@@ -45,6 +45,7 @@ fn intern_hook_type(s: &str) -> &'static str {
         "worktree_removed" => "worktree_removed",
         "on_rebase_conflict" => "on_rebase_conflict",
         "on_dirty_worktree_close" => "on_dirty_worktree_close",
+        "terminal.on_close" => "terminal.on_close",
         _ => "unknown",
     }
 }
@@ -482,6 +483,41 @@ mod tests {
                 assert_eq!(stderr, "boom");
             }
             _ => panic!("status kind not preserved"),
+        }
+    }
+
+    #[test]
+    fn from_api_interns_every_recorded_hook_type() {
+        // Every literal passed to a `run_hook*` -> `record_start` call site in
+        // hooks.rs must round-trip through interning without falling to
+        // "unknown"; a thin client re-interns mirrored history and would
+        // otherwise mislabel these in the Hook Log.
+        for ty in [
+            "on_project_open",
+            "on_project_close",
+            "on_worktree_create",
+            "on_worktree_close",
+            "pre_merge",
+            "post_merge",
+            "before_worktree_remove",
+            "worktree_removed",
+            "on_rebase_conflict",
+            "on_dirty_worktree_close",
+            "terminal.on_close",
+        ] {
+            let api = ApiHookExecution {
+                id: 1,
+                hook_type: ty.into(),
+                command: "x".into(),
+                project_name: "p".into(),
+                status: ApiHookStatus::Running,
+                terminal_id: None,
+            };
+            assert_eq!(
+                HookExecution::from_api(&api).hook_type,
+                ty,
+                "hook type {ty:?} must intern to itself, not \"unknown\""
+            );
         }
     }
 

@@ -403,7 +403,7 @@ fn handle_exits(
         }
     }
     let hook_tids =
-        handle_hook_terminal_exits(exit_events, &service_tids, reactor);
+        handle_hook_terminal_exits(exit_events, &service_tids, terminals, pty_manager, reactor);
 
     // ── 3. terminal.on_close for plain user terminals ───────────────────────
     // Same gating as the GUI: a global, project, OR parent-worktree on_close
@@ -490,6 +490,8 @@ fn handle_exits(
 fn handle_hook_terminal_exits(
     exit_events: &[(String, Option<u32>)],
     service_tids: &HashSet<String>,
+    terminals: &TerminalsRegistry,
+    pty_manager: &PtyManager,
     reactor: &PtyLoopReactor,
 ) -> HashSet<String> {
     let hook_tids: HashSet<String> = {
@@ -561,6 +563,18 @@ fn handle_hook_terminal_exits(
                         let mut focus_manager = FocusManager::new();
                         ws.delete_project(&mut focus_manager, &plan.project_id, &global_hooks, &mut cx);
 
+                        // Drain the terminal kills delete_project just QUEUED. The
+                        // worktree's shells hold CWDs inside the checkout, and on
+                        // Windows a live CWD locks the directory so the background
+                        // remove_dir_all fails — kill them BEFORE the delete runs.
+                        // (delete_project only queues; this path bypasses the
+                        // run_main_workspace_action drain, mirroring the command_loop
+                        // optimistic-removal helper.)
+                        for id in ws.drain_pending_terminal_kills() {
+                            pty_manager.kill(&id);
+                            terminals.lock().remove(&id);
+                        }
+
                         let workspace = reactor.workspace.clone();
                         let workspace_tick = reactor.workspace_tick.clone();
                         let hook_runner = reactor.hook_runner.clone();
@@ -587,10 +601,26 @@ fn handle_hook_terminal_exits(
                                     ws.fire_worktree_removed_hook(&plan, &global_hooks, &mut cx);
                                     cx.notify();
                                 }
-                                Ok(Err(e)) => log::error!(
-                                    "worktree-close: git removal failed for {}: {e}",
-                                    plan.project_id
-                                ),
+                                Ok(Err(e)) => {
+                                    // Delete failed (busy checkout: Windows file
+                                    // lock, EBUSY/EACCES on a Docker bind mount).
+                                    // The row is already gone from every client,
+                                    // but the checkout + its git registration
+                                    // survive. Surface the orphaned path so the
+                                    // user can clean it up, and do NOT fire
+                                    // on_worktree_removed (its "physically gone"
+                                    // contract is now false).
+                                    log::error!(
+                                        "worktree-close: git removal failed for {}: {e}",
+                                        plan.project_id
+                                    );
+                                    if let Some(hm) = &hook_monitor {
+                                        hm.push_toast(okena_state::Toast::error(format!(
+                                            "Worktree checkout could not be removed and remains on disk at {}: {e}",
+                                            plan.worktree_path.display()
+                                        )));
+                                    }
+                                }
                                 Err(e) => log::error!(
                                     "worktree-close: removal task failed for {}: {e}",
                                     plan.project_id
@@ -604,8 +634,21 @@ fn handle_hook_terminal_exits(
                     ),
                 }
             } else {
-                // Hook failed → abort the close: unmark the project as closing.
+                // Hook failed → abort the close: unmark the project as closing
+                // (clearing the mirrored `is_closing` marker heals the initiating
+                // client's optimistic "Closing…" row), notify so the cleared flag
+                // reaches clients, and toast why the worktree wasn't removed.
+                let project_name = ws
+                    .project(&pending.project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| pending.project_id.clone());
                 ws.finish_closing_project(&pending.project_id);
+                cx.notify();
+                if let Some(hm) = reactor.hook_monitor.as_ref() {
+                    hm.push_toast(okena_state::Toast::error(format!(
+                        "before_worktree_remove hook failed — \"{project_name}\" was not closed"
+                    )));
+                }
             }
         }
         // Hook terminal persists on non-close paths — no auto-cleanup. A client

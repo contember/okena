@@ -20,6 +20,7 @@ use okena_views_terminal::elements::resize_handle::ResizeHandle;
 use okena_views_terminal::layout::split_pane::{ActiveDrag, DragState};
 use okena_views_terminal::layout::terminal_pane::TerminalPane;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Per-project hook terminal panel entity.
@@ -44,8 +45,12 @@ pub struct HookPanel {
     terminal_pane: Option<Entity<TerminalPane<ActionDispatcher>>>,
     /// Height of the hook panel in pixels.
     panel_height: f32,
-    /// Number of hook terminals last observed (for auto-open on new hooks).
-    last_hook_count: usize,
+    /// Hook-terminal ids already observed. Seeded at construction with the
+    /// terminals present at that moment, so auto-open fires only for hooks that
+    /// appear AFTER the panel is built — a fresh create firing its hook while
+    /// we're attached — not stale hook terminals a running daemon still holds
+    /// and mirrors in on attach/relaunch.
+    seen_hook_ids: HashSet<String>,
     /// Action dispatcher for routing hook actions (e.g. rerun) to the daemon.
     /// Synced from the owning `ProjectColumn` (mirrors the ServicePanel wiring).
     action_dispatcher: Option<ActionDispatcher>,
@@ -66,45 +71,61 @@ impl HookPanel {
         initial_height: f32,
         cx: &mut Context<Self>,
     ) -> Self {
-        let initial_count = workspace.read(cx).project(&project_id)
-            .map(|p| p.hook_terminals.len())
-            .unwrap_or(0);
+        // Snapshot the hook terminals already present so they never auto-open:
+        // on attach/relaunch a running daemon mirrors its old hook terminals in
+        // at construction, and only genuinely new ones (a fresh create's hook)
+        // should pop the panel.
+        let seen_hook_ids: HashSet<String> = workspace.read(cx).project(&project_id)
+            .map(|p| p.hook_terminals.keys().cloned().collect())
+            .unwrap_or_default();
 
         // Observe workspace — auto-open when new hook terminals appear,
         // auto-close when all hooks finish.
         cx.observe(&workspace, |this: &mut Self, ws, cx| {
-            let project = ws.read(cx).project(&this.project_id);
-            let current_count = project.map(|p| p.hook_terminals.len()).unwrap_or(0);
-
-            if current_count > this.last_hook_count {
-                // New hook terminal(s) appeared — auto-open with the latest one
-                if let Some(newest_tid) = project
-                    .and_then(|p| {
-                        p.hook_terminals.keys()
-                            .find(|k| this.active_terminal_id.as_ref().is_none_or(|a| a != *k))
-                            .or_else(|| p.hook_terminals.keys().last())
-                            .cloned()
-                    })
-                {
-                    this.auto_opened = true;
-                    this.show_hook(&newest_tid, cx);
-                }
-            } else if this.panel_open && this.auto_opened && current_count > 0 {
-                // Auto-close when all hooks succeeded (stay open on failures)
+            // Read everything off the borrowed project up front into owned
+            // values, so the later show_hook/close mutations don't clash with
+            // the workspace read borrow.
+            let (current_count, current_ids, new_tid, all_succeeded) = {
+                let project = ws.read(cx).project(&this.project_id);
+                let current_ids: HashSet<String> = project
+                    .map(|p| p.hook_terminals.keys().cloned().collect())
+                    .unwrap_or_default();
+                // Auto-open only for a hook terminal that appeared AFTER this
+                // panel was constructed (not in `seen_hook_ids`) — a fresh
+                // create firing its hook while we're attached. Hooks already
+                // present at construction are seeded into the set, so
+                // attaching/relaunching against a daemon that still holds old
+                // hook terminals does not reopen their panels.
+                let new_tid = current_ids
+                    .iter()
+                    .find(|k| !this.seen_hook_ids.contains(*k))
+                    .cloned();
                 let all_succeeded = project
                     .map(|p| p.hook_terminals.values()
                         .all(|e| e.status == HookTerminalStatus::Succeeded))
                     .unwrap_or(false);
-                if all_succeeded {
-                    this.close(cx);
-                }
+                (current_ids.len(), current_ids, new_tid, all_succeeded)
+            };
+
+            if let Some(new_tid) = new_tid {
+                this.auto_opened = true;
+                this.show_hook(&new_tid, cx);
+            } else if this.panel_open && this.auto_opened && current_count > 0 && all_succeeded {
+                // Auto-close when all hooks succeeded (stay open on failures)
+                this.close(cx);
             }
 
-            this.last_hook_count = current_count;
+            // Record the current id set so already-seen hooks never re-trigger
+            // auto-open on a later notify (and dismissed ids drop out).
+            this.seen_hook_ids = current_ids;
             cx.notify();
         }).detach();
 
-        let mut this = Self {
+        // No construction-time auto-open: hooks already present here belong to
+        // the seeded `seen_hook_ids` set (attach/relaunch mirrors old hook
+        // terminals in). A fresh create fires its hook AFTER the panel is built,
+        // so the observe above catches the new id and opens the panel then.
+        Self {
             project_id,
             workspace,
             focus_manager,
@@ -118,31 +139,9 @@ impl HookPanel {
             active_terminal_id: None,
             terminal_pane: None,
             panel_height: initial_height,
-            last_hook_count: initial_count,
+            seen_hook_ids,
             action_dispatcher: None,
-        };
-
-        // Headless timing: a freshly-created project (e.g. a new worktree with an
-        // on_worktree_create hook) mirrors back from the daemon with its hook
-        // terminals ALREADY present, so the panel is constructed with count>0 and
-        // the count-increase observe above never sees the 0->N transition that
-        // auto-opens it (in-process, the panel existed first, then the hook
-        // fired). Restore the auto-open by opening here when hooks are already
-        // present at construction. Auto-close on all-succeeded still applies.
-        let newest_tid = if initial_count > 0 {
-            this.workspace
-                .read(cx)
-                .project(&this.project_id)
-                .and_then(|p| p.hook_terminals.keys().last().cloned())
-        } else {
-            None
-        };
-        if let Some(tid) = newest_tid {
-            this.auto_opened = true;
-            this.show_hook(&tid, cx);
         }
-
-        this
     }
 
     /// Set the action dispatcher used to route hook actions to the daemon.

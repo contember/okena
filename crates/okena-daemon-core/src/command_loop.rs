@@ -119,19 +119,28 @@ fn publish_config_change_after_success(
 
 /// Optimistic worktree removal, shared by the non-merge fast-close arm and the
 /// merge phase-2 close. `plan` must come from a completed `begin_worktree_removal`
-/// (so `on_worktree_close` has already fired).
+/// (so `on_worktree_close` has already fired). `did_stash` mirrors the sync
+/// `close_worktree` path: `force_remove = is_dirty && !did_stash` decides whether
+/// the `on_dirty_worktree_close` safety-net hook fires — the plain fast arm passes
+/// `false` (no merge/stash), the merge phase-2 arm passes the pipeline's outcome.
 ///
 /// Deletes the project from state + drains its queued terminal kills under a
 /// BRIEF lock, so the client's row vanishes immediately, then runs the slow
 /// `remove_dir_all` + `git worktree prune` on a blocking thread with NO lock
 /// held — this is what keeps a busy checkout (node_modules / Docker) from either
 /// freezing the daemon (lock held during the delete) or leaving the row dimmed
-/// for seconds (delete before removal, not after). `on_worktree_removed` fires
-/// once the checkout is physically gone. Returns `Ok(None)` right away so the
-/// client dialog closes without waiting for the disk delete.
+/// for seconds (delete before removal, not after). The (expensive) dirty check +
+/// `on_dirty_worktree_close` hook ride that SAME blocking hop, firing BEFORE the
+/// delete so the backup hook still sees a valid CWD; its terminal actions + hook
+/// results route back through the lock like the merge pipeline's finalize.
+/// `on_worktree_removed` fires once the checkout is physically gone; if the delete
+/// FAILS (busy checkout), the checkout is left orphaned on disk, so we surface an
+/// error toast with the path and skip `on_worktree_removed`. Returns `Ok(None)`
+/// right away so the client dialog closes without waiting for the disk delete.
 #[allow(clippy::too_many_arguments)]
 fn spawn_optimistic_worktree_removal(
     plan: WorktreeRemovalPlan,
+    did_stash: bool,
     global_hooks: &okena_workspace::persistence::HooksConfig,
     focus_manager: &mut FocusManager,
     workspace: &Arc<Mutex<Workspace>>,
@@ -144,7 +153,8 @@ fn spawn_optimistic_worktree_removal(
     // Brief lock: drop the project from state (row vanishes) + tear down its
     // PTYs. delete_project only QUEUES kills, and this path bypasses the
     // run_main_workspace_action drain, so we must drain them here or leak the
-    // worktree's dtach/tmux processes.
+    // worktree's dtach/tmux processes (and, on Windows, a live shell CWD inside
+    // the checkout locks the dir so the delete below fails).
     {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut ws = workspace.lock();
@@ -155,33 +165,83 @@ fn spawn_optimistic_worktree_removal(
         }
     }
 
-    // Background: the slow directory delete + prune off the reactor, then fire
-    // on_worktree_removed now that the checkout is physically gone.
+    // Background: the dirty check + on_dirty safety-net hook + the slow directory
+    // delete/prune, all off the reactor. When the checkout is gone, fire
+    // on_worktree_removed; when the delete fails, toast the orphaned path.
     let workspace = workspace.clone();
     let workspace_tick = workspace_tick.clone();
     let hook_runner = hook_runner.clone();
     let hook_monitor = hook_monitor.clone();
     let global_hooks = global_hooks.clone();
     tokio::task::spawn_local(async move {
-        let worktree_path = plan.worktree_path.clone();
-        let main_repo_path = std::path::PathBuf::from(&plan.main_repo_path);
-        let git = tokio::task::spawn_blocking(move || {
-            okena_git::remove_worktree_fast(&worktree_path, &main_repo_path)
+        let global_hooks_blocking = global_hooks.clone();
+        let monitor = hook_monitor.clone();
+        let runner = hook_runner.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let worktree_path = plan.worktree_path.clone();
+            let main_repo_path = std::path::PathBuf::from(&plan.main_repo_path);
+            // force_remove = is_dirty && !did_stash — same condition the sync
+            // close_worktree path uses to fire the dirty-close safety net. Runs
+            // BEFORE remove_worktree_fast so the hook's CWD still exists.
+            let dirty_actions = if !did_stash
+                && okena_git::has_uncommitted_changes(&worktree_path)
+            {
+                Some(plan.fire_on_dirty_close(
+                    &global_hooks_blocking,
+                    monitor.as_ref(),
+                    runner.as_ref(),
+                ))
+            } else {
+                None
+            };
+            let removal = okena_git::remove_worktree_fast(&worktree_path, &main_repo_path);
+            (plan, removal, dirty_actions)
         })
         .await;
-        match git {
-            Ok(Ok(())) => {
-                let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                let ws = workspace.lock();
-                ws.fire_worktree_removed_hook(&plan, &global_hooks, &mut cx);
+        match outcome {
+            Ok((plan, removal, dirty_actions)) => {
+                let mut cx =
+                    DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                let mut ws = workspace.lock();
+                // Route the dirty hook's workspace-side effects back through the
+                // lock, like the merge pipeline's finalize (they no-op on the
+                // already-deleted row — matching the sync path, which adds them
+                // then immediately deletes the project; the meaningful backup PTY
+                // already spawned inside fire_on_dirty_close above).
+                if let Some((terminal_actions, hook_results)) = dirty_actions {
+                    for (cmd, env) in terminal_actions {
+                        ws.add_terminal_with_command(&plan.project_id, &cmd, &env, &mut cx);
+                    }
+                    ws.register_hook_results(hook_results, &mut cx);
+                }
+                match removal {
+                    Ok(()) => {
+                        // Checkout physically gone — fire on_worktree_removed.
+                        ws.fire_worktree_removed_hook(&plan, &global_hooks, &mut cx);
+                    }
+                    Err(e) => {
+                        // Delete failed (busy checkout: Windows file lock,
+                        // EBUSY/EACCES on a Docker bind mount). The row is already
+                        // gone from every client, but the checkout + its git
+                        // worktree registration survive on disk. Surface the
+                        // orphaned path so the user can clean it up, and do NOT
+                        // fire on_worktree_removed — its contract is "physically
+                        // gone", which is now false.
+                        log::error!(
+                            "worktree-close: git removal failed for {}: {e}",
+                            plan.project_id
+                        );
+                        if let Some(hm) = &hook_monitor {
+                            hm.push_toast(okena_state::Toast::error(format!(
+                                "Worktree checkout could not be removed and remains on disk at {}: {e}",
+                                plan.worktree_path.display()
+                            )));
+                        }
+                    }
+                }
                 cx.notify();
             }
-            Ok(Err(e)) => {
-                log::error!("worktree-close: git removal failed for {}: {e}", plan.project_id)
-            }
-            Err(e) => {
-                log::error!("worktree-close: removal task failed for {}: {e}", plan.project_id)
-            }
+            Err(e) => log::error!("worktree-close: removal task failed: {e}"),
         }
     });
 
@@ -500,7 +560,7 @@ pub async fn daemon_command_loop(
                                     &hook_monitor,
                                 );
                                 let mut ws = workspace.lock();
-                                match ws.register_worktree_project_deferred_hooks(
+                                let registered = ws.register_worktree_project_deferred_hooks(
                                     &project_id,
                                     &branch,
                                     &git_root,
@@ -509,17 +569,19 @@ pub async fn daemon_command_loop(
                                     &app_settings.hooks,
                                     WindowId::Main,
                                     &mut cx,
-                                ) {
-                                    Ok(id) => {
-                                        ws.mark_creating_project(&id);
-                                        Some(id)
-                                    }
-                                    Err(_) => None,
+                                );
+                                // Mark creating only on success; propagate the
+                                // registration error (parent-missing OR the
+                                // same-branch/path dedupe) to the caller instead of
+                                // masking it as "project not found".
+                                if let Ok(id) = &registered {
+                                    ws.mark_creating_project(id);
                                 }
+                                registered
                             };
                             match new_id {
-                                None => CommandResult::Err(format!("project not found: {project_id}")),
-                                Some(new_id) => {
+                                Err(e) => CommandResult::Err(e),
+                                Ok(new_id) => {
                                     let workspace = workspace.clone();
                                     let workspace_tick = workspace_tick.clone();
                                     let hook_runner = hook_runner.clone();
@@ -537,7 +599,13 @@ pub async fn daemon_command_loop(
                                             let branch = branch.clone();
                                             let target = std::path::PathBuf::from(&worktree_path);
                                             tokio::task::spawn_blocking(move || {
-                                                if create_branch {
+                                                // Record whether the target dir existed BEFORE our
+                                                // git ran, so the failure cleanup only ever deletes a
+                                                // checkout THIS attempt created — never a dir that
+                                                // already belonged to someone else (a live worktree
+                                                // or a racing create's checkout).
+                                                let preexisting = target.exists();
+                                                let result = if create_branch {
                                                     let default = okena_git::get_default_branch(&git_root);
                                                     okena_git::create_worktree_with_start_point(
                                                         &git_root, &branch, &target, default.as_deref(),
@@ -546,12 +614,13 @@ pub async fn daemon_command_loop(
                                                 } else {
                                                     okena_git::create_worktree(&git_root, &branch, &target, false)
                                                         .map(|()| None)
-                                                }
+                                                };
+                                                (preexisting, result)
                                             })
                                             .await
                                         };
                                         match git {
-                                            Ok(Ok(default_branch)) => {
+                                            Ok((_, Ok(default_branch))) => {
                                                 {
                                                     let mut cx = DaemonWorkspaceCx::new(
                                                         &workspace_tick, &hook_runner, &hook_monitor,
@@ -586,17 +655,22 @@ pub async fn daemon_command_loop(
                                                 // is_collision = the target is ALREADY an active
                                                 // worktree; never clean that up (it belongs to
                                                 // someone else), only partial checkouts we started.
-                                                let (msg, is_collision) = match result {
-                                                    Ok(Err(okena_git::GitError::WorktreeExists { path })) => (
+                                                // preexisting = the target dir was on disk BEFORE our
+                                                // git ran, so it isn't ours to delete either.
+                                                let (msg, is_collision, preexisting) = match result {
+                                                    Ok((pre, Err(okena_git::GitError::WorktreeExists { path }))) => (
                                                         format!(
                                                             "Directory '{}' is already an active worktree",
                                                             path.display()
                                                         ),
                                                         true,
+                                                        pre,
                                                     ),
-                                                    Ok(Err(e)) => (e.to_string(), false),
-                                                    Err(join) => (format!("worktree creation task failed: {join}"), false),
-                                                    Ok(Ok(_)) => unreachable!("success handled above"),
+                                                    Ok((pre, Err(e))) => (e.to_string(), false, pre),
+                                                    // Join failure: we can't know disk state — treat
+                                                    // as preexisting so we never touch the dir.
+                                                    Err(join) => (format!("worktree creation task failed: {join}"), false, true),
+                                                    Ok((_, Ok(_))) => unreachable!("success handled above"),
                                                 };
                                                 // Roll the optimistic row back. Clear creating
                                                 // FIRST — remove_stale_worktree skips creating
@@ -617,9 +691,13 @@ pub async fn daemon_command_loop(
                                                 // Clean up any partial checkout git left on disk
                                                 // (dir + stale registration) so a failed create
                                                 // never leaves an empty orphaned worktree folder —
-                                                // but NOT when the target was already an active
-                                                // worktree (that dir isn't ours to delete).
-                                                if !is_collision {
+                                                // but ONLY a dir THIS attempt created: skip it when
+                                                // the target was already an active worktree
+                                                // (is_collision) or existed on disk before our git
+                                                // ran (preexisting). This makes the cleanup safe by
+                                                // construction — a losing create can never delete a
+                                                // dir it didn't create (e.g. a live checkout).
+                                                if !is_collision && !preexisting {
                                                     let _ = tokio::task::spawn_blocking(move || {
                                                         let _ = okena_git::remove_worktree_fast(
                                                             std::path::Path::new(&worktree_path),
@@ -631,9 +709,19 @@ pub async fn daemon_command_loop(
                                             }
                                         }
                                     });
+                                    // OPTIMISTIC reply: the row exists but the
+                                    // checkout is still running in the background,
+                                    // so `path` does NOT exist on disk yet.
+                                    // `pending: true` is the machine-readable signal
+                                    // that callers (REST/CLI/agents) must not treat
+                                    // this path as ready — it materializes when the
+                                    // background checkout finishes, or the row is
+                                    // removed from state (+ a toast) on failure. Old
+                                    // clients that ignore unknown fields keep working.
                                     CommandResult::Ok(Some(serde_json::json!({
                                         "project_id": new_id,
                                         "path": wt_project_path,
+                                        "pending": true,
                                     })))
                                 }
                             }
@@ -746,7 +834,7 @@ pub async fn daemon_command_loop(
                                             ws.register_hook_results(hook_results, &mut cx);
                                             CommandResult::Err(error)
                                         }
-                                        Ok(CloseWorktreeGitOutcome::Ok { .. }) => {
+                                        Ok(CloseWorktreeGitOutcome::Ok { did_stash }) => {
                                             // Phase 2: removal, merge already applied.
                                             // Detect the fast path (no before_remove
                                             // hook) under a BRIEF lock; if fast, remove
@@ -773,6 +861,7 @@ pub async fn daemon_command_loop(
                                             match plan {
                                                 Some(Ok(plan)) => spawn_optimistic_worktree_removal(
                                                     plan,
+                                                    did_stash,
                                                     &global_hooks,
                                                     &mut focus_manager,
                                                     &workspace,
@@ -833,9 +922,11 @@ pub async fn daemon_command_loop(
                         // Fast path: plain non-merge close of a hook-less worktree.
                         // Remove optimistically — drop the row now, delete the
                         // checkout off the reactor — so the dialog closes instantly
-                        // instead of spinning for the full `remove_dir_all`.
+                        // instead of spinning for the full `remove_dir_all`. merge is
+                        // false here, so nothing stashed → did_stash = false.
                         Some(Ok(plan)) => spawn_optimistic_worktree_removal(
                             plan,
+                            false,
                             &global_hooks,
                             &mut focus_manager,
                             &workspace,
@@ -1513,6 +1604,8 @@ mod tests {
             hook_terminals: Default::default(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         };
         WorkspaceData {
             version: 1,
@@ -1627,16 +1720,19 @@ mod tests {
     // HookMonitor + real LocalBackend/PtyManager the daemon builds at boot
     // (daemon.rs:199/211). The only variable is the entrypoint.
     //
-    //  * `restore_boot_path_does_not_fire_on_project_open` drives the actual
-    //    daemon-boot entrypoint (`materialize_uninitialized_terminals`, called
-    //    from `daemon.run()` at command_loop.rs:663) against a RESTORED project
-    //    that has `project.on_open` configured. Result: the monitor records
-    //    ZERO executions -> the on_project_open hook never fires on restore.
+    //  * `restore_boot_path_fires_on_project_open` drives the actual daemon-boot
+    //    entrypoint (`materialize_uninitialized_terminals`, called from
+    //    `daemon.run()`) against a RESTORED project that has `project.on_open`
+    //    configured. Result: the monitor records exactly one execution -> the
+    //    on_project_open hook fires on restore, via `fire_project_open_hooks`
+    //    (okena-workspace actions/project.rs) — the daemon restores projects
+    //    through `Workspace::new`, never `add_project`, so the boot path needs
+    //    its own fire.
     //
-    //  * `add_project_fires_on_project_open` drives `ws.add_project` (the sole
+    //  * `add_project_fires_on_project_open` drives `ws.add_project` (the OTHER
     //    fire_on_project_open call site) with the SAME services. Result: the
     //    monitor records exactly one `on_project_open` execution -> the firing
-    //    machinery works; only the restore entrypoint skips it.
+    //    machinery works from both entrypoints.
 
     /// Build a restored project that BOTH has an uninitialized terminal slot
     /// AND a configured `project.on_open` hook, at a real cwd.
@@ -1672,6 +1768,8 @@ mod tests {
             hook_terminals: Default::default(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         };
         WorkspaceData {
             version: 1,
@@ -1981,6 +2079,8 @@ mod tests {
             hook_terminals: Default::default(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         };
         WorkspaceData {
             version: 1,
@@ -2141,6 +2241,8 @@ mod tests {
             hook_terminals: Default::default(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         };
         let data = WorkspaceData {
             version: 1,

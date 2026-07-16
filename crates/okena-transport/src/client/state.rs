@@ -218,6 +218,8 @@ mod tests {
             default_shell: None,
             hook_terminals: Vec::new(),
             hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -382,6 +384,8 @@ mod tests {
             default_shell: None,
             hook_terminals: Vec::new(),
             hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }]);
         let sizes = collect_terminal_sizes(&state);
         assert_eq!(sizes.get("t1"), Some(&(120, 40)));

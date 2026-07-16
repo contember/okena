@@ -312,6 +312,8 @@ mod tests {
             default_shell: None,
             hook_terminals: vec![],
             hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 

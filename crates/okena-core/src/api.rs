@@ -350,6 +350,20 @@ pub struct ApiProject {
     /// them on PTY spawn). Empty for projects with no per-project overrides.
     #[serde(default, skip_serializing_if = "ApiHooksConfig::is_empty")]
     pub hooks: ApiHooksConfig,
+    /// Whether the worktree backing this project is still being checked out on
+    /// disk (optimistic create in flight). Clients render the "Setting up
+    /// worktree…" placeholder while true; serde-defaulted so older peers that
+    /// omit the field decode as "not creating" (a legitimate bookmark, not a
+    /// perpetual placeholder).
+    #[serde(default)]
+    pub is_creating: bool,
+    /// Whether a `before_worktree_remove` hook-gated close is in progress on the
+    /// daemon. Clients render the dimmed "Closing…" row while true and heal their
+    /// client-local optimistic flag when this arrives false (close aborted).
+    /// serde-defaulted so older peers that omit the field decode as "not
+    /// closing".
+    #[serde(default)]
+    pub is_closing: bool,
 }
 
 /// Wire mirror of `okena_state::HookTerminalStatus` (which can't be referenced
@@ -1190,6 +1204,8 @@ mod tests {
                     },
                     worktree: ApiWorktreeHooks::default(),
                 },
+                is_creating: false,
+                is_closing: false,
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,

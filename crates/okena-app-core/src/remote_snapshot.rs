@@ -73,6 +73,8 @@ pub fn build_api_project(
             .map(|(tid, e)| e.to_api(tid.clone()))
             .collect(),
         hooks: p.hooks.to_api(),
+        is_creating: p.is_creating,
+        is_closing: p.is_closing,
     }
 }
 

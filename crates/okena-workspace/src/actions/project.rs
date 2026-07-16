@@ -198,6 +198,8 @@ impl Workspace {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
@@ -562,6 +564,8 @@ mod tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -781,6 +785,8 @@ mod gpui_tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 

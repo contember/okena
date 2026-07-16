@@ -17,6 +17,7 @@ use std::collections::HashMap;
 /// `git worktree remove` off the command-loop thread and then
 /// [`Workspace::finish_worktree_removal`] applies the state change from this
 /// snapshot — the checkout is gone by then, so branch/paths can't be re-read.
+#[derive(Clone)]
 pub struct WorktreeRemovalPlan {
     pub project_id: String,
     /// The git worktree root to remove (may differ from project.path for monorepos).
@@ -26,8 +27,42 @@ pub struct WorktreeRemovalPlan {
     branch: String,
     project_hooks: HooksConfig,
     project_name: String,
+    /// The project's own path (the on_dirty-close hook's CWD), which for a
+    /// monorepo worktree is a subdir inside `worktree_path`.
+    project_path: String,
     folder_id: Option<String>,
     folder_name: Option<String>,
+}
+
+impl WorktreeRemovalPlan {
+    /// Fire the `on_dirty_worktree_close` safety-net hook (e.g. a backup of
+    /// uncommitted changes) from the captured snapshot. The sync `close_worktree`
+    /// path fires this in its `force_remove` branch (dirty && no stash); the
+    /// daemon's optimistic fast paths call it off the reactor — on the same
+    /// blocking thread as the dirty check + directory delete, BEFORE the checkout
+    /// is removed so the hook still has a valid CWD. Returns the hook's terminal
+    /// actions + results for the caller to apply under the workspace lock, exactly
+    /// like the merge pipeline.
+    #[allow(clippy::type_complexity)] // mirrors the merge pipeline's (actions, results) tuple
+    pub fn fire_on_dirty_close(
+        &self,
+        global_hooks: &HooksConfig,
+        monitor: Option<&okena_hooks::HookMonitor>,
+        runner: Option<&okena_hooks::HookRunner>,
+    ) -> (Vec<(String, HashMap<String, String>)>, Vec<crate::hooks::HookTerminalResult>) {
+        hooks::fire_on_dirty_worktree_close(
+            &self.project_hooks,
+            global_hooks,
+            &self.project_id,
+            &self.project_name,
+            &self.project_path,
+            &self.branch,
+            self.folder_id.as_deref(),
+            self.folder_name.as_deref(),
+            monitor,
+            runner,
+        )
+    }
 }
 
 /// Result of the worktree-close merge pipeline ([`close_worktree_merge_git`]).
@@ -299,6 +334,17 @@ impl Workspace {
         window_id: WindowId,
         cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
+        // Dedupe: refuse to register a second worktree row at a path some
+        // project already occupies. Two CreateWorktree requests for the same
+        // branch (a double-click or an agent retry) compute the SAME
+        // deterministic target path; without this both register a row and both
+        // run `git worktree add` against that one path concurrently, and the
+        // loser's failure cleanup can delete the winner's live checkout. Mirrors
+        // add_discovered_worktree's path dedupe.
+        if self.data.projects.iter().any(|p| p.path == project_path) {
+            return Err(format!("A worktree for '{branch}' already exists"));
+        }
+
         // Get parent project info
         let parent = self.project(parent_project_id)
             .ok_or_else(|| "Parent project not found".to_string())?;
@@ -349,6 +395,10 @@ impl Workspace {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            // Set by the caller via mark_creating_project when this is an
+            // optimistic (deferred-hooks) create still awaiting its checkout.
+            is_creating: false,
+            is_closing: false,
         };
 
         let new_project_hooks = project.hooks.clone();
@@ -500,6 +550,8 @@ impl Workspace {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         };
 
         // Multi-window new-project visibility rule (PRD user story 14):
@@ -605,6 +657,15 @@ impl Workspace {
     /// `git worktree remove` (off-reactor on the daemon) and calls
     /// [`finish_worktree_removal`](Self::finish_worktree_removal).
     pub fn begin_worktree_removal(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) -> Result<WorktreeRemovalPlan, String> {
+        // Reject removal while the worktree is still being created: the optimistic
+        // create registers the row (worktree_info set) and returns before its
+        // background `git worktree add` finishes, so removing now would race the
+        // in-flight checkout and strand an orphaned, git-registered worktree with
+        // no workspace row. Single choke point for every removal route; mirrors the
+        // `is_creating` guard in `remove_stale_worktree`.
+        if self.lifecycle.is_creating(project_id) {
+            return Err("worktree is still being created".to_string());
+        }
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
         if project.worktree_info.is_none() {
@@ -638,6 +699,7 @@ impl Workspace {
             branch,
             project_hooks,
             project_name,
+            project_path,
             folder_id,
             folder_name,
         })
@@ -648,7 +710,8 @@ impl Workspace {
     /// the `worktree_removed` hook from the `plan` snapshot. This is the single
     /// convergence point for every removal route, so the hook fires exactly once;
     /// the checkout is gone, so it runs from `main_repo_path` (OKENA_BRANCH still
-    /// carries the removed branch). Results are discarded (fire-and-forget).
+    /// carries the removed branch). The hook fires headless (no PTY runner) since
+    /// the project is already deleted — see [`fire_worktree_removed_hook`](Self::fire_worktree_removed_hook).
     pub fn finish_worktree_removal(&mut self, focus_manager: &mut FocusManager, plan: &WorktreeRemovalPlan, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
         self.delete_project(focus_manager, &plan.project_id, global_hooks, cx);
         self.fire_worktree_removed_hook(plan, global_hooks, cx);
@@ -660,8 +723,17 @@ impl Workspace {
     /// client's row vanishes at once) and fire this only after the physical
     /// directory delete finishes — preserving the hook's "actually removed"
     /// semantics without making the row hang around for the whole `remove_dir_all`.
+    ///
+    /// Fires headless (no PTY runner). The project is already deleted, so a
+    /// keep_alive PTY hook would have no project to register its terminal in:
+    /// the shell would leak in the terminals registry unowned/undismissable and
+    /// its monitor entry would stay Running forever (only registered hook
+    /// terminals are ever finished, by `handle_hook_terminal_exits`). The
+    /// headless path runs the command on a background thread and records the
+    /// monitor entry's completion — and any failure — itself. Same shape as
+    /// `on_worktree_close` / `on_project_close`, which also fire headless once
+    /// the row is gone.
     pub fn fire_worktree_removed_hook(&self, plan: &WorktreeRemovalPlan, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
-        let runner = cx.hook_runner();
         let monitor = cx.hook_monitor();
         let _ = hooks::fire_worktree_removed(
             &plan.project_hooks,
@@ -674,7 +746,7 @@ impl Workspace {
             plan.folder_id.as_deref(),
             plan.folder_name.as_deref(),
             monitor.as_ref(),
-            runner.as_ref(),
+            None,
         );
     }
 

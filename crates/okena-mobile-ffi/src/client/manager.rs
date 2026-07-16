@@ -823,6 +823,8 @@ mod tests {
             default_shell: None,
             hook_terminals: Vec::new(),
             hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 

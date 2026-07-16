@@ -66,6 +66,10 @@ Commands that create things (`term new/split/tab`, `project add`, `worktree add`
 - **`run --wait` assumes a POSIX-ish shell** (bash/zsh/sh) and a non-interactive
   command (it appends a completion marker). Don't use it for vim/REPLs.
 - **A bare `run` reports no completion or exit code** — only `run --wait` does.
+- **`worktree add` is optimistic**: it prints the id + path and returns before the
+  checkout exists on disk (the reply carries `pending: true`). Don't `cd` into the
+  path immediately — poll `okena ls`/`okena state` until the worktree's terminal
+  appears; if creation fails the row disappears from state.
 - **`--window` is honored only by** `project add/show/hide/focus` and
   `term focus/fullscreen`, and must come AFTER the subcommand; others just warn.
 - Default output is tab-separated (grep/awk friendly); add `--json` for structured.
