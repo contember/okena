@@ -592,22 +592,35 @@ pub async fn daemon_command_loop(
                                                 // already belonged to someone else (a live worktree
                                                 // or a racing create's checkout).
                                                 let preexisting = target.exists();
-                                                let result = if create_branch {
+                                                let (result, default_branch) = if create_branch {
                                                     let default = okena_git::get_default_branch(&git_root);
-                                                    okena_git::create_worktree_with_start_point(
-                                                        &git_root, &branch, &target, default.as_deref(),
+                                                    (
+                                                        okena_git::create_worktree_with_start_point(
+                                                            &git_root, &branch, &target, default.as_deref(),
+                                                        ),
+                                                        default,
                                                     )
-                                                    .map(|()| default)
                                                 } else {
-                                                    okena_git::create_worktree(&git_root, &branch, &target, false)
-                                                        .map(|()| None)
+                                                    (
+                                                        okena_git::create_worktree(&git_root, &branch, &target, false),
+                                                        None,
+                                                    )
                                                 };
+                                                if result.is_ok()
+                                                    && let Some(default_branch) = default_branch
+                                                {
+                                                    okena_git::fetch_and_fast_forward(
+                                                        &git_root,
+                                                        &target,
+                                                        &default_branch,
+                                                    );
+                                                }
                                                 (preexisting, result)
                                             })
                                             .await
                                         };
                                         match git {
-                                            Ok((_, Ok(default_branch))) => {
+                                            Ok((_, Ok(()))) => {
                                                 {
                                                     let mut cx = DaemonWorkspaceCx::new(
                                                         &workspace_tick, &hook_runner, &hook_monitor,
@@ -625,17 +638,6 @@ pub async fn daemon_command_loop(
                                                         &app_settings, None, &mut cx,
                                                     );
                                                     ws.notify_data(&mut cx);
-                                                }
-                                                // Freshen (ff-only) in the background.
-                                                if let Some(default_branch) = default_branch {
-                                                    let _ = tokio::task::spawn_blocking(move || {
-                                                        okena_git::fetch_and_fast_forward(
-                                                            &git_root,
-                                                            std::path::Path::new(&worktree_path),
-                                                            &default_branch,
-                                                        )
-                                                    })
-                                                    .await;
                                                 }
                                             }
                                             result => {
@@ -657,7 +659,7 @@ pub async fn daemon_command_loop(
                                                     // Join failure: we can't know disk state — treat
                                                     // as preexisting so we never touch the dir.
                                                     Err(join) => (format!("worktree creation task failed: {join}"), false, true),
-                                                    Ok((_, Ok(_))) => unreachable!("success handled above"),
+                                                    Ok((_, Ok(()))) => unreachable!("success handled above"),
                                                 };
                                                 // Roll the optimistic row back. Clear creating
                                                 // FIRST — remove_stale_worktree skips creating
