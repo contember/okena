@@ -2,7 +2,7 @@ use crate::auth::AuthStore;
 use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
 use crate::routes;
-use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
 use okena_transport::client::LocalEndpoint;
 use std::collections::{HashMap, HashSet};
@@ -40,6 +40,7 @@ impl RemoteServer {
         bind_addrs: Vec<IpAddr>,
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
         toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
+        terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
         git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
         next_connection_id: Arc<AtomicU64>,
@@ -168,10 +169,27 @@ impl RemoteServer {
         okena_ext_updater::installer::cleanup_old_binary();
         let update_info = okena_ext_updater::UpdateInfo::new(app_version.to_string());
 
+        // Set true once a client authenticates; gates the idle-exit monitor so a
+        // freshly-spawned daemon isn't reaped before its GUI first connects.
+        let had_client = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         // Spawn the server task
         let mut shutdown_rx_clone = shutdown_rx.clone();
         runtime.spawn(async move {
             routes::update::spawn_background_checker(update_info.clone());
+
+            // UI-owned daemons self-terminate once idle (see
+            // `run_idle_exit_monitor`) so a closed or crashed GUI never leaves a
+            // daemon holding the instance lock. Spawned here, inside the runtime,
+            // BEFORE `build_router` moves the shared handles.
+            if ui_owned {
+                tokio::spawn(routes::shutdown::run_idle_exit_monitor(
+                    active_connections.clone(),
+                    had_client.clone(),
+                    process_shutdown.clone(),
+                ));
+            }
+
             let app = routes::build_router(
                 bridge_tx,
                 auth_store,
@@ -180,12 +198,14 @@ impl RemoteServer {
                 start_time,
                 git_status,
                 toast_tx,
+                terminal_focus_tx,
                 remote_subscribed_terminals,
                 git_poll_trigger_tx,
                 next_connection_id,
                 active_connections,
                 process_shutdown,
                 ui_owned,
+                had_client,
                 update_info,
             );
             #[cfg(unix)]

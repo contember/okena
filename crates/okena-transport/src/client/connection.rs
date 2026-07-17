@@ -1363,6 +1363,23 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 .await;
                                         }
                                 }
+                                "terminal_focus_requested" => {
+                                    match serde_json::from_value::<
+                                        okena_core::api::ApiTerminalFocusRequest,
+                                    >(value.clone()) {
+                                        Ok(request) => {
+                                            let _ = event_tx_clone
+                                                .send(ConnectionEvent::TerminalFocusRequested {
+                                                    connection_id: config_id.clone(),
+                                                    request,
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Failed to parse terminal focus request: {}", e);
+                                        }
+                                    }
+                                }
                                 "toast" => {
                                     // `WsOutbound::Toast` is internally tagged, so
                                     // the ApiToast fields sit at the top level of
@@ -1681,6 +1698,7 @@ mod tests {
             project_order: Vec::new(),
             folders: Vec::new(),
             windows: Vec::new(),
+            hooks: Vec::new(),
         }));
 
         client.reconnect();

@@ -58,6 +58,14 @@ impl ProjectLifecycleTracker {
         self.closing.contains(project_id)
     }
 
+    /// Prune the closing set to only the given project ids. Used by the client
+    /// to reconcile its optimistic closing flags against the daemon's mirror:
+    /// projects the mirror no longer reports as closing (or that vanished) drop
+    /// their local flag so an aborted close doesn't strand the row "Closing…".
+    pub fn retain_closing(&mut self, keep: &HashSet<String>) {
+        self.closing.retain(|id| keep.contains(id));
+    }
+
     // === worktree removal ===
 
     pub fn mark_worktree_removing(&mut self, path: &str) {
@@ -86,11 +94,13 @@ impl ProjectLifecycleTracker {
         self.pending_worktree_closes.remove(hook_terminal_id)
     }
 
-    /// Cancel a pending worktree close: remove it and unmark the project as closing.
-    pub fn cancel_pending_close(&mut self, hook_terminal_id: &str) {
-        if let Some(pending) = self.take_pending_close(hook_terminal_id) {
-            self.closing.remove(&pending.project_id);
-        }
+    /// Cancel a pending worktree close: remove it and unmark the project as
+    /// closing. Returns the affected project id (if any) so the caller can clear
+    /// the wire-facing `is_closing` marker too.
+    pub fn cancel_pending_close(&mut self, hook_terminal_id: &str) -> Option<String> {
+        let pending = self.take_pending_close(hook_terminal_id)?;
+        self.closing.remove(&pending.project_id);
+        Some(pending.project_id)
     }
 }
 

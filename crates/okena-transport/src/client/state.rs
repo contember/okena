@@ -67,6 +67,13 @@ pub fn collect_all_terminal_ids(state: &StateResponse) -> HashSet<String> {
         if let Some(ref layout) = project.layout {
             ids.extend(collect_layout_terminal_ids(layout));
         }
+        // Hook terminals live outside the layout tree (they render in the hook
+        // panel, not the pane grid), but they are real daemon PTYs — the client
+        // must subscribe to them too or their output never streams and the pane
+        // shows a live-but-empty terminal.
+        for hook in &project.hook_terminals {
+            ids.insert(hook.terminal_id.clone());
+        }
     }
     ids
 }
@@ -77,6 +84,10 @@ pub fn collect_state_terminal_ids(state: &StateResponse) -> Vec<String> {
     for project in &state.projects {
         if let Some(ref layout) = project.layout {
             collect_layout_terminal_ids_into(layout, &mut ids);
+        }
+        // See `collect_all_terminal_ids`: hook-terminal PTYs must be subscribed.
+        for hook in &project.hook_terminals {
+            ids.push(hook.terminal_id.clone());
         }
     }
     ids
@@ -157,6 +168,7 @@ mod tests {
             project_order: vec![],
             folders: vec![],
             windows: vec![],
+            hooks: Vec::new(),
         }
     }
 
@@ -206,6 +218,8 @@ mod tests {
             default_shell: None,
             hook_terminals: Vec::new(),
             hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -225,6 +239,42 @@ mod tests {
         let diff = diff_states(&old, &new);
         assert!(diff.added_terminals.is_empty());
         assert_eq!(diff.removed_terminals, vec!["t2"]);
+    }
+
+    /// Hook terminals live outside the layout tree; the client must still
+    /// subscribe to them or their PTY output never streams (the pane renders a
+    /// live-but-empty terminal — e.g. an on_worktree_create hook).
+    #[test]
+    fn collectors_include_hook_terminal_ids() {
+        use okena_core::api::{ApiHookTerminalEntry, ApiHookTerminalStatus};
+        let mut proj = make_project("p1", vec!["t1"]);
+        proj.hook_terminals.push(ApiHookTerminalEntry {
+            terminal_id: "hook-1".to_string(),
+            label: "on_worktree_create".to_string(),
+            status: ApiHookTerminalStatus::Running,
+            hook_type: "on_worktree_create".to_string(),
+            command: "echo hi".to_string(),
+            cwd: "/tmp".to_string(),
+        });
+        let state = make_state(vec![proj]);
+
+        assert!(
+            collect_state_terminal_ids(&state).contains(&"hook-1".to_string()),
+            "initial-subscribe seed must include hook terminal ids"
+        );
+        assert!(
+            collect_all_terminal_ids(&state).contains("hook-1"),
+            "diff base must include hook terminal ids"
+        );
+
+        // A newly-appearing hook terminal must show up in diff.added_terminals so
+        // the client sends a Subscribe for it.
+        let before = make_state(vec![make_project("p1", vec!["t1"])]);
+        let diff = diff_states(&before, &state);
+        assert!(
+            diff.added_terminals.contains(&"hook-1".to_string()),
+            "a new hook terminal must be diffed as added so it gets subscribed"
+        );
     }
 
     #[test]
@@ -334,6 +384,8 @@ mod tests {
             default_shell: None,
             hook_terminals: Vec::new(),
             hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }]);
         let sizes = collect_terminal_sizes(&state);
         assert_eq!(sizes.get("t1"), Some(&(120, 40)));

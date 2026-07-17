@@ -886,6 +886,43 @@ pub fn fire_on_dirty_worktree_close(
     (Vec::new(), Vec::new())
 }
 
+/// Run the dirty-close safety hook to completion without creating project-owned PTYs.
+pub fn fire_on_dirty_worktree_close_headless(
+    project_hooks: &HooksConfig,
+    global_hooks: &HooksConfig,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    branch: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    monitor: Option<&HookMonitor>,
+) -> Result<(), String> {
+    let Some(command) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_dirty_close) else {
+        return Ok(());
+    };
+
+    let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+    env.insert("OKENA_BRANCH".into(), branch.into());
+    log::info!("Running on_dirty_worktree_close hook for project '{}'", project_name);
+
+    for action in parse_hook_actions(&command) {
+        let command = match action {
+            HookAction::Background(command) | HookAction::Terminal(command) => command,
+        };
+        run_hook_sync(
+            &command,
+            env.clone(),
+            monitor,
+            "on_dirty_worktree_close",
+            project_name,
+            None,
+            project_id,
+        )?;
+    }
+    Ok(())
+}
+
 /// Fire the `worktree_removed` hook asynchronously.
 pub fn fire_worktree_removed(
     project_hooks: &HooksConfig,
@@ -1153,6 +1190,36 @@ mod tests {
         assert_eq!(terminal_actions.len(), 1);
         assert_eq!(terminal_actions[0].0, "my-cmd");
         assert_eq!(terminal_actions[0].1.get("KEY").unwrap(), "val");
+    }
+
+    #[test]
+    fn dirty_close_terminal_actions_run_headless_to_completion() {
+        let hooks = HooksConfig {
+            worktree: WorktreeHooks {
+                on_dirty_close: Some("terminal: true".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let monitor = HookMonitor::new();
+
+        fire_on_dirty_worktree_close_headless(
+            &hooks,
+            &HooksConfig::default(),
+            "project-id",
+            "project",
+            ".",
+            "feature",
+            None,
+            None,
+            Some(&monitor),
+        )
+        .expect("headless dirty-close action should succeed");
+
+        let history = monitor.history();
+        assert_eq!(history.len(), 1);
+        assert!(history[0].terminal_id.is_none());
+        assert!(matches!(history[0].status, HookStatus::Succeeded { .. }));
     }
 
     #[test]

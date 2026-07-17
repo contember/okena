@@ -20,7 +20,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
@@ -48,6 +48,9 @@ pub struct AppState {
     /// receiver and forwards [`WsOutbound::Toast`] frames; events sent with no
     /// receivers are simply dropped (fire-and-forget, like git status).
     pub toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
+    /// One-shot exact-terminal focus requests produced by successful external
+    /// actions and consumed by connected desktop clients.
+    pub terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
     /// Per-connection set of subscribed terminal IDs (connection_id → terminal_ids).
     /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
@@ -66,6 +69,10 @@ pub struct AppState {
     /// desktop quit requests.
     pub ui_owned: bool,
     pub shutdown_when_idle: Arc<AtomicBool>,
+    /// Set true once at least one authenticated client has connected. Gates the
+    /// idle-exit monitor (see [`shutdown::run_idle_exit_monitor`]) so a freshly
+    /// spawned UI-owned daemon isn't reaped before its GUI makes first contact.
+    pub had_client: Arc<AtomicBool>,
     /// Graceful process-shutdown trigger for `/v1/shutdown`. The shared daemon
     /// run loop awaits it and tears down the socket, discovery file, and
     /// instance lock through normal drops.
@@ -111,12 +118,14 @@ pub fn build_router(
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
     toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
+    terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
     next_connection_id: Arc<AtomicU64>,
     active_connections: Arc<AtomicU64>,
     process_shutdown: Arc<tokio::sync::Notify>,
     ui_owned: bool,
+    had_client: Arc<AtomicBool>,
     update_info: okena_ext_updater::UpdateInfo,
 ) -> Router {
     let state = AppState {
@@ -127,6 +136,7 @@ pub fn build_router(
         start_time,
         git_status,
         toast_tx,
+        terminal_focus_tx,
         remote_subscribed_terminals,
         git_poll_trigger_tx,
         next_connection_id,
@@ -134,6 +144,7 @@ pub fn build_router(
         process_shutdown,
         ui_owned,
         shutdown_when_idle: Arc::new(AtomicBool::new(false)),
+        had_client,
         update_info,
     };
 

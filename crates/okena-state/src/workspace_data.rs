@@ -257,6 +257,28 @@ pub struct ProjectData {
     /// output volume is deliberately not treated as activity.
     #[serde(default)]
     pub last_activity_at: Option<u64>,
+    /// Explicit "worktree is still being checked out on disk" marker. Set while
+    /// the optimistic create registers the row (layout `None`, no terminals) and
+    /// cleared once the checkout finalizes or rolls back. Persisted so a daemon
+    /// killed mid-create can distinguish a genuinely interrupted checkout from a
+    /// deliberate `layout: None` bookmark (both otherwise look identical), and
+    /// mirrored over the wire so clients render the "Setting up worktree…"
+    /// placeholder instead of the empty-bookmark state.
+    #[serde(default)]
+    pub is_creating: bool,
+    /// Transient "a before_worktree_remove hook-gated close is in progress"
+    /// marker. Set by the daemon while it runs the before-remove hook + removal
+    /// and cleared when the close is aborted (hook failed / hook terminal
+    /// dismissed); mirrored over the wire so thin clients render the dimmed
+    /// "Closing…" row authoritatively instead of relying only on client-local
+    /// optimistic state that never heals on abort.
+    ///
+    /// Deliberately NOT persisted (`serde(skip)`), unlike `is_creating`: closing
+    /// is a live operation with no restart self-heal (the pending-close tracker
+    /// is in-memory only), so a daemon that died mid-close must not reload a
+    /// project stranded "Closing…" forever.
+    #[serde(skip)]
+    pub is_closing: bool,
 }
 
 impl ProjectData {
@@ -336,6 +358,8 @@ mod tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 

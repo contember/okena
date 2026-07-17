@@ -596,6 +596,8 @@ mod tests {
             hook_terminals: HashMap::<String, HookTerminalEntry>::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 

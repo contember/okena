@@ -1,4 +1,4 @@
-use crate::api::{ApiGitStatus, ApiSystemStats, ApiToast};
+use crate::api::{ApiGitStatus, ApiSystemStats, ApiTerminalFocusRequest, ApiToast};
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +71,9 @@ pub enum WsOutbound {
     /// notifications it produces (e.g. hook failures) are pushed here and the
     /// client's `ToastManager` renders them.
     Toast(ApiToast),
+    /// One-shot request for a connected desktop client to focus and raise an
+    /// exact terminal after an external API action succeeds.
+    TerminalFocusRequested(ApiTerminalFocusRequest),
     TerminalResized {
         terminal_id: String,
         cols: u16,
@@ -213,6 +216,11 @@ mod tests {
                 detail: Some("exit code 1".into()),
                 ttl_ms: 5000,
                 actions: Vec::new(),
+            }),
+            WsOutbound::TerminalFocusRequested(ApiTerminalFocusRequest {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                window: Some("main".into()),
             }),
             WsOutbound::TerminalResized {
                 terminal_id: "t1".into(),

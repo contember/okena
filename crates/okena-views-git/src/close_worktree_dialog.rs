@@ -53,6 +53,11 @@ struct CloseInfo {
 pub struct CloseWorktreeDialog {
     pub(super) client: okena_transport::remote_action::RemoteActionClient,
     pub(super) daemon_project_id: String,
+    /// Client-side (prefixed) project id + handle to the client workspace, used
+    /// to optimistically mark the project "closing" while the daemon runs the
+    /// before_remove hook and removal, so the sidebar row shows a busy state.
+    pub(super) workspace: Entity<Workspace>,
+    pub(super) client_project_id: String,
     pub(super) focus_handle: FocusHandle,
     pub(super) project_name: String,
     pub(super) project_path: String,
@@ -95,6 +100,8 @@ impl CloseWorktreeDialog {
         let mut dialog = Self {
             client,
             daemon_project_id,
+            workspace: workspace.clone(),
+            client_project_id: project_id.clone(),
             focus_handle: cx.focus_handle(),
             project_name,
             project_path,

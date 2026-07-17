@@ -766,7 +766,8 @@ impl ConnectionManager {
                         }
                     }
                 }
-                ConnectionEvent::SystemStatsChanged { .. } => {}
+                ConnectionEvent::SystemStatsChanged { .. }
+                | ConnectionEvent::TerminalFocusRequested { .. } => {}
                 ConnectionEvent::ServerWarning { message, .. } => {
                     log::warn!("Server warning for {}: {}", conn_id, message);
                 }
@@ -822,6 +823,8 @@ mod tests {
             default_shell: None,
             hook_terminals: Vec::new(),
             hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -834,6 +837,7 @@ mod tests {
             project_order: Vec::new(),
             folders: Vec::new(),
             windows: Vec::new(),
+            hooks: Vec::new(),
         }
     }
 

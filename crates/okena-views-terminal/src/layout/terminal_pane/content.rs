@@ -602,13 +602,12 @@ impl Render for TerminalContent {
 
         let Some(ref terminal) = self.terminal else {
             return div()
-                .flex_1()
-                .min_h(px(200.0))
+                .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(rgb(t.text_muted))
-                .child("Creating terminal...")
+                .child("Starting terminal\u{2026}")
                 .into_any_element();
         };
 

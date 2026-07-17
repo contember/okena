@@ -529,7 +529,8 @@ impl WindowView {
                 }
                 // Local-daemon self-heal is driven by `Okena`, not the sidebar.
                 RemoteManagerEvent::LocalConnectionFailed
-                | RemoteManagerEvent::SettingsChanged(_) => {}
+                | RemoteManagerEvent::SettingsChanged(_)
+                | RemoteManagerEvent::TerminalFocusRequested { .. } => {}
             }).detach();
         }
 
@@ -631,6 +632,27 @@ impl WindowView {
         focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| ws.apply_remote_snapshot(&snapshots, window_id, fm, cx));
         });
+
+        // Mirror the local daemon's hook execution history into the client-side
+        // `HookMonitor` global so the Hook Log overlay reflects hooks that ran on
+        // the daemon. Only the local daemon connection feeds this global — remote
+        // connections carry their own, unrelated hook state — and the hooks run
+        // remotely, so without this the client's monitor would stay empty.
+        if let Some(local) = snapshots
+            .iter()
+            .find(|s| s.config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID)
+            && let Some(state) = local.state.as_ref()
+            && let Some(monitor) = cx.try_global::<okena_workspace::hook_monitor::HookMonitor>()
+        {
+            let monitor = monitor.clone();
+            monitor.replace_history(
+                state
+                    .hooks
+                    .iter()
+                    .map(okena_workspace::hook_monitor::HookExecution::from_api)
+                    .collect(),
+            );
+        }
     }
 
     /// Snapshot current on-disk paths for local projects (keyed by project_id).

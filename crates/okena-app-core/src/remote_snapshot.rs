@@ -22,8 +22,8 @@
 use std::collections::{HashMap, HashSet};
 
 use okena_core::api::{
-    ApiFolder, ApiFullscreen, ApiGitStatus, ApiProject, ApiServiceInfo, ApiWindow, ApiWorktreeMetadata,
-    StateResponse,
+    ApiFolder, ApiFullscreen, ApiGitStatus, ApiHookExecution, ApiProject, ApiServiceInfo, ApiWindow,
+    ApiWorktreeMetadata, StateResponse,
 };
 use okena_workspace::state::{FolderData, ProjectData, WorkspaceData};
 
@@ -73,6 +73,8 @@ pub fn build_api_project(
             .map(|(tid, e)| e.to_api(tid.clone()))
             .collect(),
         hooks: p.hooks.to_api(),
+        is_creating: p.is_creating,
+        is_closing: p.is_closing,
     }
 }
 
@@ -152,6 +154,7 @@ pub fn build_folders(folders: &[FolderData]) -> Vec<ApiFolder> {
 /// fields (`focused_project_id`, `fullscreen_terminal`) are derived here from
 /// the active window so old clients keep a sensible focused project /
 /// fullscreen.
+#[allow(clippy::too_many_arguments)] // cohesive snapshot inputs, all already gathered by the caller
 pub fn build_state_response(
     state_version: u64,
     data: &WorkspaceData,
@@ -160,6 +163,7 @@ pub fn build_state_response(
     hidden_project_ids: &HashSet<String>,
     size_map: &HashMap<String, (u16, u16)>,
     windows: Vec<ApiWindow>,
+    hooks: Vec<ApiHookExecution>,
 ) -> StateResponse {
     let projects = build_api_projects(
         data,
@@ -187,5 +191,6 @@ pub fn build_state_response(
         project_order: data.project_order.clone(),
         folders,
         windows,
+        hooks,
     }
 }

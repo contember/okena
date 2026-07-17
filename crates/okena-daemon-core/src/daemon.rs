@@ -55,7 +55,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use async_channel::Receiver;
-use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_remote_server::auth::AuthStore;
@@ -247,6 +247,9 @@ impl DaemonCore {
         // producer; each connected client subscribes a receiver. Capacity bounds
         // the per-client backlog — a lagging client drops non-critical toasts.
         let toast_tx = Arc::new(tokio::sync::broadcast::channel::<ApiToast>(64).0);
+        let terminal_focus_tx = Arc::new(
+            tokio::sync::broadcast::channel::<ApiTerminalFocusRequest>(64).0,
+        );
         let auth_store = Arc::new(AuthStore::new());
         let remote_subscribed_terminals = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let next_connection_id = Arc::new(AtomicU64::new(0));
@@ -267,6 +270,7 @@ impl DaemonCore {
             params.listen_addrs,
             git_status_tx.clone(),
             toast_tx.clone(),
+            terminal_focus_tx,
             remote_subscribed_terminals.clone(),
             Some(git_poll_trigger_tx.clone()),
             next_connection_id,
@@ -365,6 +369,7 @@ impl DaemonCore {
                 // OSC hook-exit, soft-close reap) directly against this state.
                 crate::pty_loop::PtyLoopReactor {
                     workspace: reactor.workspace.clone(),
+                    backend: backend.clone(),
                     hook_runner: reactor.hook_runner.clone(),
                     hook_monitor: reactor.hook_monitor.clone(),
                     workspace_tick: reactor.workspace_tick.clone(),
@@ -387,6 +392,7 @@ impl DaemonCore {
             tokio::task::spawn_local(crate::toast_poll::run_toast_poll(
                 reactor.hook_monitor.clone(),
                 (*toast_tx).clone(),
+                reactor.state_version.clone(),
             ));
 
             // Materialize PTYs for every restored project's uninitialized
@@ -463,14 +469,22 @@ impl DaemonCore {
         // Cancel every LocalSet task first, then stop accepting new requests.
         // The reactor Arc remains available for the final authoritative save.
         drop(local);
-        remote_server.stop();
-
+        // Flush BEFORE stopping the server so `remote.json` stays present for the
+        // whole teardown. Otherwise `RemoteServer::stop` removes the discovery
+        // file up front, leaving a window where the daemon is alive and still
+        // holding the instance lock but undiscoverable — a GUI reopening in that
+        // window can't attach, spawns a fresh daemon that collides on the lock,
+        // and surfaces "Another Okena instance is already running". The command
+        // loop is already gone (drop(local)), so no client can mutate state
+        // during the flush; `stop()` (below) removes the discovery file last,
+        // right before the instance lock drops as `run()` returns.
         flush_shutdown_state(
             &shutdown_workspace,
             &*shutdown_backend,
             &shutdown_terminals,
             persistence::save_workspace,
         )?;
+        remote_server.stop();
         Ok(())
     }
 }

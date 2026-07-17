@@ -154,6 +154,14 @@ pub enum RemoteManagerEvent {
     /// notification queues would be parsed here but never fire an OS bubble.
     TerminalActivity(Vec<String>),
 
+    /// An external API client asked the desktop to focus and raise an exact
+    /// remote terminal. IDs are already prefixed for this manager connection.
+    TerminalFocusRequested {
+        project_id: String,
+        terminal_id: String,
+        window: Option<String>,
+    },
+
     /// The implicit local-daemon loopback connection reached a terminal failed
     /// state (its own connect/reconnect retries are exhausted against a dead
     /// endpoint). The manager stays generic — it only reports; the app decides
@@ -709,6 +717,7 @@ impl RemoteConnectionManager {
             ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
             ConnectionEvent::SystemStatsChanged { .. } => "SystemStatsChanged",
             ConnectionEvent::Toast { .. } => "Toast",
+            ConnectionEvent::TerminalFocusRequested { .. } => "TerminalFocusRequested",
             ConnectionEvent::ServerWarning { .. } => "ServerWarning",
             ConnectionEvent::TokenRefreshed { .. } => "TokenRefreshed",
         };
@@ -855,6 +864,16 @@ impl RemoteConnectionManager {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
                     conn.set_system_stats(Some(stats));
                 }
+            }
+            ConnectionEvent::TerminalFocusRequested {
+                connection_id,
+                request,
+            } => {
+                cx.emit(RemoteManagerEvent::TerminalFocusRequested {
+                    project_id: make_prefixed_id(&connection_id, &request.project_id),
+                    terminal_id: make_prefixed_id(&connection_id, &request.terminal_id),
+                    window: request.window,
+                });
             }
             ConnectionEvent::Toast {
                 connection_id,

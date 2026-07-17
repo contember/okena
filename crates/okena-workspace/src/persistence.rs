@@ -920,6 +920,36 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
         for folder in &mut data.folders {
             folder.project_ids.retain(|pid| pid != id);
         }
+        // A removed worktree stays referenced by its parent otherwise.
+        for parent in &mut data.projects {
+            parent.worktree_ids.retain(|pid| pid != id);
+        }
+    }
+
+    // Self-heal a worktree left mid-create by a daemon kill: optimistic create
+    // registers the row with layout:None before the git checkout, and the
+    // finalize (which seeds the layout + spawns the PTY) may not have persisted.
+    // If the checkout dir now EXISTS (so it isn't stale above), seed a terminal
+    // so it opens a shell instead of hanging on the "Setting up worktree…"
+    // placeholder forever.
+    //
+    // Gated on the persisted `is_creating` marker so we only touch worktrees
+    // genuinely interrupted mid-create. A worktree the user deliberately emptied
+    // (closed its last terminal -> layout:None bookmark) has is_creating == false
+    // and is left untouched — seeding a shell there would silently un-bookmark it
+    // and resurrect a shell on every restart.
+    for p in data.projects.iter_mut() {
+        if p.is_creating
+            && p.worktree_info.is_some()
+            && p.layout.is_none()
+            && Path::new(&p.path).exists()
+        {
+            p.layout = Some(LayoutNode::new_terminal());
+            // Checkout exists and the layout is now seeded — the create is
+            // effectively finalized, so clear the marker (materialize spawns the
+            // PTY and the row renders as a normal worktree, not "creating").
+            p.is_creating = false;
+        }
     }
 }
 
@@ -950,6 +980,8 @@ pub fn default_workspace() -> WorkspaceData {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }],
         project_order: vec![project_id],
         service_panel_heights: HashMap::new(),
@@ -1355,6 +1387,8 @@ mod tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -2083,6 +2117,80 @@ mod tests {
         // Should still have both projects
         assert_eq!(data.projects.len(), 2);
         assert!(data.project_order.contains(&"wt1".to_string()));
+    }
+
+    #[test]
+    fn sync_worktrees_seeds_layout_for_mid_create_worktree() {
+        // Optimistic create registers a worktree with layout:None and the
+        // is_creating marker before the git checkout; a daemon kill could persist
+        // that. On reload, if the checkout dir now exists, seed a layout so it
+        // opens a shell instead of hanging on the "Setting up worktree…"
+        // placeholder — and clear the now-stale marker.
+        let mut wt = make_project("wt1");
+        wt.path = std::env::temp_dir().to_string_lossy().to_string();
+        wt.layout = None;
+        wt.is_creating = true;
+        wt.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
+        });
+
+        let mut data = make_workspace(vec![make_project("p1"), wt], vec!["p1", "wt1"], vec![]);
+        sync_worktrees(&mut data);
+
+        let wt = data.projects.iter().find(|p| p.id == "wt1").expect("worktree kept");
+        assert!(wt.layout.is_some(), "mid-create worktree with an existing dir gets a seeded layout");
+        assert!(!wt.is_creating, "the mid-create marker is cleared once the layout is seeded");
+    }
+
+    #[test]
+    fn sync_worktrees_leaves_deliberate_bookmark_untouched() {
+        // A worktree the user deliberately emptied (closed its last terminal ->
+        // layout:None bookmark) has is_creating == false. The self-heal must NOT
+        // seed a terminal for it, or every restart would silently un-bookmark it
+        // and resurrect a shell. Only genuinely mid-create worktrees self-heal.
+        let mut wt = make_project("wt1");
+        wt.path = std::env::temp_dir().to_string_lossy().to_string();
+        wt.layout = None;
+        wt.is_creating = false;
+        wt.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
+        });
+
+        let mut data = make_workspace(vec![make_project("p1"), wt], vec!["p1", "wt1"], vec![]);
+        sync_worktrees(&mut data);
+
+        let wt = data.projects.iter().find(|p| p.id == "wt1").expect("bookmark kept");
+        assert!(wt.layout.is_none(), "a deliberate bookmark (is_creating false) keeps layout None");
+    }
+
+    #[test]
+    fn sync_worktrees_scrubs_parent_worktree_ids_on_stale_removal() {
+        let mut parent = make_project("p1");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut wt = make_project("wt1");
+        wt.path = "/nonexistent/okena-stale/xyz".to_string(); // stale → removed
+        wt.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
+            branch_name: "b".to_string(),
+        });
+
+        let mut data = make_workspace(vec![parent, wt], vec!["p1", "wt1"], vec![]);
+        sync_worktrees(&mut data);
+
+        let p1 = data.projects.iter().find(|p| p.id == "p1").unwrap();
+        assert!(p1.worktree_ids.is_empty(), "stale worktree id scrubbed from parent.worktree_ids");
+        assert!(!data.projects.iter().any(|p| p.id == "wt1"), "stale worktree removed");
     }
 
     // === validate_workspace_data worktree migration ===

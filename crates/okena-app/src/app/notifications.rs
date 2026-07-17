@@ -87,7 +87,7 @@ impl Okena {
         cx.spawn(async move |this: WeakEntity<Okena>, cx| {
             while let Ok(jump) = rx.recv().await {
                 let _ = this.update(cx, |this, cx| {
-                    this.jump_to_terminal(&jump.project_id, &jump.terminal_id, cx);
+                    this.jump_to_terminal(&jump.project_id, &jump.terminal_id, None, cx);
                 });
             }
         })
@@ -297,48 +297,35 @@ impl Okena {
         false
     }
 
-    /// Focus the specific terminal that raised a notification, raising the
-    /// window it lives in. Mirrors `jump_to_project_terminal` but targets an
-    /// exact terminal id (activating its tab) rather than the first visible one.
-    ///
-    /// Two tiers: if the project is currently visible in some window, focus it
-    /// there without disturbing the view. If it's visible *nowhere* — hidden
-    /// column, folder filter, or a window zoomed into another project — fall
-    /// back to zooming into it in the active (or main) window, which pierces
-    /// all three so the click always lands on the terminal.
-    fn jump_to_terminal(&mut self, project_id: &str, terminal_id: &str, cx: &mut Context<Self>) {
-        // Tier 1: a window where the project is actually visible right now.
-        let mut order = vec![WindowId::Main];
-        order.extend(self.extra_window_handles.keys().copied());
-        let mut visible_in: Option<WindowId> = None;
-        for wid in order {
-            if let Some((view, _)) = self.window_view_and_handle(wid)
-                && self.project_visible_in(wid, &view, project_id, cx)
-            {
-                visible_in = Some(wid);
-                break;
-            }
-        }
-
-        // Tier 2: visible nowhere → reveal (zoom) in the active or main window.
-        let (target, reveal) = match visible_in {
-            Some(wid) => (wid, false),
-            None => {
-                let active = cx.active_window();
-                let mut handles = vec![(WindowId::Main, self.main_window_handle)];
-                handles.extend(self.extra_window_handles.iter().map(|(id, h)| (*id, *h)));
-                let wid = handles
-                    .into_iter()
-                    .find(|(_, h)| Some(*h) == active)
-                    .map(|(id, _)| id)
-                    .unwrap_or(WindowId::Main);
-                (wid, true)
+    /// Focus an exact terminal in the requested window, or the active window.
+    pub(super) fn jump_to_terminal(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        requested_window: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let requested_window = match requested_window {
+            None => None,
+            Some("main") => Some(WindowId::Main),
+            Some(id) => {
+                let Ok(id) = uuid::Uuid::parse_str(id) else { return };
+                Some(WindowId::Extra(id))
             }
         };
+        let target = requested_window.unwrap_or_else(|| {
+            let active = cx.active_window();
+            self.extra_window_handles
+                .iter()
+                .find(|(_, handle)| Some(**handle) == active)
+                .map(|(id, _)| *id)
+                .unwrap_or(WindowId::Main)
+        });
 
         let Some((view, handle)) = self.window_view_and_handle(target) else {
             return;
         };
+        let reveal = !self.project_visible_in(target, &view, project_id, cx);
 
         let workspace = self.workspace.clone();
         let focus_manager = view.read(cx).focus_manager();

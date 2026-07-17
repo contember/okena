@@ -76,6 +76,7 @@ impl DaemonReactor {
         // task would race: `spawn_local` only schedules, so a bump that lands
         // before the task runs would be marked already-seen at subscribe time.)
         let workspace_rx = self.workspace_tick.subscribe();
+        let autosave_rx = self.workspace_tick.subscribe();
         let service_rx = self.service_tick.subscribe();
 
         // Clone the shared bits here (synchronously) so the spawned futures own
@@ -87,8 +88,16 @@ impl DaemonReactor {
             self.state_version.clone(),
             self.service_tick.clone(),
             self.runtime.clone(),
-            self.hook_runner.clone(),
-            self.hook_monitor.clone(),
+        ));
+        // Autosave runs on its OWN `workspace_tick` subscription so its debounce
+        // window + blocking save never delay the `state_version` bump that
+        // notifies clients. A worktree close fires several data-changing ticks
+        // back-to-back; running the 500ms-debounced save inline in the tick loop
+        // serialized them and stalled the client-visible removal by ~2s.
+        tokio::task::spawn_local(autosave_task(
+            autosave_rx,
+            self.workspace.clone(),
+            self.runtime.clone(),
         ));
         tokio::task::spawn_local(service_tick_task(
             service_rx,
@@ -105,9 +114,10 @@ impl DaemonReactor {
 type SharedWorkspace = Arc<parking_lot::Mutex<okena_workspace::state::Workspace>>;
 type SharedServiceManager = Arc<parking_lot::Mutex<ServiceManager>>;
 
-/// The workspace-tick observer task: bump `state_version`, autosave, and run the
-/// project→services load/unload diff on every `workspace_tick` change.
-#[allow(clippy::too_many_arguments)]
+/// The workspace-tick observer task: bump `state_version` and run the
+/// project→services load/unload diff on every `workspace_tick` change. Autosave
+/// lives in a separate task ([`autosave_task`]) so its debounce never delays the
+/// state_version bump.
 async fn workspace_tick_task(
     mut tick_rx: tokio::sync::watch::Receiver<u64>,
     workspace: SharedWorkspace,
@@ -115,12 +125,7 @@ async fn workspace_tick_task(
     state_version: tokio::sync::watch::Sender<u64>,
     service_tick: tokio::sync::watch::Sender<u64>,
     runtime: tokio::runtime::Handle,
-    hook_runner: Option<okena_hooks::HookRunner>,
-    hook_monitor: Option<okena_hooks::HookMonitor>,
 ) {
-    // Tracks the `data_version` last persisted, so UI-only changes skip the
-    // save — the daemon analogue of the GUI's `last_saved_version`.
-    let last_saved_version = Arc::new(AtomicU64::new(0));
     // Projects already loaded into the service manager — the GUI's `known` set,
     // kept across passes to make the diff idempotent.
     let mut known: HashSet<String> = HashSet::new();
@@ -135,11 +140,10 @@ async fn workspace_tick_task(
             return;
         }
 
-        // Coarse "persistent state changed" tick.
+        // Coarse "persistent state changed" tick. Bumped here — and nowhere that
+        // can block — so clients are notified immediately; the debounced autosave
+        // runs on its own task and never gates this.
         state_version.send_modify(|v| *v += 1);
-
-        // ── Debounced autosave ───────────────────────────────────────────────
-        autosave(&workspace, &runtime, &hook_runner, &hook_monitor, &last_saved_version).await;
 
         // ── project → services load/unload diff ─────────────────────────────
         run_services_sync(&workspace, &service_manager, &runtime, &service_tick, &mut known);
@@ -196,6 +200,28 @@ async fn service_tick_task(
     }
 }
 
+/// Dedicated autosave task, driven by the same `workspace_tick` as
+/// [`workspace_tick_task`] but on its OWN subscription. Kept separate so the
+/// debounce sleep + blocking save I/O never delay the latency-critical
+/// `state_version` bump: a worktree close fires several data-changing ticks
+/// back-to-back, and running the 500ms-debounced save inline serialized them,
+/// stalling the client-visible removal by ~2s.
+async fn autosave_task(
+    mut tick_rx: tokio::sync::watch::Receiver<u64>,
+    workspace: SharedWorkspace,
+    runtime: tokio::runtime::Handle,
+) {
+    // Tracks the `data_version` last persisted, so UI-only changes skip the save.
+    let last_saved_version = Arc::new(AtomicU64::new(0));
+    loop {
+        if tick_rx.changed().await.is_err() {
+            // All senders dropped — the reactor is gone; stop the task.
+            return;
+        }
+        autosave(&workspace, &runtime, &last_saved_version).await;
+    }
+}
+
 /// Debounced autosave pass. Skips the save when `data_version` is unchanged
 /// since the last persisted version (UI-only change); otherwise waits the
 /// debounce window, re-snapshots under a short lock, and runs the blocking
@@ -204,8 +230,6 @@ async fn service_tick_task(
 async fn autosave(
     workspace: &SharedWorkspace,
     runtime: &tokio::runtime::Handle,
-    _hook_runner: &Option<okena_hooks::HookRunner>,
-    _hook_monitor: &Option<okena_hooks::HookMonitor>,
     last_saved_version: &Arc<AtomicU64>,
 ) {
     // Skip UI-only changes: the persistent `data_version` is unchanged.

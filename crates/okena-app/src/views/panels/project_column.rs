@@ -977,7 +977,13 @@ impl Render for ProjectColumn {
             Some(project) => {
                 let has_layout = project.layout.is_some();
 
-                let is_creating = workspace.is_creating_project(&self.project_id);
+                // Explicit mid-create marker set by the daemon while the git
+                // checkout runs and mirrored over the wire — shows the "Setting
+                // up worktree…" placeholder. NOT derived from `!has_layout`: a
+                // worktree whose last terminal the user closed is a legitimate
+                // bookmark (layout None) and must fall through to the empty state
+                // with its Start Terminal button, not the creating placeholder.
+                let is_creating = project.is_creating;
 
                 // Soft tinted background based on folder color (when enabled)
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {
@@ -1113,6 +1119,8 @@ mod tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 

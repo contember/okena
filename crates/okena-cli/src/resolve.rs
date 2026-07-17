@@ -312,6 +312,8 @@ mod tests {
             default_shell: None,
             hook_terminals: vec![],
             hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -353,6 +355,7 @@ mod tests {
             project_order: vec![],
             folders: vec![],
             windows,
+            hooks: Vec::new(),
         }
     }
 

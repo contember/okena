@@ -174,6 +174,16 @@ pub fn apply_remote_snapshot(
                     existing.last_activity_at = api_project.last_activity_at;
                     existing.default_shell = api_project.default_shell.clone();
                     existing.hook_terminals = remote_hook_terminals;
+                    // Mid-create marker: drives the "Setting up worktree…"
+                    // placeholder. Mirrored (not derived from layout) so a
+                    // deliberately-emptied worktree bookmark (layout None) isn't
+                    // mistaken for a checkout in flight.
+                    existing.is_creating = api_project.is_creating;
+                    // Mirrored close-in-progress marker: drives the dimmed
+                    // "Closing…" row. The Workspace wrapper reconciles the local
+                    // optimistic closing flag against this after the snapshot
+                    // applies (see `Workspace::apply_remote_snapshot`).
+                    existing.is_closing = api_project.is_closing;
                     // Per-project hooks are daemon-authoritative (it applies them on
                     // PTY spawn). The settings panel edits a separate input buffer and
                     // dispatches UpdateProjectHooks on close, so syncing here won't
@@ -225,6 +235,8 @@ pub fn apply_remote_snapshot(
                         hook_terminals: remote_hook_terminals,
                         pinned: api_project.pinned,
                         last_activity_at: api_project.last_activity_at,
+                        is_creating: api_project.is_creating,
+                        is_closing: api_project.is_closing,
                     });
                 }
                 // Update the transient remote snapshot regardless of create/update path.
@@ -440,6 +452,8 @@ mod tests {
             default_shell: None,
             hook_terminals: Vec::new(),
             hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -463,6 +477,7 @@ mod tests {
             project_order: order,
             folders,
             windows: vec![],
+            hooks: Vec::new(),
         }
     }
 

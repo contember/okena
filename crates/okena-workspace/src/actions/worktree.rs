@@ -9,7 +9,178 @@ use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
 use crate::state::{LayoutNode, PendingWorktreeClose, ProjectData, Workspace, WindowId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// Captured inputs for a two-phase worktree removal. [`Workspace::begin_worktree_removal`]
+/// snapshots everything the finalize step needs (branch, paths, hooks) BEFORE the
+/// git worktree checkout is deleted, so the daemon can run the slow, blocking
+/// `git worktree remove` off the command-loop thread and then
+/// [`Workspace::finish_worktree_removal`] applies the state change from this
+/// snapshot — the checkout is gone by then, so branch/paths can't be re-read.
+#[derive(Clone)]
+pub struct WorktreeRemovalPlan {
+    pub project_id: String,
+    /// The git worktree root to remove (may differ from project.path for monorepos).
+    pub worktree_path: std::path::PathBuf,
+    /// The main repo path — used for `git worktree prune` in the fast removal.
+    pub main_repo_path: String,
+    branch: String,
+    project_hooks: HooksConfig,
+    project_name: String,
+    /// The project's own path (the on_dirty-close hook's CWD), which for a
+    /// monorepo worktree is a subdir inside `worktree_path`.
+    project_path: String,
+    folder_id: Option<String>,
+    folder_name: Option<String>,
+}
+
+impl WorktreeRemovalPlan {
+    /// Run the dirty-close safety hook before the checkout disappears.
+    pub fn fire_on_dirty_close_headless(
+        &self,
+        global_hooks: &HooksConfig,
+        monitor: Option<&okena_hooks::HookMonitor>,
+    ) -> Result<(), String> {
+        hooks::fire_on_dirty_worktree_close_headless(
+            &self.project_hooks,
+            global_hooks,
+            &self.project_id,
+            &self.project_name,
+            &self.project_path,
+            &self.branch,
+            self.folder_id.as_deref(),
+            self.folder_name.as_deref(),
+            monitor,
+        )
+    }
+}
+
+/// Result of the worktree-close merge pipeline ([`close_worktree_merge_git`]).
+/// The pipeline is pure git + headless hooks (no workspace access), so it can run
+/// off the daemon reactor; the caller applies the workspace-side effects.
+pub enum CloseWorktreeGitOutcome {
+    /// Merge (or a no-op merge) succeeded. `did_stash` gates `force_remove`.
+    Ok { did_stash: bool },
+    /// Rebase hit a conflict. The `on_rebase_conflict` hook produced these
+    /// terminal commands + hook results for the caller to apply under the lock,
+    /// then abort the close with `error`.
+    RebaseConflict {
+        error: String,
+        terminal_actions: Vec<(String, HashMap<String, String>)>,
+        hook_results: Vec<crate::hooks::HookTerminalResult>,
+    },
+    /// A git step (or the `pre_merge` hook) failed; stash-pop recovery already ran.
+    Err(String),
+}
+
+/// Restore a stash after a failed merge step (best-effort; a failed pop only warns).
+fn stash_pop_recover(did_stash: bool, project_path: &str, branch: &str, step: &str) {
+    if did_stash
+        && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(project_path))
+    {
+        log::warn!(
+            "Failed to restore stashed changes for worktree '{}' at {} after {} failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
+            branch, project_path, step, pop_err
+        );
+    }
+}
+
+/// The worktree-close merge pipeline: stash → fetch → pre_merge hook → rebase →
+/// merge → post_merge hook → push → delete-branch, with stash-pop recovery on any
+/// failing step. PURE: only git subprocesses + headless hooks (monitor, no PTY
+/// runner), no `&mut Workspace` — so the daemon runs it on a blocking thread with
+/// no lock held. `on_rebase_conflict` is fired headless (no runner) and its
+/// terminal/hook results are RETURNED for the caller to apply, not spawned here.
+/// Call only when the merge is actually enabled.
+#[allow(clippy::too_many_arguments)] // cohesive close-pipeline inputs
+pub fn close_worktree_merge_git(
+    stash_enabled: bool,
+    fetch_enabled: bool,
+    push_enabled: bool,
+    delete_branch_enabled: bool,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    branch: &str,
+    default_branch: &str,
+    main_repo_path: &str,
+    project_hooks: &HooksConfig,
+    global_hooks: &HooksConfig,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    monitor: Option<&okena_hooks::HookMonitor>,
+    runner: Option<&okena_hooks::HookRunner>,
+) -> CloseWorktreeGitOutcome {
+    use std::path::Path;
+    let mut did_stash = false;
+
+    if stash_enabled {
+        if let Err(e) = okena_git::stash_changes(Path::new(project_path)) {
+            return CloseWorktreeGitOutcome::Err(format!("Stash failed: {}", e));
+        }
+        did_stash = true;
+    }
+
+    if fetch_enabled
+        && let Err(e) = okena_git::fetch_all(Path::new(project_path))
+    {
+        stash_pop_recover(did_stash, project_path, branch, "fetch");
+        return CloseWorktreeGitOutcome::Err(format!("Fetch failed: {}", e));
+    }
+
+    // pre_merge hook (sync, headless — no PTY runner).
+    if let Err(e) = hooks::fire_pre_merge(
+        project_hooks, global_hooks, project_id, project_name, project_path,
+        branch, default_branch, main_repo_path, folder_id, folder_name, monitor, None,
+    ) {
+        stash_pop_recover(did_stash, project_path, branch, "pre_merge hook");
+        return CloseWorktreeGitOutcome::Err(format!("pre_merge hook failed: {}", e));
+    }
+
+    // Rebase; on conflict, fire on_rebase_conflict headless and return its data.
+    if let Err(e) = okena_git::rebase_onto(Path::new(project_path), default_branch) {
+        let error_msg = e.to_string();
+        let (terminal_actions, hook_results) = hooks::fire_on_rebase_conflict(
+            project_hooks, global_hooks, project_id, project_name, project_path,
+            branch, default_branch, main_repo_path, &error_msg, folder_id, folder_name, monitor, runner,
+        );
+        stash_pop_recover(did_stash, project_path, branch, "rebase");
+        return CloseWorktreeGitOutcome::RebaseConflict {
+            error: format!("Rebase failed: {}", e),
+            terminal_actions,
+            hook_results,
+        };
+    }
+
+    // Merge (ff-only) in the main repo.
+    if let Err(e) = okena_git::merge_branch(Path::new(main_repo_path), branch, true) {
+        stash_pop_recover(did_stash, project_path, branch, "merge");
+        return CloseWorktreeGitOutcome::Err(format!("Merge failed: {}", e));
+    }
+
+    // post_merge hook (headless, fire-and-forget).
+    let _ = hooks::fire_post_merge(
+        project_hooks, global_hooks, project_id, project_name, project_path,
+        branch, default_branch, main_repo_path, folder_id, folder_name, monitor, runner,
+    );
+
+    if push_enabled
+        && let Err(e) = okena_git::push_branch(Path::new(main_repo_path), default_branch)
+    {
+        log::warn!("Push failed (continuing): {}", e);
+    }
+
+    if delete_branch_enabled {
+        if let Err(e) = okena_git::delete_local_branch(Path::new(main_repo_path), branch) {
+            log::warn!("Delete local branch failed (continuing): {}", e);
+        }
+        if let Err(e) = okena_git::delete_remote_branch(Path::new(main_repo_path), branch) {
+            log::warn!("Delete remote branch failed (continuing): {}", e);
+        }
+    }
+
+    CloseWorktreeGitOutcome::Ok { did_stash }
+}
 
 impl Workspace {
     /// Toggle visibility for a single worktree (no propagation to children).
@@ -153,6 +324,17 @@ impl Workspace {
         window_id: WindowId,
         cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
+        // Dedupe: refuse to register a second worktree row at a path some
+        // project already occupies. Two CreateWorktree requests for the same
+        // branch (a double-click or an agent retry) compute the SAME
+        // deterministic target path; without this both register a row and both
+        // run `git worktree add` against that one path concurrently, and the
+        // loser's failure cleanup can delete the winner's live checkout. Mirrors
+        // add_discovered_worktree's path dedupe.
+        if self.data.projects.iter().any(|p| p.path == project_path) {
+            return Err(format!("A worktree for '{branch}' already exists"));
+        }
+
         // Get parent project info
         let parent = self.project(parent_project_id)
             .ok_or_else(|| "Parent project not found".to_string())?;
@@ -173,9 +355,17 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: project_path.to_string(),
-            // When hooks are deferred the worktree directory doesn't exist yet.
-            // Use None so no terminals are spawned until creation finishes.
-            layout: if fire_hooks { new_layout } else { None },
+            // When hooks are deferred the worktree directory doesn't exist yet,
+            // so use None (no terminals spawned until creation finishes). Otherwise
+            // clone the parent's structure; if the parent has NO layout, still seed
+            // a single terminal so the new worktree opens with an initial shell
+            // instead of an empty project (matches the deferred `fire_worktree_hooks`
+            // path). `spawn_uninitialized_terminals` materializes the seeded slot.
+            layout: if fire_hooks {
+                new_layout.or_else(|| Some(crate::state::LayoutNode::new_terminal()))
+            } else {
+                None
+            },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::state::WorktreeMetadata {
@@ -195,6 +385,10 @@ impl Workspace {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            // Set by the caller via mark_creating_project when this is an
+            // optimistic (deferred-hooks) create still awaiting its checkout.
+            is_creating: false,
+            is_closing: false,
         };
 
         let new_project_hooks = project.hooks.clone();
@@ -346,6 +540,8 @@ impl Workspace {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         };
 
         // Multi-window new-project visibility rule (PRD user story 14):
@@ -403,6 +599,13 @@ impl Workspace {
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
         }
+        // Scrub the child id from its parent's worktree_ids, or the sidebar keeps
+        // a dangling phantom child (both for externally-deleted worktrees and the
+        // optimistic-create rollback path). `delete_project` already does this; a
+        // stale removal must too.
+        for parent in &mut self.data.projects {
+            parent.worktree_ids.retain(|id| id != project_id);
+        }
         // Scrub the worktree id from every window's per-project storage
         // (hidden set + widths map on main + every extra). Same fan-out as
         // the primary `delete_project` path.
@@ -424,44 +627,152 @@ impl Workspace {
         ))
     }
 
-    /// Remove a worktree project and its git worktree
+    /// Remove a worktree project and its git worktree (synchronous). Fires the
+    /// `on_worktree_close` hook, runs `git worktree remove`, then finalizes state.
+    /// Single entry point for in-process / GUI / test callers; the daemon splits
+    /// it via [`begin_worktree_removal`](Self::begin_worktree_removal) + an
+    /// off-reactor `git worktree remove` + [`finish_worktree_removal`](Self::finish_worktree_removal)
+    /// so the (slow, blocking) git call doesn't stall the command loop.
     pub fn remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) -> Result<(), String> {
+        let plan = self.begin_worktree_removal(project_id, global_hooks, cx)?;
+        okena_git::remove_worktree(&plan.worktree_path, force)
+            .map_err(|e| e.to_string())?;
+        self.finish_worktree_removal(focus_manager, &plan, global_hooks, cx);
+        Ok(())
+    }
+
+    /// Phase 1 of worktree removal: validate, snapshot the inputs the finalize
+    /// step needs, and fire `on_worktree_close` (which needs the worktree to
+    /// still exist for a valid CWD). Returns the plan; the caller then runs
+    /// `git worktree remove` (off-reactor on the daemon) and calls
+    /// [`finish_worktree_removal`](Self::finish_worktree_removal).
+    pub fn begin_worktree_removal(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) -> Result<WorktreeRemovalPlan, String> {
+        // Reject removal while the worktree is still being created: the optimistic
+        // create registers the row (worktree_info set) and returns before its
+        // background `git worktree add` finishes, so removing now would race the
+        // in-flight checkout and strand an orphaned, git-registered worktree with
+        // no workspace row. Single choke point for every removal route; mirrors the
+        // `is_creating` guard in `remove_stale_worktree`.
+        if self.lifecycle.is_creating(project_id) {
+            return Err("worktree is still being created".to_string());
+        }
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
-
-        // Ensure it's a worktree project
         if project.worktree_info.is_none() {
             return Err("Not a worktree project".to_string());
         }
 
-        // Capture info before removal for the hook
+        // Snapshot everything BEFORE removal, while the project is still in state
+        // and its checkout exists on disk (git worktree remove deletes it).
         let folder = self.folder_for_project_or_parent(project_id);
-        let hook_folder_id = folder.map(|f| f.id.clone());
-        let hook_folder_name = folder.map(|f| f.name.clone());
+        let folder_id = folder.map(|f| f.id.clone());
+        let folder_name = folder.map(|f| f.name.clone());
         let project_hooks = project.hooks.clone();
         let project_name = project.name.clone();
         let project_path = project.path.clone();
-        // For monorepos the project path is a subdirectory inside the worktree checkout.
-        // Resolve the actual worktree root via git so `git worktree remove` gets the right path.
+        let main_repo_path = self.worktree_parent_path(project_id).unwrap_or_default();
+        // For monorepos the project path is a subdirectory inside the checkout;
+        // resolve the actual worktree root so `git worktree remove` gets it right.
         let project_pathbuf = std::path::PathBuf::from(&project_path);
         let worktree_path = okena_git::get_repo_root(&project_pathbuf)
             .unwrap_or(project_pathbuf);
-
-        // Resolve branch BEFORE removal (git worktree remove deletes the checkout)
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
 
-        // Fire on_worktree_close hook BEFORE removal so the hook has a valid CWD
+        // Fire on_worktree_close BEFORE removal so the hook has a valid CWD.
         let monitor = cx.hook_monitor();
-        hooks::fire_on_worktree_close_with_services(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, monitor.as_ref());
+        hooks::fire_on_worktree_close_with_services(&project_hooks, project_id, &project_name, &project_path, &branch, folder_id.as_deref(), folder_name.as_deref(), global_hooks, monitor.as_ref());
 
-        // Remove the git worktree
-        okena_git::remove_worktree(&worktree_path, force)
-            .map_err(|e| e.to_string())?;
+        Ok(WorktreeRemovalPlan {
+            project_id: project_id.to_string(),
+            worktree_path,
+            main_repo_path,
+            branch,
+            project_hooks,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        })
+    }
 
-        // Delete the project from workspace (this also fires on_project_close)
-        self.delete_project(focus_manager, project_id, global_hooks, cx);
+    /// Keep the authoritative project row while a daemon removal runs, but stop
+    /// its terminals so their CWD cannot keep the checkout busy on Windows.
+    pub fn prepare_background_worktree_removal(
+        &mut self,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<Vec<String>, String> {
+        if self.lifecycle.is_creating(project_id) {
+            return Err("worktree is still being created".to_string());
+        }
+        let project = self
+            .project_mut(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+        if project.worktree_info.is_none() {
+            return Err("Not a worktree project".to_string());
+        }
 
-        Ok(())
+        let mut terminal_ids = project
+            .layout
+            .as_ref()
+            .map_or_else(Vec::new, LayoutNode::collect_terminal_ids);
+        terminal_ids.extend(project.hook_terminals.keys().cloned());
+        terminal_ids.extend(project.service_terminals.values().cloned());
+        if let Some(layout) = &mut project.layout {
+            layout.clear_terminal_ids_except(&HashSet::new());
+        }
+
+        terminal_ids.extend(self.drain_pending_closes_for_project(project_id));
+        terminal_ids.sort();
+        terminal_ids.dedup();
+        self.mark_closing_project_authoritative(project_id);
+        self.notify_data(cx);
+        Ok(terminal_ids)
+    }
+
+    /// Phase 2 of worktree removal (after `git worktree remove` has run): delete
+    /// the project from workspace state (which fires `on_project_close`) and fire
+    /// the `worktree_removed` hook from the `plan` snapshot. This is the single
+    /// convergence point for every removal route, so the hook fires exactly once;
+    /// the checkout is gone, so it runs from `main_repo_path` (OKENA_BRANCH still
+    /// carries the removed branch). The hook fires headless (no PTY runner) since
+    /// the project is already deleted — see [`fire_worktree_removed_hook`](Self::fire_worktree_removed_hook).
+    pub fn finish_worktree_removal(&mut self, focus_manager: &mut FocusManager, plan: &WorktreeRemovalPlan, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
+        self.delete_project(focus_manager, &plan.project_id, global_hooks, cx);
+        self.fire_worktree_removed_hook(plan, global_hooks, cx);
+    }
+
+    /// Fire the `on_worktree_removed` hook. Split out of
+    /// [`finish_worktree_removal`](Self::finish_worktree_removal) so the
+    /// optimistic deferred-close path can `delete_project` immediately (the
+    /// client's row vanishes at once) and fire this only after the physical
+    /// directory delete finishes — preserving the hook's "actually removed"
+    /// semantics without making the row hang around for the whole `remove_dir_all`.
+    ///
+    /// Fires headless (no PTY runner). The project is already deleted, so a
+    /// keep_alive PTY hook would have no project to register its terminal in:
+    /// the shell would leak in the terminals registry unowned/undismissable and
+    /// its monitor entry would stay Running forever (only registered hook
+    /// terminals are ever finished, by `handle_hook_terminal_exits`). The
+    /// headless path runs the command on a background thread and records the
+    /// monitor entry's completion — and any failure — itself. Same shape as
+    /// `on_worktree_close` / `on_project_close`, which also fire headless once
+    /// the row is gone.
+    pub fn fire_worktree_removed_hook(&self, plan: &WorktreeRemovalPlan, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
+        let monitor = cx.hook_monitor();
+        let _ = hooks::fire_worktree_removed(
+            &plan.project_hooks,
+            global_hooks,
+            &plan.project_id,
+            &plan.project_name,
+            &plan.main_repo_path,
+            &plan.branch,
+            &plan.main_repo_path,
+            plan.folder_id.as_deref(),
+            plan.folder_name.as_deref(),
+            monitor.as_ref(),
+            None,
+        );
     }
 
     /// Close a worktree project: optionally stash/fetch/rebase/merge/push/
@@ -489,6 +800,14 @@ impl Workspace {
         global_hooks: &HooksConfig,
         cx: &mut impl WorkspaceCx,
     ) -> Result<(), String> {
+        // Reject up front while the worktree is still being created — before a
+        // before_remove hook is spawned and a pending close (with its mirrored
+        // `is_closing` marker) is registered. `begin_worktree_removal` has the
+        // same guard as the backstop for every removal route, but by then the
+        // hook has already run and the closing state would need unwinding.
+        if self.lifecycle.is_creating(project_id) {
+            return Err("worktree is still being created".to_string());
+        }
         // Recompute the git-derived values authoritatively (don't trust the client).
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
@@ -514,137 +833,40 @@ impl Workspace {
         let monitor = cx.hook_monitor();
         let runner = cx.hook_runner();
 
-        let mut did_stash = false;
-
-        // Step 1: If merge enabled, run merge flow
-        if merge_enabled {
-            // Stash (if stash_enabled and is_dirty)
-            if stash_enabled {
-                if let Err(e) = okena_git::stash_changes(std::path::Path::new(&project_path)) {
-                    return Err(format!("Stash failed: {}", e));
-                }
-                did_stash = true;
-            }
-
-            // Fetch (if fetch_enabled)
-            if fetch_enabled
-                && let Err(e) = okena_git::fetch_all(std::path::Path::new(&project_path)) {
-                if did_stash
-                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
-                    log::warn!(
-                        "Failed to restore stashed changes for worktree '{}' at {} after fetch failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
-                        branch, project_path, pop_err
-                    );
-                }
-                return Err(format!("Fetch failed: {}", e));
-            }
-
-            // pre_merge hook (sync, headless — no PTY runner)
-            let pre_merge_result = hooks::fire_pre_merge(
-                &project_hooks,
-                global_hooks,
+        // Step 1: If merge enabled, run the merge pipeline (pure git + headless
+        // hooks — see `close_worktree_merge_git`; the daemon runs it off-reactor).
+        let did_stash = if merge_enabled {
+            match close_worktree_merge_git(
+                stash_enabled,
+                fetch_enabled,
+                push_enabled,
+                delete_branch_enabled,
                 project_id,
                 &project_name,
                 &project_path,
                 &branch,
                 &default_branch,
                 &main_repo_path,
-                folder_id.as_deref(),
-                folder_name.as_deref(),
-                monitor.as_ref(),
-                None,
-            );
-
-            if let Err(e) = pre_merge_result {
-                if did_stash
-                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
-                    log::warn!(
-                        "Failed to restore stashed changes for worktree '{}' at {} after pre_merge hook failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
-                        branch, project_path, pop_err
-                    );
-                }
-                return Err(format!("pre_merge hook failed: {}", e));
-            }
-
-            // Rebase
-            if let Err(e) = okena_git::rebase_onto(std::path::Path::new(&project_path), &default_branch) {
-                // Fire on_rebase_conflict hook
-                let error_msg = e.to_string();
-                let (terminal_actions, hook_results) = hooks::fire_on_rebase_conflict(
-                    &project_hooks,
-                    global_hooks,
-                    project_id,
-                    &project_name,
-                    &project_path,
-                    &branch,
-                    &default_branch,
-                    &main_repo_path,
-                    &error_msg,
-                    folder_id.as_deref(),
-                    folder_name.as_deref(),
-                    monitor.as_ref(),
-                    runner.as_ref(),
-                );
-                for (cmd, env) in terminal_actions {
-                    self.add_terminal_with_command(project_id, &cmd, &env, cx);
-                }
-                self.register_hook_results(hook_results, cx);
-
-                if did_stash
-                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
-                    log::warn!(
-                        "Failed to restore stashed changes for worktree '{}' at {} after rebase failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
-                        branch, project_path, pop_err
-                    );
-                }
-                return Err(format!("Rebase failed: {}", e));
-            }
-
-            // Merge (ff-only) in the main repo
-            if let Err(e) = okena_git::merge_branch(std::path::Path::new(&main_repo_path), &branch, true) {
-                if did_stash
-                    && let Err(pop_err) = okena_git::stash_pop(std::path::Path::new(&project_path)) {
-                    log::warn!(
-                        "Failed to restore stashed changes for worktree '{}' at {} after merge failure: {}. Your changes remain in the git stash — run `git stash pop` in that worktree to recover them.",
-                        branch, project_path, pop_err
-                    );
-                }
-                return Err(format!("Merge failed: {}", e));
-            }
-
-            // post_merge hook (async)
-            let _ = hooks::fire_post_merge(
                 &project_hooks,
                 global_hooks,
-                project_id,
-                &project_name,
-                &project_path,
-                &branch,
-                &default_branch,
-                &main_repo_path,
                 folder_id.as_deref(),
                 folder_name.as_deref(),
                 monitor.as_ref(),
                 runner.as_ref(),
-            );
-
-            // Push default branch (if push_enabled)
-            if push_enabled
-                && let Err(e) = okena_git::push_branch(std::path::Path::new(&main_repo_path), &default_branch) {
-                log::warn!("Push failed (continuing): {}", e);
-            }
-
-            // Delete branch (if delete_branch_enabled)
-            if delete_branch_enabled {
-                if let Err(e) = okena_git::delete_local_branch(std::path::Path::new(&main_repo_path), &branch) {
-                    log::warn!("Delete local branch failed (continuing): {}", e);
+            ) {
+                CloseWorktreeGitOutcome::Ok { did_stash } => did_stash,
+                CloseWorktreeGitOutcome::RebaseConflict { error, terminal_actions, hook_results } => {
+                    for (cmd, env) in terminal_actions {
+                        self.add_terminal_with_command(project_id, &cmd, &env, cx);
+                    }
+                    self.register_hook_results(hook_results, cx);
+                    return Err(error);
                 }
-
-                if let Err(e) = okena_git::delete_remote_branch(std::path::Path::new(&main_repo_path), &branch) {
-                    log::warn!("Delete remote branch failed (continuing): {}", e);
-                }
+                CloseWorktreeGitOutcome::Err(e) => return Err(e),
             }
-        }
+        } else {
+            false
+        };
 
         let force_remove = is_dirty && !did_stash;
 

@@ -198,6 +198,8 @@ impl Workspace {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
@@ -213,6 +215,45 @@ impl Workspace {
         let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, folder_id, folder_name, global_hooks, runner.as_ref(), monitor.as_ref());
         self.register_hook_results(hook_results, cx);
         id
+    }
+
+    /// Re-open an ALREADY-EXISTING project (e.g. one restored from
+    /// `workspace.json` at daemon boot): drop its stale hook terminals and fire
+    /// its `on_project_open` hook, reading the project's stored hooks/name/path.
+    ///
+    /// `add_project` runs the fire+register step for NEW projects, but restored
+    /// projects enter the workspace via `Workspace::new` (never `add_project`),
+    /// so without this their `project.on_open` hook — global or per-project —
+    /// would never run on restart. The stale-clear matters because
+    /// `hook_terminals` is persisted: the entries reloaded from disk point at
+    /// PTYs that died with the previous process, so they must be dropped both to
+    /// avoid phantom rows (whose rerun/dismiss fail with "hook terminal not
+    /// found") and to stop entries accumulating on every restart. No-ops the
+    /// fire when no `on_open` hook resolves.
+    pub fn fire_project_open_hooks(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
+        let Some(project) = self.project(project_id) else { return };
+        let project_hooks = project.hooks.clone();
+        let name = project.name.clone();
+        let path = project.path.clone();
+        // Immutable `project` borrow ends here (values cloned); the folder
+        // borrow below ends at the fire call, freeing `&mut self` for the
+        // mutations that follow.
+        let folder = self.folder_for_project_or_parent(project_id);
+        let folder_id = folder.map(|f| f.id.as_str());
+        let folder_name = folder.map(|f| f.name.as_str());
+        let runner = cx.hook_runner();
+        let monitor = cx.hook_monitor();
+        let hook_results = hooks::fire_on_project_open(&project_hooks, project_id, &name, &path, folder_id, folder_name, global_hooks, runner.as_ref(), monitor.as_ref());
+        // Drop stale (dead-PTY) hook terminals restored from disk before
+        // registering the freshly-fired ones, so the panel shows only live rows.
+        if let Some(p) = self.project_mut(project_id) {
+            let stale: Vec<String> = p.hook_terminals.keys().cloned().collect();
+            for tid in stale {
+                p.hook_terminals.remove(&tid);
+                p.terminal_names.remove(&tid);
+            }
+        }
+        self.register_hook_results(hook_results, cx);
     }
 
     /// Add a new terminal to a project by splitting the root layout
@@ -523,6 +564,8 @@ mod tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -742,6 +785,8 @@ mod gpui_tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -1596,5 +1641,116 @@ mod gpui_tests {
         ws.remove_stale_worktree("wt1");
 
         assert!(ws.project("wt1").is_none(), "unmanaged stale worktree should be removed");
+    }
+
+    #[gpui::test]
+    fn begin_worktree_removal_rejected_while_creating(cx: &mut gpui::TestAppContext) {
+        // Optimistic worktree create registers the row and returns before its
+        // background `git worktree add` finishes; a removal landing in that
+        // window must be rejected so it can't race the in-flight checkout and
+        // strand an orphaned, git-registered worktree with no workspace row.
+        // The row and its creating flag must survive the rejected call intact.
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let err = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.mark_creating_project("wt1");
+            ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx).err()
+        });
+
+        assert_eq!(err.as_deref(), Some("worktree is still being created"));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.project("wt1").is_some(), "row survives the rejected removal");
+            assert!(ws.is_creating_project("wt1"), "creating flag untouched");
+        });
+    }
+
+    #[gpui::test]
+    fn close_worktree_rejected_while_creating(cx: &mut gpui::TestAppContext) {
+        // The close-entry guard must reject BEFORE close_worktree fires a
+        // before_remove hook or registers a pending close. Without the entry
+        // guard the flow would still be rejected — by the begin_worktree_removal
+        // backstop, with the identical error — but only AFTER the headless
+        // before_remove hook ran. So the sharp assertion is the marker file: the
+        // project carries a before_remove hook that writes one, and it must not
+        // exist after the rejected call. (The project path must be a real dir —
+        // the headless hook spawns with cwd = OKENA_PROJECT_PATH.)
+        let marker = std::env::temp_dir()
+            .join(format!("okena_close_guard_marker_{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut wt = make_worktree_project("wt1", "parent");
+        wt.path = std::env::temp_dir().to_string_lossy().into_owned();
+        wt.hooks.worktree.before_remove =
+            Some(format!("echo x > \"{}\"", marker.display()));
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, wt];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let err = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.mark_creating_project("wt1");
+            ws.close_worktree(
+                &mut FocusManager::new(),
+                "wt1",
+                false, // merge
+                false, // stash
+                false, // fetch
+                false, // push
+                false, // delete_branch
+                &HooksConfig::default(),
+                cx,
+            )
+            .err()
+        });
+
+        assert_eq!(err.as_deref(), Some("worktree is still being created"));
+        assert!(
+            !marker.exists(),
+            "before_remove hook must not fire on a rejected mid-create close",
+        );
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.project("wt1").is_some(), "row survives the rejected close");
+            assert!(ws.is_creating_project("wt1"), "creating flag untouched");
+            assert!(!ws.is_project_closing("wt1"), "no pending close registered (tracker)");
+            assert!(
+                !ws.project("wt1").unwrap().is_closing,
+                "no pending close registered (wire-facing closing flag stays clear)",
+            );
+        });
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[gpui::test]
+    fn begin_worktree_removal_succeeds_after_create_finishes(cx: &mut gpui::TestAppContext) {
+        // Inverse of the mid-create guard: once finish_creating_project clears
+        // the flag (finalize path), the same removal route is no longer rejected
+        // — the guard releases rather than wedging the row forever.
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let result = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.mark_creating_project("wt1");
+            ws.finish_creating_project("wt1");
+            ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx)
+        });
+
+        assert!(
+            result.is_ok(),
+            "guard should release once create finishes, got {:?}",
+            result.err(),
+        );
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.is_creating_project("wt1"), "creating flag cleared");
+        });
     }
 }

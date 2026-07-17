@@ -665,6 +665,62 @@ pub fn ensure_local_daemon_in(
         log::info!("Existing local daemon disappeared before it became reachable");
     }
 
+    // `running_daemon_in` returned None → no advertised daemon. But a UI-owned
+    // daemon may still be alive and holding the instance lock while momentarily
+    // un-advertised: it dropped `remote.json` mid-teardown, or is rebinding after
+    // a restart. Spawning now would collide on the lock and the child would exit
+    // printing "Another Okena instance is already running", which the GUI turns
+    // into a hard lockout. Give the owner a bounded window to either re-advertise
+    // (→ attach / reconnect) or finish exiting and release the lock (→ spawn
+    // cleanly); if it does neither, reap it (guarded) so the user is never stuck.
+    if instance_lock_owner_alive() {
+        log::info!(
+            "Instance lock held but no daemon advertised; waiting for the owner to re-advertise or exit before spawning"
+        );
+        let deadline = Instant::now() + LOCK_SETTLE_TIMEOUT;
+        loop {
+            if let Some(daemon) = wait_until_reachable_in(dir, LOCK_SETTLE_POLL) {
+                let token = auth_token_for_daemon(dir, &daemon)?;
+                log::info!(
+                    "Un-advertised daemon re-appeared (pid {}); attaching instead of spawning",
+                    daemon.pid
+                );
+                return Ok(EnsuredDaemon {
+                    daemon,
+                    token,
+                    spawned: None,
+                });
+            }
+            if !instance_lock_owner_alive() {
+                log::info!("Instance lock owner exited; spawning a fresh daemon");
+                break;
+            }
+            if Instant::now() >= deadline {
+                if let Some(pid) = instance_lock_owner_pid() {
+                    log::warn!(
+                        "Instance lock owner pid {pid} neither re-advertised nor exited within {LOCK_SETTLE_TIMEOUT:?}; reaping it"
+                    );
+                    if !instance_lock_is_held() {
+                        break;
+                    }
+                    if !kill_pid_if_ui_owned_okena(pid) {
+                        return Err(format!(
+                            "Instance lock is held by pid {pid}, but it is not a verified UI-owned Okena daemon; refusing to terminate it."
+                        ));
+                    }
+                    // Let the OS release the flock the reaped process held.
+                    std::thread::sleep(Duration::from_millis(200));
+                    if instance_lock_is_held() {
+                        return Err(format!(
+                            "UI-owned daemon pid {pid} did not release the instance lock after termination."
+                        ));
+                    }
+                }
+                break;
+            }
+        }
+    }
+
     let mut child = spawn_daemon().map_err(|e| format!("Failed to spawn daemon: {e}"))?;
     match wait_until_reachable_in(dir, spawn_timeout) {
         Some(daemon) => {
@@ -700,6 +756,73 @@ pub fn ensure_local_daemon_in(
             Err("Daemon did not become ready in time.".into())
         }
     }
+}
+
+/// How long to wait for an un-advertised instance-lock owner to re-advertise or
+/// exit before reaping it (see [`ensure_local_daemon_in`]). Long enough to cover
+/// a normal daemon teardown / rebind, short enough to keep startup responsive.
+const LOCK_SETTLE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Per-iteration reachability poll while waiting out an un-advertised owner.
+const LOCK_SETTLE_POLL: Duration = Duration::from_millis(400);
+
+/// Best-effort read of the instance-lock file's recorded owner pid (0/absent → None).
+fn instance_lock_owner_pid() -> Option<u32> {
+    let path = okena_workspace::persistence::instance_lock_path();
+    let content = std::fs::read_to_string(&path).ok()?;
+    okena_workspace::persistence::instance_lock_pid(&content).filter(|&pid| pid != 0)
+}
+
+/// True when the lock is held and names a still-alive process.
+fn instance_lock_owner_alive() -> bool {
+    instance_lock_is_held() && instance_lock_owner_pid().is_some_and(is_process_alive)
+}
+
+/// Check the OS lock rather than trusting stale lockfile contents.
+fn instance_lock_is_held() -> bool {
+    let path = okena_workspace::persistence::instance_lock_path();
+    let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) else {
+        return false;
+    };
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+/// Reap only a process that still matches the lockfile and explicit lifecycle mode.
+fn kill_pid_if_ui_owned_okena(pid: u32) -> bool {
+    if instance_lock_owner_pid() != Some(pid) || !instance_lock_is_held() {
+        return false;
+    }
+
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let spid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[spid]), true);
+    if let Some(proc) = sys.process(spid) {
+        let is_okena = |s: &str| s.starts_with("okena");
+        let name_ok = proc.name().to_str().is_some_and(is_okena);
+        let exe_ok = proc
+            .exe()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .is_some_and(is_okena);
+        let ui_owned = proc
+            .cmd()
+            .iter()
+            .any(|arg| arg.to_str().is_some_and(|arg| arg == "--ui-owned"));
+        if (name_ok || exe_ok) && ui_owned {
+            return proc.kill();
+        } else {
+            log::warn!(
+                "Refusing to reap pid {pid}: process is not a verified UI-owned Okena daemon"
+            );
+        }
+    }
+    false
 }
 
 /// Ensure a local daemon is reachable from the user's config dir, with caller-

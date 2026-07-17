@@ -35,6 +35,12 @@ pub struct StateResponse {
     pub folders: Vec<ApiFolder>,
     #[serde(default)]
     pub windows: Vec<ApiWindow>,
+    /// Recent hook execution history (newest first) from the daemon's
+    /// `HookMonitor`, so thin clients can render the hook log / status even
+    /// though the hooks ran remotely. `#[serde(default)]` keeps snapshots from
+    /// older servers (which omit the field) deserializable.
+    #[serde(default)]
+    pub hooks: Vec<ApiHookExecution>,
 }
 
 /// OS window bounds in screen pixels.
@@ -288,6 +294,18 @@ pub struct ApiToastAction {
     pub style: String,
 }
 
+/// One-shot desktop presentation request emitted after an external
+/// `FocusTerminal` action succeeds on the daemon. Unlike workspace state, this
+/// is intentionally transient: connected desktop clients focus and raise the
+/// requested pane once without repeatedly stealing focus on later state syncs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiTerminalFocusRequest {
+    pub project_id: String,
+    pub terminal_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ApiProject {
     pub id: String,
@@ -332,6 +350,20 @@ pub struct ApiProject {
     /// them on PTY spawn). Empty for projects with no per-project overrides.
     #[serde(default, skip_serializing_if = "ApiHooksConfig::is_empty")]
     pub hooks: ApiHooksConfig,
+    /// Whether the worktree backing this project is still being checked out on
+    /// disk (optimistic create in flight). Clients render the "Setting up
+    /// worktree…" placeholder while true; serde-defaulted so older peers that
+    /// omit the field decode as "not creating" (a legitimate bookmark, not a
+    /// perpetual placeholder).
+    #[serde(default)]
+    pub is_creating: bool,
+    /// Whether a `before_worktree_remove` hook-gated close is in progress on the
+    /// daemon. Clients render the dimmed "Closing…" row while true and heal their
+    /// client-local optimistic flag when this arrives false (close aborted).
+    /// serde-defaulted so older peers that omit the field decode as "not
+    /// closing".
+    #[serde(default)]
+    pub is_closing: bool,
 }
 
 /// Wire mirror of `okena_state::HookTerminalStatus` (which can't be referenced
@@ -356,6 +388,34 @@ pub struct ApiHookTerminalEntry {
     pub hook_type: String,
     pub command: String,
     pub cwd: String,
+}
+
+/// Wire mirror of `okena_hooks::HookStatus`. Durations are carried as whole
+/// milliseconds (the domain `Duration`/`Instant` types don't cross the wire).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ApiHookStatus {
+    Running,
+    Succeeded { duration_ms: u64 },
+    Failed { duration_ms: u64, exit_code: i32, stderr: String },
+    SpawnError { message: String },
+}
+
+/// Wire mirror of `okena_hooks::HookExecution` — one row in the hook log.
+///
+/// The domain type keeps `started_at: Instant`, which is process-local and
+/// cannot be serialized; the client reconstructs a fresh `Instant` on ingest
+/// (only the still-`Running` elapsed readout depends on it, and that
+/// self-corrects once the hook finishes and carries a concrete duration).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApiHookExecution {
+    pub id: u64,
+    pub hook_type: String,
+    pub command: String,
+    pub project_name: String,
+    pub status: ApiHookStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
 }
 
 /// Wire mirror of `okena_state::ProjectHooks`.
@@ -1144,6 +1204,8 @@ mod tests {
                     },
                     worktree: ApiWorktreeHooks::default(),
                 },
+                is_creating: false,
+                is_closing: false,
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,
@@ -1174,6 +1236,7 @@ mod tests {
                 }),
                 sidebar_open: Some(true),
             }],
+            hooks: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();
@@ -1738,5 +1801,34 @@ mod tests {
             window: None,
         };
         assert_eq!(show.target_window(), None);
+    }
+
+    #[test]
+    fn hook_execution_wire_round_trips() {
+        let api = ApiHookExecution {
+            id: 3,
+            hook_type: "worktree_removed".into(),
+            command: "echo x".into(),
+            project_name: "proj".into(),
+            status: ApiHookStatus::Failed {
+                duration_ms: 12,
+                exit_code: 1,
+                stderr: "e".into(),
+            },
+            terminal_id: Some("t1".into()),
+        };
+        let json = serde_json::to_string(&api).unwrap();
+        // Status is internally tagged by "state".
+        assert!(json.contains("\"state\":\"failed\""));
+        let back: ApiHookExecution = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, api);
+    }
+
+    #[test]
+    fn state_response_defaults_hooks_when_absent() {
+        // Snapshots from an older server omit `hooks`; it must default to empty.
+        let json = r#"{"state_version":1,"projects":[],"focused_project_id":null,"fullscreen_terminal":null}"#;
+        let parsed: StateResponse = serde_json::from_str(json).unwrap();
+        assert!(parsed.hooks.is_empty());
     }
 }
