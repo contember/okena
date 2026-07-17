@@ -3,11 +3,11 @@
  *
  * Port of `mobile/lib/src/widgets/key_toolbar.dart`:
  *   - ESC / TAB one-shot keys,
- *   - CTRL / ALT (option) / CMD sticky three-state toggles
- *     (inactive → active one-shot → locked → inactive),
+ *   - CTRL / ALT / META modifiers (tap for one-shot, hold to lock),
  *   - a handful of punctuation keys (`~ | / -`),
- *   - an arrow joystick (pan to fire arrows; tap fires from offset-from-center),
- *   - compose-sheet + paste + hide-keyboard icon buttons.
+ *   - an arrow pad with hold-to-repeat,
+ *   - clipboard paste, a reviewed compose flow, and an extended key deck for
+ *     signals, navigation, and raw characters.
  *
  * Modifier semantics (the heart of the port):
  *   - CTRL + a-z/A-Z → the control character (a→0x01 … z→0x1A). Other chars
@@ -41,8 +41,10 @@ import {
   Modal,
   TextInput,
   StyleSheet,
+  Platform,
   type GestureResponderEvent,
 } from 'react-native';
+import Clipboard from '@react-native-clipboard/clipboard';
 
 import type { OkenaNative, SpecialKey } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
@@ -50,7 +52,7 @@ import { OkenaColors } from '../theme';
 
 // ── Shared modifier state ──────────────────────────────────────────────────
 
-/** Three-state modifier cycle: inactive → active (one-shot) → locked (sticky). */
+/** Modifier state: inactive, active for one key, or locked until released. */
 export type ModifierState = 'inactive' | 'active' | 'locked';
 
 interface ModifierSnapshot {
@@ -64,17 +66,6 @@ const INITIAL_SNAPSHOT: ModifierSnapshot = {
   option: 'inactive',
   cmd: 'inactive',
 };
-
-function nextState(s: ModifierState): ModifierState {
-  switch (s) {
-    case 'inactive':
-      return 'active';
-    case 'active':
-      return 'locked';
-    case 'locked':
-      return 'inactive';
-  }
-}
 
 /**
  * Shared modifier store between {@link KeyToolbar} and {@link TerminalPane}.
@@ -116,14 +107,42 @@ export class KeyModifiers {
     return this.ctrl || this.option || this.cmd;
   }
 
+  /** Tap toggles a one-shot modifier; long-press toggles its locked state. */
   toggleCtrl(): void {
-    this.emit({ ...this.snapshot, ctrl: nextState(this.snapshot.ctrl) });
+    this.emit({
+      ...this.snapshot,
+      ctrl: this.snapshot.ctrl === 'inactive' ? 'active' : 'inactive',
+    });
+  }
+  lockCtrl(): void {
+    this.emit({
+      ...this.snapshot,
+      ctrl: this.snapshot.ctrl === 'locked' ? 'inactive' : 'locked',
+    });
   }
   toggleOption(): void {
-    this.emit({ ...this.snapshot, option: nextState(this.snapshot.option) });
+    this.emit({
+      ...this.snapshot,
+      option: this.snapshot.option === 'inactive' ? 'active' : 'inactive',
+    });
+  }
+  lockOption(): void {
+    this.emit({
+      ...this.snapshot,
+      option: this.snapshot.option === 'locked' ? 'inactive' : 'locked',
+    });
   }
   toggleCmd(): void {
-    this.emit({ ...this.snapshot, cmd: nextState(this.snapshot.cmd) });
+    this.emit({
+      ...this.snapshot,
+      cmd: this.snapshot.cmd === 'inactive' ? 'active' : 'inactive',
+    });
+  }
+  lockCmd(): void {
+    this.emit({
+      ...this.snapshot,
+      cmd: this.snapshot.cmd === 'locked' ? 'inactive' : 'locked',
+    });
   }
 
   /** Reset only one-shot (active) modifiers; locked ones persist. */
@@ -209,22 +228,46 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
 }) => {
   const mod = useKeyModifiers(modifiers);
   const [composeOpen, setComposeOpen] = useState(false);
+  const [composeInitialText, setComposeInitialText] = useState('');
+  const [keyDeckOpen, setKeyDeckOpen] = useState(false);
 
   const sendSpecialKey = useCallback(
     (key: SpecialKey) => {
       if (!terminalId) return;
       void native.sendSpecialKey(connId, terminalId, key);
+      modifiers.reset();
     },
-    [native, connId, terminalId],
+    [native, connId, terminalId, modifiers],
   );
 
   const sendText = useCallback(
     (text: string) => {
       if (!terminalId || text.length === 0) return;
+      try {
+        const offset = native.getScrollInfo(connId, terminalId).displayOffset;
+        if (offset > 0) native.scroll(connId, terminalId, -offset);
+      } catch {
+        // Input still works while the local terminal state is catching up.
+      }
       void native.sendText(connId, terminalId, text);
     },
     [native, connId, terminalId],
   );
+
+  const pasteClipboard = useCallback(() => {
+    void Clipboard.getString()
+      .then((text) => {
+        if (/\r|\n/.test(text)) {
+          setComposeInitialText(text);
+          setComposeOpen(true);
+        } else {
+          sendText(text);
+        }
+      })
+      .catch(() => {
+        // Clipboard access can be denied by the OS.
+      });
+  }, [sendText]);
 
   /** Send a character key, applying any active modifiers (Dart `_sendCharKey`). */
   const sendCharKey = useCallback(
@@ -295,19 +338,67 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
         contentContainerStyle={styles.scrollContent}
         style={styles.scroll}
       >
-        <KeyButton label="esc" onPress={() => sendSpecialKey('Escape')} />
-        <ToggleKey label={'⌃'} state={mod.ctrl} onPress={() => modifiers.toggleCtrl()} />
-        <ToggleKey label={'⌥'} state={mod.option} onPress={() => modifiers.toggleOption()} />
-        <ToggleKey label={'⌘'} state={mod.cmd} onPress={() => modifiers.toggleCmd()} />
+        <KeyButton
+          label="esc"
+          accessibilityLabel="Escape"
+          onPress={() => sendSpecialKey('Escape')}
+        />
+        <ToggleKey
+          label="ctrl"
+          state={mod.ctrl}
+          onPress={() => modifiers.toggleCtrl()}
+          onLongPress={() => modifiers.lockCtrl()}
+        />
+        <ToggleKey
+          label="alt"
+          state={mod.option}
+          onPress={() => modifiers.toggleOption()}
+          onLongPress={() => modifiers.lockOption()}
+        />
+        <ToggleKey
+          label="meta"
+          state={mod.cmd}
+          onPress={() => modifiers.toggleCmd()}
+          onLongPress={() => modifiers.lockCmd()}
+        />
         <KeyButton label="tab" onPress={() => sendSpecialKey('Tab')} />
+        <KeyButton
+          label="^C"
+          accessibilityLabel="Control C"
+          onPress={() => sendSpecialKey('CtrlC')}
+        />
         <View style={styles.gap} />
         <KeyButton label="~" onPress={() => sendCharKey('~')} />
         <KeyButton label="|" onPress={() => sendCharKey('|')} />
         <KeyButton label="/" onPress={() => sendCharKey('/')} />
         <KeyButton label="-" onPress={() => sendCharKey('-')} />
         <View style={styles.gap} />
-        <KeyButton label={'✎'} onPress={() => setComposeOpen(true)} />
-        <KeyButton label={'⌄'} onPress={() => onHideKeyboard?.()} />
+        <KeyButton
+          label="paste"
+          accessibilityLabel="Paste clipboard"
+          onPress={pasteClipboard}
+        />
+        <KeyButton
+          label="edit"
+          accessibilityLabel="Compose input"
+          onPress={() => {
+            setComposeInitialText('');
+            setComposeOpen(true);
+          }}
+        />
+        <KeyButton
+          label="more"
+          accessibilityLabel="More terminal keys"
+          onPress={() => {
+            onHideKeyboard?.();
+            setKeyDeckOpen(true);
+          }}
+        />
+        <KeyButton
+          label={'⌄'}
+          accessibilityLabel="Hide keyboard"
+          onPress={() => onHideKeyboard?.()}
+        />
       </ScrollView>
       <View style={styles.arrowSlot}>
         <ArrowJoystick onArrow={handleArrow} />
@@ -315,10 +406,29 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
 
       <ComposeSheet
         visible={composeOpen}
-        onClose={() => setComposeOpen(false)}
+        initialText={composeInitialText}
+        onClose={() => {
+          setComposeOpen(false);
+          setComposeInitialText('');
+        }}
         onSubmit={(text, sendEnter) => {
           sendText(text);
           if (sendEnter) sendSpecialKey('Enter');
+        }}
+      />
+      <KeyDeck
+        visible={keyDeckOpen}
+        onClose={() => setKeyDeckOpen(false)}
+        onSpecialKey={sendSpecialKey}
+        onCharacter={sendCharKey}
+        onPaste={() => {
+          setKeyDeckOpen(false);
+          pasteClipboard();
+        }}
+        onCompose={() => {
+          setKeyDeckOpen(false);
+          setComposeInitialText('');
+          setComposeOpen(true);
         }}
       />
     </View>
@@ -327,11 +437,17 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
 
 // ── Key widgets ─────────────────────────────────────────────────────────────
 
-const KeyButton: React.FC<{ label: string; onPress: () => void }> = ({
-  label,
-  onPress,
-}) => (
-  <Pressable style={styles.key} onPress={onPress}>
+const KeyButton: React.FC<{
+  label: string;
+  onPress: () => void;
+  accessibilityLabel?: string;
+}> = ({ label, onPress, accessibilityLabel }) => (
+  <Pressable
+    style={({ pressed }) => [styles.key, pressed && styles.keyPressed]}
+    onPress={onPress}
+    accessibilityRole="button"
+    accessibilityLabel={accessibilityLabel ?? label}
+  >
     <Text style={styles.keyText}>{label}</Text>
   </Pressable>
 );
@@ -340,16 +456,53 @@ const ToggleKey: React.FC<{
   label: string;
   state: ModifierState;
   onPress: () => void;
-}> = ({ label, state, onPress }) => {
+  onLongPress: () => void;
+}> = ({ label, state, onPress, onLongPress }) => {
+  const handledLongPress = useRef(false);
   const active = state !== 'inactive';
   const locked = state === 'locked';
   return (
     <Pressable
-      style={[styles.key, styles.toggleKey, active && styles.toggleKeyActive]}
-      onPress={onPress}
+      style={({ pressed }) => [
+        styles.key,
+        styles.toggleKey,
+        active && styles.toggleKeyActive,
+        locked && styles.toggleKeyLocked,
+        pressed && styles.keyPressed,
+      ]}
+      onPressIn={() => {
+        handledLongPress.current = false;
+      }}
+      onLongPress={() => {
+        handledLongPress.current = true;
+        onLongPress();
+      }}
+      onPress={() => {
+        if (!handledLongPress.current) onPress();
+      }}
+      delayLongPress={350}
+      accessibilityRole="button"
+      accessibilityLabel={`${label} modifier`}
+      accessibilityHint="Tap for the next key, hold to lock"
+      accessibilityState={{ selected: active }}
     >
-      <Text style={[styles.keyText, active && styles.toggleKeyTextActive]}>{label}</Text>
-      <View style={[styles.lockBar, locked && styles.lockBarActive]} />
+      <Text
+        style={[
+          styles.keyText,
+          styles.toggleKeyText,
+          active && styles.toggleKeyTextActive,
+          locked && styles.toggleKeyTextLocked,
+        ]}
+      >
+        {label}
+      </Text>
+      <View
+        style={[
+          styles.modifierState,
+          active && styles.modifierStateActive,
+          locked && styles.modifierStateLocked,
+        ]}
+      />
     </Pressable>
   );
 };
@@ -357,22 +510,25 @@ const ToggleKey: React.FC<{
 // ── Arrow joystick ─────────────────────────────────────────────────────────
 
 const JOYSTICK_SIZE = 52;
-const DRAG_THRESHOLD = 14;
 
 const ArrowJoystick: React.FC<{ onArrow: (key: ArrowKey) => void }> = ({
   onArrow,
 }) => {
-  const originRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const movedRef = useRef(false);
   const [active, setActive] = useState<ArrowKey | null>(null);
-  const clearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeRef = useRef<ArrowKey | null>(null);
+  const repeatDelay = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const repeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(
-    () => () => {
-      if (clearTimer.current) clearTimeout(clearTimer.current);
-    },
-    [],
-  );
+  const stopRepeat = useCallback(() => {
+    if (repeatDelay.current) clearTimeout(repeatDelay.current);
+    if (repeatTimer.current) clearInterval(repeatTimer.current);
+    repeatDelay.current = null;
+    repeatTimer.current = null;
+    activeRef.current = null;
+    setActive(null);
+  }, []);
+
+  useEffect(() => stopRepeat, [stopRepeat]);
 
   const dirFromDelta = (dx: number, dy: number): ArrowKey =>
     Math.abs(dx) > Math.abs(dy)
@@ -380,52 +536,39 @@ const ArrowJoystick: React.FC<{ onArrow: (key: ArrowKey) => void }> = ({
         ? 'ArrowRight'
         : 'ArrowLeft'
       : dy > 0
-        ? 'ArrowDown'
-        : 'ArrowUp';
+      ? 'ArrowDown'
+      : 'ArrowUp';
 
-  const fire = useCallback(
+  const startRepeat = useCallback(
     (dir: ArrowKey) => {
-      onArrow(dir);
+      stopRepeat();
+      activeRef.current = dir;
       setActive(dir);
+      onArrow(dir);
+      repeatDelay.current = setTimeout(() => {
+        repeatTimer.current = setInterval(() => {
+          if (activeRef.current) onArrow(activeRef.current);
+        }, 70);
+      }, 360);
     },
-    [onArrow],
+    [onArrow, stopRepeat],
   );
 
+  const directionAt = (e: GestureResponderEvent): ArrowKey | null => {
+    const dx = e.nativeEvent.locationX - JOYSTICK_SIZE / 2;
+    const dy = e.nativeEvent.locationY - JOYSTICK_SIZE / 2;
+    if (Math.hypot(dx, dy) < 5) return null;
+    return dirFromDelta(dx, dy);
+  };
+
   const onResponderGrant = (e: GestureResponderEvent) => {
-    originRef.current = {
-      x: e.nativeEvent.locationX,
-      y: e.nativeEvent.locationY,
-    };
-    movedRef.current = false;
+    const dir = directionAt(e);
+    if (dir) startRepeat(dir);
   };
 
   const onResponderMove = (e: GestureResponderEvent) => {
-    const dx = e.nativeEvent.locationX - originRef.current.x;
-    const dy = e.nativeEvent.locationY - originRef.current.y;
-    if (Math.hypot(dx, dy) >= DRAG_THRESHOLD) {
-      movedRef.current = true;
-      fire(dirFromDelta(dx, dy));
-      originRef.current = {
-        x: e.nativeEvent.locationX,
-        y: e.nativeEvent.locationY,
-      };
-    }
-  };
-
-  const onResponderRelease = () => {
-    if (!movedRef.current) {
-      const cx = JOYSTICK_SIZE / 2;
-      const cy = JOYSTICK_SIZE / 2;
-      const dx = originRef.current.x - cx;
-      const dy = originRef.current.y - cy;
-      if (Math.hypot(dx, dy) >= 4) {
-        fire(dirFromDelta(dx, dy));
-        if (clearTimer.current) clearTimeout(clearTimer.current);
-        clearTimer.current = setTimeout(() => setActive(null), 120);
-        return;
-      }
-    }
-    setActive(null);
+    const dir = directionAt(e);
+    if (dir && dir !== activeRef.current) startRepeat(dir);
   };
 
   return (
@@ -435,22 +578,45 @@ const ArrowJoystick: React.FC<{ onArrow: (key: ArrowKey) => void }> = ({
       onMoveShouldSetResponder={() => true}
       onResponderGrant={onResponderGrant}
       onResponderMove={onResponderMove}
-      onResponderRelease={onResponderRelease}
-      onResponderTerminate={onResponderRelease}
+      onResponderRelease={stopRepeat}
+      onResponderTerminate={stopRepeat}
+      accessibilityRole="adjustable"
+      accessibilityLabel="Arrow keys"
+      accessibilityHint="Touch a direction and hold to repeat"
     >
       <View style={styles.joystickGrid}>
-        <Text style={[styles.arrowGlyph, active === 'ArrowUp' && styles.arrowGlyphActive]}>
+        <Text
+          style={[
+            styles.arrowGlyph,
+            active === 'ArrowUp' && styles.arrowGlyphActive,
+          ]}
+        >
           {'▲'}
         </Text>
         <View style={styles.arrowRow}>
-          <Text style={[styles.arrowGlyph, active === 'ArrowLeft' && styles.arrowGlyphActive]}>
+          <Text
+            style={[
+              styles.arrowGlyph,
+              active === 'ArrowLeft' && styles.arrowGlyphActive,
+            ]}
+          >
             {'◀'}
           </Text>
-          <Text style={[styles.arrowGlyph, active === 'ArrowRight' && styles.arrowGlyphActive]}>
+          <Text
+            style={[
+              styles.arrowGlyph,
+              active === 'ArrowRight' && styles.arrowGlyphActive,
+            ]}
+          >
             {'▶'}
           </Text>
         </View>
-        <Text style={[styles.arrowGlyph, active === 'ArrowDown' && styles.arrowGlyphActive]}>
+        <Text
+          style={[
+            styles.arrowGlyph,
+            active === 'ArrowDown' && styles.arrowGlyphActive,
+          ]}
+        >
           {'▼'}
         </Text>
       </View>
@@ -458,21 +624,194 @@ const ArrowJoystick: React.FC<{ onArrow: (key: ArrowKey) => void }> = ({
   );
 };
 
+// ── Extended key deck ─────────────────────────────────────────────────────
+
+const KeyDeck: React.FC<{
+  visible: boolean;
+  onClose: () => void;
+  onSpecialKey: (key: SpecialKey) => void;
+  onCharacter: (character: string) => void;
+  onPaste: () => void;
+  onCompose: () => void;
+}> = ({ visible, onClose, onSpecialKey, onCharacter, onPaste, onCompose }) => (
+  <Modal
+    visible={visible}
+    transparent
+    animationType="slide"
+    onRequestClose={onClose}
+  >
+    <Pressable style={styles.deckBackdrop} onPress={onClose} />
+    <View style={styles.deckSheet}>
+      <View style={styles.sheetHandle} />
+      <View style={styles.deckHeader}>
+        <View>
+          <Text style={styles.deckTitle}>Terminal keys</Text>
+          <Text style={styles.deckSubtitle}>
+            Signals, navigation and raw input
+          </Text>
+        </View>
+        <Pressable
+          style={({ pressed }) => [
+            styles.deckClose,
+            pressed && styles.keyPressed,
+          ]}
+          onPress={onClose}
+          accessibilityRole="button"
+          accessibilityLabel="Close terminal keys"
+        >
+          <Text style={styles.deckCloseText}>Done</Text>
+        </Pressable>
+      </View>
+
+      <DeckSection label="Signals">
+        <DeckKey
+          label="ctrl c"
+          code="^C"
+          onPress={() => onSpecialKey('CtrlC')}
+        />
+        <DeckKey
+          label="ctrl d"
+          code="^D"
+          onPress={() => onSpecialKey('CtrlD')}
+        />
+        <DeckKey
+          label="ctrl z"
+          code="^Z"
+          onPress={() => onSpecialKey('CtrlZ')}
+        />
+        <DeckKey
+          label="escape"
+          code="esc"
+          onPress={() => onSpecialKey('Escape')}
+        />
+      </DeckSection>
+
+      <DeckSection label="Navigation">
+        <DeckKey
+          label="home"
+          code="home"
+          onPress={() => onSpecialKey('Home')}
+        />
+        <DeckKey label="end" code="end" onPress={() => onSpecialKey('End')} />
+        <DeckKey
+          label="page up"
+          code="pgup"
+          onPress={() => onSpecialKey('PageUp')}
+        />
+        <DeckKey
+          label="page down"
+          code="pgdn"
+          onPress={() => onSpecialKey('PageDown')}
+        />
+        <DeckKey
+          label="delete"
+          code="del"
+          onPress={() => onSpecialKey('Delete')}
+        />
+        <DeckKey
+          label="arrow left"
+          code="←"
+          onPress={() => onSpecialKey('ArrowLeft')}
+        />
+        <DeckKey
+          label="arrow up"
+          code="↑"
+          onPress={() => onSpecialKey('ArrowUp')}
+        />
+        <DeckKey
+          label="arrow down"
+          code="↓"
+          onPress={() => onSpecialKey('ArrowDown')}
+        />
+        <DeckKey
+          label="arrow right"
+          code="→"
+          onPress={() => onSpecialKey('ArrowRight')}
+        />
+      </DeckSection>
+
+      <DeckSection label="Characters">
+        {['~', '|', '\\', '/', '-', '_', '=', ':', ';'].map((character) => (
+          <DeckKey
+            key={character}
+            label={character}
+            code={character}
+            onPress={() => onCharacter(character)}
+            compact
+          />
+        ))}
+      </DeckSection>
+
+      <View style={styles.deckActions}>
+        <Pressable
+          style={({ pressed }) => [
+            styles.deckAction,
+            pressed && styles.keyPressed,
+          ]}
+          onPress={onPaste}
+        >
+          <Text style={styles.deckActionText}>Paste clipboard</Text>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [
+            styles.deckAction,
+            styles.deckActionPrimary,
+            pressed && styles.keyPressed,
+          ]}
+          onPress={onCompose}
+        >
+          <Text style={styles.deckActionPrimaryText}>Compose input</Text>
+        </Pressable>
+      </View>
+    </View>
+  </Modal>
+);
+
+const DeckSection: React.FC<{ label: string; children: React.ReactNode }> = ({
+  label,
+  children,
+}) => (
+  <View style={styles.deckSection}>
+    <Text style={styles.deckSectionLabel}>{label}</Text>
+    <View style={styles.deckKeys}>{children}</View>
+  </View>
+);
+
+const DeckKey: React.FC<{
+  label: string;
+  code: string;
+  onPress: () => void;
+  compact?: boolean;
+}> = ({ label, code, onPress, compact = false }) => (
+  <Pressable
+    style={({ pressed }) => [
+      styles.deckKey,
+      compact && styles.deckKeyCompact,
+      pressed && styles.deckKeyPressed,
+    ]}
+    onPress={onPress}
+    accessibilityRole="button"
+    accessibilityLabel={label}
+  >
+    <Text style={styles.deckKeyText}>{code}</Text>
+  </Pressable>
+);
+
 // ── Compose sheet ─────────────────────────────────────────────────────────
 
 const ComposeSheet: React.FC<{
   visible: boolean;
+  initialText: string;
   onClose: () => void;
   onSubmit: (text: string, sendEnter: boolean) => void;
-}> = ({ visible, onClose, onSubmit }) => {
+}> = ({ visible, initialText, onClose, onSubmit }) => {
   const [text, setText] = useState('');
-  const [sendEnter, setSendEnter] = useState(true);
 
   useEffect(() => {
-    if (visible) setText('');
-  }, [visible]);
+    if (visible) setText(initialText);
+  }, [visible, initialText]);
 
-  const submit = () => {
+  const submit = (sendEnter: boolean) => {
     if (text.length === 0) {
       onClose();
       return;
@@ -490,19 +829,30 @@ const ComposeSheet: React.FC<{
     >
       <Pressable style={styles.composeBackdrop} onPress={onClose} />
       <View style={styles.composeSheet}>
+        <View style={styles.sheetHandle} />
         <View style={styles.composeHeader}>
-          <Pressable
-            style={[styles.enterToggle, sendEnter && styles.enterToggleActive]}
-            onPress={() => setSendEnter((v) => !v)}
-          >
-            <Text
-              style={[
-                styles.enterToggleText,
-                sendEnter && styles.enterToggleTextActive,
-              ]}
-            >
-              {'⏎'} Enter
+          <View style={styles.composeHeading}>
+            <Text style={styles.composeTitle}>Compose input</Text>
+            <Text style={styles.composeSubtitle}>
+              Review text before it reaches the terminal
             </Text>
+          </View>
+          <Pressable
+            style={({ pressed }) => [
+              styles.composePaste,
+              pressed && styles.keyPressed,
+            ]}
+            onPress={() => {
+              void Clipboard.getString()
+                .then((clipboardText) =>
+                  setText((current) => current + clipboardText),
+                )
+                .catch(() => {
+                  // Clipboard access can be denied by the OS.
+                });
+            }}
+          >
+            <Text style={styles.composePasteText}>Paste</Text>
           </Pressable>
         </View>
         <TextInput
@@ -511,15 +861,32 @@ const ComposeSheet: React.FC<{
           onChangeText={setText}
           autoFocus
           multiline
-          placeholder="Enter command..."
+          autoCapitalize="none"
+          autoCorrect={false}
+          spellCheck={false}
+          autoComplete="off"
+          importantForAutofill="no"
+          keyboardType={
+            Platform.OS === 'android' ? 'visible-password' : 'ascii-capable'
+          }
+          placeholder="Command, path, or multiline input"
           placeholderTextColor={OkenaColors.textTertiary}
         />
         <View style={styles.composeActions}>
           <Pressable style={styles.composeBtn} onPress={onClose}>
             <Text style={styles.composeBtnText}>Cancel</Text>
           </Pressable>
-          <Pressable style={[styles.composeBtn, styles.composeSend]} onPress={submit}>
-            <Text style={styles.composeSendText}>Send</Text>
+          <Pressable
+            style={[styles.composeBtn, styles.composeInsert]}
+            onPress={() => submit(false)}
+          >
+            <Text style={styles.composeInsertText}>Insert</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.composeBtn, styles.composeSend]}
+            onPress={() => submit(true)}
+          >
+            <Text style={styles.composeSendText}>Run ↵</Text>
           </Pressable>
         </View>
       </View>
@@ -534,50 +901,57 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 6,
-    paddingVertical: 5,
+    paddingVertical: 6,
     backgroundColor: OkenaColors.glassBg,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: OkenaColors.glassStroke,
   },
   scroll: { flex: 1 },
   scrollContent: { alignItems: 'center' },
-  gap: { width: 12 },
+  gap: { width: 8 },
   key: {
-    minWidth: 40,
-    paddingHorizontal: 8,
-    paddingVertical: 9,
+    minWidth: 42,
+    minHeight: 42,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     marginHorizontal: 2,
-    borderRadius: 10,
+    borderRadius: 8,
     backgroundColor: OkenaColors.keyBg,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: OkenaColors.keyBorder,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  keyPressed: { opacity: 0.62 },
   keyText: {
     color: OkenaColors.keyText,
-    fontSize: 13,
-    fontWeight: '500',
+    fontFamily: 'JetBrainsMono',
+    fontSize: 12,
+    fontWeight: '600',
   },
-  toggleKey: { paddingVertical: 7 },
+  toggleKey: { minWidth: 50, paddingVertical: 6 },
   toggleKeyActive: {
-    backgroundColor: OkenaColors.accent,
+    backgroundColor: OkenaColors.accentSoft,
     borderColor: OkenaColors.accent,
   },
-  toggleKeyTextActive: { color: '#ffffff', fontWeight: '700', fontSize: 16 },
-  lockBar: {
-    width: 12,
+  toggleKeyLocked: { backgroundColor: OkenaColors.accent },
+  toggleKeyText: { fontSize: 11 },
+  toggleKeyTextActive: { color: OkenaColors.accent, fontWeight: '700' },
+  toggleKeyTextLocked: { color: '#ffffff' },
+  modifierState: {
+    width: 4,
     height: 2,
-    marginTop: 1,
+    marginTop: 3,
     borderRadius: 1,
     backgroundColor: 'transparent',
   },
-  lockBarActive: { backgroundColor: '#ffffff' },
+  modifierStateActive: { backgroundColor: OkenaColors.accent },
+  modifierStateLocked: { width: 18, backgroundColor: '#ffffff' },
   arrowSlot: { marginLeft: 6 },
   joystick: {
     width: JOYSTICK_SIZE,
     height: JOYSTICK_SIZE,
-    borderRadius: 16,
+    borderRadius: 12,
     backgroundColor: OkenaColors.keyBg,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: OkenaColors.keyBorder,
@@ -593,39 +967,154 @@ const styles = StyleSheet.create({
     marginVertical: 1,
   },
   arrowGlyphActive: { color: OkenaColors.accent },
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 36,
+    height: 4,
+    marginBottom: 14,
+    borderRadius: 2,
+    backgroundColor: OkenaColors.borderLight,
+  },
+  // Extended key deck
+  deckBackdrop: { flex: 1, backgroundColor: OkenaColors.backdrop },
+  deckSheet: {
+    backgroundColor: OkenaColors.surface,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.borderLight,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 24,
+  },
+  deckHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  deckTitle: {
+    color: OkenaColors.textPrimary,
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  deckSubtitle: { color: OkenaColors.textTertiary, fontSize: 12, marginTop: 2 },
+  deckClose: {
+    minHeight: 40,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deckCloseText: { color: OkenaColors.accent, fontSize: 14, fontWeight: '600' },
+  deckSection: { marginBottom: 14 },
+  deckSectionLabel: {
+    color: OkenaColors.textTertiary,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 7,
+  },
+  deckKeys: { flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -3 },
+  deckKey: {
+    minWidth: 64,
+    minHeight: 44,
+    paddingHorizontal: 10,
+    margin: 3,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: OkenaColors.surfaceElevated,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.keyBorder,
+  },
+  deckKeyCompact: { minWidth: 44, paddingHorizontal: 8 },
+  deckKeyPressed: {
+    backgroundColor: OkenaColors.accentSoft,
+    borderColor: OkenaColors.accent,
+  },
+  deckKeyText: {
+    color: OkenaColors.textPrimary,
+    fontFamily: 'JetBrainsMono',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  deckActions: { flexDirection: 'row', marginHorizontal: -4, marginTop: 2 },
+  deckAction: {
+    flex: 1,
+    minHeight: 46,
+    marginHorizontal: 4,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: OkenaColors.surfaceElevated,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.borderLight,
+  },
+  deckActionPrimary: {
+    backgroundColor: OkenaColors.accent,
+    borderColor: OkenaColors.accent,
+  },
+  deckActionText: {
+    color: OkenaColors.textSecondary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  deckActionPrimaryText: { color: '#ffffff', fontSize: 13, fontWeight: '700' },
   // Compose sheet
-  composeBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
+  composeBackdrop: { flex: 1, backgroundColor: OkenaColors.backdrop },
   composeSheet: {
     backgroundColor: OkenaColors.surface,
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
-    padding: 16,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.borderLight,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 20,
   },
   composeHeader: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginBottom: 8,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
   },
-  enterToggle: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    backgroundColor: OkenaColors.surfaceElevated,
+  composeHeading: { flex: 1, paddingRight: 12 },
+  composeTitle: {
+    color: OkenaColors.textPrimary,
+    fontSize: 18,
+    fontWeight: '700',
   },
-  enterToggleActive: { backgroundColor: OkenaColors.accent },
-  enterToggleText: {
+  composeSubtitle: {
     color: OkenaColors.textTertiary,
     fontSize: 12,
-    fontFamily: 'JetBrainsMono',
+    marginTop: 2,
   },
-  enterToggleTextActive: { color: '#ffffff' },
+  composePaste: {
+    minHeight: 40,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: OkenaColors.surfaceElevated,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.borderLight,
+  },
+  composePasteText: {
+    color: OkenaColors.accent,
+    fontSize: 13,
+    fontWeight: '600',
+  },
   composeInput: {
-    minHeight: 96,
+    minHeight: 120,
+    maxHeight: 240,
     color: OkenaColors.textPrimary,
     fontFamily: 'JetBrainsMono',
     fontSize: 14,
     backgroundColor: OkenaColors.surfaceElevated,
     borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.borderLight,
     padding: 12,
     textAlignVertical: 'top',
   },
@@ -635,12 +1124,24 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   composeBtn: {
+    minHeight: 42,
     paddingHorizontal: 16,
-    paddingVertical: 8,
     borderRadius: 8,
     marginLeft: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   composeBtnText: { color: OkenaColors.textSecondary, fontSize: 14 },
+  composeInsert: {
+    backgroundColor: OkenaColors.surfaceElevated,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.borderLight,
+  },
+  composeInsertText: {
+    color: OkenaColors.textPrimary,
+    fontSize: 14,
+    fontWeight: '600',
+  },
   composeSend: { backgroundColor: OkenaColors.accent },
   composeSendText: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
 });

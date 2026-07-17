@@ -32,7 +32,7 @@ cd mobile/rn
 npm ci
 npm run typecheck   # tsc --noEmit, strict
 npm run lint        # eslint
-npm test            # jest (packed-cell decoder smoke test)
+npm test            # jest (packed-cell decoder + keyboard modifier tests)
 ```
 
 The ubrn cross-compile, the Skia native binaries, and an on-device run need the mobile
@@ -46,9 +46,15 @@ gotchas that the generic steps don't mention.
 
 ## Verified Android run — what it actually took (2026-06)
 
-The full chain has been run end-to-end on an Android **emulator**: build → TLS connect → pair →
-workspace → live terminal (Skia paint of colored shell output). The generic steps below are
-correct in spirit but several things needed fixing/wiring that aren't obvious — captured here.
+The native chain has been run on both an Android emulator and a physical Android device: build →
+connect → pair → workspace → live terminal → input/output. Both ADB-reversed plaintext
+loopback and a real LAN TLS connection have been verified. The TypeScript adapter passes all five
+arguments expected by Rust's `connect(host, port, token, tls, fingerprint)` API, so saved
+certificate pins are enforced. First-use fingerprints are captured by the Rust connection but are
+not yet exposed back through the FFI for persistence in `SavedServer`.
+
+The generic steps below are correct in spirit but several things needed fixing/wiring that aren't
+obvious — captured here.
 
 **The turbo module is a local package.** ubrn treats a project as a *library* and would clobber
 the app's root `android/build.gradle`, so the generated module is kept as its own package at
@@ -95,6 +101,60 @@ inside the Android emulator's EGL driver (`libEGL_emulation.so` → `createNativ
 not happen on physical devices; the `-gpu host|swiftshader_indirect|angle_indirect` flags don't
 help (the guest EGL is fixed by the system image). **Use a real Android device** for stable
 terminal rendering.
+
+### Terminal input controls
+
+The terminal uses a hidden native `TextInput` for the system keyboard and keeps a terminal-specific
+key rail visible below the canvas:
+
+- Tap the terminal to focus the system keyboard. Autocorrect, capitalization, suggestions, and
+  autofill are disabled; Android uses its code-friendly `visible-password` keyboard mode.
+- `ctrl`, `alt`, and `meta`: tap for a one-shot modifier; hold for 350 ms to lock it. A short accent
+  marker means one-shot, while a full accent fill and long marker mean locked. Locked modifiers
+  survive subsequent input until tapped or held again.
+- `^C` sends an immediate interrupt. `esc`, `tab`, common path/shell characters, clipboard paste,
+  Compose, and keyboard hide are directly available in the scrollable rail.
+- The fixed arrow pad sends on touch and repeats after holding for 360 ms. Modifiers are honored;
+  Meta + arrows map to Home/End/Page Up/Page Down.
+- `more` hides the system keyboard and opens the extended key deck: Ctrl-C/D/Z, Escape,
+  Home/End/Page Up/Page Down/Delete, explicit arrows, and common raw characters.
+- `paste` sends a single-line clipboard value directly. Multiline clipboard content opens in
+  Compose first so pasted newlines cannot run several commands without review.
+- Compose offers **Insert** (send exactly the edited text) and **Run** (send text followed by Enter).
+- Long-press and drag selects terminal text; release copies it to the OS clipboard and briefly
+  shows a `Copied` confirmation. Double-tap copies the selected word.
+
+### Input UX validation status (2026-07-17)
+
+Verified statically:
+
+- strict TypeScript check, ESLint, and 10 Jest tests,
+- Android arm64 release bundle and native build, including clipboard autolinking,
+- modifier state/encoding tests: one-shot reset, long-press lock persistence, Ctrl and Meta bytes.
+
+Verified remotely on a physical OnePlus DN2103 running Android 13:
+
+- install and restart with saved token, ADB-reversed loopback connection, stable Skia rendering,
+  command input, and returned output,
+- LAN TLS pairing and saved-token reconnect to `10.145.103.64:19100` with no ADB reverse rule,
+  including a terminal command/output round-trip,
+- code-friendly soft keyboard behavior: lowercase input is preserved and the canvas, rail, and IME
+  remain usable together,
+- Ctrl tap for one-shot, automatic reset after input, long-press lock, persistence across input, and
+  explicit unlock; the dedicated Ctrl-C key interrupts the shell,
+- arrow tap and hold-to-repeat through shell history, including returning to the empty prompt,
+- the complete extended key deck in portrait, with all signal, navigation, character, paste, and
+  Compose controls visible,
+- Compose **Insert** without Enter and **Run** with Enter,
+- double-tap word copy, `Copied` feedback, and a single-line clipboard paste round-trip,
+- the terminal rail with the keyboard both shown and hidden, plus the full rail in landscape.
+
+Still worth checking with a person holding the device:
+
+1. Alt, Meta, and modifier-plus-arrow combinations in real applications;
+2. arrow repeat, Home/End/Page navigation, and Ctrl-D/Z in a TUI such as `vim`;
+3. multiline clipboard review and long-press/drag selection across several cells;
+4. one-handed reach, long-press timing, landscape keyboard layout, and iOS behavior.
 
 ---
 
@@ -181,7 +241,7 @@ mobile/rn/
 ├── metro.config.js · babel.config.js  # bundler + transpiler
 ├── react-native.config.js             # font asset linking
 ├── ubrn.config.yaml                   # ubrn: crate path, targets, output dirs
-├── jest.config.js · __tests__/        # jest (cells decoder smoke test)
+├── jest.config.js · __tests__/        # jest (cells decoder + keyboard logic)
 ├── .eslintrc.js · .prettierrc         # lint + format
 ├── tsconfig.json · package.json
 ├── assets/JetBrainsMono-*.ttf         # bundled monospace fonts

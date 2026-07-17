@@ -31,28 +31,29 @@
 import React, {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useRef,
   useState,
 } from 'react';
 import {
   View,
+  Text,
   TextInput,
   StyleSheet,
+  Platform,
   type LayoutChangeEvent,
   type NativeSyntheticEvent,
   type TextInputChangeEventData,
   type GestureResponderEvent,
 } from 'react-native';
+import Clipboard from '@react-native-clipboard/clipboard';
 
 import type { OkenaNative } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
-import { TerminalTheme } from '../theme';
+import { OkenaColors, TerminalTheme } from '../theme';
 import { TerminalView, type TerminalFonts } from './TerminalView';
-import {
-  KeyModifiers,
-  applyModifiersToText,
-} from './KeyToolbar';
+import { KeyModifiers, applyModifiersToText } from './KeyToolbar';
 
 // Sentinel buffer: keeps spaces in the TextInput so backspace always has
 // something to delete. Without this, Android's soft keyboard backspace is a
@@ -85,9 +86,14 @@ interface Grid {
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
-  ({ connId, terminalId, fonts, modifiers, native = getOkenaNative() }, ref) => {
+  (
+    { connId, terminalId, fonts, modifiers, native = getOkenaNative() },
+    ref,
+  ) => {
     const inputRef = useRef<TextInput>(null);
     const [selecting, setSelecting] = useState(false);
+    const [copied, setCopied] = useState(false);
+    const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Mirror of what's currently in the hidden TextInput (sentinel-padded).
     const lastInputText = useRef<string>(SENTINEL);
@@ -96,7 +102,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     // so touch coordinates can be converted to cells. Cell size is derived from
     // the laid-out box / grid (TerminalView floors width/cellWidth, so this is
     // an approximation good enough for hit-testing).
-    const grid = useRef<Grid>({ cols: 80, rows: 24, cellWidth: 0, cellHeight: 0 });
+    const grid = useRef<Grid>({
+      cols: 80,
+      rows: 24,
+      cellWidth: 0,
+      cellHeight: 0,
+    });
     const boxSize = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
 
     // Vertical-scroll accumulator (px) → whole-line deltas.
@@ -140,6 +151,13 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       lastInputText.current = SENTINEL;
       inputRef.current?.setNativeProps?.({ text: SENTINEL });
     }, []);
+
+    useEffect(() => {
+      resetSentinel();
+      return () => {
+        if (copiedTimer.current) clearTimeout(copiedTimer.current);
+      };
+    }, [terminalId, resetSentinel]);
 
     const scrollToBottom = useCallback(() => {
       try {
@@ -187,24 +205,33 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
     // ── touch → cell ──────────────────────────────────────────────────────────
 
-    const touchToCell = useCallback((x: number, y: number): { col: number; row: number } => {
-      const { cellWidth, cellHeight, cols, rows } = grid.current;
-      const col =
-        cellWidth > 0 ? Math.min(Math.max(Math.floor(x / cellWidth), 0), cols - 1) : 0;
-      const row =
-        cellHeight > 0 ? Math.min(Math.max(Math.floor(y / cellHeight), 0), rows - 1) : 0;
-      return { col, row };
-    }, []);
+    const touchToCell = useCallback(
+      (x: number, y: number): { col: number; row: number } => {
+        const { cellWidth, cellHeight, cols, rows } = grid.current;
+        const col =
+          cellWidth > 0
+            ? Math.min(Math.max(Math.floor(x / cellWidth), 0), cols - 1)
+            : 0;
+        const row =
+          cellHeight > 0
+            ? Math.min(Math.max(Math.floor(y / cellHeight), 0), rows - 1)
+            : 0;
+        return { col, row };
+      },
+      [],
+    );
 
     // ── selection ──────────────────────────────────────────────────────────────
 
     const copySelectionAndClear = useCallback(() => {
       try {
-        // getSelectedText is available; clipboard write goes through the host
-        // (we send the text to the terminal? no — just clear). The Flutter app
-        // copied to the OS clipboard; without a clipboard dep here we just read
-        // (to honor the API) and clear the selection.
-        native.getSelectedText(connId, terminalId);
+        const selectedText = native.getSelectedText(connId, terminalId);
+        if (selectedText !== undefined && selectedText.length > 0) {
+          Clipboard.setString(selectedText);
+          setCopied(true);
+          if (copiedTimer.current) clearTimeout(copiedTimer.current);
+          copiedTimer.current = setTimeout(() => setCopied(false), 1200);
+        }
       } catch {
         // ignore
       }
@@ -242,7 +269,10 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         clearLongPress();
         longPressTimer.current = setTimeout(() => {
           // Begin a character selection at the grant cell.
-          const { col, row } = touchToCell(grantPos.current.x, grantPos.current.y);
+          const { col, row } = touchToCell(
+            grantPos.current.x,
+            grantPos.current.y,
+          );
           try {
             native.startSelection(connId, terminalId, col, row);
           } catch {
@@ -342,7 +372,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         }
         dragLastY.current = null;
       },
-      [native, connId, terminalId, touchToCell, selecting, copySelectionAndClear, clearLongPress],
+      [
+        native,
+        connId,
+        terminalId,
+        touchToCell,
+        selecting,
+        copySelectionAndClear,
+        clearLongPress,
+      ],
     );
 
     return (
@@ -382,13 +420,25 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           autoCapitalize="none"
           autoCorrect={false}
           spellCheck={false}
+          autoComplete="off"
+          importantForAutofill="no"
+          textContentType="none"
           multiline
           caretHidden
           contextMenuHidden
-          keyboardType="default"
+          keyboardType={
+            Platform.OS === 'android' ? 'visible-password' : 'ascii-capable'
+          }
+          disableFullscreenUI
+          onFocus={resetSentinel}
           // Keep it from being read out / styled visibly.
           underlineColorAndroid="transparent"
         />
+        {copied ? (
+          <View style={styles.copyNotice} pointerEvents="none">
+            <Text style={styles.copyNoticeText}>Copied</Text>
+          </View>
+        ) : null}
       </View>
     );
   },
@@ -411,6 +461,22 @@ const styles = StyleSheet.create({
     color: 'transparent',
     backgroundColor: 'transparent',
     padding: 0,
+  },
+  copyNotice: {
+    position: 'absolute',
+    alignSelf: 'center',
+    bottom: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: OkenaColors.surfaceOverlay,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.borderLight,
+  },
+  copyNoticeText: {
+    color: OkenaColors.textPrimary,
+    fontSize: 12,
+    fontWeight: '600',
   },
 });
 
