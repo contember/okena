@@ -700,9 +700,21 @@ pub fn ensure_local_daemon_in(
                     log::warn!(
                         "Instance lock owner pid {pid} neither re-advertised nor exited within {LOCK_SETTLE_TIMEOUT:?}; reaping it"
                     );
-                    kill_pid_if_okena(pid);
+                    if !instance_lock_is_held() {
+                        break;
+                    }
+                    if !kill_pid_if_ui_owned_okena(pid) {
+                        return Err(format!(
+                            "Instance lock is held by pid {pid}, but it is not a verified UI-owned Okena daemon; refusing to terminate it."
+                        ));
+                    }
                     // Let the OS release the flock the reaped process held.
                     std::thread::sleep(Duration::from_millis(200));
+                    if instance_lock_is_held() {
+                        return Err(format!(
+                            "UI-owned daemon pid {pid} did not release the instance lock after termination."
+                        ));
+                    }
                 }
                 break;
             }
@@ -760,19 +772,32 @@ fn instance_lock_owner_pid() -> Option<u32> {
     okena_workspace::persistence::instance_lock_pid(&content).filter(|&pid| pid != 0)
 }
 
-/// True when the instance lock names a still-alive process — a daemon that may
-/// be mid-teardown / rebinding and momentarily un-advertised. The lock is an OS
-/// flock held for the owner's whole lifetime, so a live recorded pid implies a
-/// live owner still holding it.
+/// True when the lock is held and names a still-alive process.
 fn instance_lock_owner_alive() -> bool {
-    instance_lock_owner_pid().is_some_and(is_process_alive)
+    instance_lock_is_held() && instance_lock_owner_pid().is_some_and(is_process_alive)
 }
 
-/// SIGKILL / `TerminateProcess` a pid, but only when it still looks like an
-/// okena binary — guards against a recycled pid, mirroring the GUI's
-/// `kill_process_by_pid`. Used as a last resort against a wedged lock owner that
-/// neither re-advertises nor exits.
-fn kill_pid_if_okena(pid: u32) {
+/// Check the OS lock rather than trusting stale lockfile contents.
+fn instance_lock_is_held() -> bool {
+    let path = okena_workspace::persistence::instance_lock_path();
+    let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) else {
+        return false;
+    };
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+/// Reap only a process that still matches the lockfile and explicit lifecycle mode.
+fn kill_pid_if_ui_owned_okena(pid: u32) -> bool {
+    if instance_lock_owner_pid() != Some(pid) || !instance_lock_is_held() {
+        return false;
+    }
+
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let spid = Pid::from_u32(pid);
     let mut sys = System::new();
@@ -785,12 +810,19 @@ fn kill_pid_if_okena(pid: u32) {
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .is_some_and(is_okena);
-        if name_ok || exe_ok {
-            proc.kill();
+        let ui_owned = proc
+            .cmd()
+            .iter()
+            .any(|arg| arg.to_str().is_some_and(|arg| arg == "--ui-owned"));
+        if (name_ok || exe_ok) && ui_owned {
+            return proc.kill();
         } else {
-            log::warn!("Refusing to reap pid {pid}: not an okena binary (pid likely recycled)");
+            log::warn!(
+                "Refusing to reap pid {pid}: process is not a verified UI-owned Okena daemon"
+            );
         }
     }
+    false
 }
 
 /// Ensure a local daemon is reachable from the user's config dir, with caller-
