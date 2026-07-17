@@ -33,6 +33,7 @@ const OkenaColorsArgb = {
   borderLight: 0xff2a2a2a,
   // Accent
   accent: 0xff7c7fff,
+  accentSoft: 0x247c7fff,
   // Text
   textPrimary: 0xffe8e8ec,
   textSecondary: 0xff98989f,
@@ -44,6 +45,7 @@ const OkenaColorsArgb = {
   // Glass
   glassBg: 0xcc0a0a0a,
   glassStroke: 0x18ffffff,
+  backdrop: 0x8f000000,
   // Key toolbar
   keyBg: 0xff161616,
   keyBorder: 0xff2a2a2a,

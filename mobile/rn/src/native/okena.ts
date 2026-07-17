@@ -215,7 +215,13 @@ export interface OkenaNative {
    * token is supplied, pairing is skipped. (sync — just registers + kicks off
    * the connect; status is then polled via `connectionStatus`.)
    */
-  connect(host: string, port: number, savedToken: string | undefined): ConnId;
+  connect(
+    host: string,
+    port: number,
+    savedToken: string | undefined,
+    tls: boolean,
+    pinnedCertFingerprint: string | undefined,
+  ): ConnId;
 
   /** Current auth token for a connection, if paired. */
   getToken(connId: ConnId): string | undefined;

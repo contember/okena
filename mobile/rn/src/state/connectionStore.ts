@@ -9,8 +9,7 @@
  *   - `secondsSinceActivity` (staleness indicator),
  *   - status polling: ~500ms while connecting/pairing, ~2s once connected
  *     (matching the Dart `_startPolling(fast:)` cadence),
- *   - persisting the auth token (and pinned cert fingerprint) back onto the
- *     saved server once paired.
+ *   - persisting the auth token back onto the saved server once paired.
  *
  * Dependencies — the native module and persistence — are INJECTED via
  * {@link configureConnectionStore}, mirroring `TerminalView`'s `native` prop.
@@ -166,10 +165,23 @@ function persistServers(servers: readonly SavedServer[]): void {
   void deps().persistence.setItem(SAVED_SERVERS_KEY, listToJson(servers));
 }
 
+/** Connect using every transport-security field persisted with the server. */
+export function connectSavedServer(
+  native: Pick<OkenaNative, 'connect'>,
+  server: SavedServer,
+): ConnId {
+  return native.connect(
+    server.host,
+    server.port,
+    server.token,
+    server.tls,
+    server.fingerprint,
+  );
+}
+
 /**
- * After connecting, copy the freshly-negotiated auth token (and pinned cert
- * fingerprint, which the Dart model lacked) back onto the active server and
- * persist. Mirrors `_persistToken`.
+ * After connecting, copy the freshly-negotiated auth token back onto the
+ * active server and persist. Mirrors `_persistToken`.
  */
 function persistToken(
   get: StoreApi<ConnectionState>['getState'],
@@ -289,7 +301,7 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
         native.disconnect(connId);
         stopPolling();
       }
-      const newConnId = native.connect(server.host, server.port, server.token);
+      const newConnId = connectSavedServer(native, server);
       set({
         activeServer: server,
         connId: newConnId,
