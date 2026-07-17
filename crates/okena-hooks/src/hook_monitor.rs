@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 const MAX_HISTORY: usize = 50;
 
 /// Status of a hook execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookStatus {
     Running,
     Succeeded { duration: Duration },
@@ -50,14 +50,13 @@ fn intern_hook_type(s: &str) -> &'static str {
     }
 }
 
-/// Discriminant of a `HookStatus`, used for cheap change detection.
-fn status_kind(status: &HookStatus) -> u8 {
-    match status {
-        HookStatus::Running => 0,
-        HookStatus::Succeeded { .. } => 1,
-        HookStatus::Failed { .. } => 2,
-        HookStatus::SpawnError { .. } => 3,
-    }
+fn same_snapshot_execution(a: &HookExecution, b: &HookExecution) -> bool {
+    a.id == b.id
+        && a.hook_type == b.hook_type
+        && a.command == b.command
+        && a.project_name == b.project_name
+        && a.status == b.status
+        && a.terminal_id == b.terminal_id
 }
 
 impl HookExecution {
@@ -251,8 +250,8 @@ impl HookMonitor {
     /// the log rendering unchanged, it is stored reversed (oldest-first) so
     /// `history()`'s own `.rev()` yields newest-first again.
     ///
-    /// A cheap `(id, status kind)` comparison skips the write (and the `version`
-    /// bump that would re-render the hook log) when the snapshot is unchanged.
+    /// A full wire-visible comparison skips unchanged snapshots. `started_at` is
+    /// intentionally ignored because it is reconstructed locally on each ingest.
     pub fn replace_history(&self, newest_first: Vec<HookExecution>) {
         let mut inner = self.0.lock();
         let unchanged = inner.history.len() == newest_first.len()
@@ -261,7 +260,7 @@ impl HookMonitor {
                 .iter()
                 .rev()
                 .zip(newest_first.iter())
-                .all(|(a, b)| a.id == b.id && status_kind(&a.status) == status_kind(&b.status));
+                .all(|(a, b)| same_snapshot_execution(a, b));
         if unchanged {
             return;
         }
@@ -569,7 +568,7 @@ mod tests {
         let snapshot = || vec![api_exec(1, ApiHookStatus::Succeeded { duration_ms: 5 })];
         monitor.replace_history(snapshot());
         let v = monitor.version();
-        // Same ids + status kinds → no write, no version bump (no needless re-render).
+        // Same wire-visible data → no write, no version bump.
         monitor.replace_history(snapshot());
         assert_eq!(monitor.version(), v);
     }
@@ -582,5 +581,35 @@ mod tests {
         // Same id, different status kind (Running → Succeeded) → must bump.
         monitor.replace_history(vec![api_exec(1, ApiHookStatus::Succeeded { duration_ms: 9 })]);
         assert!(monitor.version() > v);
+    }
+
+    #[test]
+    fn replace_history_replaces_reused_ids_after_daemon_restart() {
+        let monitor = HookMonitor::new();
+        monitor.replace_history(vec![api_exec(
+            1,
+            ApiHookStatus::Succeeded { duration_ms: 5 },
+        )]);
+        let v = monitor.version();
+
+        let replacement = HookExecution::from_api(&ApiHookExecution {
+            id: 1,
+            hook_type: "pre_merge".into(),
+            command: "new daemon command".into(),
+            project_name: "new-project".into(),
+            status: ApiHookStatus::Succeeded { duration_ms: 9 },
+            terminal_id: Some("new-terminal".into()),
+        });
+        monitor.replace_history(vec![replacement]);
+
+        assert!(monitor.version() > v);
+        let history = monitor.history();
+        assert_eq!(history[0].command, "new daemon command");
+        assert_eq!(history[0].project_name, "new-project");
+        assert!(matches!(
+            history[0].status,
+            HookStatus::Succeeded { duration } if duration == Duration::from_millis(9)
+        ));
+        assert_eq!(history[0].terminal_id.as_deref(), Some("new-terminal"));
     }
 }
