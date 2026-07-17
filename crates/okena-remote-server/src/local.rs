@@ -24,7 +24,10 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+static PROCESS_EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Default loopback host for local clients. Newer `remote.json` files can
 /// override this with `local_host` when the daemon only has an IPv6 local TCP
@@ -246,47 +249,31 @@ pub fn mint_local_token() -> Result<MintedToken, String> {
     mint_local_token_in(&config_dir())
 }
 
-/// Resolve the dedicated `okena-daemon` binary as a sibling of the current
-/// executable. `None` if it can't be located (caller falls back to
-/// `current_exe --headless`). Honors the platform executable suffix.
-fn daemon_binary_path() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let name = if cfg!(windows) { "okena-daemon.exe" } else { "okena-daemon" };
-    let path = dir.join(name);
-    path.exists().then_some(path)
+/// Cache the executable path before an in-place update replaces its inode.
+pub fn remember_current_executable() -> std::io::Result<PathBuf> {
+    if let Some(path) = PROCESS_EXECUTABLE.get() {
+        return Ok(path.clone());
+    }
+    let path = std::env::current_exe()?;
+    let _ = PROCESS_EXECUTABLE.set(path.clone());
+    Ok(PROCESS_EXECUTABLE.get().cloned().unwrap_or(path))
 }
 
 /// Spawn a local daemon and writes `remote.json`.
 ///
-/// Prefers the dedicated, GPUI-free `okena-daemon` binary (a sibling of the
-/// current exe — cargo and shipped installs place it alongside `okena`) as the
-/// lighter variant. The dedicated daemon reads settings itself: same-host access
-/// is always local (Unix socket + loopback), and remote bind addresses are added
-/// only when the remote server setting is enabled. When that binary isn't
-/// present, the UI binary runs its own `current_exe --headless` daemon — the
-/// standard single-binary path. Either way the child inherits `OKENA_PROFILE`
-/// from this process, so it uses the same config dir.
+/// The desktop always runs its own executable with `--headless`; an explicitly
+/// started standalone `okena-daemon` is discovered and attached before this path.
+/// The child inherits `OKENA_PROFILE`, so it uses the same config dir.
 ///
 /// The caller owns the returned [`std::process::Child`]. In the UI-owned
 /// lifecycle the final desktop client requests graceful shutdown; the child
 /// handle is retained only for bounded fallback cleanup. Mint the token *before*
 /// spawning so the fresh daemon loads it at startup (no reload needed).
 pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
-    match daemon_binary_path() {
-        Some(daemon) => std::process::Command::new(daemon).arg("--ui-owned").spawn(),
-        None => {
-            let exe = std::env::current_exe()?;
-            log::info!(
-                "No sibling okena-daemon binary; running the built-in `okena --headless` \
-                 daemon (the single-binary path). The dedicated GPUI-free okena-daemon is \
-                 the lighter variant and is used when present."
-            );
-            std::process::Command::new(exe)
-                .args(["--headless", "--ui-owned"])
-                .spawn()
-        }
-    }
+    let exe = remember_current_executable()?;
+    std::process::Command::new(exe)
+        .args(["--headless", "--ui-owned"])
+        .spawn()
 }
 
 /// Poll an explicit config dir until a live daemon is discoverable or `timeout`
@@ -580,7 +567,7 @@ where
 /// successor, then quit. The child is detached (its handle is dropped); on Unix
 /// it survives as an orphan, on Windows as an independent process.
 pub fn spawn_replacement_daemon() -> std::io::Result<std::process::Child> {
-    let exe = std::env::current_exe()?;
+    let exe = remember_current_executable()?;
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     strip_await_pid_args(&mut args);
     let my_pid = std::process::id();
@@ -1427,27 +1414,10 @@ mod tests {
     }
 
     #[test]
-    fn daemon_binary_path_is_total_and_sibling_consistent() {
-        // The function must never panic and must agree with the path-derivation
-        // contract: when it returns Some, the path is the sibling of current_exe
-        // named per the platform suffix and actually exists on disk.
-        let result = daemon_binary_path();
-
-        let exe = std::env::current_exe().expect("current_exe in test harness");
-        let dir = exe.parent().expect("current_exe has a parent");
-        let name = if cfg!(windows) { "okena-daemon.exe" } else { "okena-daemon" };
-        let expected = dir.join(name);
-
-        match result {
-            // Some only when the sibling exists, and it must be that exact path.
-            Some(path) => {
-                assert_eq!(path, expected);
-                assert!(path.exists(), "Some implies the sibling exists");
-            }
-            // None is the correct, non-panicking answer when no sibling exists
-            // (caller then falls back to current_exe --headless).
-            None => assert!(!expected.exists(), "None implies no sibling on disk"),
-        }
+    fn remembered_executable_is_stable() {
+        let first = remember_current_executable().expect("current executable");
+        let second = remember_current_executable().expect("remembered executable");
+        assert_eq!(first, second);
     }
 
     #[test]

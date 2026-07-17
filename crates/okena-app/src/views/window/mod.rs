@@ -81,6 +81,8 @@ pub enum WindowViewEvent {
         origin: WindowId,
         project_id: String,
     },
+    /// Rebuild the checkout release binary and restart the UI-owned daemon and app.
+    RebuildAndRestart,
 }
 
 pub struct WindowView {

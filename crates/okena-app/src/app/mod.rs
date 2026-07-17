@@ -1,6 +1,7 @@
 mod detached_overlays;
 mod detached_terminals;
 mod extras;
+mod local_build;
 mod notifications;
 
 pub use detached_overlays::open_detached_overlay;
@@ -152,6 +153,8 @@ pub struct Okena {
     notification_jump_tx: async_channel::Sender<notifications::NotificationJump>,
     /// Child this GUI spawned, retained for owner-checked recovery fallback.
     spawned_daemon: Option<std::process::Child>,
+    /// A rebuilt successor already owns the daemon; quitting must not shut it down.
+    preserve_daemon_on_quit: bool,
     /// Single-flight guard for the local-daemon recovery task: set while a
     /// recovery loop runs so repeat `LocalConnectionFailed` events don't stack
     /// up parallel recoveries (each would re-run `ensure_local_daemon`).
@@ -262,6 +265,7 @@ impl Okena {
             remote_manager: remote_manager.clone(),
             notification_jump_tx,
             spawned_daemon,
+            preserve_daemon_on_quit: false,
             recovering: Arc::new(AtomicBool::new(false)),
             quitting: Arc::new(AtomicBool::new(false)),
             pending_extra_forgets: extras::PendingExtraForgets::default(),
@@ -411,7 +415,14 @@ impl Okena {
                     cx,
                 );
             });
-            hand_off_ui_owned_daemon(this.spawned_daemon.take());
+            if this.preserve_daemon_on_quit {
+                if let Some(child) = this.spawned_daemon.as_mut() {
+                    let _ = child.try_wait();
+                }
+                this.spawned_daemon = None;
+            } else {
+                hand_off_ui_owned_daemon(this.spawned_daemon.take());
+            }
             async move {
                 if let Err(error) = smol::unblock(move || {
                     crate::workspace::persistence::save_window_layout(
@@ -779,6 +790,15 @@ impl Okena {
                 let _ = child.wait();
             }
             return;
+        }
+
+        if let Some(local_build) = cx
+            .try_global::<okena_ext_updater::GlobalLocalBuild>()
+            .map(|global| global.0.clone())
+        {
+            local_build.update(cx, |state, cx| {
+                state.set_daemon_ui_owned(ensured.daemon.ui_owned, cx);
+            });
         }
 
         let cfg = ensured.daemon.connection_config(ensured.token.clone());

@@ -7,9 +7,8 @@
 //! [`okena_workspace::settings::load_settings`] instead of GPUI's
 //! `settings::init_settings(cx)`.
 //!
-//! The desktop app's `spawn_daemon` prefers this binary when it exists next to
-//! `okena`; the `okena --headless` entry point runs the same `DaemonCore` for
-//! single-binary installs.
+//! The desktop uses `okena --headless` for its UI-owned daemon. This dedicated
+//! binary is used only when started explicitly and runs the same `DaemonCore`.
 
 use std::io::Write;
 use std::net::IpAddr;
@@ -41,6 +40,9 @@ impl Write for TeeWriter {
 }
 
 fn main() -> anyhow::Result<()> {
+    okena_remote_server::local::remember_current_executable()
+        .context("failed to remember daemon executable path")?;
+
     if std::env::args().any(|a| a == "--version") {
         println!("okena-daemon {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
