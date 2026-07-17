@@ -893,8 +893,13 @@ impl Render for WindowView {
                 this.request_restart_daemon(cx);
             }))
             .on_action(cx.listener(
-                |this, _: &okena_ext_updater::RebuildAndRestart, _window, cx| {
-                    this.request_local_rebuild(cx);
+                |_this, _: &okena_ext_updater::RebuildLocal, _window, cx| {
+                    cx.emit(super::WindowViewEvent::RebuildLocal);
+                },
+            ))
+            .on_action(cx.listener(
+                |_this, _: &okena_ext_updater::RestartLocalBuild, _window, cx| {
+                    cx.emit(super::WindowViewEvent::RestartLocalBuild);
                 },
             ))
             // Handle show pairing dialog action

@@ -29,7 +29,7 @@ pub use local_build::{LocalCheckout, detect_local_checkout};
 pub use status::{GlobalUpdateInfo, UpdateInfo, UpdateStatus, UpdateStatusSnapshot};
 
 #[cfg(feature = "gpui-ui")]
-gpui::actions!(updater, [RebuildAndRestart]);
+gpui::actions!(updater, [RebuildLocal, RestartLocalBuild]);
 
 #[cfg(feature = "gpui-ui")]
 pub fn register() -> ExtensionRegistration {

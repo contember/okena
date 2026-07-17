@@ -5,14 +5,54 @@ use std::process::Command;
 use super::Okena;
 
 impl Okena {
-    pub(super) fn rebuild_and_restart(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn rebuild_local(&mut self, cx: &mut Context<Self>) {
         let Some(state) = cx
             .try_global::<okena_ext_updater::GlobalLocalBuild>()
             .map(|global| global.0.clone())
         else {
             return;
         };
-        let Some(checkout) = state.update(cx, |state, cx| state.try_start(cx)) else {
+        let Some(checkout) = state.update(cx, |state, cx| state.try_start_build(cx)) else {
+            return;
+        };
+
+        let root = checkout.root().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let build_result = cx
+                .background_executor()
+                .spawn(async move { run_release_build(&root) })
+                .await;
+            let _ = this.update(cx, |_this, cx| match build_result {
+                Ok(()) => state.update(cx, |state, cx| {
+                    state.set_status(okena_ext_updater::LocalBuildStatus::ReadyToRestart, cx);
+                }),
+                Err(error) => {
+                    state.update(cx, |state, cx| {
+                        state.set_status(
+                            okena_ext_updater::LocalBuildStatus::Failed {
+                                error: error.clone(),
+                            },
+                            cx,
+                        );
+                    });
+                    crate::workspace::toast::ToastManager::error(
+                        format!("Okena rebuild failed: {error}"),
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn restart_local_build(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = cx
+            .try_global::<okena_ext_updater::GlobalLocalBuild>()
+            .map(|global| global.0.clone())
+        else {
+            return;
+        };
+        let Some(checkout) = state.update(cx, |state, cx| state.try_start_restart(cx)) else {
             return;
         };
 
@@ -30,7 +70,7 @@ impl Okena {
         if !daemon.ui_owned {
             state.update(cx, |state, cx| {
                 state.set_daemon_ui_owned(false, cx);
-                state.set_status(okena_ext_updater::LocalBuildStatus::Idle, cx);
+                state.set_status(okena_ext_updater::LocalBuildStatus::ReadyToRestart, cx);
             });
             crate::workspace::toast::ToastManager::warning(
                 "The local daemon is externally managed; restart it manually",
@@ -39,7 +79,6 @@ impl Okena {
             return;
         }
 
-        let root = checkout.root().to_path_buf();
         let release_executable = checkout.release_executable().to_path_buf();
         let daemon_host = daemon.host().to_string();
         let daemon_port = daemon.port;
@@ -47,31 +86,6 @@ impl Okena {
         let app_args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
         cx.spawn(async move |this, cx| {
-            let build_result = cx
-                .background_executor()
-                .spawn(async move { run_release_build(&root) })
-                .await;
-            if let Err(error) = build_result {
-                let _ = this.update(cx, |_this, cx| {
-                    state.update(cx, |state, cx| {
-                        state.set_status(
-                            okena_ext_updater::LocalBuildStatus::Failed {
-                                error: error.clone(),
-                            },
-                            cx,
-                        );
-                    });
-                    crate::workspace::toast::ToastManager::error(
-                        format!("Okena rebuild failed: {error}"),
-                        cx,
-                    );
-                });
-                return;
-            }
-
-            state.update(cx, |state, cx| {
-                state.set_status(okena_ext_updater::LocalBuildStatus::RestartingDaemon, cx);
-            });
             let restart_result = cx
                 .background_executor()
                 .spawn(async move {

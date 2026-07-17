@@ -27,7 +27,3 @@ pub const RESTART_DAEMON_TOAST_ID: &str = "restart-daemon-confirm";
 pub const RESTART_DAEMON_CONFIRM_PREFIX: &str = "restart_daemon_confirm";
 /// Action id for the "Cancel" button on the restart-daemon confirm toast.
 pub const RESTART_DAEMON_CANCEL_PREFIX: &str = "restart_daemon_cancel";
-
-pub const LOCAL_REBUILD_TOAST_ID: &str = "local-rebuild-confirm";
-pub const LOCAL_REBUILD_CONFIRM_PREFIX: &str = "local_rebuild_confirm";
-pub const LOCAL_REBUILD_CANCEL_PREFIX: &str = "local_rebuild_cancel";
