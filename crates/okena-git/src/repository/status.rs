@@ -4,6 +4,24 @@ use std::path::Path;
 
 use crate::GitStatus;
 
+/// Cheap identity of the commit currently checked out in a worktree.
+///
+/// Unlike [`GitStatus`], reading this does not inspect the index or walk the
+/// working tree, so callers can poll it frequently and use changes as a signal
+/// to refresh the full status.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadSnapshot {
+    reference: Option<String>,
+    commit_id: Option<gix::ObjectId>,
+}
+
+impl HeadSnapshot {
+    /// Whether HEAD switched between symbolic refs or attached/detached state.
+    pub fn reference_changed(&self, previous: &Self) -> bool {
+        self.reference != previous.reference
+    }
+}
+
 /// Three-state result of a fresh git status fetch.
 ///
 /// Distinguishing "not a repo" from "transient failure" lets the polling
@@ -98,6 +116,16 @@ pub fn get_current_branch(path: &Path) -> Option<String> {
     // Detached HEAD — return short hash of HEAD's commit.
     let id = head.id()?;
     Some(id.shorten().ok()?.to_string())
+}
+
+/// Read the symbolic HEAD target and resolved commit without walking the worktree.
+pub fn get_head_snapshot(path: &Path) -> Option<HeadSnapshot> {
+    let repo = crate::gix_helpers::open(path)?;
+    let head = repo.head().ok()?;
+    Some(HeadSnapshot {
+        reference: head.referent_name().map(ToString::to_string),
+        commit_id: head.id().map(|id| id.detach()),
+    })
 }
 
 /// Get the full 40-character SHA of HEAD, or `None` if not a git repo or HEAD
@@ -596,6 +624,53 @@ mod tests {
     }
 
     #[test]
+    fn head_snapshot_changes_only_when_head_moves() {
+        let (_tmp, repo) = init_temp_repo();
+        let initial = get_head_snapshot(&repo).expect("read initial HEAD");
+
+        std::fs::write(repo.join("file.txt"), "modified").unwrap();
+        assert_eq!(get_head_snapshot(&repo).as_ref(), Some(&initial));
+
+        git_in(&repo, &["add", "file.txt"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "change"],
+        );
+        let committed = get_head_snapshot(&repo).expect("read committed HEAD");
+        assert_ne!(committed, initial);
+        assert!(!committed.reference_changed(&initial));
+
+        git_in(&repo, &["checkout", "-b", "feature"]);
+        let switched = get_head_snapshot(&repo).expect("read switched HEAD");
+        assert_ne!(switched, committed);
+        assert!(switched.reference_changed(&committed));
+    }
+
+    #[test]
+    fn head_snapshot_is_specific_to_linked_worktree() {
+        let (_tmp, repo) = init_temp_repo();
+        let linked_parent = tempfile::tempdir().expect("create linked worktree parent");
+        let linked = linked_parent.path().join("feature");
+        git_in(
+            &repo,
+            &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+        );
+
+        let main = get_head_snapshot(&repo).expect("read main worktree HEAD");
+        let feature = get_head_snapshot(&linked).expect("read linked worktree HEAD");
+        assert_ne!(feature, main);
+
+        std::fs::write(linked.join("file.txt"), "linked change").unwrap();
+        git_in(&linked, &["add", "file.txt"]);
+        git_in(
+            &linked,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "linked"],
+        );
+        assert_ne!(get_head_snapshot(&linked).as_ref(), Some(&feature));
+        assert_eq!(get_head_snapshot(&repo).as_ref(), Some(&main));
+    }
+
+    #[test]
     fn diff_stats_clean_repo_is_zero() {
         let (_tmp, repo) = init_temp_repo();
         assert_eq!(get_diff_stats(&repo), Some((0, 0)));
@@ -733,4 +808,3 @@ mod tests {
         assert_eq!((s.ahead, s.behind), (Some(2), Some(0)));
     }
 }
-

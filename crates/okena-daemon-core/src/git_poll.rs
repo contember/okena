@@ -1,5 +1,7 @@
 //! GPUI-free git-status poller: the headless analogue of
 //! `okena-views-git`'s `GitStatusWatcher` (its `watcher.rs`), minus the GUI.
+//! A separate cheap HEAD-only loop wakes the full poll within 250ms of commits
+//! and checkouts without walking the index or worktree.
 //!
 //! The GUI's watcher polls git status every ~5s for the set of *visible*
 //! non-remote projects, caches per-project [`GitStatus`], and pushes a slimmed
@@ -36,13 +38,15 @@ use std::time::Duration;
 use okena_core::api::ApiGitStatus;
 use okena_core::git_poll::GitPollTrigger;
 use okena_core::process::{Lane, with_lane};
-use okena_git::{self as git, GitStatus};
+use okena_git::{self as git, GitStatus, HeadSnapshot};
 use okena_workspace::state::Workspace;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
 /// How often to poll git status. Mirrors the GUI watcher's `GIT_POLL_INTERVAL`.
 const GIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Cheap HEAD-only cadence used to wake the full status poll after commits and checkouts.
+const HEAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// How many git poll cycles between PR URL checks (~60s). Mirrors the GUI
 /// watcher's `PR_POLL_EVERY_N_CYCLES`.
 const PR_POLL_EVERY_N_CYCLES: u64 = 12;
@@ -98,6 +102,75 @@ impl TriggerAccumulator {
         self.candidate_gh_ids.clear();
         self.invalidate_gh_ids.clear();
     }
+}
+
+/// Poll only each repository's symbolic HEAD and commit id, waking the full
+/// status loop when either changes. This never reads the index or worktree.
+pub async fn run_git_head_poll(
+    workspace: Arc<Mutex<Workspace>>,
+    trigger_tx: mpsc::UnboundedSender<GitPollTrigger>,
+) {
+    let mut previous = HashMap::<String, HeadSnapshot>::new();
+    let mut interval = tokio::time::interval(HEAD_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+        if trigger_tx.is_closed() {
+            return;
+        }
+
+        let projects: Vec<(String, String)> = {
+            let ws = workspace.lock();
+            ws.projects()
+                .iter()
+                .filter(|project| !project.is_remote)
+                .map(|project| (project.id.clone(), project.path.clone()))
+                .collect()
+        };
+        let active_ids: HashSet<String> = projects.iter().map(|(id, _)| id.clone()).collect();
+        let snapshots = tokio::task::spawn_blocking(move || {
+            projects
+                .into_iter()
+                .filter_map(|(id, path)| {
+                    with_lane(Lane::Poll, || git::get_head_snapshot(Path::new(&path)))
+                        .map(|snapshot| (id, snapshot))
+                })
+                .collect()
+        })
+        .await;
+        let Ok(snapshots) = snapshots else {
+            log::warn!("git HEAD poll task panicked");
+            continue;
+        };
+
+        for id in update_head_snapshots(&mut previous, &active_ids, snapshots) {
+            if trigger_tx.send(GitPollTrigger::head_change(id)).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+fn update_head_snapshots(
+    previous: &mut HashMap<String, HeadSnapshot>,
+    active_ids: &HashSet<String>,
+    snapshots: HashMap<String, HeadSnapshot>,
+) -> Vec<String> {
+    previous.retain(|id, _| active_ids.contains(id));
+    snapshots
+        .into_iter()
+        .filter_map(|(id, snapshot)| {
+            let changed = previous.get(&id).is_some_and(|old| old != &snapshot);
+            if changed {
+                previous.insert(id.clone(), snapshot);
+                Some(id)
+            } else {
+                previous.insert(id, snapshot);
+                None
+            }
+        })
+        .collect()
 }
 
 /// Run the daemon git-status poll loop until the `watch` channel is closed (all

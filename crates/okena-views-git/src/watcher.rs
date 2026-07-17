@@ -30,6 +30,8 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
 
 /// How often to poll git status (seconds)
 const GIT_POLL_INTERVAL: u64 = 5;
+/// Cheap HEAD-only cadence used to wake the full status refresh after commits and checkouts.
+const HEAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// How many git poll cycles between PR URL checks (~60s)
 const PR_POLL_EVERY_N_CYCLES: u64 = 12;
 /// How many git poll cycles between CI check polls when checks are pending (~15s)
@@ -40,6 +42,7 @@ const CI_SETTLED_POLL_EVERY_N_CYCLES: u64 = 12;
 /// Centralized git status poller.
 ///
 /// Polls git status for all locally visible and remotely subscribed (non-remote) projects every 5 seconds.
+/// Polls HEAD metadata every 250ms to refresh immediately after commits and checkouts.
 /// Polls PR URLs less frequently (~60 seconds).
 /// Pushes changes to:
 /// - Local UI via `cx.notify()` (ProjectColumn observes this entity)
@@ -76,6 +79,7 @@ impl GitStatusWatcher {
             remote_subscribed_terminals,
         };
         watcher.spawn_branch_warmup(cx);
+        watcher.spawn_head_poll(cx);
         watcher.spawn_refresh(cx);
         watcher
     }
@@ -101,6 +105,72 @@ impl GitStatusWatcher {
             });
             futures::future::join_all(futures).await;
         }).detach();
+    }
+
+    /// Watch visible repositories for HEAD changes without reading their index or worktree.
+    fn spawn_head_poll(&self, cx: &mut Context<Self>) {
+        let remote_subscribed_terminals = self.remote_subscribed_terminals.clone();
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let mut previous = HashMap::<String, git::HeadSnapshot>::new();
+            loop {
+                let projects: Vec<(String, String)> = match this.update(cx, |this, cx| {
+                    let ws = this.workspace.read(cx);
+                    let mut visible_ids = ws.all_visible_project_ids();
+                    if let Ok(remote_terminals) = remote_subscribed_terminals.read() {
+                        for terminal_ids in remote_terminals.values() {
+                            for terminal_id in terminal_ids {
+                                if let Some(project) = ws.find_project_for_terminal(terminal_id)
+                                    && !project.is_remote
+                                {
+                                    visible_ids.insert(project.id.clone());
+                                }
+                            }
+                        }
+                    }
+                    ws.projects()
+                        .iter()
+                        .filter(|project| !project.is_remote && visible_ids.contains(&project.id))
+                        .map(|project| (project.id.clone(), project.path.clone()))
+                        .collect()
+                }) {
+                    Ok(projects) => projects,
+                    Err(_) => break,
+                };
+                let active_ids: HashSet<String> =
+                    projects.iter().map(|(id, _)| id.clone()).collect();
+                let snapshots: HashMap<String, git::HeadSnapshot> = smol::unblock(move || {
+                    projects
+                        .into_iter()
+                        .filter_map(|(id, path)| {
+                            with_lane(Lane::Poll, || {
+                                git::get_head_snapshot(Path::new(&path))
+                            })
+                            .map(|snapshot| (id, snapshot))
+                        })
+                        .collect()
+                })
+                .await;
+                let changed = update_head_snapshots(&mut previous, &active_ids, snapshots);
+                if !changed.is_empty()
+                    && this
+                        .update(cx, |this, cx| {
+                            for (id, reference_changed) in changed {
+                                if reference_changed {
+                                    this.refresh_project(id, cx);
+                                } else {
+                                    this.refresh_visible_project(id, cx);
+                                }
+                            }
+                        })
+                        .is_err()
+                {
+                    break;
+                }
+                smol::Timer::after(HEAD_POLL_INTERVAL).await;
+            }
+        })
+        .detach();
     }
 
     /// Get cached git status for a project.
@@ -541,4 +611,28 @@ impl GitStatusWatcher {
             }
         }).detach();
     }
+}
+
+fn update_head_snapshots(
+    previous: &mut HashMap<String, git::HeadSnapshot>,
+    active_ids: &HashSet<String>,
+    snapshots: HashMap<String, git::HeadSnapshot>,
+) -> Vec<(String, bool)> {
+    previous.retain(|id, _| active_ids.contains(id));
+    snapshots
+        .into_iter()
+        .filter_map(|(id, snapshot)| {
+            let changed = previous.get(&id).is_some_and(|old| old != &snapshot);
+            let reference_changed = previous
+                .get(&id)
+                .is_some_and(|old| snapshot.reference_changed(old));
+            if changed {
+                previous.insert(id.clone(), snapshot);
+                Some((id, reference_changed))
+            } else {
+                previous.insert(id, snapshot);
+                None
+            }
+        })
+        .collect()
 }

@@ -36,7 +36,8 @@ pub use paths::{
 };
 pub use status::{
     apply_pr_base, count_ahead_behind, count_ahead_behind_vs, count_unpushed_commits,
-    get_current_branch, get_head_sha, get_status, has_uncommitted_changes, StatusFetch,
+    get_current_branch, get_head_sha, get_head_snapshot, get_status, has_uncommitted_changes,
+    HeadSnapshot, StatusFetch,
 };
 pub(crate) use status::worktree_diff;
 pub use worktree::{
