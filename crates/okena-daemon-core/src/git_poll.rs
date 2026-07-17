@@ -76,6 +76,8 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
 
 #[derive(Default)]
 struct TriggerAccumulator {
+    /// HEAD changed locally; invalidates in-flight results from the old commit.
+    head_change_ids: HashSet<String>,
     /// Unconditional `gh` refreshes. Used when existing PR/CI cache is invalid.
     force_gh_ids: HashSet<String>,
     /// Conditional refreshes. These become forced only if PR/CI cache is absent.
@@ -94,14 +96,24 @@ impl TriggerAccumulator {
             self.force_gh_ids.insert(project_id);
         } else if trigger.poll_github {
             self.candidate_gh_ids.insert(project_id);
+        } else {
+            self.head_change_ids.insert(project_id);
         }
     }
 
     fn clear(&mut self) {
+        self.head_change_ids.clear();
         self.force_gh_ids.clear();
         self.candidate_gh_ids.clear();
         self.invalidate_gh_ids.clear();
     }
+}
+
+struct GithubPollResult {
+    head_generations: HashMap<String, u64>,
+    branches: HashMap<String, Option<String>>,
+    pr_infos: HashMap<String, Option<git::PrInfo>>,
+    ci_checks: HashMap<String, Option<git::CiCheckSummary>>,
 }
 
 /// Poll only each repository's symbolic HEAD and commit id, waking the full
@@ -173,6 +185,119 @@ fn update_head_snapshots(
         .collect()
 }
 
+async fn poll_github(
+    projects: Vec<(String, String)>,
+    pr_poll_ids: HashSet<String>,
+    ci_poll_ids: HashSet<String>,
+    cached_pr_infos: HashMap<String, Option<git::PrInfo>>,
+    head_generations: HashMap<String, u64>,
+    branches: HashMap<String, Option<String>>,
+) -> GithubPollResult {
+    let mut pr_infos = HashMap::new();
+    let mut ci_checks = HashMap::new();
+
+    for (id, path) in &projects {
+        if !pr_poll_ids.contains(id) {
+            continue;
+        }
+        let task_id = id.clone();
+        let path = path.clone();
+        let fetched = tokio::task::spawn_blocking(move || {
+            with_lane(Lane::Poll, || {
+                if !git::repository::has_github_remote(Path::new(&path)) {
+                    return None;
+                }
+                git::repository::get_pr_info(Path::new(&path))
+            })
+        })
+        .await;
+        match fetched {
+            Ok(pr) => {
+                pr_infos.insert(task_id, pr);
+            }
+            Err(error) => log::warn!("gh PR info task failed for {task_id}: {error}"),
+        }
+    }
+
+    for (id, path) in &projects {
+        if !ci_poll_ids.contains(id) {
+            continue;
+        }
+        let task_id = id.clone();
+        let path = path.clone();
+        let pr_number = pr_infos
+            .get(id)
+            .or_else(|| cached_pr_infos.get(id))
+            .and_then(|pr| pr.as_ref())
+            .map(|pr| pr.number);
+        let fetched = tokio::task::spawn_blocking(move || {
+            with_lane(Lane::Poll, || {
+                if !git::repository::has_github_remote(Path::new(&path)) {
+                    return None;
+                }
+                git::repository::get_ci_checks(Path::new(&path), pr_number)
+            })
+        })
+        .await;
+        match fetched {
+            Ok(checks) => {
+                ci_checks.insert(task_id, checks);
+            }
+            Err(error) => log::warn!("gh CI checks task failed for {task_id}: {error}"),
+        }
+    }
+
+    GithubPollResult {
+        head_generations,
+        branches,
+        pr_infos,
+        ci_checks,
+    }
+}
+
+fn apply_github_result(
+    result: GithubPollResult,
+    current_head_generations: &HashMap<String, u64>,
+    pr_infos: &mut HashMap<String, Option<git::PrInfo>>,
+    ci_checks: &mut HashMap<String, Option<git::CiCheckSummary>>,
+    last: &mut HashMap<String, GitStatus>,
+    git_status_tx: &watch::Sender<HashMap<String, ApiGitStatus>>,
+    state_version: &watch::Sender<u64>,
+) -> bool {
+    let GithubPollResult {
+        head_generations,
+        branches,
+        pr_infos: fetched_pr_infos,
+        ci_checks: fetched_ci_checks,
+    } = result;
+    let is_current = |id: &str| {
+        let expected_generation = head_generations.get(id).copied().unwrap_or_default();
+        let current_generation = current_head_generations.get(id).copied().unwrap_or_default();
+        let expected_branch = branches.get(id);
+        let current_branch = last.get(id).map(|status| &status.branch);
+        expected_generation == current_generation && expected_branch == current_branch
+    };
+
+    for (id, pr_info) in fetched_pr_infos {
+        if is_current(&id) {
+            pr_infos.insert(id, pr_info);
+        }
+    }
+    for (id, checks) in fetched_ci_checks {
+        if is_current(&id) {
+            ci_checks.insert(id, checks);
+        }
+    }
+
+    let mut enriched = last.clone();
+    for (id, status) in &mut enriched {
+        status.pr_info = pr_infos.get(id).cloned().flatten();
+        status.ci_checks = ci_checks.get(id).cloned().flatten();
+    }
+    publish(last, &enriched, git_status_tx, state_version);
+    has_pending_ci(ci_checks)
+}
+
 /// Run the daemon git-status poll loop until the `watch` channel is closed (all
 /// receivers dropped → the server is gone).
 ///
@@ -217,14 +342,22 @@ pub async fn run_git_poll(
     let mut trigger_acc = TriggerAccumulator::default();
     let mut known_gh_ids: HashSet<String> = HashSet::new();
     let mut trigger_rx_closed = false;
+    let mut head_generations: HashMap<String, u64> = HashMap::new();
+    let (github_result_tx, mut github_result_rx) = mpsc::unbounded_channel();
 
     loop {
         drain_git_poll_triggers(&mut trigger_rx, &mut trigger_acc, &mut trigger_rx_closed);
-        if clear_github_cache_for_ids(
+        let mut github_cache_changed = false;
+        for id in &trigger_acc.head_change_ids {
+            *head_generations.entry(id.clone()).or_default() += 1;
+            github_cache_changed |= ci_checks.remove(id).is_some();
+        }
+        github_cache_changed |= clear_github_cache_for_ids(
             &trigger_acc.invalidate_gh_ids,
             &mut pr_infos,
             &mut ci_checks,
-        ) {
+        );
+        if github_cache_changed {
             any_pending_ci = has_pending_ci(&ci_checks);
         }
 
@@ -345,88 +478,62 @@ pub async fn run_git_poll(
             return;
         }
 
-        // ── 4. `gh` PR/CI fan-out (network, can hang) on the blocking pool ───
-        // Only on the PR/CI cadence. Each `gh` call runs under `spawn_blocking`
-        // so it never stalls the reactor or the basic-status publish above. A
-        // failed/missing call leaves that project's cache value untouched (or
-        // None) — we never panic and never blank existing data on error.
-        if check_prs {
-            for (id, path) in &projects {
-                // Only fan out `gh` for projects a client is actually viewing.
-                if !pr_poll_ids.contains(id) {
-                    continue;
-                }
-                let id = id.clone();
-                let path = path.clone();
-                let fetched = tokio::task::spawn_blocking(move || {
-                    with_lane(Lane::Poll, || {
-                        // Skip `gh` entirely for non-GitHub repos.
-                        if !git::repository::has_github_remote(Path::new(&path)) {
-                            return None;
-                        }
-                        git::repository::get_pr_info(Path::new(&path))
-                    })
-                })
-                .await;
-                match fetched {
-                    Ok(pr) => {
-                        pr_infos.insert(id, pr);
-                    }
-                    Err(e) => {
-                        log::warn!("gh PR info task failed for {id}: {e}");
-                    }
-                }
-            }
-        }
-
-        if check_ci {
-            for (id, path) in &projects {
-                // Only fan out `gh` for projects a client is actually viewing.
-                if !ci_poll_ids.contains(id) {
-                    continue;
-                }
-                let id = id.clone();
-                let path = path.clone();
-                // Use the freshest PR number we have (just-fetched or cached) so
-                // `gh pr checks` targets the right PR; falls back to branch-level
-                // checks when no PR is known.
-                let pr_number = pr_infos.get(&id).and_then(|p| p.as_ref()).map(|p| p.number);
-                let fetched = tokio::task::spawn_blocking(move || {
-                    with_lane(Lane::Poll, || {
-                        // Skip `gh` entirely for non-GitHub repos.
-                        if !git::repository::has_github_remote(Path::new(&path)) {
-                            return None;
-                        }
-                        git::repository::get_ci_checks(Path::new(&path), pr_number)
-                    })
-                })
-                .await;
-                match fetched {
-                    Ok(checks) => {
-                        ci_checks.insert(id, checks);
-                    }
-                    Err(e) => {
-                        log::warn!("gh CI checks task failed for {id}: {e}");
-                    }
-                }
-            }
-            any_pending_ci = has_pending_ci(&ci_checks);
-        }
-
-        // ── 5. Re-publish with the richer PR/CI merged in (follow-up update) ─
-        // `publish` no-ops when nothing changed since the basic publish above,
-        // so when `gh` was skipped or returned the same data this is free.
+        // ── 4. Start `gh` PR/CI fan-out without blocking local git refreshes ─
         if check_prs || check_ci {
-            for (id, status) in new_statuses.iter_mut() {
-                status.pr_info = pr_infos.get(id).cloned().flatten();
-                status.ci_checks = ci_checks.get(id).cloned().flatten();
-            }
-            publish(&mut last, &new_statuses, &git_status_tx, &state_version);
+            let result_tx = github_result_tx.clone();
+            let poll_generations = projects
+                .iter()
+                .map(|(id, _)| (id.clone(), head_generations.get(id).copied().unwrap_or_default()))
+                .collect();
+            let poll_branches = new_statuses
+                .iter()
+                .map(|(id, status)| (id.clone(), status.branch.clone()))
+                .collect();
+            let cached_pr_infos = pr_infos.clone();
+            tokio::spawn(async move {
+                let result = poll_github(
+                    projects,
+                    pr_poll_ids,
+                    ci_poll_ids,
+                    cached_pr_infos,
+                    poll_generations,
+                    poll_branches,
+                )
+                .await;
+                let _ = result_tx.send(result);
+            });
         }
 
         trigger_acc.clear();
         cycle += 1;
-        wait_for_next_cycle(&mut trigger_rx, &mut trigger_acc, &mut trigger_rx_closed).await;
+        let deadline = tokio::time::sleep(GIT_POLL_INTERVAL);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                biased;
+                trigger = trigger_rx.recv(), if !trigger_rx_closed => {
+                    match trigger {
+                        Some(trigger) => {
+                            trigger_acc.record(trigger);
+                            break;
+                        }
+                        None => trigger_rx_closed = true,
+                    }
+                }
+                Some(result) = github_result_rx.recv() => {
+                    any_pending_ci = apply_github_result(
+                        result,
+                        &head_generations,
+                        &mut pr_infos,
+                        &mut ci_checks,
+                        &mut last,
+                        &git_status_tx,
+                        &state_version,
+                    );
+                }
+                _ = &mut deadline => break,
+            }
+        }
     }
 }
 
@@ -514,31 +621,6 @@ fn gh_poll_ids(
         (true, false) => forced_gh_ids.clone(),
         (false, true) => gh_ids.clone(),
         (false, false) => HashSet::new(),
-    }
-}
-
-async fn wait_for_next_cycle(
-    trigger_rx: &mut mpsc::UnboundedReceiver<GitPollTrigger>,
-    trigger_acc: &mut TriggerAccumulator,
-    trigger_rx_closed: &mut bool,
-) {
-    if *trigger_rx_closed {
-        tokio::time::sleep(GIT_POLL_INTERVAL).await;
-        return;
-    }
-
-    tokio::select! {
-        _ = tokio::time::sleep(GIT_POLL_INTERVAL) => {}
-        trigger = trigger_rx.recv() => {
-            match trigger {
-                Some(trigger) => {
-                    trigger_acc.record(trigger);
-                }
-                None => {
-                    *trigger_rx_closed = true;
-                }
-            }
-        }
     }
 }
 
@@ -688,6 +770,7 @@ mod tests {
     #[test]
     fn trigger_accumulator_keeps_visible_projects_conditional() {
         let mut acc = TriggerAccumulator::default();
+        acc.record(GitPollTrigger::head_change("committed".to_string()));
         acc.record(GitPollTrigger::project_visible("visible".to_string()));
         acc.record(GitPollTrigger::branch_change("switched".to_string()));
         acc.record(GitPollTrigger::visibility_changed());
@@ -695,6 +778,64 @@ mod tests {
         assert!(acc.candidate_gh_ids.contains("visible"));
         assert!(acc.force_gh_ids.contains("switched"));
         assert!(acc.invalidate_gh_ids.contains("switched"));
+        assert!(acc.head_change_ids.contains("committed"));
+        assert!(!acc.force_gh_ids.contains("committed"));
         assert!(!acc.force_gh_ids.contains("visible"));
+    }
+
+    #[test]
+    fn github_results_apply_only_to_the_captured_head() {
+        let (git_status_tx, _rx) = watch::channel(HashMap::new());
+        let (state_version, _state_rx) = watch::channel(0);
+        let mut last = HashMap::from([(
+            "p1".to_string(),
+            GitStatus {
+                branch: Some("main".to_string()),
+                ..GitStatus::default()
+            },
+        )]);
+        let mut pr_infos = HashMap::new();
+        let mut ci_checks = HashMap::new();
+        let current_generations = HashMap::from([("p1".to_string(), 2)]);
+
+        let result = |generation, branch: &str| GithubPollResult {
+            head_generations: HashMap::from([("p1".to_string(), generation)]),
+            branches: HashMap::from([("p1".to_string(), Some(branch.to_string()))]),
+            pr_infos: HashMap::from([("p1".to_string(), None)]),
+            ci_checks: HashMap::from([("p1".to_string(), None)]),
+        };
+
+        apply_github_result(
+            result(1, "main"),
+            &current_generations,
+            &mut pr_infos,
+            &mut ci_checks,
+            &mut last,
+            &git_status_tx,
+            &state_version,
+        );
+        apply_github_result(
+            result(2, "feature"),
+            &current_generations,
+            &mut pr_infos,
+            &mut ci_checks,
+            &mut last,
+            &git_status_tx,
+            &state_version,
+        );
+        assert!(!pr_infos.contains_key("p1"));
+        assert!(!ci_checks.contains_key("p1"));
+
+        apply_github_result(
+            result(2, "main"),
+            &current_generations,
+            &mut pr_infos,
+            &mut ci_checks,
+            &mut last,
+            &git_status_tx,
+            &state_version,
+        );
+        assert!(pr_infos.contains_key("p1"));
+        assert!(ci_checks.contains_key("p1"));
     }
 }
