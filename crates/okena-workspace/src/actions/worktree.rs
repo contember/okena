@@ -35,22 +35,13 @@ pub struct WorktreeRemovalPlan {
 }
 
 impl WorktreeRemovalPlan {
-    /// Fire the `on_dirty_worktree_close` safety-net hook (e.g. a backup of
-    /// uncommitted changes) from the captured snapshot. The sync `close_worktree`
-    /// path fires this in its `force_remove` branch (dirty && no stash); the
-    /// daemon's optimistic fast paths call it off the reactor — on the same
-    /// blocking thread as the dirty check + directory delete, BEFORE the checkout
-    /// is removed so the hook still has a valid CWD. Returns the hook's terminal
-    /// actions + results for the caller to apply under the workspace lock, exactly
-    /// like the merge pipeline.
-    #[allow(clippy::type_complexity)] // mirrors the merge pipeline's (actions, results) tuple
-    pub fn fire_on_dirty_close(
+    /// Run the dirty-close safety hook before the checkout disappears.
+    pub fn fire_on_dirty_close_headless(
         &self,
         global_hooks: &HooksConfig,
         monitor: Option<&okena_hooks::HookMonitor>,
-        runner: Option<&okena_hooks::HookRunner>,
-    ) -> (Vec<(String, HashMap<String, String>)>, Vec<crate::hooks::HookTerminalResult>) {
-        hooks::fire_on_dirty_worktree_close(
+    ) -> Result<(), String> {
+        hooks::fire_on_dirty_worktree_close_headless(
             &self.project_hooks,
             global_hooks,
             &self.project_id,
@@ -60,7 +51,6 @@ impl WorktreeRemovalPlan {
             self.folder_id.as_deref(),
             self.folder_name.as_deref(),
             monitor,
-            runner,
         )
     }
 }

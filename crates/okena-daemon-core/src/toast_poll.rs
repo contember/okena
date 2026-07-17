@@ -41,18 +41,25 @@ const TOAST_POLL_INTERVAL: Duration = Duration::from_millis(200);
 pub async fn run_toast_poll(
     hook_monitor: Option<HookMonitor>,
     toast_tx: tokio::sync::broadcast::Sender<ApiToast>,
+    state_version: tokio::sync::watch::Sender<u64>,
 ) {
     let Some(hook_monitor) = hook_monitor else {
         // No hook monitor → no toast source. Nothing to do.
         return;
     };
 
+    let mut monitor_version = 0;
     loop {
         for toast in hook_monitor.drain_pending_toasts() {
             // Ignore the no-receivers error: clients may come and go, and these
             // toasts are fire-and-forget. Draining above already cleared the
             // queue so it cannot grow unbounded regardless of delivery.
             let _ = toast_tx.send(toast.to_api());
+        }
+        let next_version = hook_monitor.version();
+        if next_version != monitor_version {
+            monitor_version = next_version;
+            state_version.send_modify(|version| *version = version.wrapping_add(1));
         }
         tokio::time::sleep(TOAST_POLL_INTERVAL).await;
     }
@@ -118,6 +125,31 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn returns_immediately_without_hook_monitor() {
         let (tx, _) = tokio::sync::broadcast::channel::<ApiToast>(8);
-        run_toast_poll(None, tx).await;
+        let (state_tx, _) = tokio::sync::watch::channel(0);
+        run_toast_poll(None, tx, state_tx).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publishes_hook_start_and_completion_to_state_watchers() {
+        let monitor = HookMonitor::new();
+        let (toast_tx, _) = tokio::sync::broadcast::channel::<ApiToast>(8);
+        let (state_tx, mut state_rx) = tokio::sync::watch::channel(0);
+        let task = tokio::spawn(run_toast_poll(Some(monitor.clone()), toast_tx, state_tx));
+
+        let id = monitor.record_start("on_open", "true", "proj", None);
+        tokio::time::timeout(Duration::from_secs(1), state_rx.changed())
+            .await
+            .expect("hook start should publish")
+            .expect("state sender should remain live");
+
+        monitor.record_finish(id, HookStatus::Succeeded {
+            duration: Duration::from_millis(1),
+        });
+        tokio::time::timeout(Duration::from_secs(1), state_rx.changed())
+            .await
+            .expect("hook completion should publish")
+            .expect("state sender should remain live");
+
+        task.abort();
     }
 }

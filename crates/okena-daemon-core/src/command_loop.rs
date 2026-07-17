@@ -124,15 +124,9 @@ fn publish_config_change_after_success(
 /// the `on_dirty_worktree_close` safety-net hook fires — the plain fast arm passes
 /// `false` (no merge/stash), the merge phase-2 arm passes the pipeline's outcome.
 ///
-/// Deletes the project from state + drains its queued terminal kills under a
-/// BRIEF lock, so the client's row vanishes immediately, then runs the slow
-/// `remove_dir_all` + `git worktree prune` on a blocking thread with NO lock
-/// held — this is what keeps a busy checkout (node_modules / Docker) from either
-/// freezing the daemon (lock held during the delete) or leaving the row dimmed
-/// for seconds (delete before removal, not after). The (expensive) dirty check +
-/// `on_dirty_worktree_close` hook ride that SAME blocking hop, firing BEFORE the
-/// delete so the backup hook still sees a valid CWD; its terminal actions + hook
-/// results route back through the lock like the merge pipeline's finalize.
+/// Deletes the project from state, then runs the dirty-close hook and physical
+/// removal off the reactor. The dirty-close hook is headless because the project
+/// no longer exists to own a PTY terminal.
 /// `on_worktree_removed` fires once the checkout is physically gone; if the delete
 /// FAILS (busy checkout), the checkout is left orphaned on disk, so we surface an
 /// error toast with the path and skip `on_worktree_removed`. Returns `Ok(None)`
@@ -176,44 +170,37 @@ fn spawn_optimistic_worktree_removal(
     tokio::task::spawn_local(async move {
         let global_hooks_blocking = global_hooks.clone();
         let monitor = hook_monitor.clone();
-        let runner = hook_runner.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let worktree_path = plan.worktree_path.clone();
             let main_repo_path = std::path::PathBuf::from(&plan.main_repo_path);
             // force_remove = is_dirty && !did_stash — same condition the sync
             // close_worktree path uses to fire the dirty-close safety net. Runs
             // BEFORE remove_worktree_fast so the hook's CWD still exists.
-            let dirty_actions = if !did_stash
+            let dirty_hook = if !did_stash
                 && okena_git::has_uncommitted_changes(&worktree_path)
             {
-                Some(plan.fire_on_dirty_close(
+                Some(plan.fire_on_dirty_close_headless(
                     &global_hooks_blocking,
                     monitor.as_ref(),
-                    runner.as_ref(),
                 ))
             } else {
                 None
             };
             let removal = okena_git::remove_worktree_fast(&worktree_path, &main_repo_path);
-            (plan, removal, dirty_actions)
+            (plan, removal, dirty_hook)
         })
         .await;
         match outcome {
-            Ok((plan, removal, dirty_actions)) => {
+            Ok((plan, removal, dirty_hook)) => {
+                if let Some(Err(error)) = dirty_hook {
+                    log::error!(
+                        "worktree-close: dirty-close hook failed for {}: {error}",
+                        plan.project_id
+                    );
+                }
                 let mut cx =
                     DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                let mut ws = workspace.lock();
-                // Route the dirty hook's workspace-side effects back through the
-                // lock, like the merge pipeline's finalize (they no-op on the
-                // already-deleted row — matching the sync path, which adds them
-                // then immediately deletes the project; the meaningful backup PTY
-                // already spawned inside fire_on_dirty_close above).
-                if let Some((terminal_actions, hook_results)) = dirty_actions {
-                    for (cmd, env) in terminal_actions {
-                        ws.add_terminal_with_command(&plan.project_id, &cmd, &env, &mut cx);
-                    }
-                    ws.register_hook_results(hook_results, &mut cx);
-                }
+                let ws = workspace.lock();
                 match removal {
                     Ok(()) => {
                         // Checkout physically gone — fire on_worktree_removed.

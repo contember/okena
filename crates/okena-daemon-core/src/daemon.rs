@@ -391,6 +391,7 @@ impl DaemonCore {
             tokio::task::spawn_local(crate::toast_poll::run_toast_poll(
                 reactor.hook_monitor.clone(),
                 (*toast_tx).clone(),
+                reactor.state_version.clone(),
             ));
 
             // Materialize PTYs for every restored project's uninitialized
