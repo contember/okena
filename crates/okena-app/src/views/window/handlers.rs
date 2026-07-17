@@ -227,7 +227,8 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) {
         use crate::soft_close::{
-            decode_action, KILL_PREFIX, RESTART_DAEMON_CANCEL_PREFIX,
+            decode_action, KILL_PREFIX, LOCAL_REBUILD_CANCEL_PREFIX,
+            LOCAL_REBUILD_CONFIRM_PREFIX, RESTART_DAEMON_CANCEL_PREFIX,
             RESTART_DAEMON_CONFIRM_PREFIX, UNDO_PREFIX,
         };
         use crate::workspace::toast::ToastManager;
@@ -241,6 +242,15 @@ impl WindowView {
             return;
         }
         if event.action_id == RESTART_DAEMON_CANCEL_PREFIX {
+            ToastManager::dismiss(&event.toast_id, cx);
+            return;
+        }
+        if event.action_id == LOCAL_REBUILD_CONFIRM_PREFIX {
+            ToastManager::dismiss(&event.toast_id, cx);
+            cx.emit(super::WindowViewEvent::RebuildAndRestart);
+            return;
+        }
+        if event.action_id == LOCAL_REBUILD_CANCEL_PREFIX {
             ToastManager::dismiss(&event.toast_id, cx);
             return;
         }
@@ -662,6 +672,43 @@ impl WindowView {
                 rm.send_action(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID, action, cx);
             });
         }
+    }
+
+    pub(super) fn request_local_rebuild(&self, cx: &mut Context<Self>) {
+        use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastManager};
+
+        let Some(state) = cx
+            .try_global::<okena_ext_updater::GlobalLocalBuild>()
+            .map(|global| global.0.clone())
+        else {
+            return;
+        };
+        if state.read(cx).daemon_ui_owned() != Some(true) {
+            ToastManager::warning(
+                "The local daemon is externally managed; restart it manually",
+                cx,
+            );
+            return;
+        }
+
+        let actions = vec![
+            ToastAction::new(
+                crate::soft_close::LOCAL_REBUILD_CONFIRM_PREFIX,
+                "Rebuild & restart",
+                ToastActionStyle::Danger,
+            ),
+            ToastAction::new(
+                crate::soft_close::LOCAL_REBUILD_CANCEL_PREFIX,
+                "Cancel",
+                ToastActionStyle::Default,
+            ),
+        ];
+        let toast = Toast::warning("Rebuild and restart Okena?")
+            .with_id(crate::soft_close::LOCAL_REBUILD_TOAST_ID)
+            .with_detail("This ends all terminal sessions in every window.")
+            .with_ttl(std::time::Duration::from_secs(30))
+            .with_actions(actions);
+        ToastManager::post(toast, cx);
     }
 
     /// Show a confirmation toast before restarting the local daemon. Restarting

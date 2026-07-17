@@ -892,6 +892,11 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &RestartDaemon, _window, cx| {
                 this.request_restart_daemon(cx);
             }))
+            .on_action(cx.listener(
+                |this, _: &okena_ext_updater::RebuildAndRestart, _window, cx| {
+                    this.request_local_rebuild(cx);
+                },
+            ))
             // Handle show pairing dialog action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();

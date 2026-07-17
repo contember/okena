@@ -305,6 +305,10 @@ fn run_headless(listen_addr: Option<IpAddr>) -> anyhow::Result<()> {
 }
 
 fn main() {
+    if let Err(error) = okena_remote_server::local::remember_current_executable() {
+        eprintln!("Warning: failed to remember executable path: {error}");
+    }
+
     // Handle --version before initializing anything (used by updater validation)
     if std::env::args().any(|a| a == "--version") {
         println!("okena {}", env!("CARGO_PKG_VERSION"));
@@ -715,6 +719,14 @@ fn main() {
                 std::process::exit(1);
             }
         };
+        if let Some(local_build) = cx
+            .try_global::<okena_ext_updater::GlobalLocalBuild>()
+            .map(|global| global.0.clone())
+        {
+            local_build.update(cx, |state, cx| {
+                state.set_daemon_ui_owned(local_daemon.daemon.ui_owned, cx);
+            });
+        }
 
         // Create the main window
         #[allow(

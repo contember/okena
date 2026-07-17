@@ -230,25 +230,102 @@ fn open_url(url: &str) {
 /// Status bar widget that shows update status.
 #[cfg(feature = "gpui-ui")]
 pub struct UpdateStatusWidget {
-    _subscription: Option<()>,
+    _subscription: Option<Subscription>,
 }
 
 #[cfg(feature = "gpui-ui")]
 impl UpdateStatusWidget {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // Mirror daemon-owned update state into this GPUI process.
-        if let Some(gui) = cx.try_global::<GlobalUpdateInfo>() {
+        let subscription = cx
+            .try_global::<crate::GlobalLocalBuild>()
+            .map(|local| local.0.clone())
+            .map(|state| cx.observe(&state, |_this, _state, cx| cx.notify()));
+
+        // Installed builds mirror daemon-owned update state into this process.
+        if subscription.is_none()
+            && let Some(gui) = cx.try_global::<GlobalUpdateInfo>()
+        {
             let info = gui.0.clone();
             crate::update_checker::start_update_status_poll(info, cx);
         }
 
-        Self { _subscription: None }
+        Self {
+            _subscription: subscription,
+        }
     }
 }
 
 #[cfg(feature = "gpui-ui")]
 impl Render for UpdateStatusWidget {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(local) = cx
+            .try_global::<crate::GlobalLocalBuild>()
+            .map(|global| global.0.clone())
+        {
+            let t = theme(cx);
+            let state = local.read(cx);
+            let text = |label: String, color| {
+                div()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .text_color(color)
+                    .text_size(ui_text_sm(cx))
+                    .child(label)
+                    .into_any_element()
+            };
+
+            if state.daemon_ui_owned() == Some(false) {
+                return text(
+                    "Local build · external daemon".to_string(),
+                    rgb(t.text_muted),
+                );
+            }
+
+            return match state.status() {
+                crate::LocalBuildStatus::Idle => div()
+                    .id("local-rebuild")
+                    .cursor_pointer()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .text_color(rgb(t.term_green))
+                    .text_size(ui_text_sm(cx))
+                    .child("Local build · Rebuild & restart")
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::RebuildAndRestart), cx);
+                    })
+                    .into_any_element(),
+                crate::LocalBuildStatus::Building => {
+                    text("Building release…".to_string(), rgb(t.term_yellow))
+                }
+                crate::LocalBuildStatus::RestartingDaemon => {
+                    text("Restarting daemon…".to_string(), rgb(t.term_yellow))
+                }
+                crate::LocalBuildStatus::RestartingApp => {
+                    text("Restarting Okena…".to_string(), rgb(t.term_yellow))
+                }
+                crate::LocalBuildStatus::Failed { error } => h_flex()
+                    .id("local-rebuild-failed")
+                    .gap(px(6.0))
+                    .items_center()
+                    .text_size(ui_text_sm(cx))
+                    .child(div().text_color(rgb(t.term_red)).child(format!(
+                        "Rebuild failed: {error}"
+                    )))
+                    .child(
+                        div()
+                            .id("local-rebuild-retry")
+                            .cursor_pointer()
+                            .text_color(rgb(t.text_muted))
+                            .hover(|s| s.text_color(rgb(t.text_primary)))
+                            .child("Retry")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::RebuildAndRestart), cx);
+                            }),
+                    )
+                    .into_any_element(),
+            };
+        }
+
         let Some(update_info) = cx.try_global::<GlobalUpdateInfo>() else {
             return div().size_0().into_any_element();
         };

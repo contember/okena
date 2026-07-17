@@ -176,7 +176,9 @@ impl RemoteServer {
         // Spawn the server task
         let mut shutdown_rx_clone = shutdown_rx.clone();
         runtime.spawn(async move {
-            routes::update::spawn_background_checker(update_info.clone());
+            if okena_ext_updater::detect_local_checkout().is_none() {
+                routes::update::spawn_background_checker(update_info.clone());
+            }
 
             // UI-owned daemons self-terminate once idle (see
             // `run_idle_exit_monitor`) so a closed or crashed GUI never leaves a
