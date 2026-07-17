@@ -38,10 +38,10 @@ use std::sync::Arc;
 use async_channel::Receiver;
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_services::manager::ServiceManager;
+use okena_terminal::backend::TerminalBackend;
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_terminal::TerminalsRegistry;
 use okena_workspace::context::WorkspaceCx;
-use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
 use okena_workspace::state::{HookTerminalStatus, Workspace};
 use parking_lot::Mutex;
@@ -70,6 +70,9 @@ pub struct PtyLoopReactor {
     /// The daemon-owned workspace: hook-terminal status, pending worktree close,
     /// soft-close records, and project deletion all mutate it directly.
     pub workspace: Arc<Mutex<Workspace>>,
+    /// Terminal backend used to stop and restore project terminals around a
+    /// background worktree removal.
+    pub backend: Arc<dyn TerminalBackend>,
     /// Hook runner — threaded into `DaemonWorkspaceCx` so workspace mutators that
     /// need it (e.g. project deletion firing lifecycle hooks) can reach it.
     pub hook_runner: Option<HookRunner>,
@@ -402,8 +405,7 @@ fn handle_exits(
             monitor.notify_exit(terminal_id, *exit_code);
         }
     }
-    let hook_tids =
-        handle_hook_terminal_exits(exit_events, &service_tids, terminals, pty_manager, reactor);
+    let hook_tids = handle_hook_terminal_exits(exit_events, &service_tids, terminals, reactor);
 
     // ── 3. terminal.on_close for plain user terminals ───────────────────────
     // Same gating as the GUI: a global, project, OR parent-worktree on_close
@@ -491,7 +493,6 @@ fn handle_hook_terminal_exits(
     exit_events: &[(String, Option<u32>)],
     service_tids: &HashSet<String>,
     terminals: &TerminalsRegistry,
-    pty_manager: &PtyManager,
     reactor: &PtyLoopReactor,
 ) -> HashSet<String> {
     let hook_tids: HashSet<String> = {
@@ -550,83 +551,19 @@ fn handle_hook_terminal_exits(
                 // state (delete_project + worktree_removed) when it completes.
                 match ws.begin_worktree_removal(&pending.project_id, &global_hooks, &mut cx) {
                     Ok(plan) => {
-                        // OPTIMISTIC REMOVAL: delete the project from state NOW,
-                        // under the lock we already hold, so the client's row
-                        // vanishes immediately. Previously the removal ran the git
-                        // delete FIRST and only then `delete_project`, so the row
-                        // sat there (dimmed "Closing…") for the entire
-                        // `remove_dir_all` of the checkout — node_modules / build
-                        // output make that take seconds. Nothing re-adds worktree
-                        // projects from a scan (only explicit user create), so
-                        // early removal is safe; `on_worktree_removed` fires below,
-                        // once the checkout is physically gone.
-                        let mut focus_manager = FocusManager::new();
-                        ws.delete_project(&mut focus_manager, &plan.project_id, &global_hooks, &mut cx);
-
-                        // Drain the terminal kills delete_project just QUEUED. The
-                        // worktree's shells hold CWDs inside the checkout, and on
-                        // Windows a live CWD locks the directory so the background
-                        // remove_dir_all fails — kill them BEFORE the delete runs.
-                        // (delete_project only queues; this path bypasses the
-                        // run_main_workspace_action drain, mirroring the command_loop
-                        // optimistic-removal helper.)
-                        for id in ws.drain_pending_terminal_kills() {
-                            pty_manager.kill(&id);
-                            terminals.lock().remove(&id);
-                        }
-
-                        let workspace = reactor.workspace.clone();
-                        let workspace_tick = reactor.workspace_tick.clone();
-                        let hook_runner = reactor.hook_runner.clone();
-                        let hook_monitor = reactor.hook_monitor.clone();
-                        let global_hooks = global_hooks.clone();
-                        tokio::task::spawn_local(async move {
-                            let worktree_path = plan.worktree_path.clone();
-                            let main_repo_path = std::path::PathBuf::from(&plan.main_repo_path);
-                            let git = tokio::task::spawn_blocking(move || {
-                                okena_git::remove_worktree_fast(&worktree_path, &main_repo_path)
-                            })
-                            .await;
-                            match git {
-                                Ok(Ok(())) => {
-                                    // Checkout physically gone — fire the removed
-                                    // hook + notify so any resulting state reaches
-                                    // clients.
-                                    let mut cx = DaemonWorkspaceCx::new(
-                                        &workspace_tick,
-                                        &hook_runner,
-                                        &hook_monitor,
-                                    );
-                                    let ws = workspace.lock();
-                                    ws.fire_worktree_removed_hook(&plan, &global_hooks, &mut cx);
-                                    cx.notify();
-                                }
-                                Ok(Err(e)) => {
-                                    // Delete failed (busy checkout: Windows file
-                                    // lock, EBUSY/EACCES on a Docker bind mount).
-                                    // The row is already gone from every client,
-                                    // but the checkout + its git registration
-                                    // survive. Surface the orphaned path so the
-                                    // user can clean it up, and do NOT fire
-                                    // on_worktree_removed (its "physically gone"
-                                    // contract is now false).
-                                    log::error!(
-                                        "worktree-close: git removal failed for {}: {e}",
-                                        plan.project_id
-                                    );
-                                    if let Some(hm) = &hook_monitor {
-                                        hm.push_toast(okena_state::Toast::error(format!(
-                                            "Worktree checkout could not be removed and remains on disk at {}: {e}",
-                                            plan.worktree_path.display()
-                                        )));
-                                    }
-                                }
-                                Err(e) => log::error!(
-                                    "worktree-close: removal task failed for {}: {e}",
-                                    plan.project_id
-                                ),
-                            }
-                        });
+                        drop(ws);
+                        let _ = crate::command_loop::spawn_background_worktree_removal(
+                            plan,
+                            false,
+                            &global_hooks,
+                            &reactor.workspace,
+                            &reactor.workspace_tick,
+                            &reactor.hook_runner,
+                            &reactor.hook_monitor,
+                            &reactor.backend,
+                            terminals,
+                            &reactor.settings,
+                        );
                     }
                     Err(e) => {
                         // The removal was rejected after the hook already ran
@@ -766,8 +703,11 @@ mod tests {
 
     fn test_reactor(workspace: Workspace, settings: AppSettings) -> PtyLoopReactor {
         let (workspace_tick, _wrx) = watch::channel(0u64);
+        let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+        let backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
         PtyLoopReactor {
             workspace: Arc::new(Mutex::new(workspace)),
+            backend,
             hook_runner: None,
             hook_monitor: Some(HookMonitor::new()),
             workspace_tick,

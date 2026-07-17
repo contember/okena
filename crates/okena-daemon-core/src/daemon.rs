@@ -369,6 +369,7 @@ impl DaemonCore {
                 // OSC hook-exit, soft-close reap) directly against this state.
                 crate::pty_loop::PtyLoopReactor {
                     workspace: reactor.workspace.clone(),
+                    backend: backend.clone(),
                     hook_runner: reactor.hook_runner.clone(),
                     hook_monitor: reactor.hook_monitor.clone(),
                     workspace_tick: reactor.workspace_tick.clone(),

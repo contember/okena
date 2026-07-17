@@ -496,6 +496,12 @@ impl Workspace {
         self.lifecycle.mark_closing(project_id);
     }
 
+    /// Daemon-owned closing mark mirrored to thin clients.
+    pub fn mark_closing_project_authoritative(&mut self, project_id: &str) {
+        self.lifecycle.mark_closing(project_id);
+        self.set_project_closing_flag(project_id, true);
+    }
+
     pub fn finish_closing_project(&mut self, project_id: &str) {
         self.lifecycle.finish_closing(project_id);
         // Clear the wire-facing marker too: on the daemon this is the abort path

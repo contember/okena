@@ -9,7 +9,7 @@ use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
 use crate::state::{LayoutNode, PendingWorktreeClose, ProjectData, Workspace, WindowId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Captured inputs for a two-phase worktree removal. [`Workspace::begin_worktree_removal`]
 /// snapshots everything the finalize step needs (branch, paths, hooks) BEFORE the
@@ -693,6 +693,41 @@ impl Workspace {
             folder_id,
             folder_name,
         })
+    }
+
+    /// Keep the authoritative project row while a daemon removal runs, but stop
+    /// its terminals so their CWD cannot keep the checkout busy on Windows.
+    pub fn prepare_background_worktree_removal(
+        &mut self,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<Vec<String>, String> {
+        if self.lifecycle.is_creating(project_id) {
+            return Err("worktree is still being created".to_string());
+        }
+        let project = self
+            .project_mut(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+        if project.worktree_info.is_none() {
+            return Err("Not a worktree project".to_string());
+        }
+
+        let mut terminal_ids = project
+            .layout
+            .as_ref()
+            .map_or_else(Vec::new, LayoutNode::collect_terminal_ids);
+        terminal_ids.extend(project.hook_terminals.keys().cloned());
+        terminal_ids.extend(project.service_terminals.values().cloned());
+        if let Some(layout) = &mut project.layout {
+            layout.clear_terminal_ids_except(&HashSet::new());
+        }
+
+        terminal_ids.extend(self.drain_pending_closes_for_project(project_id));
+        terminal_ids.sort();
+        terminal_ids.dedup();
+        self.mark_closing_project_authoritative(project_id);
+        self.notify_data(cx);
+        Ok(terminal_ids)
     }
 
     /// Phase 2 of worktree removal (after `git worktree remove` has run): delete
