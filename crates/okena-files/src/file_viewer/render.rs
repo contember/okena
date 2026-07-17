@@ -774,8 +774,10 @@ impl FileViewer {
         };
 
         if needs_new {
-            tab.markdown_list_state =
-                Some(ListState::new(count, ListAlignment::Top, px(400.0)));
+            // Unmeasured items are zero-height, making the scrollbar grow while scrolling.
+            tab.markdown_list_state = Some(
+                ListState::new(count, ListAlignment::Top, px(400.0)).measure_all(),
+            );
             tab.markdown_list_nodes = count;
             tab.markdown_list_font = font;
         } else if tab.markdown_list_font != font {
