@@ -234,7 +234,8 @@ impl Okena {
             WindowViewEvent::JumpToProject { origin, project_id } => {
                 self.jump_to_project_terminal(*origin, project_id, cx);
             }
-            WindowViewEvent::RebuildAndRestart => self.rebuild_and_restart(cx),
+            WindowViewEvent::RebuildLocal => self.rebuild_local(cx),
+            WindowViewEvent::RestartLocalBuild => self.restart_local_build(cx),
         }
     }
 

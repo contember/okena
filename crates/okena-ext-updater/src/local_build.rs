@@ -59,6 +59,7 @@ fn detect_local_checkout_from(executable: &Path, workspace_root: &Path) -> Optio
 pub enum LocalBuildStatus {
     Idle,
     Building,
+    ReadyToRestart,
     RestartingDaemon,
     RestartingApp,
     Failed { error: String },
@@ -98,11 +99,20 @@ impl LocalBuildState {
         cx.notify();
     }
 
-    pub fn try_start(&mut self, cx: &mut Context<Self>) -> Option<LocalCheckout> {
-        if !self.can_start() {
+    pub fn try_start_build(&mut self, cx: &mut Context<Self>) -> Option<LocalCheckout> {
+        if !self.can_build() {
             return None;
         }
         self.status = LocalBuildStatus::Building;
+        cx.notify();
+        Some(self.checkout.clone())
+    }
+
+    pub fn try_start_restart(&mut self, cx: &mut Context<Self>) -> Option<LocalCheckout> {
+        if !self.can_restart() {
+            return None;
+        }
+        self.status = LocalBuildStatus::RestartingDaemon;
         cx.notify();
         Some(self.checkout.clone())
     }
@@ -112,14 +122,20 @@ impl LocalBuildState {
         cx.notify();
     }
 
-    fn can_start(&self) -> bool {
+    fn can_build(&self) -> bool {
         self.daemon_ui_owned == Some(true)
             && !matches!(
                 self.status,
                 LocalBuildStatus::Building
+                    | LocalBuildStatus::ReadyToRestart
                     | LocalBuildStatus::RestartingDaemon
                     | LocalBuildStatus::RestartingApp
             )
+    }
+
+    fn can_restart(&self) -> bool {
+        self.daemon_ui_owned == Some(true)
+            && matches!(self.status, LocalBuildStatus::ReadyToRestart)
     }
 }
 
@@ -179,22 +195,41 @@ mod tests {
             release_executable: "/repo/target/release/okena".into(),
         };
         let mut state = LocalBuildState::new(checkout);
-        assert!(!state.can_start());
+        assert!(!state.can_build());
 
         state.daemon_ui_owned = Some(true);
-        assert!(state.can_start());
+        assert!(state.can_build());
         state.status = LocalBuildStatus::Failed {
             error: "failed".to_string(),
         };
-        assert!(state.can_start());
+        assert!(state.can_build());
 
         for status in [
             LocalBuildStatus::Building,
+            LocalBuildStatus::ReadyToRestart,
             LocalBuildStatus::RestartingDaemon,
             LocalBuildStatus::RestartingApp,
         ] {
             state.status = status;
-            assert!(!state.can_start());
+            assert!(!state.can_build());
         }
+    }
+
+    #[cfg(feature = "gpui-ui")]
+    #[test]
+    fn restart_requires_completed_build_and_managed_daemon() {
+        let checkout = LocalCheckout {
+            root: "/repo".into(),
+            release_executable: "/repo/target/release/okena".into(),
+        };
+        let mut state = LocalBuildState::new(checkout);
+        state.status = LocalBuildStatus::ReadyToRestart;
+        assert!(!state.can_restart());
+
+        state.daemon_ui_owned = Some(true);
+        assert!(state.can_restart());
+
+        state.status = LocalBuildStatus::Idle;
+        assert!(!state.can_restart());
     }
 }

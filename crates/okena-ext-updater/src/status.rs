@@ -289,14 +289,26 @@ impl Render for UpdateStatusWidget {
                     .py(px(1.0))
                     .text_color(rgb(t.term_green))
                     .text_size(ui_text_sm(cx))
-                    .child("Local build · Rebuild & restart")
+                    .child("Local build · Rebuild")
                     .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(crate::RebuildAndRestart), cx);
+                        window.dispatch_action(Box::new(crate::RebuildLocal), cx);
                     })
                     .into_any_element(),
                 crate::LocalBuildStatus::Building => {
                     text("Building release…".to_string(), rgb(t.term_yellow))
                 }
+                crate::LocalBuildStatus::ReadyToRestart => div()
+                    .id("local-restart")
+                    .cursor_pointer()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .text_color(rgb(t.term_green))
+                    .text_size(ui_text_sm(cx))
+                    .child("Local build · Restart")
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::RestartLocalBuild), cx);
+                    })
+                    .into_any_element(),
                 crate::LocalBuildStatus::RestartingDaemon => {
                     text("Restarting daemon…".to_string(), rgb(t.term_yellow))
                 }
@@ -319,7 +331,7 @@ impl Render for UpdateStatusWidget {
                             .hover(|s| s.text_color(rgb(t.text_primary)))
                             .child("Retry")
                             .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(crate::RebuildAndRestart), cx);
+                                window.dispatch_action(Box::new(crate::RebuildLocal), cx);
                             }),
                     )
                     .into_any_element(),
