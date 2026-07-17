@@ -687,10 +687,15 @@ fn collect_terminal_close_infos(
 mod tests {
     use super::*;
 
+    use okena_state::{HookTerminalEntry, ProjectData, WorktreeMetadata};
     use okena_terminal::backend::LocalBackend;
     use okena_terminal::session_backend::SessionBackend;
     use okena_terminal::terminal::{Terminal, TerminalSize};
-    use okena_workspace::state::WorkspaceData;
+    use okena_workspace::state::{PendingWorktreeClose, WorkspaceData};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::Duration;
 
     fn terminal_size() -> TerminalSize {
         TerminalSize {
@@ -713,6 +718,252 @@ mod tests {
             workspace_tick,
             settings: Arc::new(Mutex::new(settings)),
         }
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn real_git_worktree() -> (PathBuf, PathBuf) {
+        let repo = std::env::temp_dir().join(format!(
+            "okena-pty-close-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let worktree = repo.with_extension("worktree");
+        std::fs::create_dir_all(&repo).expect("create repository directory");
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "test@okena.local"]);
+        run_git(&repo, &["config", "user.name", "Okena Test"]);
+        std::fs::write(repo.join("file.txt"), "base\n").expect("write fixture");
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-q", "-m", "base"]);
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                worktree.to_str().expect("utf-8 worktree path"),
+            ],
+        );
+        (repo, worktree)
+    }
+
+    fn workspace_with_pending_close(
+        main_repo: &Path,
+        worktree: &Path,
+        hook_terminal_id: &str,
+    ) -> Workspace {
+        let parent = ProjectData {
+            id: "parent".into(),
+            name: "Parent".into(),
+            path: main_repo.to_string_lossy().into_owned(),
+            layout: None,
+            terminal_names: Default::default(),
+            hidden_terminals: Default::default(),
+            worktree_info: None,
+            worktree_ids: vec!["wt1".into()],
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: Default::default(),
+            default_shell: None,
+            hook_terminals: Default::default(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        };
+        let child = ProjectData {
+            id: "wt1".into(),
+            name: "Feature".into(),
+            path: worktree.to_string_lossy().into_owned(),
+            layout: None,
+            terminal_names: HashMap::from([(
+                hook_terminal_id.to_string(),
+                "Before remove".to_string(),
+            )]),
+            hidden_terminals: Default::default(),
+            worktree_info: Some(WorktreeMetadata {
+                parent_project_id: "parent".into(),
+                color_override: None,
+                main_repo_path: main_repo.to_string_lossy().into_owned(),
+                worktree_path: worktree.to_string_lossy().into_owned(),
+                branch_name: "feature".into(),
+            }),
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: Default::default(),
+            default_shell: None,
+            hook_terminals: HashMap::from([(
+                hook_terminal_id.to_string(),
+                HookTerminalEntry {
+                    label: "Before remove".into(),
+                    status: HookTerminalStatus::Running,
+                    hook_type: "before_worktree_remove".into(),
+                    command: "true".into(),
+                    cwd: worktree.to_string_lossy().into_owned(),
+                },
+            )]),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        };
+        let mut workspace = Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![parent, child],
+            project_order: vec!["parent".into()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        });
+        workspace.register_pending_worktree_close(PendingWorktreeClose {
+            project_id: "wt1".into(),
+            hook_terminal_id: hook_terminal_id.into(),
+            branch: "feature".into(),
+            main_repo_path: main_repo.to_string_lossy().into_owned(),
+        });
+        workspace
+    }
+
+    async fn drive_hook_exit_through_pty_loop(
+        reactor: PtyLoopReactor,
+        terminals: TerminalsRegistry,
+        terminal_id: &str,
+        exit_code: Option<u32>,
+    ) {
+        let (tx, events) = async_channel::bounded(4);
+        let (pty_manager, _unused_events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            reactor.backend.clone(),
+            terminals.clone(),
+        )));
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let (state_version, _state_rx) = watch::channel(0u64);
+        let handle = tokio::task::spawn_local(run_pty_loop(
+            events,
+            terminals,
+            pty_manager,
+            service_manager,
+            Handle::current(),
+            service_tick,
+            reactor,
+            state_version,
+        ));
+        tx.send(PtyEvent::Exit {
+            terminal_id: terminal_id.to_string(),
+            exit_code,
+        })
+        .await
+        .expect("send hook exit");
+        drop(tx);
+        handle.await.expect("PTY loop joins");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn successful_hook_pty_exit_removes_real_worktree() {
+        let (repo, worktree) = real_git_worktree();
+        let reactor = test_reactor(
+            workspace_with_pending_close(&repo, &worktree, "hook-1"),
+            AppSettings::default(),
+        );
+        let workspace = reactor.workspace.clone();
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                drive_hook_exit_through_pty_loop(reactor, terminals, "hook-1", Some(0)).await;
+
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        if workspace.lock().project("wt1").is_none() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("PTY completion removes worktree");
+            })
+            .await;
+
+        assert!(!worktree.exists(), "checkout was physically removed");
+        assert!(
+            !String::from_utf8_lossy(
+                &Command::new("git")
+                    .args(["worktree", "list", "--porcelain"])
+                    .current_dir(&repo)
+                    .output()
+                    .expect("list worktrees")
+                    .stdout
+            )
+            .contains(worktree.to_string_lossy().as_ref()),
+            "git worktree registration was pruned"
+        );
+        assert!(
+            workspace
+                .lock()
+                .project("parent")
+                .expect("parent remains")
+                .worktree_ids
+                .is_empty()
+        );
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_hook_pty_exit_aborts_pending_close() {
+        let repo = std::env::temp_dir().join("okena-hook-failure-main");
+        let worktree = std::env::temp_dir().join("okena-hook-failure-worktree");
+        let reactor = test_reactor(
+            workspace_with_pending_close(&repo, &worktree, "hook-1"),
+            AppSettings::default(),
+        );
+        let workspace = reactor.workspace.clone();
+        let hook_monitor = reactor.hook_monitor.clone().expect("hook monitor");
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(drive_hook_exit_through_pty_loop(
+                reactor,
+                terminals,
+                "hook-1",
+                Some(7),
+            ))
+            .await;
+
+        let workspace_guard = workspace.lock();
+        let project = workspace_guard.project("wt1").expect("project retained");
+        assert!(!project.is_closing);
+        assert!(!workspace_guard.is_project_closing("wt1"));
+        assert!(matches!(
+            project.hook_terminals["hook-1"].status,
+            HookTerminalStatus::Failed { exit_code: 7 }
+        ));
+        drop(workspace_guard);
+        assert_eq!(hook_monitor.drain_pending_toasts().len(), 1);
     }
 
     /// `run_pty_loop` routes a synthesized `Data` event into a registered

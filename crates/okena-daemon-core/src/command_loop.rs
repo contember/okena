@@ -2367,6 +2367,41 @@ mod tests {
         }
     }
 
+    struct RestoringBackend;
+
+    impl TerminalBackend for RestoringBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+        fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
+            Ok("restored-terminal".to_string())
+        }
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("restoring backend: reconnect not supported")
+        }
+        fn kill(&self, _terminal_id: &str) {}
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
     /// A single-terminal project whose terminal already has a real id.
     fn workspace_with_initialized_terminal(terminal_id: &str) -> WorkspaceData {
         use okena_state::{LayoutNode, ProjectData};
@@ -2556,38 +2591,99 @@ mod tests {
         );
     }
 
-    #[test]
-    fn background_removal_failure_keeps_authoritative_project_row() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_removal_failure_restores_authoritative_project() {
+        use std::time::Duration;
+
+        let invalid_worktree = std::env::temp_dir().join(format!(
+            "okena-remove-failure-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&invalid_worktree, "not a directory").expect("create removal obstacle");
+
         let mut data = workspace_with_worktree_child();
+        data.projects[1].path = invalid_worktree.to_string_lossy().into_owned();
+        let metadata = data.projects[1]
+            .worktree_info
+            .as_mut()
+            .expect("worktree metadata");
+        metadata.worktree_path = invalid_worktree.to_string_lossy().into_owned();
+        metadata.main_repo_path = invalid_worktree
+            .with_extension("missing-main")
+            .to_string_lossy()
+            .into_owned();
         if let Some(LayoutNode::Terminal { terminal_id, .. }) = data.projects[1].layout.as_mut() {
             *terminal_id = Some("terminal-1".into());
         }
-        let mut workspace = Workspace::new(data);
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RestoringBackend);
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let settings = Arc::new(Mutex::new(default_settings()));
+        let hook_monitor_service = okena_hooks::HookMonitor::new();
+        let hook_monitor = Some(hook_monitor_service.clone());
+        let hook_runner = None;
         let (workspace_tick, _receiver) = watch::channel(0u64);
-        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &None, &None);
+        let plan = {
+            let mut cx =
+                DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+            workspace
+                .lock()
+                .begin_worktree_removal("wt1", &Default::default(), &mut cx)
+                .expect("build removal plan")
+        };
 
-        let terminal_ids = workspace
-            .prepare_background_worktree_removal("wt1", &mut cx)
-            .expect("prepare removal");
-        assert_eq!(terminal_ids, vec!["terminal-1"]);
-        assert!(workspace.project("wt1").is_some());
-        assert!(workspace.project("wt1").unwrap().is_closing);
-        assert!(workspace.is_project_closing("wt1"));
-        assert!(matches!(
-            workspace.project("wt1").unwrap().layout,
-            Some(LayoutNode::Terminal {
-                terminal_id: None,
-                ..
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let result = spawn_background_worktree_removal(
+                    plan,
+                    false,
+                    &Default::default(),
+                    &workspace,
+                    &workspace_tick,
+                    &hook_runner,
+                    &hook_monitor,
+                    &backend,
+                    &terminals,
+                    &settings,
+                );
+                assert!(
+                    matches!(result, CommandResult::Ok(Some(ref value)) if value["pending"] == true)
+                );
+
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if !workspace.lock().is_project_closing("wt1") {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("failed removal rolls back");
             })
-        ));
+            .await;
 
-        // The physical Git delete failed: aborting the lifecycle must retain
-        // the daemon-owned row and make its cleared slot spawnable again.
-        workspace.finish_closing_project("wt1");
-        cx.notify();
-        assert!(workspace.project("wt1").is_some());
-        assert!(!workspace.project("wt1").unwrap().is_closing);
-        assert!(!workspace.is_project_closing("wt1"));
+        let workspace_guard = workspace.lock();
+        let project = workspace_guard.project("wt1").expect("project row retained");
+        assert!(!project.is_closing);
+        assert!(matches!(
+            project.layout,
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(ref id),
+                ..
+            }) if id == "restored-terminal"
+        ));
+        drop(workspace_guard);
+        assert!(terminals.lock().contains_key("restored-terminal"));
+        assert!(invalid_worktree.is_file(), "failed removal left source untouched");
+        assert_eq!(
+            hook_monitor_service.drain_pending_toasts().len(),
+            1,
+            "failure is surfaced to clients"
+        );
+        std::fs::remove_file(invalid_worktree).ok();
     }
 
     #[test]
