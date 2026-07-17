@@ -9,6 +9,14 @@ pub struct GitPollTrigger {
 }
 
 impl GitPollTrigger {
+    pub fn head_change(project_id: String) -> Self {
+        Self {
+            project_id: Some(project_id),
+            poll_github: false,
+            invalidate_github: false,
+        }
+    }
+
     pub fn branch_change(project_id: String) -> Self {
         Self {
             project_id: Some(project_id),
@@ -64,6 +72,14 @@ pub fn git_poll_trigger_for_action(action: &ActionRequest) -> Option<GitPollTrig
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn head_change_only_wakes_local_git_poll() {
+        let trigger = GitPollTrigger::head_change("p1".to_string());
+        assert_eq!(trigger.project_id.as_deref(), Some("p1"));
+        assert!(!trigger.poll_github);
+        assert!(!trigger.invalidate_github);
+    }
 
     #[test]
     fn branch_checkout_creates_invalidating_trigger() {

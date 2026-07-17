@@ -25,6 +25,8 @@ pub use repository::{
     project_path_in_worktree,
     has_uncommitted_changes,
     get_current_branch,
+    get_head_snapshot,
+    HeadSnapshot,
     get_default_branch,
     resolve_review_base,
     rebase_onto,

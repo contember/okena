@@ -384,6 +384,10 @@ impl DaemonCore {
                 remote_subscribed_terminals,
                 git_poll_trigger_rx,
             ));
+            tokio::task::spawn_local(crate::git_poll::run_git_head_poll(
+                reactor.workspace.clone(),
+                git_poll_trigger_tx.clone(),
+            ));
             // Forward the daemon's HookMonitor toasts to clients. The daemon has
             // no surface; this drains its pending toasts and broadcasts them over
             // the same channel the remote server fans out (`WsOutbound::Toast`).
