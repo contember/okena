@@ -931,11 +931,12 @@ pub async fn daemon_command_loop(
                 // ── Default: workspace-scoped action ─────────────────────────
                 action => {
                     let git_poll_trigger = git_poll_trigger_for_action(&action);
+                    let presentation_only_window =
+                        matches!(&action, ActionRequest::FocusTerminal { .. });
                     // Resolve the action's explicit target window (if any)
                     // BEFORE moving `action` into `execute_action`. The daemon
-                    // serves only the synthetic main window: `None` and
-                    // `Some("main")` are accepted; any other (valid) window id is
-                    // "not found"; a malformed id is "invalid".
+                    // serves only the synthetic main window. FocusTerminal may
+                    // carry an extra UI window through daemon-side validation.
                     let parsed_target = match action.target_window() {
                         None => Ok(None),
                         Some(s) => match parse_window_id(s) {
@@ -948,7 +949,10 @@ pub async fn daemon_command_loop(
                             // Malformed window id: rejected up front.
                             CommandResult::Err(format!("invalid window id: {bad}"))
                         }
-                        Ok(None) | Ok(Some(WindowId::Main)) => {
+                        Ok(Some(WindowId::Extra(uuid))) if !presentation_only_window => {
+                            CommandResult::Err(format!("window not found: {uuid}"))
+                        }
+                        Ok(_) => {
                             // Snapshot app settings to thread into the gpui-free
                             // `execute_action` (hooks / worktree template /
                             // default shell). Read before locking the workspace.
@@ -974,10 +978,6 @@ pub async fn daemon_command_loop(
                                 &git_poll_trigger_tx,
                             );
                             result
-                        }
-                        Ok(Some(WindowId::Extra(uuid))) => {
-                            // The daemon has only the synthetic main window.
-                            CommandResult::Err(format!("window not found: {uuid}"))
                         }
                     }
                 }

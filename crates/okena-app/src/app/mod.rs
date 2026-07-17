@@ -324,9 +324,9 @@ impl Okena {
                 RemoteManagerEvent::TerminalFocusRequested {
                     project_id,
                     terminal_id,
-                    window: _,
+                    window,
                 } => {
-                    this.jump_to_terminal(project_id, terminal_id, cx);
+                    this.jump_to_terminal(project_id, terminal_id, window.as_deref(), cx);
                 }
                 // Local daemon connection dead-ended — re-run discovery/ensure so
                 // the GUI recovers instead of staying wedged on a dead socket.
