@@ -481,6 +481,8 @@ impl LayoutNode {
     }
 
     /// Remove a child node at the given path.
+    /// For split parents, transfers the removed weight to the next sibling, or
+    /// the previous sibling when removing the last child.
     /// If the parent has only one child left after removal, collapses the parent to that child.
     /// Returns the removed node, or None if the path is invalid.
     pub fn remove_at_path(&mut self, path: &[usize]) -> Option<LayoutNode> {
@@ -501,7 +503,14 @@ impl LayoutNode {
                 }
                 let removed = children.remove(child_index);
                 if child_index < sizes.len() {
-                    sizes.remove(child_index);
+                    let removed_size = sizes.remove(child_index);
+                    if !sizes.is_empty() {
+                        // Expand the next sibling, or the previous sibling when the
+                        // removed pane was last. This makes split + close restore the
+                        // original pane's share instead of shrinking it every cycle.
+                        let recipient_index = child_index.min(sizes.len() - 1);
+                        sizes[recipient_index] += removed_size;
+                    }
                 }
                 if children.len() == 1 {
                     let remaining = children.remove(0);
@@ -552,22 +561,6 @@ impl LayoutNode {
                 }
             }
 
-        // Sizes are relative weights — the tiny-pair threshold is 10% of the total
-        // sum so the check works regardless of overall scale.
-        if let LayoutNode::Split { sizes, children, .. } = self {
-            let has_invalid = sizes.iter().any(|s| *s <= 0.0 || !s.is_finite());
-            let total: f32 = sizes.iter().sum();
-            let min_resize = total * 0.1;
-            let has_tiny_pair = sizes.windows(2).any(|w| w[0] + w[1] <= min_resize);
-            if has_invalid || has_tiny_pair {
-                log::warn!("Layout has invalid/too-small sizes {:?}, resetting to equal", sizes);
-                let equal = 100.0 / children.len() as f32;
-                for s in sizes.iter_mut() {
-                    *s = equal;
-                }
-            }
-        }
-
         let should_unwrap = match self {
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children.len() <= 1,
             _ => false,
@@ -612,6 +605,24 @@ impl LayoutNode {
 
                 *children = new_children;
                 *sizes = new_sizes;
+            }
+        }
+
+        // Sizes are relative weights — the tiny-pair threshold is 10% of the total
+        // sum so the check works regardless of overall scale. Validate after
+        // flattening because flattening a same-direction split can create a tiny
+        // adjacent pair even when the parent sizes were valid.
+        if let LayoutNode::Split { sizes, children, .. } = self {
+            let has_invalid = sizes.iter().any(|s| *s <= 0.0 || !s.is_finite());
+            let total: f32 = sizes.iter().sum();
+            let min_resize = total * 0.1;
+            let has_tiny_pair = sizes.windows(2).any(|w| w[0] + w[1] <= min_resize);
+            if has_invalid || has_tiny_pair {
+                log::warn!("Layout has invalid/too-small sizes {:?}, resetting to equal", sizes);
+                let equal = 100.0 / children.len() as f32;
+                for s in sizes.iter_mut() {
+                    *s = equal;
+                }
             }
         }
     }
@@ -1491,6 +1502,33 @@ mod tests {
     }
 
     #[test]
+    fn normalize_rechecks_tiny_sizes_after_flattening_same_direction_split() {
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![33.333_332, 1.041_666_6],
+            children: vec![
+                terminal("t1"),
+                LayoutNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    sizes: vec![50.0, 50.0],
+                    children: vec![terminal("t2"), terminal("t3")],
+                },
+            ],
+        };
+
+        node.normalize();
+
+        let LayoutNode::Split { sizes, children, .. } = node else {
+            panic!("Expected flattened split");
+        };
+        assert_eq!(children.len(), 3);
+        let expected = 100.0 / 3.0;
+        for size in sizes {
+            assert!((size - expected).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
     fn normalize_valid_sizes_untouched() {
         let mut node = LayoutNode::Split {
             direction: SplitDirection::Horizontal,
@@ -1566,7 +1604,7 @@ mod tests {
         match &node {
             LayoutNode::Split { children, sizes, .. } => {
                 assert_eq!(children.len(), 2);
-                assert_eq!(sizes.len(), 2);
+                assert_eq!(sizes.as_slice(), &[33.0, 67.0]);
             }
             _ => panic!("Expected split with 2 children"),
         }

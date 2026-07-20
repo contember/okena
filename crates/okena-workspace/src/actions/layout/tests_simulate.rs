@@ -150,9 +150,9 @@ fn test_close_terminal_from_3_child_split() {
 }
 
 #[test]
-fn test_close_terminal_from_3_child_sizes_consistent() {
+fn test_close_terminal_from_3_child_redistributes_removed_weight() {
     // Verify that closing a child from a 3-child split keeps sizes in sync
-    // and that the remaining sizes sum correctly
+    // and gives the removed weight to the next sibling.
     let mut layout = LayoutNode::Split {
         direction: SplitDirection::Horizontal,
         sizes: vec![25.0, 50.0, 25.0],
@@ -165,8 +165,7 @@ fn test_close_terminal_from_3_child_sizes_consistent() {
         LayoutNode::Split { children, sizes, .. } => {
             assert_eq!(children.len(), 2);
             assert_eq!(sizes.len(), 2);
-            // Sizes should be [25.0, 25.0] — the middle entry was removed
-            assert_eq!(sizes, &vec![25.0, 25.0]);
+            assert_eq!(sizes, &vec![25.0, 75.0]);
         }
         _ => panic!("Expected split with 2 children"),
     }
@@ -182,7 +181,7 @@ fn test_close_terminal_from_3_child_sizes_consistent() {
         LayoutNode::Split { children, sizes, .. } => {
             assert_eq!(children.len(), 2);
             assert_eq!(sizes.len(), 2);
-            assert_eq!(sizes, &vec![40.0, 30.0]);
+            assert_eq!(sizes, &vec![70.0, 30.0]);
         }
         _ => panic!("Expected split with 2 children"),
     }
