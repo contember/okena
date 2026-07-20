@@ -307,7 +307,7 @@ impl ProjectColumn {
             let action_dispatcher = self.action_dispatcher.clone();
             let window_id = self.window_id;
 
-            self.layout_container = Some(cx.new(move |_cx| {
+            self.layout_container = Some(cx.new(move |cx| {
                 LayoutContainer::new(
                     workspace,
                     focus_manager,
@@ -320,6 +320,7 @@ impl ProjectColumn {
                     terminals,
                     active_drag,
                     action_dispatcher,
+                    cx,
                 )
             }));
         } else if let Some(container) = &self.layout_container {
@@ -1095,10 +1096,26 @@ impl Render for ProjectColumn {
 #[cfg(test)]
 mod tests {
     use super::project_header_display_name;
+    use crate::action_dispatch::ActionDispatcher;
+    use crate::terminal::backend::TerminalBackend;
+    use crate::terminal::shell_config::ShellType;
+    use crate::terminal::terminal::TerminalTransport;
+    use crate::views::layout::layout_container::LayoutContainer;
+    use crate::views::layout::split_pane::new_active_drag;
+    use crate::workspace::focus::FocusManager;
+    use crate::workspace::request_broker::RequestBroker;
     use crate::workspace::settings::HooksConfig;
-    use crate::workspace::state::{ProjectData, WorktreeMetadata};
+    use crate::workspace::state::{
+        LayoutNode, ProjectData, WindowId, Workspace, WorkspaceData, WorktreeMetadata,
+    };
+    use anyhow::Result;
+    use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
+    use std::cell::Cell;
     use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+    use std::sync::Arc;
 
     fn project_with_name(name: &str) -> ProjectData {
         ProjectData {
@@ -1136,5 +1153,119 @@ mod tests {
         });
 
         assert_eq!(project_header_display_name(&project), "feature-login");
+    }
+
+    struct TestTransport;
+
+    impl TerminalTransport for TestTransport {
+        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    struct TestBackend;
+
+    impl TerminalBackend for TestBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(TestTransport)
+        }
+
+        fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> Result<String> {
+            unreachable!("test never creates a terminal")
+        }
+
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> Result<String> {
+            unreachable!("test never reconnects a terminal")
+        }
+
+        fn kill(&self, _terminal_id: &str) {}
+
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+
+        fn is_remote(&self) -> bool {
+            true
+        }
+
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    #[gpui::test]
+    fn terminal_create_and_close_invalidate_cached_layout(cx: &mut gpui::TestAppContext) {
+        let mut project = project_with_name("Project");
+        project.layout = Some(LayoutNode::new_terminal());
+        let project_id = project.id.clone();
+        let mut data = WorkspaceData::empty();
+        data.project_order.push(project_id.clone());
+        data.projects.push(project);
+        let workspace = cx.new(|_| Workspace::new(data));
+        let focus_manager = cx.new(|_| FocusManager::new());
+        let request_broker = cx.new(|_| RequestBroker::new());
+        let terminals = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let container = cx.new(|cx| {
+            LayoutContainer::<ActionDispatcher>::new(
+                workspace.clone(),
+                focus_manager,
+                request_broker,
+                WindowId::Main,
+                project_id.clone(),
+                "/tmp/project".to_string(),
+                Vec::new(),
+                Arc::new(TestBackend),
+                terminals,
+                new_active_drag(),
+                None,
+                cx,
+            )
+        });
+
+        let notifications = Rc::new(Cell::new(0));
+        let observer_notifications = notifications.clone();
+        let _observer = cx.new(|cx| {
+            cx.observe(&container, move |_, _, _| {
+                observer_notifications.set(observer_notifications.get() + 1);
+            })
+            .detach();
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_terminal(&mut FocusManager::new(), &project_id, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            notifications.get(),
+            1,
+            "creating a terminal must repaint the cached layout tree",
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.close_terminal(&project_id, &[1], cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            notifications.get(),
+            2,
+            "closing a terminal must repaint the cached layout tree",
+        );
     }
 }

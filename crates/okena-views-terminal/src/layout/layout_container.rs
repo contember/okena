@@ -12,7 +12,9 @@ use crate::layout::terminal_pane::TerminalPane;
 use okena_terminal::TerminalsRegistry;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::request_broker::RequestBroker;
-use okena_workspace::state::{LayoutNode, SplitDirection, WindowId, Workspace};
+use okena_workspace::state::{
+    LayoutNode, ProjectLayoutMode, SplitDirection, WindowId, Workspace,
+};
 use gpui::*;
 use gpui::prelude::*;
 use std::cell::RefCell;
@@ -32,6 +34,8 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) project_id: String,
     pub(super) project_path: String,
     pub(super) layout_path: Vec<usize>,
+    observed_layout: Option<LayoutNode>,
+    observed_layout_mode: ProjectLayoutMode,
     pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
     terminal_pane: Option<Entity<TerminalPane<D>>>,
@@ -62,7 +66,32 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         action_dispatcher: Option<D>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let (observed_layout, observed_layout_mode) = {
+            let workspace = workspace.read(cx);
+            let layout = workspace
+                .project(&project_id)
+                .and_then(|project| project.layout.as_ref())
+                .and_then(|layout| layout.get_at_path(&layout_path))
+                .cloned();
+            (layout, workspace.project_layout_mode(window_id))
+        };
+
+        cx.observe(&workspace, |this, workspace, cx| {
+            let workspace = workspace.read(cx);
+            let next_layout = this.get_layout(workspace).cloned();
+            let next_layout_mode = workspace.project_layout_mode(this.window_id);
+            if next_layout != this.observed_layout
+                || next_layout_mode != this.observed_layout_mode
+            {
+                this.observed_layout = next_layout;
+                this.observed_layout_mode = next_layout_mode;
+                cx.notify();
+            }
+        })
+        .detach();
+
         Self {
             workspace,
             focus_manager,
@@ -71,6 +100,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             project_id,
             project_path,
             layout_path,
+            observed_layout,
+            observed_layout_mode,
             backend,
             terminals,
             terminal_pane: None,
@@ -435,7 +466,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .child_containers
                 .entry(child_path.clone())
                 .or_insert_with(|| {
-                    cx.new(|_cx| {
+                    cx.new(|cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
                             self.focus_manager.clone(),
@@ -448,6 +479,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.terminals.clone(),
                             self.active_drag.clone(),
                             self.action_dispatcher.clone(),
+                            cx,
                         )
                     })
                 })
@@ -510,7 +542,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .child_containers
                 .entry(child_path.clone())
                 .or_insert_with(|| {
-                    cx.new(|_cx| {
+                    cx.new(|cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
                             self.focus_manager.clone(),
@@ -523,6 +555,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.terminals.clone(),
                             self.active_drag.clone(),
                             self.action_dispatcher.clone(),
+                            cx,
                         )
                     })
                 })
