@@ -180,6 +180,17 @@ impl LayoutNode {
         }
     }
 
+    /// Whether any leaf still carries a terminal ID. Allocation-free counterpart
+    /// to `collect_terminal_ids().is_empty()` for render-path checks.
+    pub fn has_terminal_ids(&self) -> bool {
+        match self {
+            LayoutNode::Terminal { terminal_id, .. } => terminal_id.is_some(),
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                children.iter().any(LayoutNode::has_terminal_ids)
+            }
+        }
+    }
+
     /// Clear terminal IDs except those in the `keep` set (e.g. hook terminals).
     /// Kept terminals preserve their ID, minimized, and detached state.
     pub fn clear_terminal_ids_except(&mut self, keep: &HashSet<&str>) {
@@ -1203,6 +1214,22 @@ mod tests {
     fn collect_terminal_ids_skips_none() {
         let node = hsplit(vec![LayoutNode::new_terminal(), terminal("t1")]);
         assert_eq!(node.collect_terminal_ids(), vec!["t1"]);
+    }
+
+    #[test]
+    fn has_terminal_ids_matches_collect() {
+        let nested = hsplit(vec![
+            LayoutNode::new_terminal(),
+            tabs(vec![LayoutNode::new_terminal(), terminal("t1")]),
+        ]);
+        assert!(nested.has_terminal_ids());
+
+        let mut cleared = nested;
+        cleared.clear_terminal_ids_except(&HashSet::new());
+        assert!(
+            !cleared.has_terminal_ids(),
+            "a tree stripped for worktree teardown carries no ids",
+        );
     }
 
     #[test]

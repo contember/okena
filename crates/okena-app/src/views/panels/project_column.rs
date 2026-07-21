@@ -26,6 +26,53 @@ fn project_header_display_name(project: &ProjectData) -> String {
     project.name.clone()
 }
 
+/// What the project column paints in its main content area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnContent {
+    /// Worktree teardown is underway and its terminals are already gone.
+    Closing,
+    /// Normal case: render the pane tree.
+    Layout,
+    /// Worktree checkout is still being created.
+    Creating,
+    /// Bookmark project with no terminal attached.
+    Empty,
+}
+
+/// Pick the content branch for a project column.
+///
+/// `Closing` wins over `Layout` because a closing worktree keeps `layout: Some`
+/// — `prepare_background_worktree_removal` nulls every leaf's `terminal_id` but
+/// leaves the tree shape standing so `ensure_terminal` can't resurrect a PTY
+/// inside the doomed checkout. Without this branch those id-less panes each
+/// render the "Starting terminal…" placeholder for the whole removal window,
+/// which is seconds on a real checkout.
+///
+/// Deliberately gated on the terminals being *gone*, not on `closing` alone:
+/// the merge/`before_remove`-hook phases also set the closing flag while the
+/// terminals are still live and useful, and those must keep painting.
+fn column_content(project: &ProjectData, closing: bool) -> ColumnContent {
+    let has_terminals = project
+        .layout
+        .as_ref()
+        .is_some_and(|layout| layout.has_terminal_ids());
+
+    if closing && !has_terminals {
+        ColumnContent::Closing
+    } else if project.layout.is_some() {
+        ColumnContent::Layout
+    } else if project.is_creating {
+        // Explicit mid-create marker set by the daemon while the git checkout
+        // runs and mirrored over the wire. NOT derived from a missing layout: a
+        // worktree whose last terminal the user closed is a legitimate bookmark
+        // (layout None) and must fall through to the empty state with its Start
+        // Terminal button, not the creating placeholder.
+        ColumnContent::Creating
+    } else {
+        ColumnContent::Empty
+    }
+}
+
 /// A single project column with header and layout
 pub struct ProjectColumn {
     /// Identifies which window-scoped slot on the shared `Workspace` this
@@ -785,6 +832,40 @@ impl ProjectColumn {
             .child(header_body)
     }
 
+    /// Render the closing state shown while a worktree is being torn down.
+    fn render_closing_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        v_flex()
+            .items_center()
+            .justify_center()
+            .size_full()
+            .gap(px(12.0))
+            .bg(rgb(t.bg_primary))
+            .child(
+                svg()
+                    .path("icons/git-branch.svg")
+                    .size(px(48.0))
+                    .text_color(rgb(t.text_muted))
+            )
+            .child(
+                div()
+                    .text_size(ui_text_xl(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child("Closing worktree\u{2026}")
+            )
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .max_w(px(240.0))
+                    .text_center()
+                    // Deliberately not "removing the checkout": the before_remove
+                    // hook phase reaches this screen too, and that phase is still
+                    // abortable — nothing has been deleted yet.
+                    .child("This project disappears once the worktree is gone.")
+            )
+    }
+
     /// Render empty state for bookmark projects (no terminal)
     fn render_creating_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -975,15 +1056,11 @@ impl Render for ProjectColumn {
 
         match project {
             Some(project) => {
-                let has_layout = project.layout.is_some();
-
-                // Explicit mid-create marker set by the daemon while the git
-                // checkout runs and mirrored over the wire — shows the "Setting
-                // up worktree…" placeholder. NOT derived from `!has_layout`: a
-                // worktree whose last terminal the user closed is a legitimate
-                // bookmark (layout None) and must fall through to the empty state
-                // with its Start Terminal button, not the creating placeholder.
-                let is_creating = project.is_creating;
+                // Daemon-authoritative flag mirrored over the wire, OR'd with the
+                // initiating client's optimistic tracker — same pair the sidebar
+                // row reads for its "Closing…" label.
+                let is_closing = project.is_closing || workspace.is_project_closing(&project.id);
+                let content_kind = column_content(&project, is_closing);
 
                 // Soft tinted background based on folder color (when enabled)
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {
@@ -997,25 +1074,26 @@ impl Render for ProjectColumn {
                     rgb(t.bg_primary)
                 };
 
-                // Content: layout, creating state, or empty bookmark state
-                let content = if has_layout {
-                    self.ensure_layout_container(project.path.clone(), cx);
+                // Content: layout, closing/creating placeholder, or empty bookmark state
+                let content = match content_kind {
+                    ColumnContent::Layout => {
+                        self.ensure_layout_container(project.path.clone(), cx);
 
-                    div()
-                        .id("project-column-content")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .when_some(self.layout_container.clone(), |d, container| {
-                            d.child(AnyView::from(container).cached(
-                                StyleRefinement::default().size_full(),
-                            ))
-                        })
-                        .into_any_element()
-                } else if is_creating {
-                    self.render_creating_state(cx).into_any_element()
-                } else {
-                    self.render_empty_state(cx).into_any_element()
+                        div()
+                            .id("project-column-content")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .when_some(self.layout_container.clone(), |d, container| {
+                                d.child(AnyView::from(container).cached(
+                                    StyleRefinement::default().size_full(),
+                                ))
+                            })
+                            .into_any_element()
+                    }
+                    ColumnContent::Closing => self.render_closing_state(cx).into_any_element(),
+                    ColumnContent::Creating => self.render_creating_state(cx).into_any_element(),
+                    ColumnContent::Empty => self.render_empty_state(cx).into_any_element(),
                 };
 
                 // Get current branch for commit log popover and update git header.
@@ -1094,9 +1172,9 @@ impl Render for ProjectColumn {
 
 #[cfg(test)]
 mod tests {
-    use super::project_header_display_name;
+    use super::{column_content, project_header_display_name, ColumnContent};
     use crate::workspace::settings::HooksConfig;
-    use crate::workspace::state::{ProjectData, WorktreeMetadata};
+    use crate::workspace::state::{LayoutNode, ProjectData, SplitDirection, WorktreeMetadata};
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
@@ -1122,6 +1200,92 @@ mod tests {
             is_creating: false,
             is_closing: false,
         }
+    }
+
+    /// A layout tree in the exact shape `prepare_background_worktree_removal`
+    /// leaves behind: structure intact, every leaf's terminal id nulled.
+    fn split_layout(terminal_ids: [Option<&str>; 2]) -> LayoutNode {
+        let children = terminal_ids
+            .into_iter()
+            .map(|id| {
+                let mut node = LayoutNode::new_terminal();
+                if let LayoutNode::Terminal { terminal_id, .. } = &mut node {
+                    *terminal_id = id.map(str::to_string);
+                }
+                node
+            })
+            .collect();
+
+        LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![0.5, 0.5],
+            children,
+        }
+    }
+
+    #[test]
+    fn closing_worktree_with_nulled_terminal_ids_shows_closing_state() {
+        let mut project = project_with_name("feature-login");
+        project.layout = Some(split_layout([None, None]));
+        project.is_closing = true;
+
+        assert_eq!(
+            column_content(&project, true),
+            ColumnContent::Closing,
+            "id-less panes mid-teardown must not fall through to \"Starting terminal…\"",
+        );
+    }
+
+    #[test]
+    fn closing_worktree_keeps_painting_live_terminals() {
+        let mut project = project_with_name("feature-login");
+        project.layout = Some(split_layout([Some("t1"), None]));
+        project.is_closing = true;
+
+        assert_eq!(
+            column_content(&project, true),
+            ColumnContent::Layout,
+            "merge and before_remove-hook phases keep the terminals alive and visible",
+        );
+    }
+
+    #[test]
+    fn closing_bookmark_without_layout_shows_closing_not_empty_state() {
+        let mut project = project_with_name("feature-login");
+        project.is_closing = true;
+
+        assert_eq!(
+            column_content(&project, true),
+            ColumnContent::Closing,
+            "a closing project must not offer a Start Terminal button",
+        );
+    }
+
+    #[test]
+    fn optimistic_client_closing_flag_alone_triggers_closing_state() {
+        let project = project_with_name("feature-login");
+
+        assert_eq!(
+            column_content(&project, true),
+            ColumnContent::Closing,
+            "the initiating client marks closing in its tracker before the mirror catches up",
+        );
+    }
+
+    #[test]
+    fn non_closing_project_branches_are_unchanged() {
+        let mut project = project_with_name("feature-login");
+        assert_eq!(column_content(&project, false), ColumnContent::Empty);
+
+        project.is_creating = true;
+        assert_eq!(column_content(&project, false), ColumnContent::Creating);
+
+        project.layout = Some(split_layout([None, None]));
+        assert_eq!(
+            column_content(&project, false),
+            ColumnContent::Layout,
+            "a fresh worktree's uninitialized slots still render panes, not a placeholder",
+        );
     }
 
     #[test]
