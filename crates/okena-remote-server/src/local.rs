@@ -272,7 +272,7 @@ pub fn remember_current_executable() -> std::io::Result<PathBuf> {
 pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
     let exe = remember_current_executable()?;
     std::process::Command::new(exe)
-        .args(["--headless", "--ui-owned"])
+        .args(["--headless", UI_OWNED_FLAG])
         .spawn()
 }
 
@@ -511,6 +511,11 @@ fn wait_until_ready_replacing(old_pid: u32, timeout: Duration) -> Option<LocalDa
 /// and [`wait_for_pid_exit`].
 pub const AWAIT_PID_FLAG: &str = "--await-pid";
 
+/// Marks a daemon as spawned by (and therefore reapable by) a desktop client.
+/// Passed by [`spawn_daemon`], carried across restarts by
+/// [`spawn_replacement_daemon`], and verified before any reap.
+pub const UI_OWNED_FLAG: &str = "--ui-owned";
+
 /// Block until the process `pid` is no longer alive, or `timeout` elapses. Polls
 /// every 50ms. A `pid` of 0 (unknown) returns immediately.
 ///
@@ -664,7 +669,11 @@ pub fn ensure_local_daemon_in(
         log::info!(
             "Instance lock held but no daemon advertised; waiting for the owner to re-advertise or exit before spawning"
         );
-        let deadline = Instant::now() + LOCK_SETTLE_TIMEOUT;
+        let mut deadline = Instant::now() + LOCK_SETTLE_TIMEOUT;
+        // A reap can hand the lock straight to a restart successor, which
+        // deserves its own settle window. Bounded so a pathological chain of
+        // wedged daemons still terminates instead of reaping forever.
+        let mut reaps_left = 2;
         loop {
             if let Some(daemon) = wait_until_reachable_in(dir, LOCK_SETTLE_POLL) {
                 let token = auth_token_for_daemon(dir, &daemon)?;
@@ -683,27 +692,49 @@ pub fn ensure_local_daemon_in(
                 break;
             }
             if Instant::now() >= deadline {
-                if let Some(pid) = instance_lock_owner_pid() {
-                    log::warn!(
-                        "Instance lock owner pid {pid} neither re-advertised nor exited within {LOCK_SETTLE_TIMEOUT:?}; reaping it"
-                    );
-                    if !instance_lock_is_held() {
-                        break;
-                    }
-                    if !kill_pid_if_ui_owned_okena(pid) {
-                        return Err(format!(
-                            "Instance lock is held by pid {pid}, but it is not a verified UI-owned Okena daemon; refusing to terminate it."
-                        ));
-                    }
-                    // Let the OS release the flock the reaped process held.
-                    std::thread::sleep(Duration::from_millis(200));
-                    if instance_lock_is_held() {
-                        return Err(format!(
-                            "UI-owned daemon pid {pid} did not release the instance lock after termination."
-                        ));
-                    }
+                let Some(pid) = instance_lock_owner_pid() else {
+                    break;
+                };
+                if !instance_lock_is_held() {
+                    break;
                 }
-                break;
+                if reaps_left == 0 {
+                    log::warn!("Instance lock still held by pid {pid} after reaping; spawning anyway");
+                    break;
+                }
+                log::warn!(
+                    "Instance lock owner pid {pid} neither re-advertised nor exited within {LOCK_SETTLE_TIMEOUT:?}; reaping it"
+                );
+                if !kill_pid_if_ui_owned_okena(pid) {
+                    return Err(format!(
+                        "Instance lock is held by pid {pid}, but it is not a verified UI-owned Okena daemon; refusing to terminate it."
+                    ));
+                }
+                reaps_left -= 1;
+                // Wait for the process itself to go, which is what releases the
+                // flock — rather than sleeping a fixed guess.
+                wait_for_pid_exit(pid, REAP_RELEASE_TIMEOUT);
+
+                // Only *this* pid still holding the lock is a failure. Someone
+                // else holding it is the expected outcome of reaping a daemon
+                // that wedged mid-restart: its replacement was already spawned
+                // and blocked on `--await-pid <pid>`, so killing the outgoing
+                // process is exactly the event that lets the successor acquire.
+                // Treating any holder as failure reported that success as the
+                // very lockout this branch exists to clear.
+                if instance_lock_owner_pid() == Some(pid) && instance_lock_is_held() {
+                    return Err(format!(
+                        "UI-owned daemon pid {pid} did not release the instance lock after termination."
+                    ));
+                }
+                if !instance_lock_owner_alive() {
+                    log::info!("Instance lock released; spawning a fresh daemon");
+                    break;
+                }
+                // A successor took over — give it the same chance to advertise
+                // that the process we just reaped had.
+                log::info!("Instance lock passed to a successor; waiting for it to advertise");
+                deadline = Instant::now() + LOCK_SETTLE_TIMEOUT;
             }
         }
     }
@@ -752,6 +783,10 @@ const LOCK_SETTLE_TIMEOUT: Duration = Duration::from_secs(8);
 /// Per-iteration reachability poll while waiting out an un-advertised owner.
 const LOCK_SETTLE_POLL: Duration = Duration::from_millis(400);
 
+/// How long to wait for a reaped process to actually disappear (and with it the
+/// flock it held) before deciding the reap failed.
+const REAP_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Best-effort read of the instance-lock file's recorded owner pid (0/absent → None).
 fn instance_lock_owner_pid() -> Option<u32> {
     let path = okena_workspace::persistence::instance_lock_path();
@@ -779,9 +814,73 @@ fn instance_lock_is_held() -> bool {
     }
 }
 
+/// What we could learn about a live process, as the reap guard needs it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ProcessIdentity {
+    name: Option<String>,
+    exe_file_name: Option<String>,
+    args: Vec<String>,
+}
+
+/// Read a live process's name, executable and argv.
+///
+/// Split out from the guard so the sysinfo refresh contract is testable on its
+/// own. `System::refresh_processes` refreshes only a minimal set of fields and
+/// leaves `cmd()` **empty** — with it, the `--ui-owned` check below never
+/// matched, so no process was ever verified and the reap path was dead code:
+/// every un-advertised lock holder became a hard lockout the user had to clear
+/// by killing the process by hand. The command line has to be requested.
+fn read_process_identity(pid: u32) -> Option<ProcessIdentity> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let spid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[spid]),
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always),
+    );
+    let proc = sys.process(spid)?;
+
+    Some(ProcessIdentity {
+        name: proc.name().to_str().map(str::to_string),
+        exe_file_name: proc
+            .exe()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_string),
+        args: proc
+            .cmd()
+            .iter()
+            .filter_map(|arg| arg.to_str().map(str::to_string))
+            .collect(),
+    })
+}
+
+/// Whether a process looks like a daemon this UI spawned and may therefore reap.
+fn is_ui_owned_okena(identity: &ProcessIdentity) -> bool {
+    let is_okena = |name: &String| name.starts_with("okena");
+    let named_okena =
+        identity.name.as_ref().is_some_and(is_okena) || identity.exe_file_name.as_ref().is_some_and(is_okena);
+    let ui_owned = identity.args.iter().any(|arg| arg == UI_OWNED_FLAG);
+    named_okena && ui_owned
+}
+
 /// Reap only a process that still matches the lockfile and explicit lifecycle mode.
 fn kill_pid_if_ui_owned_okena(pid: u32) -> bool {
     if instance_lock_owner_pid() != Some(pid) || !instance_lock_is_held() {
+        return false;
+    }
+
+    let Some(identity) = read_process_identity(pid) else {
+        return false;
+    };
+    if !is_ui_owned_okena(&identity) {
+        log::warn!(
+            "Refusing to reap pid {pid}: process is not a verified UI-owned Okena daemon ({identity:?})"
+        );
         return false;
     }
 
@@ -789,27 +888,7 @@ fn kill_pid_if_ui_owned_okena(pid: u32) -> bool {
     let spid = Pid::from_u32(pid);
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[spid]), true);
-    if let Some(proc) = sys.process(spid) {
-        let is_okena = |s: &str| s.starts_with("okena");
-        let name_ok = proc.name().to_str().is_some_and(is_okena);
-        let exe_ok = proc
-            .exe()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .is_some_and(is_okena);
-        let ui_owned = proc
-            .cmd()
-            .iter()
-            .any(|arg| arg.to_str().is_some_and(|arg| arg == "--ui-owned"));
-        if (name_ok || exe_ok) && ui_owned {
-            return proc.kill();
-        } else {
-            log::warn!(
-                "Refusing to reap pid {pid}: process is not a verified UI-owned Okena daemon"
-            );
-        }
-    }
-    false
+    sys.process(spid).is_some_and(|proc| proc.kill())
 }
 
 /// Ensure a local daemon is reachable from the user's config dir, with caller-
@@ -908,6 +987,68 @@ fn blocking_client_and_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity(name: &str, exe: &str, args: &[&str]) -> ProcessIdentity {
+        ProcessIdentity {
+            name: Some(name.to_string()),
+            exe_file_name: Some(exe.to_string()),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn ui_owned_okena_requires_both_an_okena_binary_and_the_flag() {
+        assert!(is_ui_owned_okena(&identity(
+            "okena",
+            "okena",
+            &["--headless", UI_OWNED_FLAG]
+        )));
+        assert!(
+            is_ui_owned_okena(&identity("okena-daemon", "okena-daemon", &[UI_OWNED_FLAG])),
+            "the standalone daemon binary counts too",
+        );
+        assert!(
+            !is_ui_owned_okena(&identity("okena", "okena", &["--headless"])),
+            "a daemon the user started themselves is not ours to kill",
+        );
+        assert!(
+            !is_ui_owned_okena(&identity("zsh", "zsh", &[UI_OWNED_FLAG])),
+            "a recycled pid carrying the flag is still not okena",
+        );
+        assert!(
+            !is_ui_owned_okena(&ProcessIdentity::default()),
+            "unknown process — never reap",
+        );
+    }
+
+    /// Pins the sysinfo contract the guard depends on. `refresh_processes` alone
+    /// leaves `cmd()` empty, which silently made `is_ui_owned_okena` fail for
+    /// every process: the reap path became unreachable and any un-advertised
+    /// lock holder turned into a lockout the user had to clear by hand.
+    #[cfg(unix)]
+    #[test]
+    fn read_process_identity_reports_the_command_line() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        // Give the OS a moment to publish the new process.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let identity = read_process_identity(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let identity = identity.expect("sysinfo should see a live child process");
+        assert!(
+            !identity.args.is_empty(),
+            "command line must be populated, got {identity:?}",
+        );
+        assert!(
+            identity.args.iter().any(|arg| arg == "30"),
+            "argv should carry the argument we spawned with, got {identity:?}",
+        );
+    }
 
     fn temp_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
