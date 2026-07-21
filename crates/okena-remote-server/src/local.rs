@@ -699,8 +699,9 @@ pub fn ensure_local_daemon_in(
                     break;
                 }
                 if reaps_left == 0 {
-                    log::warn!("Instance lock still held by pid {pid} after reaping; spawning anyway");
-                    break;
+                    return Err(format!(
+                        "Instance lock is still held by pid {pid} after two recovery attempts."
+                    ));
                 }
                 log::warn!(
                     "Instance lock owner pid {pid} neither re-advertised nor exited within {LOCK_SETTLE_TIMEOUT:?}; reaping it"
@@ -713,20 +714,14 @@ pub fn ensure_local_daemon_in(
                 reaps_left -= 1;
                 // Wait for the process itself to go, which is what releases the
                 // flock — rather than sleeping a fixed guess.
-                wait_for_pid_exit(pid, REAP_RELEASE_TIMEOUT);
-
-                // Only *this* pid still holding the lock is a failure. Someone
-                // else holding it is the expected outcome of reaping a daemon
-                // that wedged mid-restart: its replacement was already spawned
-                // and blocked on `--await-pid <pid>`, so killing the outgoing
-                // process is exactly the event that lets the successor acquire.
-                // Treating any holder as failure reported that success as the
-                // very lockout this branch exists to clear.
-                if instance_lock_owner_pid() == Some(pid) && instance_lock_is_held() {
+                if !wait_for_pid_exit(pid, REAP_RELEASE_TIMEOUT) {
                     return Err(format!(
-                        "UI-owned daemon pid {pid} did not release the instance lock after termination."
+                        "UI-owned daemon pid {pid} did not exit after termination."
                     ));
                 }
+
+                // Do not trust the lockfile owner here: a successor can acquire
+                // the lock before it replaces the old process's stale PID.
                 if !instance_lock_owner_alive() {
                     log::info!("Instance lock released; spawning a fresh daemon");
                     break;
