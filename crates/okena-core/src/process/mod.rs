@@ -91,12 +91,91 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// Whether `pid` has exited but not yet been reaped by its parent.
+///
+/// macOS: `proc_pidinfo(PROC_PIDTBSDINFO)` fills a record for a live process
+/// and fails with `ESRCH` once it has exited — including while it is still a
+/// zombie and `kill(pid, 0)` reports it present.
+#[cfg(target_os = "macos")]
+fn is_zombie(pid: u32) -> bool {
+    /// `PROC_PIDTBSDINFO` from `<sys/proc_info.h>`.
+    const PROC_PIDTBSDINFO: libc::c_int = 3;
+
+    // The record is 136 bytes today; over-size the buffer so a larger one on a
+    // future release still fits (too small is an error, too large is fine).
+    let mut info = [0u8; 512];
+    let written = unsafe {
+        // Apple's wrapper collapses the kernel's -1 into a return of 0 and
+        // reports the reason through errno, so the return value alone cannot
+        // tell "this pid is gone" from "the call failed". Clear errno first so
+        // an unrelated earlier failure can't be mistaken for ours.
+        *libc::__error() = 0;
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            info.len() as libc::c_int,
+        )
+    };
+    if written > 0 {
+        return false;
+    }
+
+    // Only "no such process" means the pid has exited. The other ways this
+    // returns 0 — EPERM for a process we may not inspect, ENOMEM for a buffer
+    // the kernel considers too small — say nothing about liveness, and we
+    // already know from `kill(pid, 0)` that the pid exists. Treat those as
+    // running: keeping the old answer beats declaring a live daemon dead and
+    // respawning on top of it.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// Linux: field 3 of `/proc/<pid>/stat` is the state character, `Z` for zombie.
+/// The preceding `comm` field is parenthesised and may itself contain spaces
+/// and parentheses, so the scan starts after its last `)`.
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: u32) -> bool {
+    // Read bytes, not a String: `comm` is the raw executable name and need not
+    // be valid UTF-8, which would otherwise fail the read and report a zombie
+    // as running.
+    let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let stat = String::from_utf8_lossy(&stat);
+    let Some((_, after_comm)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    after_comm.split_whitespace().next() == Some("Z")
+}
+
+/// Other unix targets keep the old behaviour: no cheap zombie probe, so a
+/// pid in the table counts as alive.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn is_zombie(_pid: u32) -> bool {
+    false
+}
+
 /// Check whether a process with the given PID is still running.
+///
+/// A process that has exited but whose parent has not reaped it yet keeps its
+/// pid in the table, so `kill(pid, 0)` still succeeds for it. Every caller here
+/// means *running* — a zombie answers no requests, serves no port and holds no
+/// lock — so zombies count as dead. This matters for processes we spawn
+/// ourselves and reap late: the desktop holds its daemon's `Child` handle, so a
+/// daemon that exited stayed "alive" to every pid probe until the handle was
+/// finally waited on, which made a clean shutdown burn its whole timeout and a
+/// crashed daemon look reachable.
+///
+/// Windows needs no equivalent: its process handle is signalled at exit.
 pub fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // signal 0 probes for existence without delivering a signal.
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return false;
+        }
+        !is_zombie(pid)
     }
     #[cfg(windows)]
     {
@@ -302,5 +381,43 @@ mod tests {
         cmd.arg("status");
         let out = safe_output(&mut cmd).expect("mock");
         assert_eq!(out.stdout, b"mocked");
+    }
+
+    /// A child that exited but has not been `wait`ed on is a zombie: its pid is
+    /// still in the table, so `kill(pid, 0)` succeeds. Reporting that as alive
+    /// made the desktop's shutdown wait sit out its whole timeout on a corpse
+    /// and a crashed daemon look reachable.
+    #[cfg(unix)]
+    #[test]
+    fn exited_but_unreaped_child_is_not_alive() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        // Let it exit. Deliberately do NOT reap it yet.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let alive = is_process_alive(pid);
+        let _ = child.wait();
+
+        assert!(!alive, "an exited, unreaped child must not count as running");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_processes_are_alive() {
+        assert!(is_process_alive(std::process::id()), "this test process");
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn");
+        std::thread::sleep(Duration::from_millis(300));
+        let alive = is_process_alive(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(alive, "a live child must count as running");
     }
 }
