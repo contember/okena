@@ -149,12 +149,21 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
     });
 }
 
-#[gpui::test]
-fn split_close_cycle_preserves_existing_pane_sizes(cx: &mut gpui::TestAppContext) {
+/// Split a pane, close the pane that split created, and the layout you started
+/// from must come back — whichever pane you split. `split_terminal` inserts the
+/// new pane directly after its source, so the weight has to travel back to the
+/// pane *before* the one being closed. Crediting the next sibling instead let
+/// every cycle shave the source pane (50 -> 25 -> 12.5 -> …) until the layout
+/// bore no resemblance to what the user built.
+fn assert_split_close_cycle_is_reversible(
+    cx: &mut gpui::TestAppContext,
+    split_at: usize,
+    expected: [f32; 2],
+) {
     let mut project = make_project("p1");
     project.layout = Some(LayoutNode::Split {
         direction: SplitDirection::Horizontal,
-        sizes: vec![33.333_332, 16.666_666],
+        sizes: vec![66.666_664, 33.333_332],
         children: vec![terminal("t1"), terminal("t2")],
     });
     let data = make_workspace_data(vec![project], vec!["p1"]);
@@ -165,11 +174,12 @@ fn split_close_cycle_preserves_existing_pane_sizes(cx: &mut gpui::TestAppContext
             ws.split_terminal(
                 &mut FocusManager::new(),
                 "p1",
-                &[1],
+                &[split_at],
                 SplitDirection::Horizontal,
                 cx,
             );
-            ws.close_terminal("p1", &[2], cx);
+            // The new pane always lands directly after the one it split.
+            ws.close_terminal("p1", &[split_at + 1], cx);
         });
     }
 
@@ -179,8 +189,54 @@ fn split_close_cycle_preserves_existing_pane_sizes(cx: &mut gpui::TestAppContext
             panic!("Expected split after split/close cycles");
         };
         assert_eq!(children.len(), 2);
-        assert!((sizes[0] - 33.333_332).abs() < f32::EPSILON);
-        assert!((sizes[1] - 16.666_666).abs() < f32::EPSILON);
+        for (size, want) in sizes.iter().zip(expected) {
+            assert!(
+                (size - want).abs() < 0.01,
+                "split/close at index {split_at} drifted: {sizes:?}",
+            );
+        }
+    });
+}
+
+#[gpui::test]
+fn split_close_cycle_is_reversible_on_the_last_pane(cx: &mut gpui::TestAppContext) {
+    assert_split_close_cycle_is_reversible(cx, 1, [66.666_664, 33.333_332]);
+}
+
+#[gpui::test]
+fn split_close_cycle_is_reversible_on_a_leading_pane(cx: &mut gpui::TestAppContext) {
+    assert_split_close_cycle_is_reversible(cx, 0, [66.666_664, 33.333_332]);
+}
+
+#[gpui::test]
+fn adding_a_terminal_keeps_the_existing_panes_in_proportion(cx: &mut gpui::TestAppContext) {
+    let mut project = make_project("p1");
+    project.layout = Some(LayoutNode::Split {
+        direction: SplitDirection::Horizontal,
+        sizes: vec![70.0, 30.0],
+        children: vec![terminal("t1"), terminal("t2")],
+    });
+    let data = make_workspace_data(vec![project], vec!["p1"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.add_terminal(&mut FocusManager::new(), "p1", cx);
+    });
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+        let LayoutNode::Split { sizes, children, .. } = layout else {
+            panic!("Expected the new pane to join the root split");
+        };
+        // Previously this re-wrapped the whole tree in a fresh 50/50 split, so
+        // t1 and t2 were squeezed into one half — 35/15 — while the single new
+        // pane took the other 50.
+        assert_eq!(children.len(), 3);
+        assert!((sizes[2] - 100.0 / 3.0).abs() < 0.01, "got {sizes:?}");
+        assert!(
+            (sizes[0] / sizes[1] - 70.0 / 30.0).abs() < 0.01,
+            "existing panes must keep their ratio: {sizes:?}",
+        );
     });
 }
 

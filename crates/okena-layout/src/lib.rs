@@ -17,6 +17,15 @@ fn default_zoom_level() -> f32 {
     1.0
 }
 
+/// Split weights are shares of 100, one per child. Every mutation goes through
+/// [`LayoutNode::normalize`], which restores that invariant.
+pub const TOTAL_PANE_WEIGHT: f32 = 100.0;
+
+/// Smallest share a pane may hold, matching the 5% floor the resize drag clamps
+/// to — so any layout the user can build by dragging survives normalization.
+/// Splits with more than 20 children fall back to an equal share instead.
+pub const MIN_PANE_WEIGHT: f32 = 5.0;
+
 /// Recursive layout tree node
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -504,12 +513,9 @@ impl LayoutNode {
                 let removed = children.remove(child_index);
                 if child_index < sizes.len() {
                     let removed_size = sizes.remove(child_index);
-                    if !sizes.is_empty() {
-                        // Expand the next sibling, or the previous sibling when the
-                        // removed pane was last. This makes split + close restore the
-                        // original pane's share instead of shrinking it every cycle.
-                        let recipient_index = child_index.min(sizes.len() - 1);
-                        sizes[recipient_index] += removed_size;
+                    if let Some(recipient) = Self::weight_recipient(children, child_index)
+                        && let Some(slot) = sizes.get_mut(recipient) {
+                        *slot += removed_size;
                     }
                 }
                 if children.len() == 1 {
@@ -535,6 +541,124 @@ impl LayoutNode {
         }
     }
 
+    /// Append `node` as a new pane of this split, giving it an equal share of
+    /// the new total and scaling the existing weights down proportionally so
+    /// their ratios survive.
+    ///
+    /// Returns `false` when `self` is not a `Split`, leaving it untouched — the
+    /// caller decides how to wrap a bare terminal or a tab group.
+    pub fn push_split_child(&mut self, node: LayoutNode) -> bool {
+        let LayoutNode::Split { children, sizes, .. } = self else {
+            return false;
+        };
+        Self::sanitize_weights(sizes, children.len());
+
+        let share = TOTAL_PANE_WEIGHT / (children.len() + 1) as f32;
+        let keep = 1.0 - share / TOTAL_PANE_WEIGHT;
+        for size in sizes.iter_mut() {
+            *size *= keep;
+        }
+        children.push(node);
+        sizes.push(share);
+        true
+    }
+
+    /// Pick which sibling absorbs a removed pane's weight.
+    ///
+    /// Prefers the pane *before* the removed one. `split_terminal` always
+    /// inserts the new pane directly after the one it split, so crediting the
+    /// previous sibling is what makes split-then-close restore the original
+    /// layout exactly; crediting the next one instead shrank the pane you split
+    /// from on every cycle.
+    ///
+    /// Hidden panes are skipped in both directions: the renderer normalizes
+    /// over visible children only, so weight parked on a minimized or detached
+    /// pane leaves the visible budget entirely and comes back oversized when
+    /// that pane is restored.
+    ///
+    /// `children` is already post-removal, so the previous sibling sits at
+    /// `removed_index - 1` and the next one at `removed_index`.
+    fn weight_recipient(children: &[LayoutNode], removed_index: usize) -> Option<usize> {
+        if children.is_empty() {
+            return None;
+        }
+        let split_at = removed_index.min(children.len());
+
+        if let Some(previous) = children[..split_at]
+            .iter()
+            .rposition(|child| !child.is_all_hidden())
+        {
+            return Some(previous);
+        }
+        if let Some(offset) = children[split_at..]
+            .iter()
+            .position(|child| !child.is_all_hidden())
+        {
+            return Some(split_at + offset);
+        }
+        // Every sibling is hidden — keep the weight in the vec anyway so the
+        // total is preserved for whenever one of them is restored.
+        Some(split_at.min(children.len() - 1))
+    }
+
+    /// Bring a split's weights back to the model's invariant: exactly one
+    /// finite, positive weight per child, summing to 100, none below
+    /// [`MIN_PANE_WEIGHT`].
+    ///
+    /// Renormalizing to a fixed total is what makes the scale uniform — callers
+    /// that write weights on a 0..1 scale converge here instead of rendering a
+    /// pane at ~1% next to a 0..100 sibling.
+    ///
+    /// This replaces an older repair that reset *every* weight in the split to
+    /// equal as soon as it saw an adjacent pair summing under 10% of the total.
+    /// That discarded deliberate layouts wholesale, and because the resize drag
+    /// clamps each pane to 5%, two panes dragged to the minimum landed exactly
+    /// on the reject threshold — the smallest arrangement the UI let you build
+    /// was wiped by the next mutation. Rescaling keeps the user's proportions.
+    fn sanitize_weights(sizes: &mut Vec<f32>, child_count: usize) {
+        if child_count == 0 {
+            sizes.clear();
+            return;
+        }
+        let equal = TOTAL_PANE_WEIGHT / child_count as f32;
+
+        sizes.truncate(child_count);
+        while sizes.len() < child_count {
+            sizes.push(equal);
+        }
+
+        // A non-finite or non-positive weight means the vector can't be trusted
+        // — fall back to an equal split rather than trying to honour garbage.
+        if sizes.iter().any(|size| !size.is_finite() || *size <= 0.0) {
+            log::warn!("Layout has invalid split sizes {:?}, resetting to equal", sizes);
+            sizes.fill(equal);
+            return;
+        }
+
+        let total: f32 = sizes.iter().sum();
+        let scale = TOTAL_PANE_WEIGHT / total;
+        for size in sizes.iter_mut() {
+            *size *= scale;
+        }
+
+        // Raise anything under the floor, taking the difference from the panes
+        // that have room in proportion to their surplus. The total stays 100.
+        let floor = MIN_PANE_WEIGHT.min(equal);
+        let deficit: f32 = sizes.iter().map(|size| (floor - *size).max(0.0)).sum();
+        if deficit <= 0.0 {
+            return;
+        }
+        let surplus: f32 = sizes.iter().map(|size| (*size - floor).max(0.0)).sum();
+        if surplus <= deficit {
+            sizes.fill(equal);
+            return;
+        }
+        let keep = (surplus - deficit) / surplus;
+        for size in sizes.iter_mut() {
+            *size = floor + (*size - floor).max(0.0) * keep;
+        }
+    }
+
     /// Normalize the layout tree in-place:
     /// - Flatten nested splits with the same direction (merging sizes proportionally)
     /// - Unwrap splits/tabs with a single child
@@ -553,13 +677,12 @@ impl LayoutNode {
             *active_tab = (*active_tab).min(children.len().saturating_sub(1));
         }
 
-        if let LayoutNode::Split { sizes, children, .. } = self
-            && sizes.len() != children.len() {
-                sizes.truncate(children.len());
-                while sizes.len() < children.len() {
-                    sizes.push(100.0 / children.len() as f32);
-                }
-            }
+        // Reconcile lengths and scale BEFORE flattening: the flatten below
+        // indexes `sizes[i]` per child and divides the parent slot across the
+        // grandchildren, so it needs one sane weight per child to work from.
+        if let LayoutNode::Split { sizes, children, .. } = self {
+            Self::sanitize_weights(sizes, children.len());
+        }
 
         let should_unwrap = match self {
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children.len() <= 1,
@@ -608,22 +731,11 @@ impl LayoutNode {
             }
         }
 
-        // Sizes are relative weights — the tiny-pair threshold is 10% of the total
-        // sum so the check works regardless of overall scale. Validate after
-        // flattening because flattening a same-direction split can create a tiny
-        // adjacent pair even when the parent sizes were valid.
+        // Re-apply the invariant after flattening: splitting a parent slot
+        // across grandchildren can push a pane under the floor even when both
+        // the parent and child weights were fine on their own.
         if let LayoutNode::Split { sizes, children, .. } = self {
-            let has_invalid = sizes.iter().any(|s| *s <= 0.0 || !s.is_finite());
-            let total: f32 = sizes.iter().sum();
-            let min_resize = total * 0.1;
-            let has_tiny_pair = sizes.windows(2).any(|w| w[0] + w[1] <= min_resize);
-            if has_invalid || has_tiny_pair {
-                log::warn!("Layout has invalid/too-small sizes {:?}, resetting to equal", sizes);
-                let equal = 100.0 / children.len() as f32;
-                for s in sizes.iter_mut() {
-                    *s = equal;
-                }
-            }
+            Self::sanitize_weights(sizes, children.len());
         }
     }
 
@@ -990,7 +1102,7 @@ impl LayoutNode {
 
 #[cfg(test)]
 mod tests {
-    use super::{LayoutNode, SplitDirection};
+    use super::{LayoutNode, SplitDirection, MIN_PANE_WEIGHT, TOTAL_PANE_WEIGHT};
     use okena_core::shell::ShellType;
     use std::collections::HashSet;
 
@@ -1483,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_tiny_adjacent_sizes_reset_to_equal() {
+    fn normalize_raises_a_tiny_pane_to_the_floor_and_keeps_the_rest() {
         let mut node = LayoutNode::Split {
             direction: SplitDirection::Horizontal,
             sizes: vec![90.0, 1.0, 9.0],
@@ -1492,10 +1604,14 @@ mod tests {
         node.normalize();
         if let LayoutNode::Split { sizes, .. } = &node {
             assert_eq!(sizes.len(), 3);
-            let expected = 100.0 / 3.0;
-            for s in sizes {
-                assert!((*s - expected).abs() < f32::EPSILON);
-            }
+            // The pane under the floor is raised to it and the two with room
+            // give up the difference in proportion to their surplus — so the
+            // layout still reads as "one big pane, one small, one minimum".
+            // The old repair reset all three to 33.3 and threw it away.
+            assert!((sizes[1] - MIN_PANE_WEIGHT).abs() < 1e-3, "got {:?}", sizes);
+            assert!(sizes[0] > sizes[2] && sizes[2] > sizes[1], "got {:?}", sizes);
+            assert!(sizes[0] > 80.0, "the dominant pane stays dominant: {:?}", sizes);
+            assert!((sizes.iter().sum::<f32>() - TOTAL_PANE_WEIGHT).abs() < 1e-3);
         } else {
             panic!("Expected split");
         }
@@ -1522,10 +1638,12 @@ mod tests {
             panic!("Expected flattened split");
         };
         assert_eq!(children.len(), 3);
-        let expected = 100.0 / 3.0;
-        for size in sizes {
-            assert!((size - expected).abs() < f32::EPSILON);
-        }
+        // Flattening divides the nested split's slot across its grandchildren,
+        // which can drop them under the floor. They get raised to it and the
+        // big pane absorbs the cost — nobody's layout is discarded.
+        assert!((sizes[1] - MIN_PANE_WEIGHT).abs() < 1e-3, "got {:?}", sizes);
+        assert!((sizes[2] - MIN_PANE_WEIGHT).abs() < 1e-3, "got {:?}", sizes);
+        assert!((sizes.iter().sum::<f32>() - TOTAL_PANE_WEIGHT).abs() < 1e-3);
     }
 
     #[test]
@@ -1545,17 +1663,38 @@ mod tests {
     }
 
     #[test]
-    fn normalize_relative_sizes_untouched() {
+    fn normalize_rescales_relative_sizes_to_the_standard_total() {
+        let original = [26.8_f32, 9.47, 17.6];
         let mut node = LayoutNode::Split {
             direction: SplitDirection::Horizontal,
-            sizes: vec![26.8, 9.47, 17.6],
+            sizes: original.to_vec(),
             children: vec![terminal("t1"), terminal("t2"), terminal("t3")],
         };
         node.normalize();
         if let LayoutNode::Split { sizes, .. } = &node {
-            assert!((sizes[0] - 26.8).abs() < f32::EPSILON);
-            assert!((sizes[1] - 9.47).abs() < f32::EPSILON);
-            assert!((sizes[2] - 17.6).abs() < f32::EPSILON);
+            // Weights are shares of 100 whatever scale the writer used, so a
+            // vec written on one scale can never render against another.
+            assert!((sizes.iter().sum::<f32>() - TOTAL_PANE_WEIGHT).abs() < 1e-3);
+            let total: f32 = original.iter().sum();
+            for (size, source) in sizes.iter().zip(original) {
+                let expected = source / total * TOTAL_PANE_WEIGHT;
+                assert!((size - expected).abs() < 1e-3, "got {:?}", sizes);
+            }
+        } else {
+            panic!("Expected split");
+        }
+    }
+
+    #[test]
+    fn normalize_converges_weights_written_on_a_fractional_scale() {
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![0.25, 0.75],
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+        node.normalize();
+        if let LayoutNode::Split { sizes, .. } = &node {
+            assert_eq!(sizes.as_slice(), &[25.0, 75.0]);
         } else {
             panic!("Expected split");
         }
@@ -1604,7 +1743,45 @@ mod tests {
         match &node {
             LayoutNode::Split { children, sizes, .. } => {
                 assert_eq!(children.len(), 2);
-                assert_eq!(sizes.as_slice(), &[33.0, 67.0]);
+                assert_eq!(
+                    sizes.as_slice(),
+                    &[66.0, 34.0],
+                    "the freed weight goes to the pane before it — the one a split would have grown from",
+                );
+            }
+            _ => panic!("Expected split with 2 children"),
+        }
+    }
+
+    #[test]
+    fn remove_at_path_credits_the_next_pane_when_removing_the_first() {
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![33.0, 33.0, 34.0],
+            children: vec![terminal("t1"), terminal("t2"), terminal("t3")],
+        };
+        node.remove_at_path(&[0]);
+        match &node {
+            LayoutNode::Split { sizes, .. } => {
+                assert_eq!(sizes.as_slice(), &[66.0, 34.0], "no previous sibling to credit");
+            }
+            _ => panic!("Expected split with 2 children"),
+        }
+    }
+
+    #[test]
+    fn remove_at_path_skips_hidden_siblings_when_crediting_weight() {
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![25.0, 25.0, 50.0],
+            children: vec![terminal("t1"), terminal_minimized("t2"), terminal("t3")],
+        };
+        // Removing t3 would positionally credit the minimized t2, parking the
+        // weight where the renderer cannot see it. Skip to the visible t1.
+        node.remove_at_path(&[2]);
+        match &node {
+            LayoutNode::Split { sizes, .. } => {
+                assert_eq!(sizes.as_slice(), &[75.0, 25.0]);
             }
             _ => panic!("Expected split with 2 children"),
         }

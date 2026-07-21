@@ -141,6 +141,17 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         };
 
         if needs_new_pane {
+            // Drop the outgoing pane's claim on its old terminal first. Closing
+            // a pane shifts every later sibling down one index, so containers —
+            // which are keyed by layout path — get reused for a *different*
+            // terminal and rebuild their pane here. `shared_resize_target` sizes
+            // a terminal to the MINIMUM across its registered viewers, so a
+            // viewer left behind by the replaced pane pins the survivor's PTY to
+            // the pre-close cols/rows for as long as it stays registered.
+            if let Some(pane) = self.terminal_pane.take() {
+                pane.update(cx, |pane, cx| pane.deregister_resize_viewer(cx));
+            }
+
             let workspace = self.workspace.clone();
             let focus_manager = self.focus_manager.clone();
             let request_broker = self.request_broker.clone();

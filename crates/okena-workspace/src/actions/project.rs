@@ -256,16 +256,33 @@ impl Workspace {
         self.register_hook_results(hook_results, cx);
     }
 
-    /// Add a new terminal to a project by splitting the root layout
+    /// Place a new pane in an existing layout.
+    ///
+    /// When the root is already a split the pane joins it as one more child,
+    /// taking an equal share while the existing panes keep their proportions.
+    /// This used to re-wrap the *whole* layout in a fresh 50/50 split, which
+    /// halved every existing pane on every added terminal — four equal panes
+    /// became four 12.5% panes plus one at 50%.
+    ///
+    /// A bare terminal or a tab group still gets wrapped in a vertical split,
+    /// since neither can take a sibling pane directly.
+    fn add_pane_to_layout(layout: &mut LayoutNode, pane: LayoutNode) {
+        if !layout.push_split_child(pane.clone()) {
+            let existing = layout.clone();
+            *layout = LayoutNode::Split {
+                direction: crate::state::SplitDirection::Vertical,
+                sizes: vec![50.0, 50.0],
+                children: vec![existing, pane],
+            };
+        }
+        layout.normalize();
+    }
+
+    /// Add a new terminal to a project by adding a pane to the root layout
     pub fn add_terminal(&mut self, focus_manager: &mut FocusManager, project_id: &str, cx: &mut impl WorkspaceCx) {
         if let Some(project) = self.project_mut(project_id) {
-            if let Some(ref old_layout) = project.layout {
-                let old_layout = old_layout.clone();
-                project.layout = Some(LayoutNode::Split {
-                    direction: crate::state::SplitDirection::Vertical,
-                    sizes: vec![50.0, 50.0],
-                    children: vec![old_layout, LayoutNode::new_terminal()],
-                });
+            if let Some(layout) = project.layout.as_mut() {
+                Self::add_pane_to_layout(layout, LayoutNode::new_terminal());
             } else {
                 // Project has no layout - create one with a terminal
                 project.layout = Some(LayoutNode::new_terminal());
@@ -292,13 +309,8 @@ impl Workspace {
     ) {
         if let Some(project) = self.project_mut(project_id) {
             let new_node = LayoutNode::new_terminal_with_command(command, env_vars);
-            if let Some(ref old_layout) = project.layout {
-                let old_layout = old_layout.clone();
-                project.layout = Some(LayoutNode::Split {
-                    direction: crate::state::SplitDirection::Vertical,
-                    sizes: vec![50.0, 50.0],
-                    children: vec![old_layout, new_node],
-                });
+            if let Some(layout) = project.layout.as_mut() {
+                Self::add_pane_to_layout(layout, new_node);
             } else {
                 project.layout = Some(new_node);
             }

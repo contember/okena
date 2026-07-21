@@ -46,6 +46,13 @@ impl Workspace {
                     {
                         *active_tab = (prev_active_tab - 1).min(children.len().saturating_sub(1));
                     }
+                    // Reconcile structure and weights now, like every other
+                    // layout mutation does. Without this a close could leave a
+                    // same-direction split nested inside its parent; nothing
+                    // flattened it until the next split or the next app launch,
+                    // so the resulting reflow surfaced long after the action
+                    // that caused it.
+                    layout.normalize();
                     self.notify_data(cx);
                     return self.cleanup_orphaned_metadata(project_id);
                 }
