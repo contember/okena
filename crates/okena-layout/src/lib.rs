@@ -481,6 +481,7 @@ impl LayoutNode {
     }
 
     /// Remove a child node at the given path.
+    /// For split parents, transfers removed weight to the previous sibling, falling back to the next.
     /// If the parent has only one child left after removal, collapses the parent to that child.
     /// Returns the removed node, or None if the path is invalid.
     pub fn remove_at_path(&mut self, path: &[usize]) -> Option<LayoutNode> {
@@ -501,7 +502,11 @@ impl LayoutNode {
                 }
                 let removed = children.remove(child_index);
                 if child_index < sizes.len() {
-                    sizes.remove(child_index);
+                    let removed_size = sizes.remove(child_index);
+                    let recipient = child_index.saturating_sub(1);
+                    if let Some(size) = sizes.get_mut(recipient) {
+                        *size += removed_size;
+                    }
                 }
                 if children.len() == 1 {
                     let remaining = children.remove(0);
@@ -1566,8 +1571,22 @@ mod tests {
         match &node {
             LayoutNode::Split { children, sizes, .. } => {
                 assert_eq!(children.len(), 2);
-                assert_eq!(sizes.len(), 2);
+                assert_eq!(sizes, &[66.0, 34.0]);
             }
+            _ => panic!("Expected split with 2 children"),
+        }
+    }
+
+    #[test]
+    fn remove_at_path_transfers_first_child_weight_to_next_sibling() {
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![20.0, 30.0, 50.0],
+            children: vec![terminal("t1"), terminal("t2"), terminal("t3")],
+        };
+        node.remove_at_path(&[0]);
+        match &node {
+            LayoutNode::Split { sizes, .. } => assert_eq!(sizes, &[50.0, 50.0]),
             _ => panic!("Expected split with 2 children"),
         }
     }

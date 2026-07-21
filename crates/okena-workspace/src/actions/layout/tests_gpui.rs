@@ -39,6 +39,16 @@ fn make_project(id: &str) -> ProjectData {
     }
 }
 
+fn terminal(id: &str) -> LayoutNode {
+    LayoutNode::Terminal {
+        terminal_id: Some(id.to_string()),
+        minimized: false,
+        detached: false,
+        shell_type: ShellType::Default,
+        zoom_level: 1.0,
+    }
+}
+
 fn make_workspace_data(projects: Vec<ProjectData>, order: Vec<&str>) -> WorkspaceData {
     WorkspaceData {
         version: 1,
@@ -136,6 +146,39 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         // After closing child 0, sibling (t2) should replace the split
         assert!(matches!(layout, LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "t2"));
+    });
+}
+
+#[gpui::test]
+fn split_close_cycle_preserves_pane_weights(cx: &mut gpui::TestAppContext) {
+    let mut project = make_project("p1");
+    project.layout = Some(LayoutNode::Split {
+        direction: SplitDirection::Horizontal,
+        sizes: vec![66.0, 34.0],
+        children: vec![terminal("t1"), terminal("t2")],
+    });
+    let data = make_workspace_data(vec![project], vec!["p1"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    for _ in 0..4 {
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.split_terminal(
+                &mut FocusManager::new(),
+                "p1",
+                &[0],
+                SplitDirection::Horizontal,
+                cx,
+            );
+            ws.close_terminal("p1", &[1], cx);
+        });
+    }
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+        let LayoutNode::Split { sizes, .. } = layout else {
+            panic!("Expected split after split/close cycles");
+        };
+        assert_eq!(sizes, &[66.0, 34.0]);
     });
 }
 
