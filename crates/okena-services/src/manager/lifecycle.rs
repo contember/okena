@@ -141,6 +141,7 @@ impl ServiceManager {
             } => {
                 log::info!("[services] No okena.yaml found at {}", project_path);
                 // No okena.yaml — still try Docker Compose auto-detection
+                self.drain_okena_restarts_for_project(project_id, true);
                 self.begin_project_incarnation(project_id, project_path);
                 self.project_paths
                     .insert(project_id.to_string(), project_path.to_string());
@@ -169,6 +170,7 @@ impl ServiceManager {
             }
         };
 
+        self.drain_okena_restarts_for_project(project_id, true);
         self.begin_project_incarnation(project_id, project_path);
         self.project_paths
             .insert(project_id.to_string(), project_path.to_string());
@@ -309,6 +311,7 @@ impl ServiceManager {
         cx: &mut impl ServiceCx,
     ) -> Vec<String> {
         self.invalidate_project_incarnation(project_id);
+        let mut terminal_ids = self.drain_okena_restarts_for_project(project_id, kill_unpreserved);
 
         // Stop Docker status poller
         if let Some(cancel) = self.docker_pollers.remove(project_id) {
@@ -322,7 +325,6 @@ impl ServiceManager {
             .cloned()
             .collect();
 
-        let mut terminal_ids = Vec::new();
         for key in keys {
             if let Some(instance) = self.instances.get(&key)
                 && let Some(terminal_id) = &instance.terminal_id
@@ -402,6 +404,7 @@ impl ServiceManager {
             }
         };
 
+        self.drain_okena_restarts_for_project(project_id, true);
         self.begin_project_incarnation(project_id, project_path);
 
         self.project_paths

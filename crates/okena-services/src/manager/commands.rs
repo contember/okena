@@ -228,6 +228,8 @@ impl ServiceManager {
         project_path: &str,
         cx: &mut impl ServiceCx,
     ) {
+        let key = (project_id.to_string(), service_name.to_string());
+        self.invalidate_okena_restart(&key, true);
         let terminal_id = uuid::Uuid::new_v4().to_string();
         self.begin_okena_terminal_launch(
             project_id,
@@ -384,6 +386,7 @@ impl ServiceManager {
             return;
         }
         self.invalidate_okena_launch(&key);
+        self.invalidate_okena_restart(&key, true);
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
             None => return,
@@ -477,11 +480,13 @@ impl ServiceManager {
                 instance.detected_ports.clear();
                 cx.notify();
 
+                let restart_token =
+                    self.begin_okena_restart(&key, project_path, terminal_id.clone());
+
                 let pid = project_id.to_string();
                 let name = service_name.to_string();
                 let path = project_path.to_string();
                 let backend = self.backend.clone();
-                let terminals = self.terminals.clone();
 
                 cx.spawn_main(async move |this, cx| {
                     // Collect descendant PIDs on background executor.
@@ -504,23 +509,15 @@ impl ServiceManager {
 
                     let is_current = this
                         .update(cx, |this, _| {
-                            project_incarnation.as_ref().is_some_and(|incarnation| {
-                                this.is_project_incarnation_current(&pid, incarnation)
-                            })
+                            let key = (pid.clone(), name.clone());
+                            this.finalize_okena_restart_terminal(&key, &restart_token)
+                                && project_incarnation.as_ref().is_some_and(|incarnation| {
+                                    this.is_project_incarnation_current(&pid, incarnation)
+                                })
                         })
                         .unwrap_or(false);
                     if !is_current {
                         return;
-                    }
-
-                    // Kill old terminal (backend.kill spawns a bg thread internally)
-                    if let Some(ref tid) = terminal_id {
-                        backend.kill(tid);
-                        terminals.lock().remove(tid);
-                        let tid = tid.clone();
-                        let _ = this.update(cx, |this, _cx| {
-                            this.terminal_to_service.remove(&tid);
-                        });
                     }
 
                     // Wait for old processes to die
@@ -540,6 +537,10 @@ impl ServiceManager {
                             return;
                         }
                         let key = (pid.clone(), name.clone());
+                        if !this.is_okena_restart_current(&key, &restart_token) {
+                            return;
+                        }
+                        this.finish_okena_restart(&key, &restart_token);
                         if let Some(instance) = this.instances.get(&key)
                             && instance.status == ServiceStatus::Restarting
                         {

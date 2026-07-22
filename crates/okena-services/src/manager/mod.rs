@@ -32,6 +32,8 @@ pub struct ServiceManager {
     project_lifecycles: ProjectLifecycles,
     pending_okena_launches: HashMap<(String, String), OkenaLaunchToken>,
     next_okena_launch_generation: u64,
+    pending_okena_restarts: HashMap<(String, String), OkenaRestartToken>,
+    next_okena_restart_generation: u64,
     pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
     /// Cancel tokens for Docker status pollers (project_id -> cancel flag)
@@ -48,6 +50,13 @@ pub struct ServiceManager {
 pub(super) struct OkenaLaunchToken {
     generation: u64,
     project_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct OkenaRestartToken {
+    generation: u64,
+    project_path: String,
+    terminal_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -389,6 +398,8 @@ impl ServiceManager {
             project_lifecycles: ProjectLifecycles::default(),
             pending_okena_launches: HashMap::new(),
             next_okena_launch_generation: 1,
+            pending_okena_restarts: HashMap::new(),
+            next_okena_restart_generation: 1,
             backend,
             terminals,
             docker_pollers: HashMap::new(),
@@ -614,6 +625,109 @@ impl ServiceManager {
 
     pub(super) fn invalidate_okena_launch(&mut self, key: &(String, String)) {
         self.pending_okena_launches.remove(key);
+    }
+
+    pub(super) fn begin_okena_restart(
+        &mut self,
+        key: &(String, String),
+        project_path: &str,
+        terminal_id: Option<String>,
+    ) -> OkenaRestartToken {
+        self.invalidate_okena_restart(key, true);
+        let generation = self.next_okena_restart_generation;
+        self.next_okena_restart_generation = generation
+            .checked_add(1)
+            .expect("Okena service restart generation exhausted");
+        let token = OkenaRestartToken {
+            generation,
+            project_path: project_path.to_string(),
+            terminal_id,
+        };
+        if let Some(terminal_id) = &token.terminal_id
+            && self.terminal_to_service.get(terminal_id) == Some(key)
+        {
+            self.terminal_to_service.remove(terminal_id);
+        }
+        self.pending_okena_restarts
+            .insert(key.clone(), token.clone());
+        token
+    }
+
+    pub(super) fn is_okena_restart_current(
+        &self,
+        key: &(String, String),
+        token: &OkenaRestartToken,
+    ) -> bool {
+        self.pending_okena_restarts.get(key).is_some_and(|pending| {
+            pending.generation == token.generation && pending.project_path == token.project_path
+        }) && self.project_paths.get(&key.0) == Some(&token.project_path)
+    }
+
+    pub(super) fn finalize_okena_restart_terminal(
+        &mut self,
+        key: &(String, String),
+        token: &OkenaRestartToken,
+    ) -> bool {
+        if !self.is_okena_restart_current(key, token) {
+            return false;
+        }
+        let terminal_id = self
+            .pending_okena_restarts
+            .get_mut(key)
+            .and_then(|pending| pending.terminal_id.take());
+        if let Some(terminal_id) = terminal_id {
+            self.backend.kill(&terminal_id);
+            self.terminals.lock().remove(&terminal_id);
+            if self.terminal_to_service.get(&terminal_id) == Some(key) {
+                self.terminal_to_service.remove(&terminal_id);
+            }
+        }
+        true
+    }
+
+    pub(super) fn finish_okena_restart(
+        &mut self,
+        key: &(String, String),
+        token: &OkenaRestartToken,
+    ) {
+        if self.pending_okena_restarts.get(key).is_some_and(|pending| {
+            pending.generation == token.generation && pending.project_path == token.project_path
+        }) {
+            self.pending_okena_restarts.remove(key);
+        }
+    }
+
+    pub(super) fn invalidate_okena_restart(
+        &mut self,
+        key: &(String, String),
+        kill_terminal: bool,
+    ) -> Option<String> {
+        let token = self.pending_okena_restarts.remove(key)?;
+        let terminal_id = token.terminal_id?;
+        if kill_terminal {
+            self.backend.kill(&terminal_id);
+        }
+        self.terminals.lock().remove(&terminal_id);
+        if self.terminal_to_service.get(&terminal_id) == Some(key) {
+            self.terminal_to_service.remove(&terminal_id);
+        }
+        Some(terminal_id)
+    }
+
+    pub(super) fn drain_okena_restarts_for_project(
+        &mut self,
+        project_id: &str,
+        kill_terminals: bool,
+    ) -> Vec<String> {
+        let keys: Vec<(String, String)> = self
+            .pending_okena_restarts
+            .keys()
+            .filter(|(pending_project_id, _)| pending_project_id == project_id)
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| self.invalidate_okena_restart(&key, kill_terminals))
+            .collect()
     }
 
     /// Whether the project has any service definitions loaded (Okena or Docker).
