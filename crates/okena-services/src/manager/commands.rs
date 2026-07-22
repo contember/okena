@@ -86,6 +86,7 @@ impl ServiceManager {
                 let run = mutation.clone();
                 let runner = runner.clone();
                 let result = cx.spawn_blocking(async move { runner.run(&run) }).await;
+                crate::docker_compose::invalidate_status_snapshot();
                 let failed = result.is_err();
                 if let Err(error) = result {
                     log::error!(

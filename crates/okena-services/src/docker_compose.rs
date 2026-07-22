@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Timeout for Docker CLI commands.  When the Docker daemon is not running the
@@ -230,11 +231,20 @@ const PS_SNAPSHOT_TTL: Duration = Duration::from_secs(4);
 /// share this one snapshot, so the host is queried at most once per TTL
 /// regardless of how many projects are polling.
 static PS_SNAPSHOT: Mutex<Option<(Instant, Vec<ContainerSnapshot>)>> = Mutex::new(None);
+/// Prevents an in-flight pre-mutation refresh from repopulating stale state.
+static PS_SNAPSHOT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Single-flight gate for refreshing [`PS_SNAPSHOT`]. Without it, all per-project
 /// pollers waking on the same ~5s tick find the cache stale at once and each
 /// spawn their own `docker ps` before any stores a result (thundering herd).
 static PS_REFRESH_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn invalidate_status_snapshot() {
+    PS_SNAPSHOT_GENERATION.fetch_add(1, Ordering::AcqRel);
+    *PS_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+}
 
 /// One compose container distilled from `docker ps -a --format json`.
 #[derive(Clone)]
@@ -570,8 +580,12 @@ fn ps_snapshot() -> crate::ServiceResult<Vec<ContainerSnapshot>> {
         return Ok(snap);
     }
 
+    let generation = PS_SNAPSHOT_GENERATION.load(Ordering::Acquire);
     let fresh = refresh_ps_snapshot()?;
-    if let Ok(mut guard) = PS_SNAPSHOT.lock() {
+    let mut guard = PS_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if PS_SNAPSHOT_GENERATION.load(Ordering::Acquire) == generation {
         *guard = Some((Instant::now(), fresh.clone()));
     }
     Ok(fresh)
