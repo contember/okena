@@ -36,6 +36,17 @@ pub struct WorktreeRemovalPlan {
 }
 
 impl WorktreeRemovalPlan {
+    /// Reject standard-remove failures that can be known before runtimes are
+    /// disturbed. Git refuses a dirty checkout unless the caller passes force.
+    pub fn preflight_remove(&self, force: bool) -> Result<(), String> {
+        if !force && okena_git::has_uncommitted_changes(&self.worktree_path) {
+            return Err(
+                "worktree has uncommitted changes; pass force=true to remove it".to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn remove(&self, force: bool) -> Result<(), String> {
         okena_git::remove_worktree(&self.verified_worktree, force)
             .map_err(|error| error.to_string())

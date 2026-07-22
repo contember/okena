@@ -284,6 +284,24 @@ fn unload_project_services_for_background_removal(
     active_service_names
 }
 
+fn detach_project_services_for_runtime_quiesce(
+    project_id: &str,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+) -> (Vec<String>, Vec<String>) {
+    let reactor_ref = ServiceReactorRef::new(
+        service_manager.clone(),
+        runtime.clone(),
+        service_tick.clone(),
+    );
+    let mut manager = service_manager.lock();
+    let mut cx = reactor_ref.cx();
+    let active_service_names = manager.active_okena_service_names(project_id);
+    let terminal_ids = manager.unload_project_services_for_backend_migration(project_id, &mut cx);
+    (active_service_names, terminal_ids)
+}
+
 struct QuiescedProjectRuntime {
     workspace: ProjectRuntimeQuiesce,
     active_service_names: Vec<String>,
@@ -302,8 +320,9 @@ fn begin_project_runtime_quiesce(
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
     terminals: &TerminalsRegistry,
+    deadlines: &SoftCloseDeadlines,
 ) -> Result<QuiescedProjectRuntime, String> {
-    let snapshot = {
+    let mut snapshot = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         workspace.lock().begin_project_runtime_quiesce(
             project_id,
@@ -313,12 +332,29 @@ fn begin_project_runtime_quiesce(
             &mut cx,
         )?
     };
-    let active_service_names = unload_project_services_for_background_removal(
+    {
+        let mut deadlines = deadlines.lock();
+        for terminal_id in &snapshot.pending_close_terminal_ids {
+            deadlines.remove(terminal_id);
+        }
+    }
+    let (active_service_names, service_terminal_ids) = detach_project_services_for_runtime_quiesce(
         project_id,
         service_manager,
         service_tick,
         runtime,
     );
+    snapshot.teardown_sessions.extend(
+        service_terminal_ids
+            .into_iter()
+            .map(TerminalSessionTeardown::host),
+    );
+    snapshot
+        .teardown_sessions
+        .sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+    snapshot
+        .teardown_sessions
+        .dedup_by(|a, b| a.terminal_id == b.terminal_id);
     {
         let mut registry = terminals.lock();
         for teardown in &snapshot.teardown_sessions {
@@ -352,6 +388,23 @@ async fn flush_project_runtime_teardown(
         })
         .await
         .map_err(|error| format!("terminal teardown task failed: {error}"))
+}
+
+async fn flush_terminal_session_teardown(
+    teardown_sessions: Vec<TerminalSessionTeardown>,
+    backend: &Arc<dyn TerminalBackend>,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(), String> {
+    let backend = backend.clone();
+    runtime
+        .spawn_blocking(move || {
+            for teardown in &teardown_sessions {
+                backend.kill_session(teardown);
+            }
+            backend.flush_teardown();
+        })
+        .await
+        .map_err(|error| format!("terminal cleanup task failed: {error}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -390,7 +443,29 @@ async fn recover_quiesced_project_runtime(
             okena_app_core::workspace::actions::execute::ActionResult::Err(error) => Some(error),
         }
     };
-    recover_project_services(
+    let partial_cleanup_error = if terminal_error.is_some() {
+        let partial_teardowns = {
+            let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+            let mut workspace = workspace.lock();
+            let teardowns = workspace.drain_partial_project_runtime_recovery(
+                &quiesced.workspace,
+                &settings.default_shell,
+                settings.session_backend,
+                &mut cx,
+            );
+            let mut registry = terminals.lock();
+            for teardown in &teardowns {
+                registry.remove(&teardown.terminal_id);
+            }
+            teardowns
+        };
+        flush_terminal_session_teardown(partial_teardowns, backend, runtime)
+            .await
+            .err()
+    } else {
+        None
+    };
+    let service_error = recover_project_services(
         &quiesced.workspace.project_id,
         &quiesced.active_service_names,
         workspace,
@@ -398,7 +473,8 @@ async fn recover_quiesced_project_runtime(
         service_tick,
         runtime,
     )
-    .await;
+    .await
+    .err();
     {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
@@ -410,9 +486,20 @@ async fn recover_quiesced_project_runtime(
         }
         workspace.finish_project_runtime_recovery(&quiesced.workspace, &mut cx);
     }
-    match terminal_error {
-        Some(error) => Err(format!("terminal recovery failed: {error}")),
-        None => Ok(()),
+    let mut errors = Vec::new();
+    if let Some(error) = terminal_error {
+        errors.push(format!("terminal recovery failed: {error}"));
+    }
+    if let Some(error) = partial_cleanup_error {
+        errors.push(error);
+    }
+    if let Some(error) = service_error {
+        errors.push(format!("service recovery failed: {error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -552,24 +639,23 @@ async fn recover_project_services_with_preparer<Prepare>(
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
     prepare: Prepare,
-) where
+) -> Result<(), String>
+where
     Prepare: FnOnce(&str) -> PreparedProjectConfig + Send + 'static,
 {
-    let Some(owner) = snapshot_service_owner(project_id, workspace, service_manager) else {
-        return;
-    };
+    let owner = snapshot_service_owner(project_id, workspace, service_manager)
+        .ok_or_else(|| format!("service recovery owner is unavailable: {project_id}"))?;
     if service_manager.lock().project_path(project_id).is_some() {
-        return;
+        return Err(format!(
+            "service manager already owns project during recovery: {project_id}"
+        ));
     }
-    let (owner, prepared) = match prepare_services_off_reactor(owner, runtime, prepare).await {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            log::error!("Failed to prepare recovered services for {project_id}: {error}");
-            return;
-        }
-    };
+    let (owner, prepared) = prepare_services_off_reactor(owner, runtime, prepare).await?;
     if matches!(prepared, PreparedProjectConfig::Missing) {
-        return;
+        return Err(format!(
+            "project path is unavailable during service recovery: {}",
+            owner.project_path
+        ));
     }
 
     let workspace = workspace.lock();
@@ -577,7 +663,7 @@ async fn recover_project_services_with_preparer<Prepare>(
     if !service_owner_is_current(project_id, &owner, &workspace, &manager)
         || manager.project_path(project_id).is_some()
     {
-        return;
+        return Err(format!("service recovery owner became stale: {project_id}"));
     }
     let reactor_ref = ServiceReactorRef::new(
         service_manager.clone(),
@@ -598,11 +684,15 @@ async fn recover_project_services_with_preparer<Prepare>(
         prepared,
         &mut cx,
     );
-    if status == ServiceLoadStatus::Loaded {
-        for service_name in active_service_names {
-            manager.start_service(project_id, service_name, &owner.project_path, &mut cx);
-        }
+    if status == ServiceLoadStatus::Failed {
+        return Err(format!(
+            "failed to load recovered services for project: {project_id}"
+        ));
     }
+    for service_name in active_service_names {
+        manager.start_service(project_id, service_name, &owner.project_path, &mut cx);
+    }
+    Ok(())
 }
 
 async fn recover_project_services(
@@ -612,7 +702,7 @@ async fn recover_project_services(
     service_manager: &Arc<Mutex<ServiceManager>>,
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
-) {
+) -> Result<(), String> {
     recover_project_services_with_preparer(
         project_id,
         active_service_names,
@@ -622,7 +712,7 @@ async fn recover_project_services(
         runtime,
         prepare_project_config,
     )
-    .await;
+    .await
 }
 
 fn recover_project_services_for_backend_migration(
@@ -1086,6 +1176,7 @@ async fn remove_worktree_project_off_reactor_with<Remove>(
     settings: &AppSettings,
     service_manager: &Arc<Mutex<ServiceManager>>,
     service_tick: &watch::Sender<u64>,
+    deadlines: &SoftCloseDeadlines,
     runtime: &tokio::runtime::Handle,
     remove: Remove,
 ) -> CommandResult
@@ -1100,6 +1191,17 @@ where
             Err(error) => return CommandResult::Err(error),
         }
     };
+    let preflight_plan = plan.clone();
+    match runtime
+        .spawn_blocking(move || preflight_plan.preflight_remove(force))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return CommandResult::Err(error),
+        Err(error) => {
+            return CommandResult::Err(format!("worktree removal preflight failed: {error}"));
+        }
+    }
     let quiesced = match begin_project_runtime_quiesce(
         &project_id,
         false,
@@ -1112,6 +1214,7 @@ where
         service_tick,
         runtime,
         terminals,
+        deadlines,
     ) {
         Ok(quiesced) => quiesced,
         Err(error) => return CommandResult::Err(error),
@@ -1224,6 +1327,7 @@ async fn rename_project_directory_off_reactor_with<Move>(
     settings: &AppSettings,
     service_manager: &Arc<Mutex<ServiceManager>>,
     service_tick: &watch::Sender<u64>,
+    deadlines: &SoftCloseDeadlines,
     runtime: &tokio::runtime::Handle,
     move_directory: Move,
 ) -> CommandResult
@@ -1315,6 +1419,7 @@ where
         service_tick,
         runtime,
         terminals,
+        deadlines,
     ) {
         Ok(quiesced) => quiesced,
         Err(error) => return CommandResult::Err(error),
@@ -1421,7 +1526,7 @@ where
         };
         (new_project_path, terminal_error)
     };
-    recover_project_services(
+    let service_error = recover_project_services(
         &project_id,
         &quiesced.active_service_names,
         workspace,
@@ -1429,7 +1534,8 @@ where
         service_tick,
         runtime,
     )
-    .await;
+    .await
+    .err();
     {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
@@ -1441,11 +1547,17 @@ where
         }
         workspace.finish_project_runtime_recovery(&quiesced.workspace, &mut cx);
     }
-    match terminal_error {
-        Some(error) => CommandResult::Err(format!(
-            "directory renamed, but terminal rematerialization failed: {error}"
-        )),
-        None => CommandResult::Ok(None),
+    let mut errors = Vec::new();
+    if let Some(error) = terminal_error {
+        errors.push(format!("terminal rematerialization failed: {error}"));
+    }
+    if let Some(error) = service_error {
+        errors.push(format!("service recovery failed: {error}"));
+    }
+    if errors.is_empty() {
+        CommandResult::Ok(None)
+    } else {
+        CommandResult::Err(format!("directory renamed, but {}", errors.join("; ")))
     }
 }
 
@@ -1602,7 +1714,7 @@ pub(crate) fn spawn_background_worktree_removal(
                             )));
                         }
                         drop(ws);
-                        recover_project_services(
+                        if let Err(error) = recover_project_services(
                             &plan.project_id,
                             &active_service_names,
                             &workspace,
@@ -1610,7 +1722,13 @@ pub(crate) fn spawn_background_worktree_removal(
                             &service_tick,
                             &runtime,
                         )
-                        .await;
+                        .await
+                        {
+                            log::error!(
+                                "worktree-close: failed to recover services for {}: {error}",
+                                plan.project_id
+                            );
+                        }
                         let mut cx =
                             DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
                         let mut ws = workspace.lock();
@@ -1646,7 +1764,7 @@ pub(crate) fn spawn_background_worktree_removal(
                     );
                 }
                 drop(ws);
-                recover_project_services(
+                if let Err(error) = recover_project_services(
                     &task_project_id,
                     &active_service_names,
                     &workspace,
@@ -1654,7 +1772,12 @@ pub(crate) fn spawn_background_worktree_removal(
                     &service_tick,
                     &runtime,
                 )
-                .await;
+                .await
+                {
+                    log::error!(
+                        "worktree-close: failed to recover services for {task_project_id}: {error}"
+                    );
+                }
                 let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
                 let mut ws = workspace.lock();
                 if ws.data_replacement_epoch() == operation_epoch {
@@ -2752,6 +2875,7 @@ pub async fn daemon_command_loop(
                             &app_settings,
                             &service_manager,
                             &service_tick,
+                            &deadlines,
                             &runtime,
                             |plan, force| plan.remove(force),
                         )
@@ -2782,6 +2906,7 @@ pub async fn daemon_command_loop(
                             &app_settings,
                             &service_manager,
                             &service_tick,
+                            &deadlines,
                             &runtime,
                             |plan| plan.execute(),
                         )
@@ -3882,7 +4007,8 @@ mod tests {
             &service_tick,
             &runtime,
         )
-        .await;
+        .await
+        .expect("recover project services");
 
         let writebacks = service_manager.lock().service_terminal_writebacks();
         assert_eq!(writebacks.len(), 1);
@@ -3981,7 +4107,8 @@ mod tests {
                     &service_tick,
                     &runtime,
                 )
-                .await;
+                .await
+                .expect("recover project services");
 
                 let manager = service_manager.lock();
                 let statuses: HashMap<&str, &okena_services::manager::ServiceStatus> = manager
@@ -4005,6 +4132,47 @@ mod tests {
                 std::fs::remove_dir_all(project_dir).expect("remove project fixture");
             })
             .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_service_recovery_reports_error_and_retains_writeback_owner() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "okena-service-recovery-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create service recovery fixture");
+        let project_path = project_dir.to_string_lossy().into_owned();
+        let workspace = Arc::new(Mutex::new(Workspace::new(
+            workspace_with_uninitialized_terminal(&project_path),
+        )));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(backend, terminals)));
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let runtime = tokio::runtime::Handle::current();
+
+        let error = recover_project_services_with_preparer(
+            "p1",
+            &["manual-on".to_string()],
+            &workspace,
+            &service_manager,
+            &service_tick,
+            &runtime,
+            |_| PreparedProjectConfig::Failed("injected parse failure".to_string()),
+        )
+        .await
+        .expect_err("service recovery failure is propagated");
+
+        assert!(error.contains("failed to load recovered services"));
+        let writebacks = service_manager.lock().service_terminal_writebacks();
+        assert_eq!(writebacks.len(), 1);
+        assert_eq!(writebacks[0].project_id, "p1");
+        assert_eq!(writebacks[0].project_path, project_path);
+        assert_eq!(
+            writebacks[0].data_replacement_epoch,
+            workspace.lock().data_replacement_epoch()
+        );
+        std::fs::remove_dir_all(project_dir).expect("remove service recovery fixture");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4044,7 +4212,7 @@ mod tests {
                             }
                         },
                     )
-                    .await;
+                    .await
                 });
 
                 started_rx.await.expect("service preparation started");
@@ -4057,7 +4225,11 @@ mod tests {
                     workspace.replace_data(&mut FocusManager::new(), replacement, &mut cx);
                 }
                 release_tx.send(()).expect("release service preparation");
-                recovery.await.expect("recovery task completed");
+                let error = recovery
+                    .await
+                    .expect("recovery task completed")
+                    .expect_err("stale workspace owner is rejected");
+                assert!(error.contains("stale") || error.contains("already owns"));
 
                 let manager = service_manager.lock();
                 assert_eq!(manager.project_path("p1"), None);
@@ -4100,7 +4272,7 @@ mod tests {
                             prepare_project_config(project_path)
                         },
                     )
-                    .await;
+                    .await
                 });
 
                 started_rx.await.expect("service preparation started");
@@ -4124,7 +4296,11 @@ mod tests {
                     );
                 }
                 release_tx.send(()).expect("release service preparation");
-                recovery.await.expect("recovery task completed");
+                let error = recovery
+                    .await
+                    .expect("recovery task completed")
+                    .expect_err("stale manager owner is rejected");
+                assert!(!error.is_empty());
 
                 let manager = service_manager.lock();
                 assert_eq!(
@@ -5705,6 +5881,7 @@ mod tests {
     struct RenameRecordingBackend {
         events: Arc<Mutex<Vec<String>>>,
         next_id: std::sync::atomic::AtomicUsize,
+        fail_after: Option<usize>,
     }
 
     impl TerminalBackend for RenameRecordingBackend {
@@ -5717,6 +5894,9 @@ mod tests {
             let id = self
                 .next_id
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_after.is_some_and(|fail_after| id >= fail_after) {
+                anyhow::bail!("injected terminal creation failure");
+            }
             Ok(format!("replacement-{id}"))
         }
 
@@ -6008,9 +6188,39 @@ mod tests {
         let mut data = workspace_with_worktree_child();
         data.projects[0].path = repo.to_string_lossy().into_owned();
         data.projects[1].path = worktree.to_string_lossy().into_owned();
-        if let Some(LayoutNode::Terminal { terminal_id, .. }) = data.projects[1].layout.as_mut() {
-            *terminal_id = Some("active-in-checkout".to_string());
-        }
+        data.projects[1].layout = Some(LayoutNode::Split {
+            direction: okena_state::SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![
+                LayoutNode::Terminal {
+                    terminal_id: Some("active-in-checkout".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: ShellType::Default,
+                    zoom_level: 1.0,
+                },
+                LayoutNode::Terminal {
+                    terminal_id: Some("second-in-checkout".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: ShellType::Default,
+                    zoom_level: 1.0,
+                },
+            ],
+        });
+        data.projects[1].hook_terminals.insert(
+            "running-hook".to_string(),
+            okena_state::HookTerminalEntry {
+                label: "Running hook".to_string(),
+                status: okena_state::HookTerminalStatus::Running,
+                hook_type: "on_project_open".to_string(),
+                command: "echo hook".to_string(),
+                cwd: worktree.to_string_lossy().into_owned(),
+            },
+        );
+        data.projects[1]
+            .terminal_names
+            .insert("running-hook".to_string(), "Running hook".to_string());
         let metadata = data.projects[1]
             .worktree_info
             .as_mut()
@@ -6041,6 +6251,7 @@ mod tests {
                     terminals.clone(),
                 )));
                 let (service_tick, _service_rx) = watch::channel(0u64);
+                let deadlines: SoftCloseDeadlines = Default::default();
                 let app_settings = default_settings();
                 let runtime = tokio::runtime::Handle::current();
                 let (started_tx, mut started_rx) = oneshot::channel();
@@ -6052,6 +6263,7 @@ mod tests {
                 let task_runtime = runtime.clone();
                 let task_service_manager = service_manager.clone();
                 let task_service_tick = service_tick.clone();
+                let task_deadlines = deadlines.clone();
                 let removal = tokio::task::spawn_local(async move {
                     let mut focus_manager = FocusManager::new();
                     remove_worktree_project_off_reactor_with(
@@ -6068,6 +6280,7 @@ mod tests {
                         &app_settings,
                         &task_service_manager,
                         &task_service_tick,
+                        &task_deadlines,
                         &task_runtime,
                         move |_plan, force| {
                             assert!(force, "the caller's force flag reaches git removal");
@@ -6122,6 +6335,7 @@ mod tests {
                     terminals.clone(),
                 )));
                 let (service_tick, _service_rx) = watch::channel(0u64);
+                let deadlines: SoftCloseDeadlines = Default::default();
                 let app_settings = default_settings();
                 let runtime = tokio::runtime::Handle::current();
                 let (started_tx, started_rx) = oneshot::channel();
@@ -6133,6 +6347,7 @@ mod tests {
                 let task_runtime = runtime.clone();
                 let task_service_manager = service_manager.clone();
                 let task_service_tick = service_tick.clone();
+                let task_deadlines = deadlines.clone();
                 let removal = tokio::task::spawn_local(async move {
                     let mut focus_manager = FocusManager::new();
                     remove_worktree_project_off_reactor_with(
@@ -6149,6 +6364,7 @@ mod tests {
                         &app_settings,
                         &task_service_manager,
                         &task_service_tick,
+                        &task_deadlines,
                         &task_runtime,
                         move |_plan, _force| {
                             let _ = started_tx.send(());
@@ -6186,6 +6402,173 @@ mod tests {
         std::fs::remove_dir_all(fixture).expect("remove fixture");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dirty_direct_removal_preflight_leaves_runtimes_and_services_untouched() {
+        let (fixture, workspace) = direct_removal_fixture("dirty-preflight");
+        let worktree_path = fixture.join("worktree");
+        std::fs::write(worktree_path.join("dirty.txt"), "dirty\n").expect("dirty worktree");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RenameRecordingBackend {
+            events: events.clone(),
+            next_id: std::sync::atomic::AtomicUsize::new(1),
+            fail_after: None,
+        });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let deadlines: SoftCloseDeadlines = Default::default();
+        let runtime = tokio::runtime::Handle::current();
+        let settings = default_settings();
+        let before_workspace = serde_json::to_value(workspace.lock().data())
+            .expect("serialize workspace before preflight");
+        let workspace_epoch = workspace.lock().data_replacement_epoch();
+        let before_service_token = {
+            let reactor_ref = ServiceReactorRef::new(
+                service_manager.clone(),
+                runtime.clone(),
+                service_tick.clone(),
+            );
+            let mut manager = service_manager.lock();
+            let mut cx = reactor_ref.cx();
+            manager.set_project_writeback_owner(
+                "wt1",
+                &worktree_path.to_string_lossy(),
+                workspace_epoch,
+            );
+            assert_eq!(
+                manager.load_project_services_prepared_without_auto_start(
+                    "wt1",
+                    &worktree_path.to_string_lossy(),
+                    PreparedProjectConfig::Loaded {
+                        config: None,
+                        detected_compose_file: None,
+                    },
+                    &mut cx,
+                ),
+                ServiceLoadStatus::Loaded
+            );
+            manager.project_state_token("wt1")
+        };
+
+        let mut focus_manager = FocusManager::new();
+        let result = remove_worktree_project_off_reactor_with(
+            "wt1".to_string(),
+            false,
+            Default::default(),
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            &mut focus_manager,
+            &backend,
+            &terminals,
+            &settings,
+            &service_manager,
+            &service_tick,
+            &deadlines,
+            &runtime,
+            |_plan, _force| panic!("dirty checkout must fail before physical removal"),
+        )
+        .await;
+
+        assert!(
+            matches!(result, CommandResult::Err(ref error) if error.contains("uncommitted changes")),
+            "{result:?}"
+        );
+        assert!(events.lock().is_empty(), "no terminal teardown or flush");
+        assert_eq!(
+            serde_json::to_value(workspace.lock().data())
+                .expect("serialize workspace after preflight"),
+            before_workspace
+        );
+        let manager = service_manager.lock();
+        assert_eq!(
+            manager.project_path("wt1").map(String::as_str),
+            Some(worktree_path.to_string_lossy().as_ref())
+        );
+        assert!(manager.is_project_state_token_current("wt1", &before_service_token));
+        drop(manager);
+        std::fs::remove_dir_all(fixture).expect("remove fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_partial_runtime_recovery_cleans_created_ptys_and_lifecycle() {
+        let (fixture, workspace) = direct_removal_fixture("partial-recovery");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RenameRecordingBackend {
+            events: events.clone(),
+            next_id: std::sync::atomic::AtomicUsize::new(1),
+            fail_after: Some(2),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let deadlines: SoftCloseDeadlines = Default::default();
+        let runtime = tokio::runtime::Handle::current();
+        let settings = default_settings();
+        let mut focus_manager = FocusManager::new();
+
+        let result = remove_worktree_project_off_reactor_with(
+            "wt1".to_string(),
+            true,
+            Default::default(),
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            &mut focus_manager,
+            &backend,
+            &terminals,
+            &settings,
+            &service_manager,
+            &service_tick,
+            &deadlines,
+            &runtime,
+            |_plan, _force| Err("injected removal failure".to_string()),
+        )
+        .await;
+
+        assert!(
+            matches!(result, CommandResult::Err(ref error)
+                if error.contains("injected removal failure")
+                    && error.contains("terminal recovery failed")),
+            "{result:?}"
+        );
+        let workspace = workspace.lock();
+        let project = workspace
+            .project("wt1")
+            .expect("project remains after failure");
+        assert!(!workspace.is_project_closing("wt1"));
+        assert!(
+            project
+                .layout
+                .as_ref()
+                .expect("layout retained")
+                .collect_terminal_ids()
+                .is_empty(),
+            "partial terminal ids are cleared from authoritative layout"
+        );
+        assert!(
+            !project.hook_terminals.contains_key("running-hook"),
+            "cancelled active hook entry is not left dead after recovery"
+        );
+        drop(workspace);
+        assert!(terminals.lock().is_empty(), "partial PTY registry is clean");
+        let events = events.lock();
+        assert!(events.iter().any(|event| event == "kill:replacement-1"));
+        assert_eq!(events.iter().filter(|event| *event == "flush").count(), 2);
+        drop(events);
+        std::fs::remove_dir_all(fixture).expect("remove fixture");
+    }
+
     fn rename_runtime_fixture(label: &str) -> (std::path::PathBuf, Arc<Mutex<Workspace>>) {
         let fixture = std::env::temp_dir().join(format!(
             "okena-rename-runtime-{label}-{}-{}",
@@ -6215,6 +6598,7 @@ mod tests {
         let backend: Arc<dyn TerminalBackend> = Arc::new(RenameRecordingBackend {
             events: events.clone(),
             next_id: std::sync::atomic::AtomicUsize::new(1),
+            fail_after: None,
         });
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
         let service_manager = Arc::new(Mutex::new(ServiceManager::new(
@@ -6223,6 +6607,7 @@ mod tests {
         )));
         let (workspace_tick, _workspace_rx) = watch::channel(0u64);
         let (service_tick, _service_rx) = watch::channel(0u64);
+        let deadlines: SoftCloseDeadlines = Default::default();
         let runtime = tokio::runtime::Handle::current();
         let settings = default_settings();
 
@@ -6239,6 +6624,7 @@ mod tests {
                 &settings,
                 &service_manager,
                 &service_tick,
+                &deadlines,
                 &runtime,
                 {
                     let events = events.clone();
@@ -6292,6 +6678,7 @@ mod tests {
         let backend: Arc<dyn TerminalBackend> = Arc::new(RenameRecordingBackend {
             events: events.clone(),
             next_id: std::sync::atomic::AtomicUsize::new(1),
+            fail_after: None,
         });
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
         let service_manager = Arc::new(Mutex::new(ServiceManager::new(
@@ -6300,6 +6687,7 @@ mod tests {
         )));
         let (workspace_tick, _workspace_rx) = watch::channel(0u64);
         let (service_tick, _service_rx) = watch::channel(0u64);
+        let deadlines: SoftCloseDeadlines = Default::default();
         let runtime = tokio::runtime::Handle::current();
         let settings = default_settings();
 
@@ -6316,6 +6704,7 @@ mod tests {
                 &settings,
                 &service_manager,
                 &service_tick,
+                &deadlines,
                 &runtime,
                 |_plan| Err("injected move failure".to_string()),
             ))
