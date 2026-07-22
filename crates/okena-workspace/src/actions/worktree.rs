@@ -1111,6 +1111,9 @@ impl Workspace {
         if self.lifecycle.is_creating(project_id) {
             return Err("worktree is still being created".to_string());
         }
+        if self.lifecycle.is_closing(project_id) {
+            return Err("worktree is already closing".to_string());
+        }
         // Recompute the git-derived values authoritatively (don't trust the client).
         let project = self
             .project(project_id)

@@ -112,6 +112,46 @@ fn publish_config_change_after_success(result: &CommandResult, state_version: &w
     }
 }
 
+/// Run destructive cleanup only while the workspace still has no project that
+/// owns `project_path`. The workspace guard fences replacement registration
+/// against the check-to-delete window.
+fn with_unclaimed_project_path<R>(
+    workspace: &Arc<Mutex<Workspace>>,
+    project_path: &str,
+    cleanup: impl FnOnce() -> R,
+) -> Option<R> {
+    let workspace = workspace.lock();
+    if workspace
+        .projects()
+        .iter()
+        .any(|project| project.path == project_path)
+    {
+        return None;
+    }
+    Some(cleanup())
+}
+
+fn cleanup_created_worktree_if_unclaimed(
+    workspace: &Arc<Mutex<Workspace>>,
+    project_path: &str,
+    worktree_path: &std::path::Path,
+    git_root: &std::path::Path,
+) {
+    let result = with_unclaimed_project_path(workspace, project_path, || {
+        okena_git::remove_worktree_fast(worktree_path, git_root)
+    });
+    match result {
+        Some(Err(error)) => log::warn!(
+            "worktree-create: failed to clean stale checkout at {}: {error}",
+            worktree_path.display()
+        ),
+        None => log::info!(
+            "worktree-create: retained checkout now claimed by project path {project_path}"
+        ),
+        Some(Ok(())) => {}
+    }
+}
+
 fn unload_project_services(
     project_id: &str,
     service_manager: &Arc<Mutex<ServiceManager>>,
@@ -155,6 +195,28 @@ fn recover_project_services(
     // The old persistent sessions were intentionally killed before removal;
     // reconnecting their ids here would race their asynchronous teardown.
     manager.load_project_services(project_id, &project_path, &HashMap::new(), &mut cx);
+}
+
+fn apply_deferred_hook_actions(
+    ws: &mut Workspace,
+    project_id: &str,
+    outcome: okena_hooks::HookActionOutcome,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> okena_app_core::workspace::actions::execute::ActionResult {
+    let (terminal_actions, hook_results) = outcome;
+    let needs_materialization = !terminal_actions.is_empty();
+    ws.register_hook_results(hook_results, cx);
+    for (command, env) in terminal_actions {
+        ws.add_terminal_with_command(project_id, &command, &env, cx);
+    }
+    if needs_materialization {
+        spawn_uninitialized_terminals(ws, project_id, backend, terminals, settings, None, cx)
+    } else {
+        okena_app_core::workspace::actions::execute::ActionResult::Ok(None)
+    }
 }
 
 /// Run physical worktree removal off the reactor while the daemon keeps the
@@ -208,18 +270,22 @@ pub(crate) fn spawn_background_worktree_removal(
         let task_project_id = plan.project_id.clone();
         let global_hooks_blocking = global_hooks.clone();
         let monitor = hook_monitor.clone();
+        let teardown_backend = backend.clone();
         let outcome = tokio::task::spawn_blocking(move || {
+            // `kill` is asynchronous for local PTYs. Wait off-reactor until the
+            // queued handles and persistent sessions release their checkout CWD.
+            teardown_backend.flush_teardown();
             let worktree_path = plan.worktree_path.clone();
             let main_repo_path = std::path::PathBuf::from(&plan.main_repo_path);
-            plan.fire_close_hooks_headless(&global_hooks_blocking, monitor.as_ref());
             // force_remove = is_dirty && !did_stash — same condition the sync
             // close_worktree path uses to fire the dirty-close safety net. Runs
-            // BEFORE remove_worktree_fast so the hook's CWD still exists.
+            // before close hooks and removal, matching the canonical sync flow.
             let dirty_hook = if !did_stash && okena_git::has_uncommitted_changes(&worktree_path) {
                 Some(plan.fire_on_dirty_close_headless(&global_hooks_blocking, monitor.as_ref()))
             } else {
                 None
             };
+            plan.fire_close_hooks_headless(&global_hooks_blocking, monitor.as_ref());
             let removal = okena_git::remove_worktree_fast(&worktree_path, &main_repo_path);
             (plan, removal, dirty_hook)
         })
@@ -526,18 +592,30 @@ fn spawn_merge_worktree_close(
             }
             Ok(CloseWorktreeGitOutcome::RebaseConflict { error, hook_plan }) => {
                 if let Some(hook_plan) = hook_plan {
-                    let (terminal_actions, hook_results) = okena_hooks::execute_hook_action_plan(
+                    let outcome = okena_hooks::execute_hook_action_plan(
                         hook_plan,
                         hook_monitor.as_ref(),
                         hook_runner.as_ref(),
                     );
+                    let app_settings = settings.lock().clone();
                     let mut cx =
                         DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
                     let mut ws = workspace.lock();
-                    for (command, env) in terminal_actions {
-                        ws.add_terminal_with_command(&project_id, &command, &env, &mut cx);
+                    if let okena_app_core::workspace::actions::execute::ActionResult::Err(
+                        spawn_error,
+                    ) = apply_deferred_hook_actions(
+                        &mut ws,
+                        &project_id,
+                        outcome,
+                        backend.as_ref(),
+                        &terminals,
+                        &app_settings,
+                        &mut cx,
+                    ) {
+                        log::error!(
+                            "worktree-close: failed to materialize rebase hook terminal for {project_id}: {spawn_error}"
+                        );
                     }
-                    ws.register_hook_results(hook_results, &mut cx);
                 }
                 abort_background_worktree_close(
                     &project_id,
@@ -1030,12 +1108,6 @@ pub async fn daemon_command_loop(
                                                 let target =
                                                     std::path::PathBuf::from(&worktree_path);
                                                 tokio::task::spawn_blocking(move || {
-                                                // Record whether the target dir existed BEFORE our
-                                                // git ran, so the failure cleanup only ever deletes a
-                                                // checkout THIS attempt created — never a dir that
-                                                // already belonged to someone else (a live worktree
-                                                // or a racing create's checkout).
-                                                let preexisting = target.exists();
                                                 let (result, default_branch) = if create_branch {
                                                     let default = okena_git::get_default_branch(&git_root);
                                                     (
@@ -1059,38 +1131,22 @@ pub async fn daemon_command_loop(
                                                         &default_branch,
                                                     );
                                                 }
-                                                (preexisting, result)
+                                                result
                                             })
                                             .await
                                             };
-                                            let replacement_state = {
-                                                let ws = workspace.lock();
-                                                (
-                                                    ws.data_replacement_epoch() != operation_epoch,
-                                                    ws.projects().iter().any(|project| {
-                                                        project.path == wt_project_path_task
-                                                    }),
-                                                )
-                                            };
-                                            if replacement_state.0 {
+                                            let stale = workspace.lock().data_replacement_epoch()
+                                                != operation_epoch;
+                                            if stale {
                                                 log::info!(
                                                     "worktree-create: ignoring stale completion for {new_id_task}"
                                                 );
-                                                let created_by_attempt = match &git {
-                                                    Ok((false, Ok(()))) => true,
-                                                    Ok((
-                                                        false,
-                                                        Err(okena_git::GitError::WorktreeExists {
-                                                            ..
-                                                        }),
-                                                    )) => false,
-                                                    Ok((false, Err(_))) => true,
-                                                    _ => false,
-                                                };
-                                                if created_by_attempt && !replacement_state.1 {
+                                                if matches!(&git, Ok(Ok(()))) {
                                                     let _ =
                                                         tokio::task::spawn_blocking(move || {
-                                                            let _ = okena_git::remove_worktree_fast(
+                                                            cleanup_created_worktree_if_unclaimed(
+                                                                &workspace,
+                                                                &wt_project_path_task,
                                                                 std::path::Path::new(
                                                                     &worktree_path,
                                                                 ),
@@ -1102,7 +1158,7 @@ pub async fn daemon_command_loop(
                                                 return;
                                             }
                                             match git {
-                                                Ok((_, Ok(()))) => {
+                                                Ok(Ok(())) => {
                                                     {
                                                         let mut cx = DaemonWorkspaceCx::new(
                                                             &workspace_tick,
@@ -1134,26 +1190,23 @@ pub async fn daemon_command_loop(
                                                     }
                                                 }
                                                 result => {
-                                                    // is_collision = the target is ALREADY an active
-                                                    // worktree; never clean that up (it belongs to
-                                                    // someone else), only partial checkouts we started.
-                                                    // preexisting = the target dir was on disk BEFORE our
-                                                    // git ran, so it isn't ours to delete either.
-                                                    let (msg, is_collision, preexisting) = match result {
-                                                    Ok((pre, Err(okena_git::GitError::WorktreeExists { path }))) => (
-                                                        format!(
-                                                            "Directory '{}' is already an active worktree",
+                                                    let msg = match result {
+                                                        Ok(Err(
+                                                            okena_git::GitError::WorktreeExists {
+                                                                path,
+                                                            },
+                                                        )) => format!(
+                                                            "Directory '{}' already exists",
                                                             path.display()
                                                         ),
-                                                        true,
-                                                        pre,
-                                                    ),
-                                                    Ok((pre, Err(e))) => (e.to_string(), false, pre),
-                                                    // Join failure: we can't know disk state — treat
-                                                    // as preexisting so we never touch the dir.
-                                                    Err(join) => (format!("worktree creation task failed: {join}"), false, true),
-                                                    Ok((_, Ok(()))) => unreachable!("success handled above"),
-                                                };
+                                                        Ok(Err(e)) => e.to_string(),
+                                                        Err(join) => format!(
+                                                            "worktree creation task failed: {join}"
+                                                        ),
+                                                        Ok(Ok(())) => {
+                                                            unreachable!("success handled above")
+                                                        }
+                                                    };
                                                     // Roll the optimistic row back. Clear creating
                                                     // FIRST — remove_stale_worktree skips creating
                                                     // projects.
@@ -1176,29 +1229,8 @@ pub async fn daemon_command_loop(
                                                             msg,
                                                         ));
                                                     }
-                                                    // Clean up any partial checkout git left on disk
-                                                    // (dir + stale registration) so a failed create
-                                                    // never leaves an empty orphaned worktree folder —
-                                                    // but ONLY a dir THIS attempt created: skip it when
-                                                    // the target was already an active worktree
-                                                    // (is_collision) or existed on disk before our git
-                                                    // ran (preexisting). This makes the cleanup safe by
-                                                    // construction — a losing create can never delete a
-                                                    // dir it didn't create (e.g. a live checkout).
-                                                    if !is_collision && !preexisting {
-                                                        let _ = tokio::task::spawn_blocking(
-                                                            move || {
-                                                                let _ =
-                                                                    okena_git::remove_worktree_fast(
-                                                                        std::path::Path::new(
-                                                                            &worktree_path,
-                                                                        ),
-                                                                        &git_root,
-                                                                    );
-                                                            },
-                                                        )
-                                                        .await;
-                                                    }
+                                                    // A failed git command does not prove ownership of
+                                                    // anything left at the target, so cleanup is manual.
                                                 }
                                             }
                                         });
@@ -1260,6 +1292,8 @@ pub async fn daemon_command_loop(
                                 &service_manager,
                                 &service_tick,
                             )
+                        } else if workspace.lock().is_project_closing(&project_id) {
+                            CommandResult::Err("worktree is already closing".to_string())
                         } else {
                             let plan = {
                                 let mut cx = DaemonWorkspaceCx::new(
@@ -1847,6 +1881,42 @@ mod tests {
     }
 
     #[test]
+    fn deferred_hook_terminal_actions_are_materialized_immediately() {
+        let mut data = workspace_with_worktree_child();
+        data.projects[1].layout = None;
+        let mut workspace = Workspace::new(data);
+        let backend = RestoringBackend;
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let (workspace_tick, _receiver) = watch::channel(0u64);
+        let hook_runner = None;
+        let hook_monitor = None;
+        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+
+        let result = apply_deferred_hook_actions(
+            &mut workspace,
+            "wt1",
+            (vec![("git status".to_string(), HashMap::new())], Vec::new()),
+            &backend,
+            &terminals,
+            &default_settings(),
+            &mut cx,
+        );
+
+        assert!(matches!(
+            result,
+            okena_app_core::workspace::actions::execute::ActionResult::Ok(_)
+        ));
+        assert!(matches!(
+            workspace.project("wt1").and_then(|project| project.layout.as_ref()),
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(id),
+                ..
+            }) if id == "restored-terminal"
+        ));
+        assert!(terminals.lock().contains_key("restored-terminal"));
+    }
+
+    #[test]
     fn api_project_visibility_reads_from_hidden_set() {
         use okena_app_core::remote_snapshot::api_project_visibility;
         let hidden: HashSet<String> = ["p1".to_string()].into_iter().collect();
@@ -1881,6 +1951,35 @@ mod tests {
         assert_eq!(trigger.project_id.as_deref(), Some("p1"));
         assert!(trigger.poll_github);
         assert!(trigger.invalidate_github);
+    }
+
+    #[test]
+    fn stale_create_cleanup_skips_path_claimed_by_replacement_project() {
+        let claimed_path = "/replacement/worktree/project";
+        let mut data = workspace_with_worktree_child();
+        data.projects[1].path = claimed_path.to_string();
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+
+        let result = with_unclaimed_project_path(&workspace, claimed_path, || {
+            panic!("claimed replacement path must not be cleaned")
+        });
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn stale_create_cleanup_holds_ownership_guard_through_delete() {
+        let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
+
+        let result = with_unclaimed_project_path(&workspace, "/unclaimed/worktree", || {
+            assert!(
+                workspace.try_lock().is_none(),
+                "replacement registration must not interleave after the ownership check"
+            );
+            "cleaned"
+        });
+
+        assert_eq!(result, Some("cleaned"));
     }
 
     // ── Loop round-trip tests ─────────────────────────────────────────────────
@@ -2021,6 +2120,50 @@ mod tests {
                     assert!(workspace.is_creating_project("wt1"));
                     assert!(!workspace.is_project_closing("wt1"));
                 }
+
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_merge_close_rejects_worktree_already_closing() {
+        let h = harness();
+        {
+            let mut workspace = h.workspace.lock();
+            *workspace = Workspace::new(workspace_with_worktree_child());
+            workspace.mark_closing_project_authoritative("wt1");
+        }
+        let workspace_for_assert = h.workspace.clone();
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let result = request(
+                    &bridge_tx,
+                    RemoteCommand::Action(ActionRequest::CloseWorktree {
+                        project_id: "wt1".into(),
+                        merge: false,
+                        stash: false,
+                        fetch: false,
+                        push: false,
+                        delete_branch: false,
+                    }),
+                    "CloseWorktree",
+                )
+                .await;
+
+                assert!(matches!(
+                    &result,
+                    CommandResult::Err(error) if error == "worktree is already closing"
+                ));
+                let workspace = workspace_for_assert.lock();
+                assert!(workspace.project("wt1").is_some());
+                assert!(workspace.is_project_closing("wt1"));
+                drop(workspace);
 
                 drop(bridge_tx);
                 handle.await.expect("loop task joins");
@@ -2784,6 +2927,72 @@ mod tests {
         }
     }
 
+    struct RemovalBarrierBackend {
+        killed: std::sync::atomic::AtomicBool,
+        flush_started: std::sync::atomic::AtomicBool,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl TerminalBackend for RemovalBarrierBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("removal barrier backend does not create terminals")
+        }
+
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("removal barrier backend does not reconnect terminals")
+        }
+
+        fn kill(&self, _terminal_id: &str) {
+            self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn flush_teardown(&self) {
+            assert!(
+                self.killed.load(std::sync::atomic::Ordering::SeqCst),
+                "project PTYs must be killed before the teardown barrier"
+            );
+            self.flush_started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.release
+                .lock()
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("test releases teardown barrier");
+        }
+
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+
+        fn is_remote(&self) -> bool {
+            false
+        }
+
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
     /// A single-terminal project whose terminal already has a real id.
     fn workspace_with_initialized_terminal(terminal_id: &str) -> WorkspaceData {
         use okena_state::{LayoutNode, ProjectData};
@@ -3132,6 +3341,168 @@ mod tests {
             "failure is surfaced to clients"
         );
         std::fs::remove_file(invalid_worktree).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_removal_waits_for_teardown_then_runs_hooks_in_order() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        let repo = std::env::temp_dir().join(format!(
+            "okena-close-hook-order-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let worktree = repo.with_extension("worktree");
+        let marker = repo.with_extension("hooks.log");
+        std::fs::create_dir_all(&repo).expect("create repository directory");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@okena.local"]);
+        git(&repo, &["config", "user.name", "Okena Test"]);
+        std::fs::write(repo.join("file.txt"), "base\n").expect("write fixture");
+        git(&repo, &["add", "file.txt"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                worktree.to_str().expect("utf-8 worktree path"),
+            ],
+        );
+        std::fs::write(worktree.join("file.txt"), "dirty\n").expect("dirty worktree");
+
+        let mut data = workspace_with_worktree_child();
+        data.projects[0].path = repo.to_string_lossy().into_owned();
+        data.projects[1].path = worktree.to_string_lossy().into_owned();
+        let metadata = data.projects[1]
+            .worktree_info
+            .as_mut()
+            .expect("worktree metadata");
+        metadata.main_repo_path = repo.to_string_lossy().into_owned();
+        metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".into();
+        if let Some(LayoutNode::Terminal { terminal_id, .. }) = data.projects[1].layout.as_mut() {
+            *terminal_id = Some("terminal-1".to_string());
+        }
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let barrier_backend = Arc::new(RemovalBarrierBackend {
+            killed: std::sync::atomic::AtomicBool::new(false),
+            flush_started: std::sync::atomic::AtomicBool::new(false),
+            release: Mutex::new(release_rx),
+        });
+        let backend: Arc<dyn TerminalBackend> = barrier_backend.clone();
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let mut settings_value = default_settings();
+        settings_value.hooks.worktree.on_dirty_close = Some(format!(
+            "printf 'dirty\\n' >> '{}'",
+            marker.to_string_lossy()
+        ));
+        settings_value.hooks.worktree.on_close = Some(format!(
+            "printf 'close\\n' >> '{}'",
+            marker.to_string_lossy()
+        ));
+        let global_hooks = settings_value.hooks.clone();
+        let settings = Arc::new(Mutex::new(settings_value));
+        let hook_runner = None;
+        let hook_monitor = None;
+        let (workspace_tick, _receiver) = watch::channel(0u64);
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let (service_tick, _service_receiver) = watch::channel(0u64);
+        let runtime = tokio::runtime::Handle::current();
+        let (operation_epoch, plan) = {
+            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+            let mut ws = workspace.lock();
+            let operation_epoch = ws.data_replacement_epoch();
+            let plan = ws
+                .begin_worktree_removal("wt1", &global_hooks, &mut cx)
+                .expect("build removal plan");
+            (operation_epoch, plan)
+        };
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let result = spawn_background_worktree_removal(
+                    plan,
+                    operation_epoch,
+                    false,
+                    &global_hooks,
+                    &workspace,
+                    &workspace_tick,
+                    &hook_runner,
+                    &hook_monitor,
+                    &backend,
+                    &terminals,
+                    &settings,
+                    &service_manager,
+                    &service_tick,
+                    &runtime,
+                );
+                assert!(matches!(
+                    result,
+                    CommandResult::Ok(Some(ref value)) if value["pending"] == true
+                ));
+
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while !barrier_backend
+                        .flush_started
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("removal reaches teardown barrier");
+                assert!(
+                    worktree.exists(),
+                    "checkout survives while teardown is pending"
+                );
+                assert!(
+                    !marker.exists(),
+                    "close hooks wait behind terminal teardown"
+                );
+                release_tx.send(()).expect("release teardown barrier");
+
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        if workspace.lock().project("wt1").is_none() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("background removal completes");
+            })
+            .await;
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("read hook order"),
+            "dirty\nclose\n"
+        );
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_file(&marker).ok();
     }
 
     #[test]

@@ -1,76 +1,21 @@
-//! Worktree operations: create / remove / list / clean stale dirs.
+//! Worktree operations: create / remove / list.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use okena_core::process::{command, safe_output};
 
 use super::branch::get_default_branch;
-use super::paths::normalize_path;
 use super::{head_branch_short, path_str, require_success};
 use crate::error::{GitError, GitResult};
 
-/// Collect the work-directory paths of every active worktree (main + linked),
-/// including detached ones — unlike `list_git_worktrees`, which skips detached
-/// heads. Best-effort: returns an empty vec if the repo can't be opened.
-fn active_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
-    let Some(repo) = crate::gix_helpers::open(repo_path) else {
-        return Vec::new();
-    };
-
-    let mut paths = Vec::new();
-
-    // Main worktree, resolved via common_dir so this works from a linked worktree.
-    if let Ok(main_repo) = gix::open(repo.common_dir())
-        && let Some(workdir) = main_repo.workdir()
-    {
-        paths.push(workdir.to_path_buf());
-    }
-
-    // Linked worktrees from .git/worktrees/*; base() resolves even if the
-    // worktree directory is currently inaccessible.
-    if let Ok(worktrees) = repo.worktrees() {
-        for proxy in worktrees {
-            if let Ok(base) = proxy.base() {
-                paths.push(base);
-            }
-        }
-    }
-
-    paths
-}
-
-/// If `target_path` exists but is NOT a currently registered worktree, remove
-/// the stale directory and prune worktree metadata so a fresh `worktree add`
-/// can succeed.  Returns an error only when the path is still an active worktree.
-fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> GitResult<()> {
-    if !target_path.exists() {
-        return Ok(());
-    }
-
-    // Ask gix which paths are active worktrees (main + linked, incl. detached).
-    let repo_str = path_str(repo_path)?;
-    let target_normalized = normalize_path(target_path);
-    if active_worktree_paths(repo_path)
-        .iter()
-        .any(|p| normalize_path(p) == target_normalized)
-    {
+/// Refuse every existing target. An unregistered directory is not proof that
+/// Okena owns its contents, so create must never remove it speculatively.
+fn require_absent_worktree_target(target_path: &Path) -> GitResult<()> {
+    if target_path.exists() {
         return Err(GitError::WorktreeExists {
             path: target_path.to_path_buf(),
         });
     }
-
-    // Not an active worktree — remove the stale directory and prune metadata
-    log::info!(
-        "Removing stale worktree directory: {}",
-        target_path.display()
-    );
-    std::fs::remove_dir_all(target_path).map_err(|e| GitError::RemoveFailed {
-        path: target_path.to_path_buf(),
-        source: e,
-    })?;
-
-    let _ = safe_output(command("git").args(["-C", repo_str, "worktree", "prune"]));
-
     Ok(())
 }
 
@@ -82,7 +27,7 @@ pub fn create_worktree(
     create_branch: bool,
 ) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
-    clean_stale_worktree_dir(repo_path, target_path)?;
+    require_absent_worktree_target(target_path)?;
 
     let repo_str = path_str(repo_path)?;
     let target_str = path_str(target_path)?;
@@ -130,7 +75,7 @@ pub fn create_worktree_with_start_point(
     if let Some(sb) = start_branch {
         crate::validate_git_ref(sb)?;
     }
-    clean_stale_worktree_dir(repo_path, target_path)?;
+    require_absent_worktree_target(target_path)?;
 
     let repo_str = path_str(repo_path)?;
     let target_str = path_str(target_path)?;
@@ -310,5 +255,26 @@ mod tests {
         let mut branches = crate::repository::get_worktree_branches(&repo);
         branches.sort();
         assert_eq!(branches, vec!["feat", "main"]);
+    }
+
+    #[test]
+    fn create_refuses_existing_unregistered_directory_without_deleting_it() {
+        let (_tmp, repo) = init_temp_repo();
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let target = target_parent.path().join("existing-directory");
+        std::fs::create_dir(&target).expect("create existing target");
+        let sentinel = target.join("keep-me.txt");
+        std::fs::write(&sentinel, "user data").expect("write sentinel");
+
+        let result = create_worktree(&repo, "feature", &target, true);
+
+        assert!(matches!(
+            result,
+            Err(GitError::WorktreeExists { ref path }) if path == &target
+        ));
+        assert_eq!(
+            std::fs::read_to_string(sentinel).expect("existing data survives"),
+            "user data"
+        );
     }
 }

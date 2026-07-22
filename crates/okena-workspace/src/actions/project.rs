@@ -2157,6 +2157,39 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn close_worktree_rejected_while_already_closing(cx: &mut gpui::TestAppContext) {
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let err = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.mark_closing_project_authoritative("wt1");
+            ws.close_worktree(
+                &mut FocusManager::new(),
+                "wt1",
+                false,
+                false,
+                false,
+                false,
+                false,
+                &HooksConfig::default(),
+                cx,
+            )
+            .err()
+        });
+
+        assert_eq!(err.as_deref(), Some("worktree is already closing"));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.project("wt1").is_some());
+            assert!(ws.is_project_closing("wt1"));
+            assert!(ws.project("wt1").unwrap().is_closing);
+        });
+    }
+
+    #[gpui::test]
     fn begin_worktree_removal_succeeds_after_create_finishes(cx: &mut gpui::TestAppContext) {
         // Inverse of the mid-create guard: once finish_creating_project clears
         // the flag (finalize path), the same removal route is no longer rejected
