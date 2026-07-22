@@ -51,6 +51,14 @@ fn canonicalize_layout_action(action: ActionRequest, mode: ProjectLayoutMode) ->
     }
 }
 
+fn discovered_worktree_project_name(worktree_path: &str, branch: &str) -> String {
+    let directory_name = std::path::Path::new(worktree_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("worktree");
+    format!("{directory_name} ({branch})")
+}
+
 /// Build an ActionDispatcher for the given project.
 ///
 /// Every project is a remote project of the local daemon, so this always
@@ -281,6 +289,19 @@ impl ActionDispatcher {
                 let branch = branch.clone();
                 workspace.update(cx, |ws, _cx| {
                     ws.queue_pending_remote_project_visibility(window_id, &cid, &branch, None);
+                });
+                // Don't return — action proceeds to be sent to server below
+            }
+            ActionRequest::AddDiscoveredWorktree {
+                worktree_path,
+                branch,
+                ..
+            } => {
+                let window_id = *window_id;
+                let cid = connection_id.clone();
+                let name = discovered_worktree_project_name(worktree_path, branch);
+                workspace.update(cx, |ws, _cx| {
+                    ws.queue_pending_remote_project_visibility(window_id, &cid, &name, None);
                 });
                 // Don't return — action proceeds to be sent to server below
             }
@@ -1116,5 +1137,17 @@ mod tests {
             action,
             ActionRequest::MovePaneTo { zone, .. } if zone == "top"
         ));
+    }
+
+    #[test]
+    fn discovered_worktree_visibility_name_matches_daemon_project_name() {
+        assert_eq!(
+            discovered_worktree_project_name("/repo/worktrees/payments", "feature/payments"),
+            "payments (feature/payments)"
+        );
+        assert_eq!(
+            discovered_worktree_project_name("/", "feature/fallback"),
+            "worktree (feature/fallback)"
+        );
     }
 }
