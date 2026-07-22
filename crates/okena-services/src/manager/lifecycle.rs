@@ -92,6 +92,24 @@ impl ServiceManager {
         )
     }
 
+    /// Apply a prepared config without starting services from config defaults.
+    pub fn load_project_services_prepared_without_auto_start(
+        &mut self,
+        project_id: &str,
+        project_path: &str,
+        prepared: PreparedProjectConfig,
+        cx: &mut impl ServiceCx,
+    ) -> ServiceLoadStatus {
+        self.load_project_services_prepared_with_auto_start(
+            project_id,
+            project_path,
+            &HashMap::new(),
+            prepared,
+            false,
+            cx,
+        )
+    }
+
     fn load_project_services_prepared_with_auto_start(
         &mut self,
         project_id: &str,

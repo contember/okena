@@ -191,12 +191,12 @@ fn cleanup_created_worktree_if_unclaimed(
     }
 }
 
-fn unload_project_services(
+fn unload_project_services_for_background_removal(
     project_id: &str,
     service_manager: &Arc<Mutex<ServiceManager>>,
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
-) {
+) -> Vec<String> {
     let reactor_ref = ServiceReactorRef::new(
         service_manager.clone(),
         runtime.clone(),
@@ -204,7 +204,9 @@ fn unload_project_services(
     );
     let mut manager = service_manager.lock();
     let mut cx = reactor_ref.cx();
+    let active_service_names = manager.active_okena_service_names(project_id);
     manager.unload_project_services(project_id, &mut cx);
+    active_service_names
 }
 
 struct PreparedServiceOwner {
@@ -337,6 +339,7 @@ async fn reload_project_services_off_reactor(
 
 async fn recover_project_services_with_preparer<Prepare>(
     project_id: &str,
+    active_service_names: &[String],
     workspace: &Arc<Mutex<Workspace>>,
     service_manager: &Arc<Mutex<ServiceManager>>,
     service_tick: &watch::Sender<u64>,
@@ -382,17 +385,22 @@ async fn recover_project_services_with_preparer<Prepare>(
     );
     // The old persistent sessions were intentionally killed before removal;
     // reconnecting their ids here would race their asynchronous teardown.
-    manager.load_project_services_prepared(
+    let status = manager.load_project_services_prepared_without_auto_start(
         project_id,
         &owner.project_path,
-        &HashMap::new(),
         prepared,
         &mut cx,
     );
+    if status == ServiceLoadStatus::Loaded {
+        for service_name in active_service_names {
+            manager.start_service(project_id, service_name, &owner.project_path, &mut cx);
+        }
+    }
 }
 
 async fn recover_project_services(
     project_id: &str,
+    active_service_names: &[String],
     workspace: &Arc<Mutex<Workspace>>,
     service_manager: &Arc<Mutex<ServiceManager>>,
     service_tick: &watch::Sender<u64>,
@@ -400,6 +408,7 @@ async fn recover_project_services(
 ) {
     recover_project_services_with_preparer(
         project_id,
+        active_service_names,
         workspace,
         service_manager,
         service_tick,
@@ -951,7 +960,12 @@ pub(crate) fn spawn_background_worktree_removal(
     };
     // ServiceManager owns restart-on-crash. Unload before killing project PTYs
     // so their exit events cannot schedule replacement services mid-removal.
-    unload_project_services(&plan.project_id, service_manager, service_tick, runtime);
+    let active_service_names = unload_project_services_for_background_removal(
+        &plan.project_id,
+        service_manager,
+        service_tick,
+        runtime,
+    );
     for id in terminal_ids {
         backend.kill(&id);
         terminals.lock().remove(&id);
@@ -1039,8 +1053,6 @@ pub(crate) fn spawn_background_worktree_removal(
                             );
                             return;
                         }
-                        ws.finish_closing_project(&plan.project_id);
-                        cx.notify();
                         if let okena_app_core::workspace::actions::execute::ActionResult::Err(
                             spawn_error,
                         ) = spawn_uninitialized_terminals(
@@ -1066,12 +1078,20 @@ pub(crate) fn spawn_background_worktree_removal(
                         drop(ws);
                         recover_project_services(
                             &plan.project_id,
+                            &active_service_names,
                             &workspace,
                             &service_manager,
                             &service_tick,
                             &runtime,
                         )
                         .await;
+                        let mut cx =
+                            DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                        let mut ws = workspace.lock();
+                        if ws.data_replacement_epoch() == operation_epoch {
+                            ws.finish_closing_project(&plan.project_id);
+                            cx.notify();
+                        }
                     }
                 }
             }
@@ -1084,8 +1104,6 @@ pub(crate) fn spawn_background_worktree_removal(
                     log::info!("worktree-close: ignoring stale task failure for {task_project_id}");
                     return;
                 }
-                ws.finish_closing_project(&task_project_id);
-                cx.notify();
                 if let okena_app_core::workspace::actions::execute::ActionResult::Err(spawn_error) =
                     spawn_uninitialized_terminals(
                         &mut ws,
@@ -1104,12 +1122,19 @@ pub(crate) fn spawn_background_worktree_removal(
                 drop(ws);
                 recover_project_services(
                     &task_project_id,
+                    &active_service_names,
                     &workspace,
                     &service_manager,
                     &service_tick,
                     &runtime,
                 )
                 .await;
+                let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                let mut ws = workspace.lock();
+                if ws.data_replacement_epoch() == operation_epoch {
+                    ws.finish_closing_project(&task_project_id);
+                    cx.notify();
+                }
             }
         }
     });
@@ -3232,7 +3257,12 @@ mod tests {
         let (service_tick, _service_rx) = watch::channel(0u64);
         let runtime = tokio::runtime::Handle::current();
 
-        unload_project_services("p1", &service_manager, &service_tick, &runtime);
+        let active_service_names = unload_project_services_for_background_removal(
+            "p1",
+            &service_manager,
+            &service_tick,
+            &runtime,
+        );
         assert!(
             service_manager
                 .lock()
@@ -3240,7 +3270,15 @@ mod tests {
                 .is_empty()
         );
 
-        recover_project_services("p1", &workspace, &service_manager, &service_tick, &runtime).await;
+        recover_project_services(
+            "p1",
+            &active_service_names,
+            &workspace,
+            &service_manager,
+            &service_tick,
+            &runtime,
+        )
+        .await;
 
         let writebacks = service_manager.lock().service_terminal_writebacks();
         assert_eq!(writebacks.len(), 1);
@@ -3270,6 +3308,228 @@ mod tests {
         drop(workspace);
 
         std::fs::remove_dir_all(project_dir).expect("remove project fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_close_service_recovery_preserves_inverted_manual_intent() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let project_dir = std::env::temp_dir().join(format!(
+                    "okena-service-intent-recovery-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::create_dir_all(&project_dir).expect("create project fixture");
+                std::fs::write(
+                    project_dir.join("okena.yaml"),
+                    "services:\n  - name: configured-on\n    command: echo configured\n    auto_start: true\n  - name: manual-on\n    command: echo manual\n    auto_start: false\n",
+                )
+                .expect("write project services");
+
+                let project_path = project_dir.to_string_lossy().into_owned();
+                let workspace = Arc::new(Mutex::new(Workspace::new(
+                    workspace_with_uninitialized_terminal(&project_path),
+                )));
+                let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+                let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingMigrationBackend::new(
+                    Arc::new(Mutex::new(Vec::new())),
+                    SessionBackend::None,
+                    false,
+                    false,
+                ));
+                let service_manager = Arc::new(Mutex::new(ServiceManager::new(backend, terminals)));
+                let (service_tick, _service_rx) = watch::channel(0u64);
+                let runtime = tokio::runtime::Handle::current();
+                let current_epoch = workspace.lock().data_replacement_epoch();
+                {
+                    let reactor_ref = ServiceReactorRef::new(
+                        service_manager.clone(),
+                        runtime.clone(),
+                        service_tick.clone(),
+                    );
+                    let mut manager = service_manager.lock();
+                    let mut cx = reactor_ref.cx();
+                    manager.set_project_writeback_owner("p1", &project_path, current_epoch);
+                    manager.load_project_services_prepared(
+                        "p1",
+                        &project_path,
+                        &HashMap::new(),
+                        prepare_project_config(&project_path),
+                        &mut cx,
+                    );
+                    manager.stop_service("p1", "configured-on", &mut cx);
+                    manager.start_service("p1", "manual-on", &project_path, &mut cx);
+                }
+
+                let active_service_names = unload_project_services_for_background_removal(
+                    "p1",
+                    &service_manager,
+                    &service_tick,
+                    &runtime,
+                );
+                assert_eq!(active_service_names, vec!["manual-on"]);
+
+                recover_project_services(
+                    "p1",
+                    &active_service_names,
+                    &workspace,
+                    &service_manager,
+                    &service_tick,
+                    &runtime,
+                )
+                .await;
+
+                let manager = service_manager.lock();
+                let statuses: HashMap<&str, &okena_services::manager::ServiceStatus> = manager
+                    .services_for_project("p1")
+                    .into_iter()
+                    .map(|service| (service.definition.name.as_str(), &service.status))
+                    .collect();
+                assert_eq!(
+                    statuses.get("configured-on"),
+                    Some(&&okena_services::manager::ServiceStatus::Stopped)
+                );
+                assert!(matches!(
+                    statuses.get("manual-on"),
+                    Some(
+                        okena_services::manager::ServiceStatus::Starting
+                            | okena_services::manager::ServiceStatus::Running
+                    )
+                ));
+                drop(manager);
+
+                std::fs::remove_dir_all(project_dir).expect("remove project fixture");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_close_service_recovery_discards_stale_workspace_epoch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let project_path = "/captured/project";
+                let workspace = Arc::new(Mutex::new(Workspace::new(
+                    workspace_with_uninitialized_terminal(project_path),
+                )));
+                let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+                let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+                let service_manager = Arc::new(Mutex::new(ServiceManager::new(backend, terminals)));
+                let (service_tick, _service_rx) = watch::channel(0u64);
+                let runtime = tokio::runtime::Handle::current();
+                let (started_tx, started_rx) = oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let task_workspace = workspace.clone();
+                let task_manager = service_manager.clone();
+                let task_tick = service_tick.clone();
+                let task_runtime = runtime.clone();
+                let recovery = tokio::task::spawn_local(async move {
+                    recover_project_services_with_preparer(
+                        "p1",
+                        &["manual-on".to_string()],
+                        &task_workspace,
+                        &task_manager,
+                        &task_tick,
+                        &task_runtime,
+                        move |_| {
+                            let _ = started_tx.send(());
+                            release_rx.recv().expect("release service preparation");
+                            PreparedProjectConfig::Loaded {
+                                config: None,
+                                detected_compose_file: None,
+                            }
+                        },
+                    )
+                    .await;
+                });
+
+                started_rx.await.expect("service preparation started");
+                {
+                    let mut workspace = workspace.lock();
+                    let mut replacement = workspace.data().clone();
+                    replacement.projects[0].path = "/replacement/project".to_string();
+                    let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &None, &None);
+                    workspace.replace_data(&mut FocusManager::new(), replacement, &mut cx);
+                }
+                release_tx.send(()).expect("release service preparation");
+                recovery.await.expect("recovery task completed");
+
+                let manager = service_manager.lock();
+                assert_eq!(manager.project_path("p1"), None);
+                assert!(manager.service_terminal_writebacks().is_empty());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_close_service_recovery_discards_stale_manager_ownership() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let project_path = "/captured/project";
+                let workspace = Arc::new(Mutex::new(Workspace::new(
+                    workspace_with_uninitialized_terminal(project_path),
+                )));
+                let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+                let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+                let service_manager = Arc::new(Mutex::new(ServiceManager::new(backend, terminals)));
+                let (service_tick, _service_rx) = watch::channel(0u64);
+                let runtime = tokio::runtime::Handle::current();
+                let (started_tx, started_rx) = oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let task_workspace = workspace.clone();
+                let task_manager = service_manager.clone();
+                let task_tick = service_tick.clone();
+                let task_runtime = runtime.clone();
+                let recovery = tokio::task::spawn_local(async move {
+                    recover_project_services_with_preparer(
+                        "p1",
+                        &["manual-on".to_string()],
+                        &task_workspace,
+                        &task_manager,
+                        &task_tick,
+                        &task_runtime,
+                        move |_| {
+                            let _ = started_tx.send(());
+                            release_rx.recv().expect("release service preparation");
+                            prepare_project_config(project_path)
+                        },
+                    )
+                    .await;
+                });
+
+                started_rx.await.expect("service preparation started");
+                {
+                    let reactor_ref = ServiceReactorRef::new(
+                        service_manager.clone(),
+                        runtime.clone(),
+                        service_tick.clone(),
+                    );
+                    let mut manager = service_manager.lock();
+                    let mut cx = reactor_ref.cx();
+                    manager.load_project_services_prepared(
+                        "p1",
+                        project_path,
+                        &HashMap::new(),
+                        PreparedProjectConfig::Loaded {
+                            config: None,
+                            detected_compose_file: None,
+                        },
+                        &mut cx,
+                    );
+                }
+                release_tx.send(()).expect("release service preparation");
+                recovery.await.expect("recovery task completed");
+
+                let manager = service_manager.lock();
+                assert_eq!(
+                    manager.project_path("p1").map(String::as_str),
+                    Some(project_path)
+                );
+                assert!(manager.services_for_project("p1").is_empty());
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
