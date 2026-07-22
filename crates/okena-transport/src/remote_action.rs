@@ -14,6 +14,10 @@ const FAST_TIMEOUT_SECS: u64 = 10;
 /// wire alone, which would time out the fast client with no useful signal.
 const BYTES_TIMEOUT_SECS: u64 = 90;
 
+/// Total request timeout for repository content searches. Unlike metadata
+/// actions, these may need to walk and inspect an entire large checkout.
+const SEARCH_TIMEOUT_SECS: u64 = 90;
+
 /// Hard ceiling on response body size accepted by the remote bridge. Cuts
 /// off arbitrarily large or runaway responses before they're buffered into
 /// memory (peak resident is ~4× the file size while the base64 + JSON +
@@ -21,10 +25,26 @@ const BYTES_TIMEOUT_SECS: u64 = 90;
 /// `src/workspace/actions/execute/files.rs`.
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 
-fn timeout_for(action: &ActionRequest) -> u64 {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionClientKind {
+    Fast,
+    Bytes,
+    Search,
+}
+
+fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
     match action {
-        ActionRequest::ReadFileBytes { .. } => BYTES_TIMEOUT_SECS,
-        _ => FAST_TIMEOUT_SECS,
+        ActionRequest::ReadFileBytes { .. } => ActionClientKind::Bytes,
+        ActionRequest::SearchContent { .. } => ActionClientKind::Search,
+        _ => ActionClientKind::Fast,
+    }
+}
+
+fn timeout_for(action: &ActionRequest) -> u64 {
+    match client_kind_for(action) {
+        ActionClientKind::Fast => FAST_TIMEOUT_SECS,
+        ActionClientKind::Bytes => BYTES_TIMEOUT_SECS,
+        ActionClientKind::Search => SEARCH_TIMEOUT_SECS,
     }
 }
 
@@ -37,6 +57,7 @@ struct RemoteActionClientInner {
     token: String,
     fast: OnceLock<Result<ClientAndUrl, String>>,
     bytes: OnceLock<Result<ClientAndUrl, String>>,
+    search: OnceLock<Result<ClientAndUrl, String>>,
 }
 
 /// Cloneable blocking action client backed by one complete connection config.
@@ -57,15 +78,17 @@ impl RemoteActionClient {
                 token,
                 fast: OnceLock::new(),
                 bytes: OnceLock::new(),
+                search: OnceLock::new(),
             }),
         }
     }
 
     /// Post an action and return its optional JSON payload.
     pub fn post_action(&self, action: ActionRequest) -> Result<Option<serde_json::Value>, String> {
-        let transport = match &action {
-            ActionRequest::ReadFileBytes { .. } => &self.inner.bytes,
-            _ => &self.inner.fast,
+        let transport = match client_kind_for(&action) {
+            ActionClientKind::Fast => &self.inner.fast,
+            ActionClientKind::Bytes => &self.inner.bytes,
+            ActionClientKind::Search => &self.inner.search,
         };
         let timeout = std::time::Duration::from_secs(timeout_for(&action));
         let client_and_url = transport.get_or_init(|| {
@@ -197,4 +220,47 @@ fn parse_action_response(
     }
 
     Ok(Some(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn search_action() -> ActionRequest {
+        ActionRequest::SearchContent {
+            project_id: "project".to_string(),
+            query: "needle".to_string(),
+            case_sensitive: false,
+            mode: "literal".to_string(),
+            max_results: 1000,
+            file_glob: None,
+            context_lines: 0,
+            show_ignored: false,
+        }
+    }
+
+    #[test]
+    fn content_search_uses_long_timeout() {
+        assert_eq!(timeout_for(&search_action()), SEARCH_TIMEOUT_SECS);
+        assert_eq!(SEARCH_TIMEOUT_SECS, 90);
+    }
+
+    #[test]
+    fn content_search_has_a_dedicated_cached_client() {
+        assert_eq!(client_kind_for(&search_action()), ActionClientKind::Search);
+        assert_eq!(
+            client_kind_for(&ActionRequest::ReadFile {
+                project_id: "project".to_string(),
+                relative_path: "README.md".to_string(),
+            }),
+            ActionClientKind::Fast
+        );
+        assert_eq!(
+            client_kind_for(&ActionRequest::ReadFileBytes {
+                project_id: "project".to_string(),
+                relative_path: "image.png".to_string(),
+            }),
+            ActionClientKind::Bytes
+        );
+    }
 }
