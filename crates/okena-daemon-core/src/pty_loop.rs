@@ -554,14 +554,24 @@ fn handle_hook_terminal_exits(
         let success = *exit_code == Some(0);
         let tid = terminal_id.clone();
 
-        // Update HookMonitor so the hook log shows correct status.
-        if let Some(monitor) = reactor.hook_monitor.as_ref() {
-            monitor.finish_by_terminal_id(&tid, *exit_code);
-        }
-
         // Set hook status + resolve any pending worktree close.
         let mut cx = reactor.workspace_cx();
         let mut ws = reactor.workspace.lock();
+        let hook_is_running = ws.projects().iter().any(|project| {
+            project
+                .hook_terminals
+                .get(&tid)
+                .is_some_and(|entry| entry.status == HookTerminalStatus::Running)
+        });
+        // A completed keep-alive hook may be intentionally torn down while its
+        // scrollback remains registered; its late PTY exit must not rewrite it.
+        if !hook_is_running {
+            continue;
+        }
+
+        if let Some(monitor) = reactor.hook_monitor.as_ref() {
+            monitor.finish_by_terminal_id(&tid, *exit_code);
+        }
 
         let status = if success {
             HookTerminalStatus::Succeeded
@@ -1263,6 +1273,71 @@ mod tests {
         ));
         drop(workspace_guard);
         assert_eq!(hook_monitor.drain_pending_toasts().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn late_exit_preserves_completed_hook_status_and_registry_buffer() {
+        let mut project = plain_project("ordinary");
+        project.hook_terminals.insert(
+            "completed-hook".into(),
+            HookTerminalEntry {
+                label: "Completed hook".into(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".into(),
+                command: "echo done".into(),
+                cwd: "/tmp/project-one".into(),
+            },
+        );
+        let workspace = Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["project-1".into()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        });
+        let reactor = test_reactor(workspace, AppSettings::default());
+        let workspace = reactor.workspace.clone();
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let retained = Arc::new(Terminal::new(
+            "completed-hook".into(),
+            terminal_size(),
+            reactor.backend.transport(),
+            "/tmp/project-one".into(),
+        ));
+        retained.process_output(b"preserved output\r\n");
+        terminals
+            .lock()
+            .insert("completed-hook".into(), retained.clone());
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(drive_hook_exit_through_pty_loop(
+                reactor,
+                terminals.clone(),
+                "completed-hook",
+                None,
+            ))
+            .await;
+
+        assert!(matches!(
+            workspace
+                .lock()
+                .project("project-1")
+                .expect("project")
+                .hook_terminals["completed-hook"]
+                .status,
+            HookTerminalStatus::Succeeded
+        ));
+        assert!(Arc::ptr_eq(
+            terminals
+                .lock()
+                .get("completed-hook")
+                .expect("retained terminal"),
+            &retained
+        ));
     }
 
     /// `run_pty_loop` routes a synthesized `Data` event into a registered

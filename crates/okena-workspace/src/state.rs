@@ -17,7 +17,7 @@ use okena_core::theme::FolderColor;
 use okena_terminal::backend::TerminalSessionTeardown;
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -297,9 +297,13 @@ pub struct TerminalBackendMigration {
 pub struct ProjectRuntimeQuiesce {
     pub project_id: String,
     pub data_replacement_epoch: u64,
+    pub runtime_quiesce_generation: u64,
     pub project_path: String,
     pub teardown_sessions: Vec<TerminalSessionTeardown>,
+    /// Running hook owners that must be cancelled and removed from the registry.
     pub hook_terminal_ids: Vec<String>,
+    /// Completed hooks whose scrollback remains registered after session teardown.
+    pub preserved_registry_terminal_ids: Vec<String>,
     pub pending_close_terminal_ids: Vec<String>,
     layout_slots: Vec<ProjectRuntimeSlot>,
 }
@@ -484,98 +488,147 @@ impl Workspace {
         reject_running_hooks: bool,
         cx: &mut impl WorkspaceCx,
     ) -> Result<ProjectRuntimeQuiesce, String> {
-        if self.lifecycle.is_creating(project_id) {
-            return Err("project is still being created".to_string());
+        let mut snapshots = self.begin_project_runtimes_quiesce(
+            &[project_id.to_string()],
+            global_default_shell,
+            backend_preference,
+            reject_running_hooks,
+            cx,
+        )?;
+        snapshots
+            .pop()
+            .ok_or_else(|| "project runtime quiesce produced no owner".to_string())
+    }
+
+    /// Atomically detach every runtime for a set of projects.
+    pub fn begin_project_runtimes_quiesce(
+        &mut self,
+        project_ids: &[String],
+        global_default_shell: &ShellType,
+        backend_preference: SessionBackend,
+        reject_running_hooks: bool,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<Vec<ProjectRuntimeQuiesce>, String> {
+        let mut unique_ids = Vec::new();
+        let mut seen = HashSet::new();
+        for project_id in project_ids {
+            if seen.insert(project_id.clone()) {
+                unique_ids.push(project_id.clone());
+            }
         }
-        if self.lifecycle.is_closing(project_id) {
-            return Err("project operation is already in progress".to_string());
-        }
-        let project = self
-            .project(project_id)
-            .ok_or_else(|| "Project not found".to_string())?;
-        if project.is_remote {
-            return Err("remote project directories cannot be changed locally".to_string());
-        }
-        if reject_running_hooks
-            && project
-                .hook_terminals
-                .values()
-                .any(|entry| entry.status == HookTerminalStatus::Running)
-        {
-            return Err("cannot move a project while a lifecycle hook is running".to_string());
+        if unique_ids.is_empty() {
+            return Ok(Vec::new());
         }
 
-        let data_replacement_epoch = self.data_replacement_epoch;
-        let project_path = project.path.clone();
-        let mut teardown_sessions = Vec::new();
-        let mut hook_terminal_ids = Vec::new();
-        let mut layout_slots = Vec::new();
-        {
+        // Validate the full batch before claiming or mutating any project.
+        for project_id in &unique_ids {
+            if self.lifecycle.is_creating(project_id) {
+                return Err(format!("project is still being created: {project_id}"));
+            }
+            if self.lifecycle.is_closing(project_id) {
+                return Err(format!(
+                    "project operation is already in progress: {project_id}"
+                ));
+            }
             let project = self
-                .project_mut(project_id)
-                .ok_or_else(|| "Project not found".to_string())?;
-            if let Some(layout) = &mut project.layout {
-                take_project_layout_runtime(
-                    layout,
-                    project.default_shell.as_ref(),
-                    global_default_shell,
-                    backend_preference,
-                    &mut project.terminal_names,
-                    &mut project.hidden_terminals,
-                    &mut Vec::new(),
-                    &mut layout_slots,
-                    &mut teardown_sessions,
-                );
+                .project(project_id)
+                .ok_or_else(|| format!("Project not found: {project_id}"))?;
+            if project.is_remote {
+                return Err(format!(
+                    "remote project directories cannot be changed locally: {project_id}"
+                ));
             }
-            teardown_sessions.extend(
-                project
-                    .service_terminals
-                    .drain()
-                    .map(|(_, terminal_id)| TerminalSessionTeardown::host(terminal_id)),
-            );
-            hook_terminal_ids.extend(project.hook_terminals.keys().cloned());
-            if !reject_running_hooks {
-                let active_hook_ids: Vec<String> = project
+            if reject_running_hooks
+                && project
                     .hook_terminals
-                    .iter()
-                    .filter(|(_, entry)| entry.status == HookTerminalStatus::Running)
-                    .map(|(terminal_id, _)| terminal_id.clone())
-                    .collect();
-                for terminal_id in active_hook_ids {
-                    project.hook_terminals.remove(&terminal_id);
-                    project.terminal_names.remove(&terminal_id);
-                    project.hidden_terminals.remove(&terminal_id);
-                }
+                    .values()
+                    .any(|entry| entry.status == HookTerminalStatus::Running)
+            {
+                return Err(format!(
+                    "cannot move a project while a lifecycle hook is running: {project_id}"
+                ));
             }
+        }
+
+        let generation = self.lifecycle.claim_runtime_quiesce(&unique_ids)?;
+        let data_replacement_epoch = self.data_replacement_epoch;
+        let mut snapshots = Vec::with_capacity(unique_ids.len());
+        for project_id in &unique_ids {
+            let project_path = self
+                .project(project_id)
+                .map(|project| project.path.clone())
+                .ok_or_else(|| format!("Project not found: {project_id}"))?;
+            let mut teardown_sessions = Vec::new();
+            let mut hook_terminal_ids = Vec::new();
+            let mut preserved_registry_terminal_ids = Vec::new();
+            let mut layout_slots = Vec::new();
+            {
+                let project = self
+                    .project_mut(project_id)
+                    .ok_or_else(|| format!("Project not found: {project_id}"))?;
+                if let Some(layout) = &mut project.layout {
+                    take_project_layout_runtime(
+                        layout,
+                        project.default_shell.as_ref(),
+                        global_default_shell,
+                        backend_preference,
+                        &mut project.terminal_names,
+                        &mut project.hidden_terminals,
+                        &mut Vec::new(),
+                        &mut layout_slots,
+                        &mut teardown_sessions,
+                    );
+                }
+                teardown_sessions.extend(
+                    project
+                        .service_terminals
+                        .drain()
+                        .map(|(_, terminal_id)| TerminalSessionTeardown::host(terminal_id)),
+                );
+                let all_hook_ids: Vec<String> = project.hook_terminals.keys().cloned().collect();
+                for terminal_id in &all_hook_ids {
+                    let is_running = project
+                        .hook_terminals
+                        .get(terminal_id)
+                        .is_some_and(|entry| entry.status == HookTerminalStatus::Running);
+                    if is_running {
+                        hook_terminal_ids.push(terminal_id.clone());
+                        project.hook_terminals.remove(terminal_id);
+                        project.terminal_names.remove(terminal_id);
+                        project.hidden_terminals.remove(terminal_id);
+                    } else {
+                        preserved_registry_terminal_ids.push(terminal_id.clone());
+                    }
+                }
+                teardown_sessions
+                    .extend(all_hook_ids.into_iter().map(TerminalSessionTeardown::host));
+            }
+            let pending_close_terminal_ids = self.drain_pending_closes_for_project(project_id);
             teardown_sessions.extend(
-                hook_terminal_ids
+                pending_close_terminal_ids
                     .iter()
                     .cloned()
                     .map(TerminalSessionTeardown::host),
             );
+            teardown_sessions.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+            teardown_sessions.dedup_by(|a, b| a.terminal_id == b.terminal_id);
+            hook_terminal_ids.sort();
+            preserved_registry_terminal_ids.sort();
+            self.mark_closing_project_authoritative(project_id);
+            snapshots.push(ProjectRuntimeQuiesce {
+                project_id: project_id.clone(),
+                data_replacement_epoch,
+                runtime_quiesce_generation: generation,
+                project_path,
+                teardown_sessions,
+                hook_terminal_ids,
+                preserved_registry_terminal_ids,
+                pending_close_terminal_ids,
+                layout_slots,
+            });
         }
-        let pending_close_terminal_ids = self.drain_pending_closes_for_project(project_id);
-        teardown_sessions.extend(
-            pending_close_terminal_ids
-                .iter()
-                .cloned()
-                .map(TerminalSessionTeardown::host),
-        );
-        teardown_sessions.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
-        teardown_sessions.dedup_by(|a, b| a.terminal_id == b.terminal_id);
-        hook_terminal_ids.sort();
-
-        self.mark_closing_project_authoritative(project_id);
         self.notify_data(cx);
-        Ok(ProjectRuntimeQuiesce {
-            project_id: project_id.to_string(),
-            data_replacement_epoch,
-            project_path,
-            teardown_sessions,
-            hook_terminal_ids,
-            pending_close_terminal_ids,
-            layout_slots,
-        })
+        Ok(snapshots)
     }
 
     pub fn project_runtime_quiesce_is_current(&self, snapshot: &ProjectRuntimeQuiesce) -> bool {
@@ -588,6 +641,9 @@ impl Workspace {
         project_path: &str,
     ) -> bool {
         self.data_replacement_epoch == snapshot.data_replacement_epoch
+            && self
+                .lifecycle
+                .owns_runtime_quiesce(&snapshot.project_id, snapshot.runtime_quiesce_generation)
             && self.lifecycle.is_closing(&snapshot.project_id)
             && self
                 .project(&snapshot.project_id)
@@ -600,6 +656,13 @@ impl Workspace {
         snapshot: &ProjectRuntimeQuiesce,
         cx: &mut impl WorkspaceCx,
     ) {
+        if self.data_replacement_epoch != snapshot.data_replacement_epoch
+            || !self
+                .lifecycle
+                .owns_runtime_quiesce(&snapshot.project_id, snapshot.runtime_quiesce_generation)
+        {
+            return;
+        }
         let Some(project) = self.project_mut(&snapshot.project_id) else {
             return;
         };
@@ -623,6 +686,12 @@ impl Workspace {
             if let Some(hidden) = slot.hidden {
                 project.hidden_terminals.insert(terminal_id, hidden);
             }
+        }
+        if !self
+            .lifecycle
+            .finish_runtime_quiesce(&snapshot.project_id, snapshot.runtime_quiesce_generation)
+        {
+            return;
         }
         self.finish_closing_project(&snapshot.project_id);
         self.notify_data(cx);
@@ -2252,6 +2321,131 @@ mod workspace_tests {
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
         }
+    }
+
+    #[test]
+    fn project_runtime_quiesce_batch_is_all_or_nothing() {
+        let mut blocked = make_project("blocked");
+        blocked.is_remote = true;
+        let mut workspace = Workspace::new(make_workspace_data(
+            vec![make_project("ready"), blocked],
+            vec!["ready", "blocked"],
+        ));
+        let mut cx = RecordingCx::default();
+
+        let error = workspace
+            .begin_project_runtimes_quiesce(
+                &["ready".to_string(), "blocked".to_string()],
+                &ShellType::Default,
+                SessionBackend::None,
+                true,
+                &mut cx,
+            )
+            .expect_err("remote descendant rejects the full batch");
+
+        assert!(error.contains("remote project"));
+        assert!(matches!(
+            workspace.project("ready").and_then(|project| project.layout.as_ref()),
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal_id),
+                ..
+            }) if terminal_id == "term_ready"
+        ));
+        assert!(!workspace.is_project_closing("ready"));
+        assert_eq!(cx.notifications, 0);
+    }
+
+    #[test]
+    fn project_runtime_quiesce_preserves_completed_hooks_and_fences_aba() {
+        let mut project = make_project("p1");
+        project.hook_terminals.insert(
+            "completed-hook".to_string(),
+            HookTerminalEntry {
+                label: "completed".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "project.on_open".to_string(),
+                command: "echo done".to_string(),
+                cwd: "/tmp/test".to_string(),
+            },
+        );
+        project.hook_terminals.insert(
+            "running-hook".to_string(),
+            HookTerminalEntry {
+                label: "running".to_string(),
+                status: HookTerminalStatus::Running,
+                hook_type: "project.on_open".to_string(),
+                command: "sleep 10".to_string(),
+                cwd: "/tmp/test".to_string(),
+            },
+        );
+        project
+            .terminal_names
+            .insert("completed-hook".to_string(), "completed".to_string());
+        project
+            .terminal_names
+            .insert("running-hook".to_string(), "running".to_string());
+        let mut workspace = Workspace::new(make_workspace_data(vec![project], vec!["p1"]));
+        let mut cx = RecordingCx::default();
+
+        let first = workspace
+            .begin_project_runtime_quiesce(
+                "p1",
+                &ShellType::Default,
+                SessionBackend::None,
+                false,
+                &mut cx,
+            )
+            .expect("quiesce project");
+        assert_eq!(first.hook_terminal_ids, vec!["running-hook"]);
+        assert_eq!(
+            first.preserved_registry_terminal_ids,
+            vec!["completed-hook"]
+        );
+        let project = workspace.project("p1").expect("project");
+        assert!(project.hook_terminals.contains_key("completed-hook"));
+        assert!(!project.hook_terminals.contains_key("running-hook"));
+        assert!(project.terminal_names.contains_key("completed-hook"));
+        assert!(!project.terminal_names.contains_key("running-hook"));
+
+        workspace.finish_project_runtime_recovery(&first, &mut cx);
+        let second = workspace
+            .begin_project_runtime_quiesce(
+                "p1",
+                &ShellType::Default,
+                SessionBackend::None,
+                false,
+                &mut cx,
+            )
+            .expect("quiesce project again");
+        assert_ne!(
+            first.runtime_quiesce_generation,
+            second.runtime_quiesce_generation
+        );
+        workspace.finish_project_runtime_recovery(&first, &mut cx);
+        assert!(workspace.project_runtime_quiesce_is_current(&second));
+        assert!(workspace.is_project_closing("p1"));
+
+        let mut focus = crate::focus::FocusManager::new();
+        workspace.replace_data(
+            &mut focus,
+            make_workspace_data(vec![make_project("p1")], vec!["p1"]),
+            &mut cx,
+        );
+        let replacement = workspace
+            .begin_project_runtime_quiesce(
+                "p1",
+                &ShellType::Default,
+                SessionBackend::None,
+                false,
+                &mut cx,
+            )
+            .expect("quiesce replacement project");
+        assert_eq!(
+            first.runtime_quiesce_generation, replacement.runtime_quiesce_generation,
+            "replacement tracker may reuse generations"
+        );
+        workspace.finish_project_runtime_recovery(&first, &mut cx);
+        assert!(workspace.project_runtime_quiesce_is_current(&replacement));
     }
 
     #[test]

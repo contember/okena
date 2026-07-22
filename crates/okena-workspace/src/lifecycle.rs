@@ -16,6 +16,9 @@ pub struct ProjectLifecycleTracker {
     creating: HashSet<String>,
     /// Project IDs currently being closed (hook running or removal in progress).
     closing: HashSet<String>,
+    /// Exact owners for headless runtime quiesce operations.
+    runtime_quiesce_owners: HashMap<String, u64>,
+    next_runtime_quiesce_generation: u64,
     /// Worktree paths currently being removed in the background.
     /// The sync watcher skips these to avoid re-adding a worktree
     /// whose directory hasn't been fully deleted yet.
@@ -33,6 +36,7 @@ impl ProjectLifecycleTracker {
     pub fn has_active_operations(&self) -> bool {
         !self.creating.is_empty()
             || !self.closing.is_empty()
+            || !self.runtime_quiesce_owners.is_empty()
             || !self.removing_worktree_paths.is_empty()
             || !self.pending_worktree_closes.is_empty()
     }
@@ -63,6 +67,38 @@ impl ProjectLifecycleTracker {
 
     pub fn is_closing(&self, project_id: &str) -> bool {
         self.closing.contains(project_id)
+    }
+
+    /// Atomically claim runtime ownership for every project in one operation.
+    pub fn claim_runtime_quiesce(&mut self, project_ids: &[String]) -> Result<u64, String> {
+        if let Some(project_id) = project_ids.iter().find(|project_id| {
+            self.runtime_quiesce_owners
+                .contains_key(project_id.as_str())
+        }) {
+            return Err(format!("project runtime is already quiesced: {project_id}"));
+        }
+        let generation = self.next_runtime_quiesce_generation.max(1);
+        self.next_runtime_quiesce_generation = generation
+            .checked_add(1)
+            .ok_or_else(|| "project runtime quiesce generation exhausted".to_string())?;
+        for project_id in project_ids {
+            self.runtime_quiesce_owners
+                .insert(project_id.clone(), generation);
+        }
+        Ok(generation)
+    }
+
+    pub fn owns_runtime_quiesce(&self, project_id: &str, generation: u64) -> bool {
+        self.runtime_quiesce_owners.get(project_id) == Some(&generation)
+    }
+
+    /// Release only the operation that still owns this project.
+    pub fn finish_runtime_quiesce(&mut self, project_id: &str, generation: u64) -> bool {
+        if !self.owns_runtime_quiesce(project_id, generation) {
+            return false;
+        }
+        self.runtime_quiesce_owners.remove(project_id);
+        true
     }
 
     /// Prune the closing set to only the given project ids. Used by the client
@@ -176,5 +212,30 @@ mod tests {
         tracker.register_pending_close(pending("p1", "hook1"));
         tracker.cancel_pending_close("hook1");
         assert!(!tracker.is_closing("p1"));
+    }
+
+    #[test]
+    fn runtime_quiesce_claims_are_atomic_and_generation_fenced() {
+        let mut tracker = ProjectLifecycleTracker::new();
+        let first = tracker
+            .claim_runtime_quiesce(&["p1".to_string(), "p2".to_string()])
+            .expect("claim batch");
+
+        assert!(tracker.owns_runtime_quiesce("p1", first));
+        assert!(tracker.owns_runtime_quiesce("p2", first));
+        assert!(
+            tracker
+                .claim_runtime_quiesce(&["p2".to_string(), "p3".to_string()])
+                .is_err()
+        );
+        assert!(!tracker.owns_runtime_quiesce("p3", first));
+
+        assert!(tracker.finish_runtime_quiesce("p1", first));
+        let second = tracker
+            .claim_runtime_quiesce(&["p1".to_string()])
+            .expect("reclaim project");
+        assert_ne!(first, second);
+        assert!(!tracker.finish_runtime_quiesce("p1", first));
+        assert!(tracker.owns_runtime_quiesce("p1", second));
     }
 }
