@@ -190,6 +190,27 @@ fn add_context_lines(matches: &mut [ContentMatch], file_path: &Path, context_lin
     }
 }
 
+/// Atomically claim up to `requested` result slots from the shared limit.
+fn reserve_match_slots(total: &AtomicUsize, max_results: usize, requested: usize) -> usize {
+    let mut current = total.load(Ordering::Acquire);
+    loop {
+        let remaining = max_results.saturating_sub(current);
+        let reserved = requested.min(remaining);
+        if reserved == 0 {
+            return 0;
+        }
+        match total.compare_exchange_weak(
+            current,
+            current + reserved,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return reserved,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 /// Run a content search in the given project directory.
 ///
 /// Streams results back via the `on_result` callback. Returns when the search
@@ -322,7 +343,11 @@ fn search_content_grep(
                     return WalkState::Continue;
                 }
 
-                total_matches.fetch_add(file_matches.len(), Ordering::Relaxed);
+                let reserved = reserve_match_slots(total_matches, max_results, file_matches.len());
+                if reserved == 0 {
+                    return WalkState::Quit;
+                }
+                file_matches.truncate(reserved);
 
                 if context_lines > 0 {
                     add_context_lines(&mut file_matches, path, context_lines);
@@ -460,11 +485,16 @@ fn search_content_fuzzy(
                 // Sort by score descending — best matches first
                 scored_matches.sort_by_key(|b| std::cmp::Reverse(b.0));
 
+                let reserved =
+                    reserve_match_slots(total_matches, max_results, scored_matches.len());
+                if reserved == 0 {
+                    return WalkState::Quit;
+                }
+                scored_matches.truncate(reserved);
+
                 let best_score = scored_matches.first().map(|(s, _)| *s).unwrap_or(0);
                 let mut file_matches: Vec<ContentMatch> =
                     scored_matches.into_iter().map(|(_, m)| m).collect();
-
-                total_matches.fetch_add(file_matches.len(), Ordering::Relaxed);
 
                 if context_lines > 0 {
                     add_context_lines(&mut file_matches, path, context_lines);
@@ -591,5 +621,45 @@ mod tests {
 
         assert!(results.iter().any(|path| path == "small.txt"));
         assert!(!results.iter().any(|path| path == "big.log"));
+    }
+
+    fn assert_dense_parallel_search_respects_cap(mode: SearchMode) {
+        let dir = TempDir::new();
+        for file_index in 0..32 {
+            let content = (0..32)
+                .map(|line_index| format!("needle {file_index} {line_index}\n"))
+                .collect::<String>();
+            fs::write(dir.path.join(format!("dense-{file_index}.txt")), content).unwrap();
+        }
+
+        let cancelled = AtomicBool::new(false);
+        let config = ContentSearchConfig {
+            mode,
+            max_results: 17,
+            ..ContentSearchConfig::default()
+        };
+        let mut matches = Vec::new();
+        search_content(&dir.path, "needle", &config, &cancelled, &mut |result| {
+            matches.extend(
+                result
+                    .matches
+                    .into_iter()
+                    .map(|found| (result.relative_path.clone(), found.line_number)),
+            );
+        });
+
+        let unique = matches.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(matches.len(), config.max_results);
+        assert_eq!(unique.len(), matches.len());
+    }
+
+    #[test]
+    fn parallel_grep_search_has_a_strict_result_cap() {
+        assert_dense_parallel_search_respects_cap(SearchMode::Literal);
+    }
+
+    #[test]
+    fn parallel_fuzzy_search_has_a_strict_result_cap() {
+        assert_dense_parallel_search_respects_cap(SearchMode::Fuzzy);
     }
 }
