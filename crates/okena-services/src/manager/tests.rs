@@ -360,6 +360,29 @@ fn handle_exit_restart_clears_terminal() {
 }
 
 #[test]
+fn clean_okena_exit_stops_without_scheduling_restart() {
+    let path = "/project";
+    let mut manager = manager();
+    manager.project_paths.insert("project".into(), path.into());
+    manager.begin_project_incarnation("project", path);
+    let (key, instance) = make_instance("project", "web", true, 2, ServiceStatus::Running);
+    let terminal_id = instance.terminal_id.clone().expect("running terminal");
+    manager.instances.insert(key.clone(), instance);
+    manager
+        .terminal_to_service
+        .insert(terminal_id.clone(), key.clone());
+    let mut cx = RecordingCx::default();
+
+    assert!(manager.handle_service_exit(&terminal_id, Some(0), &mut cx));
+
+    assert_eq!(manager.instances[&key].status, ServiceStatus::Stopped);
+    assert_eq!(manager.instances[&key].terminal_id, None);
+    assert_eq!(manager.instances[&key].restart_count, 0);
+    assert!(!manager.terminal_to_service.contains_key(&terminal_id));
+    assert_eq!(cx.spawned.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn scheduled_restart_requires_the_same_restarting_state() {
     let mut manager = manager();
     let (key, instance) = make_instance("project", "web", true, 1, ServiceStatus::Restarting);
