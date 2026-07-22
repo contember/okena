@@ -806,6 +806,72 @@ fn apply_deferred_hook_actions(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn remove_worktree_project_off_reactor_with<Remove>(
+    project_id: String,
+    force: bool,
+    global_hooks: okena_workspace::persistence::HooksConfig,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    focus_manager: &mut FocusManager,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    runtime: &tokio::runtime::Handle,
+    remove: Remove,
+) -> CommandResult
+where
+    Remove: FnOnce(&WorktreeRemovalPlan, bool) -> Result<(), String> + Send + 'static,
+{
+    let (operation_epoch, plan) = {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut workspace = workspace.lock();
+        let plan = match workspace.begin_worktree_removal(&project_id, &global_hooks, &mut cx) {
+            Ok(plan) => plan,
+            Err(error) => return CommandResult::Err(error),
+        };
+        (workspace.data_replacement_epoch(), plan)
+    };
+
+    let blocking_hooks = global_hooks.clone();
+    let blocking_monitor = hook_monitor.clone();
+    let outcome = runtime
+        .spawn_blocking(move || {
+            plan.fire_close_hooks_headless(&blocking_hooks, blocking_monitor.as_ref());
+            let result = remove(&plan, force);
+            (plan, result)
+        })
+        .await;
+
+    let (plan, removal) = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return CommandResult::Err(format!("worktree removal task failed: {error}"));
+        }
+    };
+    if let Err(error) = removal {
+        return CommandResult::Err(error);
+    }
+
+    let terminal_ids = {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut workspace = workspace.lock();
+        if workspace.data_replacement_epoch() != operation_epoch {
+            return CommandResult::Err(format!(
+                "workspace changed while worktree was being removed: {project_id}"
+            ));
+        }
+        workspace.finish_worktree_removal(focus_manager, &plan, &global_hooks, &mut cx);
+        workspace.drain_pending_terminal_kills()
+    };
+    for terminal_id in terminal_ids {
+        backend.kill(&terminal_id);
+        terminals.lock().remove(&terminal_id);
+    }
+    CommandResult::Ok(None)
+}
+
 /// Run physical worktree removal off the reactor while the daemon keeps the
 /// authoritative project row in `is_closing` state. State is deleted only after
 /// Git confirms the checkout is gone; failures restore normal terminal slots.
@@ -2017,6 +2083,33 @@ pub async fn daemon_command_loop(
                                 }
                             }
                         }
+                    }
+
+                    // ── Direct worktree removal: preserve its synchronous reply ──
+                    ActionRequest::RemoveWorktreeProject { project_id, force } => {
+                        let trigger =
+                            git_poll_trigger_for_action(&ActionRequest::RemoveWorktreeProject {
+                                project_id: project_id.clone(),
+                                force,
+                            });
+                        let global_hooks = settings.lock().hooks.clone();
+                        let result = remove_worktree_project_off_reactor_with(
+                            project_id,
+                            force,
+                            global_hooks,
+                            &workspace,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                            &mut focus_manager,
+                            &backend,
+                            &terminals,
+                            &runtime,
+                            |plan, force| plan.remove(force),
+                        )
+                        .await;
+                        send_git_poll_trigger_after_success(&result, trigger, &git_poll_trigger_tx);
+                        result
                     }
 
                     // ── Default: workspace-scoped action ─────────────────────────
@@ -4651,6 +4744,189 @@ mod tests {
             main_window: Default::default(),
             extra_windows: Vec::new(),
         }
+    }
+
+    fn direct_removal_fixture(label: &str) -> (std::path::PathBuf, Arc<Mutex<Workspace>>) {
+        use std::process::Command;
+
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-direct-remove-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let repo = fixture.join("main");
+        let worktree = fixture.join("worktree");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        std::fs::create_dir_all(&repo).expect("create repository");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@okena.local"]);
+        git(&repo, &["config", "user.name", "Okena Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").expect("write base");
+        git(&repo, &["add", "base.txt"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                worktree.to_str().expect("utf-8 worktree path"),
+            ],
+        );
+
+        let mut data = workspace_with_worktree_child();
+        data.projects[0].path = repo.to_string_lossy().into_owned();
+        data.projects[1].path = worktree.to_string_lossy().into_owned();
+        let metadata = data.projects[1]
+            .worktree_info
+            .as_mut()
+            .expect("worktree metadata");
+        metadata.main_repo_path = repo.to_string_lossy().into_owned();
+        metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".to_string();
+
+        (fixture, Arc::new(Mutex::new(Workspace::new(data))))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn direct_worktree_removal_keeps_localset_and_workspace_live() {
+        let (fixture, workspace) = direct_removal_fixture("reactor");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+                let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+                let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+                let runtime = tokio::runtime::Handle::current();
+                let (started_tx, started_rx) = oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let task_workspace = workspace.clone();
+                let task_tick = workspace_tick.clone();
+                let task_backend = backend.clone();
+                let task_terminals = terminals.clone();
+                let task_runtime = runtime.clone();
+                let removal = tokio::task::spawn_local(async move {
+                    let mut focus_manager = FocusManager::new();
+                    remove_worktree_project_off_reactor_with(
+                        "wt1".to_string(),
+                        true,
+                        Default::default(),
+                        &task_workspace,
+                        &task_tick,
+                        &None,
+                        &None,
+                        &mut focus_manager,
+                        &task_backend,
+                        &task_terminals,
+                        &task_runtime,
+                        move |_plan, force| {
+                            assert!(force, "the caller's force flag reaches git removal");
+                            let _ = started_tx.send(());
+                            release_rx.recv().map_err(|error| error.to_string())?;
+                            Ok(())
+                        },
+                    )
+                    .await
+                });
+
+                started_rx.await.expect("blocking removal started");
+                let reader_workspace = workspace.clone();
+                tokio::task::spawn_local(async move {
+                    tokio::task::yield_now().await;
+                    assert!(reader_workspace.lock().project("wt1").is_some());
+                })
+                .await
+                .expect("sibling LocalSet task reads workspace");
+
+                release_tx.send(()).expect("release blocking removal");
+                assert!(matches!(
+                    removal.await.expect("removal task joined"),
+                    CommandResult::Ok(None)
+                ));
+                assert!(workspace.lock().project("wt1").is_none());
+            })
+            .await;
+        std::fs::remove_dir_all(fixture).expect("remove fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn direct_worktree_removal_does_not_finalize_into_replaced_workspace() {
+        let (fixture, workspace) = direct_removal_fixture("stale");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+                let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+                let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+                let runtime = tokio::runtime::Handle::current();
+                let (started_tx, started_rx) = oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let task_workspace = workspace.clone();
+                let task_tick = workspace_tick.clone();
+                let task_backend = backend.clone();
+                let task_terminals = terminals.clone();
+                let task_runtime = runtime.clone();
+                let removal = tokio::task::spawn_local(async move {
+                    let mut focus_manager = FocusManager::new();
+                    remove_worktree_project_off_reactor_with(
+                        "wt1".to_string(),
+                        false,
+                        Default::default(),
+                        &task_workspace,
+                        &task_tick,
+                        &None,
+                        &None,
+                        &mut focus_manager,
+                        &task_backend,
+                        &task_terminals,
+                        &task_runtime,
+                        move |_plan, _force| {
+                            let _ = started_tx.send(());
+                            release_rx.recv().map_err(|error| error.to_string())?;
+                            Ok(())
+                        },
+                    )
+                    .await
+                });
+
+                started_rx.await.expect("blocking removal started");
+                {
+                    let mut workspace = workspace.lock();
+                    let mut replacement = workspace.data().clone();
+                    replacement.projects[1].name = "Replacement project".to_string();
+                    let mut focus_manager = FocusManager::new();
+                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &None, &None);
+                    workspace.replace_data(&mut focus_manager, replacement, &mut cx);
+                }
+                release_tx.send(()).expect("release blocking removal");
+
+                let result = removal.await.expect("removal task joined");
+                assert!(
+                    matches!(result, CommandResult::Err(ref error) if error.contains("workspace changed"))
+                );
+                assert_eq!(
+                    workspace
+                        .lock()
+                        .project("wt1")
+                        .map(|project| project.name.as_str()),
+                    Some("Replacement project")
+                );
+            })
+            .await;
+        std::fs::remove_dir_all(fixture).expect("remove fixture");
     }
 
     /// A worktree row whose optimistic create is still in flight (`is_creating`)
