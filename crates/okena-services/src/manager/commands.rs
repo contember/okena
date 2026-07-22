@@ -612,6 +612,16 @@ impl ServiceManager {
         // Okena service exit handling
         instance.detected_ports.clear();
 
+        if exit_code == Some(0) {
+            instance.terminal_id = None;
+            instance.status = ServiceStatus::Stopped;
+            instance.restart_count = 0;
+            self.terminals.lock().remove(terminal_id);
+            self.invalidate_okena_launch(&key);
+            cx.notify();
+            return true;
+        }
+
         let should_restart =
             instance.definition.restart_on_crash && instance.restart_count < MAX_RESTART_COUNT;
         if should_restart {
