@@ -95,10 +95,10 @@ pub trait ServiceAsyncCx {
     /// Offload blocking work (subprocess calls) to a background thread and await
     /// the result.
     ///
-    /// GPUI: `cx.background_executor().spawn(fut)`.
+    /// GPUI: `smol::unblock(task)`.
     fn spawn_blocking<T>(
         &self,
-        fut: impl Future<Output = T> + Send + 'static,
+        task: impl FnOnce() -> T + Send + 'static,
     ) -> impl Future<Output = T>
     where
         T: Send + 'static;
@@ -154,12 +154,12 @@ impl ServiceAsyncCx for AsyncApp {
 
     fn spawn_blocking<T>(
         &self,
-        fut: impl Future<Output = T> + Send + 'static,
+        task: impl FnOnce() -> T + Send + 'static,
     ) -> impl Future<Output = T>
     where
         T: Send + 'static,
     {
-        self.background_executor().spawn(fut)
+        smol::unblock(task)
     }
 
     fn timer(&self, duration: Duration) -> impl Future<Output = ()> {

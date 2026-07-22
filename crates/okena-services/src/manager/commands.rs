@@ -85,7 +85,7 @@ impl ServiceManager {
 
                 let run = mutation.clone();
                 let runner = runner.clone();
-                let result = cx.spawn_blocking(async move { runner.run(&run) }).await;
+                let result = cx.spawn_blocking(move || runner.run(&run)).await;
                 crate::docker_compose::invalidate_status_snapshot();
                 let failed = result.is_err();
                 if let Err(error) = result {
@@ -339,15 +339,12 @@ impl ServiceManager {
             let launch_id = terminal_id.clone();
             let launch_cwd = cwd.clone();
             let result = cx
-                .spawn_blocking(async move {
-                    smol::unblock(move || {
-                        launch_backend.reconnect_terminal_with_plan(
-                            &launch_id,
-                            &launch_cwd,
-                            &launch_plan,
-                        )
-                    })
-                    .await
+                .spawn_blocking(move || {
+                    launch_backend.reconnect_terminal_with_plan(
+                        &launch_id,
+                        &launch_cwd,
+                        &launch_plan,
+                    )
                 })
                 .await;
 
@@ -415,10 +412,8 @@ impl ServiceManager {
                 }
                 for cleanup_id in cleanup_ids {
                     let cleanup_backend = backend.clone();
-                    cx.spawn_blocking(async move {
-                        smol::unblock(move || cleanup_backend.kill(&cleanup_id)).await
-                    })
-                    .await;
+                    cx.spawn_blocking(move || cleanup_backend.kill(&cleanup_id))
+                        .await;
                 }
             }
         });
@@ -540,7 +535,7 @@ impl ServiceManager {
                     let old_pids: Vec<u32> = if let Some(ref tid) = terminal_id {
                         let tid = tid.clone();
                         let backend_ref = backend.clone();
-                        cx.spawn_blocking(async move {
+                        cx.spawn_blocking(move || {
                             backend_ref
                                 .get_service_pids(&tid)
                                 .into_iter()

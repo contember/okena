@@ -172,18 +172,73 @@ impl ServiceAsyncCx for DaemonServiceAsyncCx {
 
     fn spawn_blocking<T>(
         &self,
-        fut: impl Future<Output = T> + Send + 'static,
+        task: impl FnOnce() -> T + Send + 'static,
     ) -> impl Future<Output = T>
     where
         T: Send + 'static,
     {
-        // Offload onto the multi-thread runtime and await the join handle. The
-        // future is `Send + 'static`, so `Handle::spawn` accepts it directly.
-        let join = self.reactor.runtime.spawn(fut);
+        let join = self.reactor.runtime.spawn_blocking(task);
         async move { join.await.expect("daemon spawn_blocking: task panicked") }
     }
 
     fn timer(&self, duration: Duration) -> impl Future<Output = ()> {
         tokio::time::sleep(duration)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use okena_terminal::backend::LocalBackend;
+    use okena_terminal::pty_manager::PtyManager;
+    use okena_terminal::session_backend::SessionBackend;
+
+    #[test]
+    fn blocking_service_work_does_not_stall_a_single_runtime_worker() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+        let manager = Arc::new(Mutex::new(ServiceManager::new(
+            Arc::new(LocalBackend::new(Arc::new(pty_manager))),
+            Arc::new(Mutex::new(Default::default())),
+        )));
+        let (service_tick, _service_tick_rx) = watch::channel(0);
+        let async_cx = DaemonServiceAsyncCx {
+            reactor: ServiceReactor {
+                manager,
+                runtime: runtime.handle().clone(),
+                service_tick,
+            },
+        };
+
+        runtime.block_on(async {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocked = async_cx.spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok::<_, &'static str>(42)
+            });
+            started_rx.await.unwrap();
+
+            let (regular_tx, regular_rx) = tokio::sync::oneshot::channel();
+            runtime.handle().spawn(async move {
+                regular_tx.send(()).unwrap();
+            });
+            tokio::time::timeout(Duration::from_secs(1), regular_rx)
+                .await
+                .expect("regular async work was stalled")
+                .unwrap();
+
+            release_tx.send(()).unwrap();
+            assert_eq!(blocked.await, Ok(42));
+            let error = async_cx
+                .spawn_blocking(|| Err::<(), _>("expected error"))
+                .await;
+            assert_eq!(error, Err("expected error"));
+        });
     }
 }

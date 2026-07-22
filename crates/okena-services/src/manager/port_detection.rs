@@ -94,7 +94,7 @@ impl ServiceManager {
                 // scan ports ONCE, distribute results.
                 let backend_ref = backend.clone();
                 let results: Vec<((String, String), super::ProjectIncarnation, Vec<u16>)> = cx
-                    .spawn_blocking(async move {
+                    .spawn_blocking(move || {
                         // Get root PIDs for all services in one batch.
                         // On Linux+dtach this reads /proc once instead of spawning lsof per terminal.
                         let terminal_ids: Vec<&str> =
