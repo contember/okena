@@ -644,6 +644,22 @@ fn sync_prepared_services(
         }
 
         let previous = sync_state.known.get(&p.id).cloned();
+        let manager_owns_renamed_project = path_exists
+            && previous.as_ref().is_some_and(|previous| {
+                previous.data_replacement_epoch == identity.data_replacement_epoch
+                    && previous.path != identity.path
+            })
+            && sm.project_path(&p.id) == Some(&p.path)
+            && sm.service_terminal_writebacks().iter().any(|writeback| {
+                writeback.project_id == p.id
+                    && writeback.project_path == p.path
+                    && writeback.data_replacement_epoch == p.data_replacement_epoch
+            });
+        if manager_owns_renamed_project {
+            sync_state.known.insert(p.id.clone(), identity);
+            sync_state.resolve_retry(&p.id);
+            continue;
+        }
         if path_exists
             && previous.as_ref() == Some(&identity)
             && sm.project_path(&p.id) == Some(&p.path)
@@ -1581,6 +1597,122 @@ mod tests {
             sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
         assert_eq!(sync_state.known, known_after_first);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_services_adopts_recovered_directory_runtime_without_resetting_intent() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "okena-observer-renamed-runtime-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create renamed project dir");
+        std::fs::write(
+            project_dir.join("okena.yaml"),
+            "services:\n  - name: manual\n    command: echo manual\n  - name: automatic\n    command: echo automatic\n    auto_start: true\n",
+        )
+        .expect("write service config");
+        let new_path = project_dir.to_string_lossy().into_owned();
+        let backend = Arc::new(RecordingBackend {
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            reconnect_fail_after: None,
+            reconnect_count: AtomicUsize::new(0),
+        });
+        let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
+        let sm = Arc::new(parking_lot::Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals,
+        )));
+        let rr = reactor_ref(&sm);
+        let local = tokio::task::LocalSet::new();
+
+        let mut sync_state = ServiceSyncState {
+            known: HashMap::from([(
+                "project".to_string(),
+                KnownProject {
+                    path: "/previous/project/path".to_string(),
+                    data_replacement_epoch: 0,
+                },
+            )]),
+            ..ServiceSyncState::default()
+        };
+        let mut renamed = project("project", &new_path, false);
+        renamed
+            .service_terminals
+            .insert("manual".into(), "manual-terminal".into());
+
+        let (reconnected_before_sync, killed_before_sync) = local
+            .run_until(async {
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    manager.set_project_writeback_owner("project", &new_path, 0);
+                    assert_eq!(
+                        manager.load_project_services_prepared(
+                            "project",
+                            &new_path,
+                            &renamed.service_terminals,
+                            prepare_project_config(&new_path),
+                            &mut cx,
+                        ),
+                        ServiceLoadStatus::Loaded
+                    );
+                }
+                wait_for_test_condition(|| {
+                    sm.lock()
+                        .services_for_project("project")
+                        .iter()
+                        .any(|service| {
+                            service.definition.name == "manual"
+                                && service.status == okena_services::manager::ServiceStatus::Running
+                        })
+                })
+                .await;
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    manager.stop_service("project", "automatic", &mut cx);
+                    let reconnected_before_sync =
+                        backend.reconnected.lock().expect("reconnect lock").clone();
+                    let killed_before_sync = backend.killed.lock().expect("kill lock").clone();
+                    sync_services(&[renamed], &mut sync_state, &mut manager, &mut cx);
+                    (reconnected_before_sync, killed_before_sync)
+                }
+            })
+            .await;
+
+        let manager = sm.lock();
+        let statuses: HashMap<_, _> = manager
+            .services_for_project("project")
+            .iter()
+            .map(|service| (service.definition.name.as_str(), service.status.clone()))
+            .collect();
+        assert_eq!(
+            statuses.get("manual"),
+            Some(&okena_services::manager::ServiceStatus::Running)
+        );
+        assert_eq!(
+            statuses.get("automatic"),
+            Some(&okena_services::manager::ServiceStatus::Stopped)
+        );
+        assert_eq!(
+            sync_state.known.get("project"),
+            Some(&KnownProject {
+                path: new_path,
+                data_replacement_epoch: 0,
+            })
+        );
+        assert_eq!(
+            *backend.reconnected.lock().expect("reconnect lock"),
+            reconnected_before_sync
+        );
+        assert_eq!(
+            *backend.killed.lock().expect("kill lock"),
+            killed_before_sync
+        );
+        drop(manager);
+        std::fs::remove_dir_all(project_dir).expect("remove renamed project dir");
     }
 
     #[tokio::test]
