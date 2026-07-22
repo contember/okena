@@ -412,10 +412,11 @@ impl Workspace {
         });
 
         let Some((parent_project_id, recorded_root)) = worktree else {
+            let translated_paths = self.translate_local_project_paths(&old_path, &new_path_buf)?;
             std::fs::rename(&old_path, &new_path_buf)
                 .map_err(|error| format!("Failed to rename: {error}"))?;
+            self.apply_translated_project_paths(translated_paths);
             self.with_project(project_id, cx, |project| {
-                project.path = new_path;
                 project.name = new_name;
                 true
             });
@@ -447,57 +448,24 @@ impl Workspace {
             if !Self::physical_path_identity(&new_path_buf).starts_with(&root_identity) {
                 return Err("renamed project path must stay inside its linked worktree".to_string());
             }
+            let translated_paths = self.translate_local_project_paths(&old_path, &new_path_buf)?;
             std::fs::rename(&old_path, &new_path_buf)
                 .map_err(|error| format!("Failed to rename: {error}"))?;
+            self.apply_translated_project_paths(translated_paths);
             self.with_project(project_id, cx, |project| {
-                project.path = new_path;
                 project.name = new_name;
                 true
             });
             return Ok(());
         }
 
-        let canonical_root = std::fs::canonicalize(verified.checkout_path())
-            .map_err(|error| format!("Failed to resolve worktree root: {error}"))?;
-        let mut translated_paths = Vec::new();
-        for descendant in self.projects().iter().filter(|project| !project.is_remote) {
-            let descendant_path = std::path::Path::new(&descendant.path);
-            if !Self::physical_path_identity(descendant_path).starts_with(&root_identity) {
-                continue;
-            }
-            let canonical_descendant = std::fs::canonicalize(descendant_path).map_err(|error| {
-                format!(
-                    "Failed to resolve descendant project '{}': {error}",
-                    descendant.name
-                )
-            })?;
-            let suffix = canonical_descendant
-                .strip_prefix(&canonical_root)
-                .map_err(|_| {
-                    format!(
-                        "Failed to translate descendant project '{}' into moved worktree",
-                        descendant.name
-                    )
-                })?;
-            translated_paths.push((
-                descendant.id.clone(),
-                new_path_buf.join(suffix).to_string_lossy().into_owned(),
-            ));
-        }
+        let translated_paths =
+            self.translate_local_project_paths(verified.checkout_path(), &new_path_buf)?;
 
         let moved = okena_git::move_worktree(&verified, &new_path_buf)
             .map_err(|error| error.to_string())?;
         let moved_root = moved.checkout_path().to_string_lossy().into_owned();
-        for (id, translated_path) in translated_paths {
-            if let Some(descendant) = self
-                .data
-                .projects
-                .iter_mut()
-                .find(|project| project.id == id)
-            {
-                descendant.path = translated_path;
-            }
-        }
+        self.apply_translated_project_paths(translated_paths);
         if let Some(project) = self
             .data
             .projects
@@ -512,6 +480,55 @@ impl Workspace {
         }
         self.notify_data(cx);
         Ok(())
+    }
+
+    fn translate_local_project_paths(
+        &self,
+        old_root: &std::path::Path,
+        new_root: &std::path::Path,
+    ) -> Result<Vec<(String, String)>, String> {
+        let old_identity = Self::physical_path_identity(old_root);
+        let canonical_root = std::fs::canonicalize(old_root)
+            .map_err(|error| format!("Failed to resolve project directory: {error}"))?;
+        let mut translated_paths = Vec::new();
+        for descendant in self.projects().iter().filter(|project| !project.is_remote) {
+            let descendant_path = std::path::Path::new(&descendant.path);
+            if !Self::physical_path_identity(descendant_path).starts_with(&old_identity) {
+                continue;
+            }
+            let canonical_descendant = std::fs::canonicalize(descendant_path).map_err(|error| {
+                format!(
+                    "Failed to resolve descendant project '{}': {error}",
+                    descendant.name
+                )
+            })?;
+            let suffix = canonical_descendant
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    format!(
+                        "Failed to translate descendant project '{}' into moved directory",
+                        descendant.name
+                    )
+                })?;
+            translated_paths.push((
+                descendant.id.clone(),
+                new_root.join(suffix).to_string_lossy().into_owned(),
+            ));
+        }
+        Ok(translated_paths)
+    }
+
+    fn apply_translated_project_paths(&mut self, translated_paths: Vec<(String, String)>) {
+        for (id, translated_path) in translated_paths {
+            if let Some(descendant) = self
+                .data
+                .projects
+                .iter_mut()
+                .find(|project| project.id == id)
+            {
+                descendant.path = translated_path;
+            }
+        }
     }
 
     /// Set the folder color for a project (also propagates to worktree children without overrides)
@@ -2786,8 +2803,9 @@ mod gpui_tests {
             "user.name",
             "Okena Test",
         ]);
-        std::fs::create_dir_all(main_repo.join("packages/app")).unwrap();
+        std::fs::create_dir_all(main_repo.join("packages/app/nested")).unwrap();
         std::fs::write(main_repo.join("packages/app/file.txt"), "tracked\n").unwrap();
+        std::fs::write(main_repo.join("packages/app/nested/file.txt"), "nested\n").unwrap();
         git(&["-C", path_str(&main_repo), "add", "packages"]);
         git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
         git(&[
@@ -2810,9 +2828,14 @@ mod gpui_tests {
         let metadata = child.worktree_info.as_mut().unwrap();
         metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
         metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        let mut descendant = make_project("descendant");
+        descendant.path = old_project_path
+            .join("nested")
+            .to_string_lossy()
+            .into_owned();
         let mut data = make_workspace_data();
-        data.projects = vec![parent, child];
-        data.project_order = vec!["parent".to_string()];
+        data.projects = vec![parent, child, descendant];
+        data.project_order = vec!["parent".to_string(), "descendant".to_string()];
         let workspace = cx.new(|_| Workspace::new(data));
 
         workspace.update(cx, |ws, cx| {
@@ -2832,6 +2855,10 @@ mod gpui_tests {
                 Path::new(&moved.worktree_info.as_ref().unwrap().worktree_path),
                 worktree
             );
+            assert_eq!(
+                Path::new(&ws.project("descendant").unwrap().path),
+                new_project_path.join("nested")
+            );
         });
         assert!(worktree.exists());
         assert!(!old_project_path.exists());
@@ -2845,6 +2872,49 @@ mod gpui_tests {
             "--force",
             path_str(&worktree),
         ]);
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_project_directory_translates_descendant_projects(cx: &mut gpui::TestAppContext) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-project-rename-{}", uuid::Uuid::new_v4()));
+        let project_path = fixture.join("project");
+        let renamed_path = fixture.join("renamed-project");
+        let descendant_path = project_path.join("packages/nested");
+        std::fs::create_dir_all(&descendant_path).unwrap();
+
+        let mut project = make_project("project");
+        project.path = project_path.to_string_lossy().into_owned();
+        let mut descendant = make_project("descendant");
+        descendant.path = descendant_path.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![project, descendant];
+        data.project_order = vec!["project".to_string(), "descendant".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        workspace.update(cx, |ws, cx| {
+            ws.rename_project_directory(
+                "project",
+                renamed_path.to_string_lossy().into_owned(),
+                "renamed-project".to_string(),
+                cx,
+            )
+            .unwrap();
+        });
+
+        workspace.read_with(cx, |ws, _| {
+            assert_eq!(
+                Path::new(&ws.project("project").unwrap().path),
+                renamed_path
+            );
+            assert_eq!(
+                Path::new(&ws.project("descendant").unwrap().path),
+                renamed_path.join("packages/nested")
+            );
+        });
+        assert!(!project_path.exists());
+        assert!(renamed_path.join("packages/nested").exists());
         let _ = std::fs::remove_dir_all(fixture);
     }
 
