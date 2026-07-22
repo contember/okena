@@ -85,6 +85,7 @@ struct PtyInstances {
     creating: HashMap<String, PtyGeneration>,
     exited: HashMap<String, ExitedPty>,
     pending_session_kills: HashMap<String, usize>,
+    backend_reconfiguration: bool,
 }
 
 struct ExitedPty {
@@ -550,12 +551,25 @@ impl PtyManager {
         self.session_backend.read().preference
     }
 
+    /// Prevent new PTYs from selecting the old route while it is drained.
+    pub fn begin_session_backend_reconfiguration(&self) -> Result<()> {
+        let mut instances = self.instances.lock();
+        if instances.backend_reconfiguration {
+            anyhow::bail!("terminal backend reconfiguration already in progress");
+        }
+        instances.backend_reconfiguration = true;
+        Ok(())
+    }
+
     /// Confirm that every PTY and queued old-backend teardown has drained.
     pub fn ensure_session_backend_reconfigurable(&self) -> Result<()> {
         if !self.terminals.lock().is_empty() {
             anyhow::bail!("cannot switch session backend while terminals are still active");
         }
         let instances = self.instances.lock();
+        if !instances.backend_reconfiguration {
+            anyhow::bail!("terminal backend reconfiguration has not started");
+        }
         if !instances.current.is_empty()
             || !instances.creating.is_empty()
             || !instances.pending_session_kills.is_empty()
@@ -572,6 +586,7 @@ impl PtyManager {
             preference,
             resolved,
         };
+        self.cancel_session_backend_reconfiguration();
         if resolved.supports_persistence() {
             log::info!("Session persistence switched to {:?}", resolved);
         }
@@ -583,6 +598,13 @@ impl PtyManager {
         {
             log::warn!("failed to spawn dtach cleanup thread: {error}");
         }
+    }
+
+    /// Abort a route migration and allow PTY creation on the unchanged route.
+    pub fn cancel_session_backend_reconfiguration(&self) {
+        let mut instances = self.instances.lock();
+        instances.backend_reconfiguration = false;
+        self.instance_changed.notify_all();
     }
 
     /// Return whether an event belongs to the currently attached PTY instance.
@@ -673,10 +695,16 @@ impl PtyManager {
     ) -> Result<()> {
         let generation = PtyGeneration(self.next_generation.fetch_add(1, Ordering::Relaxed));
         let mut instances = self.instances.lock();
+        if instances.backend_reconfiguration {
+            anyhow::bail!("terminal backend reconfiguration is in progress");
+        }
         while instances.has_pending_session_kill(terminal_id)
             || instances.creating.contains_key(terminal_id)
         {
             self.instance_changed.wait(&mut instances);
+            if instances.backend_reconfiguration {
+                anyhow::bail!("terminal backend reconfiguration is in progress");
+            }
         }
         if instances.current.contains_key(terminal_id) {
             if self.terminals.lock().contains_key(terminal_id) {
@@ -2292,10 +2320,40 @@ mod tests {
         let (manager, _events) = PtyManager::new(SessionBackend::None);
 
         manager
+            .begin_session_backend_reconfiguration()
+            .expect("begin reconfiguration");
+        manager
             .ensure_session_backend_reconfigurable()
             .expect("new manager is drained");
         manager.apply_session_backend(SessionBackend::Tmux);
 
         assert_eq!(manager.session_backend_preference(), SessionBackend::Tmux);
+        assert!(!manager.instances.lock().backend_reconfiguration);
+    }
+
+    #[test]
+    fn backend_reconfiguration_fence_rejects_stale_creation_until_released() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+
+        manager
+            .begin_session_backend_reconfiguration()
+            .expect("begin reconfiguration");
+        manager
+            .ensure_session_backend_reconfigurable()
+            .expect("manager remains drained");
+
+        let error = manager
+            .create_or_reconnect_terminal_with_plan(
+                Some("stale-launch"),
+                ".",
+                &TerminalLaunchPlan::for_shell(ShellType::Default),
+            )
+            .expect_err("stale creation must not select the old route");
+        assert!(error.to_string().contains("reconfiguration is in progress"));
+        assert!(manager.terminals.lock().is_empty());
+        assert!(manager.instances.lock().creating.is_empty());
+
+        manager.cancel_session_backend_reconfiguration();
+        assert!(!manager.instances.lock().backend_reconfiguration);
     }
 }
