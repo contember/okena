@@ -198,16 +198,19 @@ pub fn execute_prepared_content_search_with_cancellation(
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> ActionResult {
     let mut results = Vec::new();
-    okena_files::content_search::search_content(
+    let search_result = okena_files::content_search::search_content(
         &search.project_path,
         &search.query,
         &search.config,
         cancelled,
         &mut |result| results.push(result),
     );
-    ActionResult::Ok(Some(
-        serde_json::to_value(results).expect("BUG: FileSearchResult must serialize"),
-    ))
+    match search_result {
+        Ok(()) => ActionResult::Ok(Some(
+            serde_json::to_value(results).expect("BUG: FileSearchResult must serialize"),
+        )),
+        Err(error) => ActionResult::Err(error),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
