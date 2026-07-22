@@ -78,6 +78,8 @@ pub struct ContentSearchDialog {
     pub(super) error_message: Option<String>,
     /// Handle to cancel running search.
     pub(super) search_handle: Option<SearchHandle>,
+    /// Identity of the latest requested search, including its debounce period.
+    pub(super) search_generation: u64,
     /// Search config toggles.
     pub(super) case_sensitive: bool,
     pub(super) regex_mode: bool,
@@ -220,6 +222,7 @@ impl ContentSearchDialog {
             searching: false,
             error_message: None,
             search_handle: None,
+            search_generation: 0,
             case_sensitive,
             regex_mode,
             fuzzy_mode,
