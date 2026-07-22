@@ -29,6 +29,10 @@ use okena_workspace::context::WorkspaceCx;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use files::{
+    PreparedContentSearch, execute_prepared_content_search,
+    execute_prepared_content_search_with_cancellation, prepare_content_search,
+};
 pub use session::{
     apply_imported_workspace, apply_loaded_session, begin_workspace_replacement,
     cleanup_stale_workspace_replacement, ensure_workspace_replacement_allowed,

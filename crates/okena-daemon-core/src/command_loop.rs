@@ -43,10 +43,11 @@ use okena_app_core::remote_snapshot::build_state_response;
 #[cfg(test)]
 use okena_app_core::workspace::actions::execute::apply_loaded_session;
 use okena_app_core::workspace::actions::execute::{
-    begin_workspace_replacement, cleanup_stale_workspace_replacement, ensure_terminal,
-    ensure_workspace_replacement_allowed, execute_action, fail_workspace_replacement,
+    PreparedContentSearch, begin_workspace_replacement, cleanup_stale_workspace_replacement,
+    ensure_terminal, ensure_workspace_replacement_allowed, execute_action,
+    execute_prepared_content_search_with_cancellation, fail_workspace_replacement,
     finish_workspace_replacement, import_workspace_data, load_session_data_for_shell,
-    materialize_workspace_replacement, prepare_workspace_replacement,
+    materialize_workspace_replacement, prepare_content_search, prepare_workspace_replacement,
     spawn_uninitialized_terminals,
 };
 use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
@@ -65,7 +66,7 @@ use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
 use okena_workspace::state::{TerminalBackendMigration, WindowId, Workspace};
 use parking_lot::Mutex;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, oneshot, watch};
 
 use crate::daemon_config::{DaemonConfig, get_settings_schema};
 use crate::service_cx::ServiceReactorRef;
@@ -145,6 +146,77 @@ fn publish_committed_settings_change(
     if outcome.committed {
         state_version.send_modify(|version| *version = version.wrapping_add(1));
     }
+}
+
+const MAX_CONCURRENT_CONTENT_SEARCHES: usize = 2;
+
+fn spawn_content_search_with<Run>(
+    search: PreparedContentSearch,
+    reply: Option<oneshot::Sender<CommandResult>>,
+    runtime: &tokio::runtime::Handle,
+    permits: Arc<Semaphore>,
+    run: Run,
+) where
+    Run: FnOnce(PreparedContentSearch, &std::sync::atomic::AtomicBool) -> CommandResult
+        + Send
+        + 'static,
+{
+    let worker_runtime = runtime.clone();
+    let _task = runtime.spawn(async move {
+        let _permit = match permits.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                if let Some(reply) = reply {
+                    let _ = reply.send(CommandResult::Err(
+                        "content search executor unavailable".to_string(),
+                    ));
+                }
+                return;
+            }
+        };
+        if reply.as_ref().is_some_and(oneshot::Sender::is_closed) {
+            return;
+        }
+
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let mut worker = worker_runtime.spawn_blocking(move || run(search, &worker_cancelled));
+
+        let result = match reply {
+            Some(mut reply) => {
+                tokio::select! {
+                    result = &mut worker => {
+                        let result = result.unwrap_or_else(|error| {
+                            CommandResult::Err(format!("content search worker failed: {error}"))
+                        });
+                        let _ = reply.send(result);
+                        return;
+                    }
+                    _ = reply.closed() => {
+                        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let _ = worker.await;
+                        return;
+                    }
+                }
+            }
+            None => worker.await,
+        };
+
+        if let Err(error) = result {
+            log::warn!("detached content search worker failed: {error}");
+        }
+    });
+}
+
+fn spawn_content_search(
+    search: PreparedContentSearch,
+    reply: Option<oneshot::Sender<CommandResult>>,
+    runtime: &tokio::runtime::Handle,
+    permits: Arc<Semaphore>,
+) {
+    spawn_content_search_with(search, reply, runtime, permits, |search, cancelled| {
+        execute_prepared_content_search_with_cancellation(search, cancelled).into_command_result()
+    });
 }
 
 /// Run destructive cleanup only while no current project occupies the physical
@@ -1498,14 +1570,15 @@ pub async fn daemon_command_loop(
         runtime.clone(),
         service_tick.clone(),
     );
+    let content_search_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CONTENT_SEARCHES));
 
     loop {
-        let msg: BridgeMessage = match bridge_rx.recv().await {
+        let BridgeMessage { command, reply } = match bridge_rx.recv().await {
             Ok(m) => m,
             Err(_) => break,
         };
 
-        let command = match msg.command {
+        let command = match command {
             // Identityless actions (HTTP /v1/actions: CLI, agents) do NOT
             // touch resize authority — nulling the owner here handed the next
             // arriving resize to a random client. Only input from an
@@ -1517,6 +1590,49 @@ pub async fn daemon_command_loop(
             } => {
                 claim_input_resize_owner(&action, &connection_id);
                 RemoteCommand::Action(action)
+            }
+            command => command,
+        };
+
+        let command = match command {
+            RemoteCommand::Action(ActionRequest::SearchContent {
+                project_id,
+                query,
+                case_sensitive,
+                mode,
+                max_results,
+                file_glob,
+                context_lines,
+                show_ignored,
+            }) => {
+                let prepared = {
+                    let workspace = workspace.lock();
+                    prepare_content_search(
+                        &workspace,
+                        project_id,
+                        query,
+                        case_sensitive,
+                        mode,
+                        max_results,
+                        file_glob,
+                        context_lines,
+                        show_ignored,
+                    )
+                };
+                match prepared {
+                    Ok(search) => spawn_content_search(
+                        search,
+                        reply,
+                        &runtime,
+                        content_search_permits.clone(),
+                    ),
+                    Err(error) => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(CommandResult::Err(error));
+                        }
+                    }
+                }
+                continue;
             }
             command => command,
         };
@@ -2437,7 +2553,7 @@ pub async fn daemon_command_loop(
             }
         };
 
-        if let Some(reply) = msg.reply {
+        if let Some(reply) = reply {
             let _ = reply.send(result);
         }
     }
@@ -4410,6 +4526,96 @@ mod tests {
             main_window: Default::default(),
             extra_windows: Vec::new(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_content_search_keeps_workspace_live_and_replies_after_release() {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-content-search-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&fixture).expect("create content search fixture");
+        let fixture_path = fixture.to_str().expect("fixture path is utf-8");
+        let workspace = Arc::new(Mutex::new(Workspace::new(
+            workspace_with_uninitialized_terminal(fixture_path),
+        )));
+        let search = {
+            let workspace = workspace.lock();
+            prepare_content_search(
+                &workspace,
+                "p1".to_string(),
+                "needle".to_string(),
+                false,
+                "literal".to_string(),
+                1000,
+                None,
+                0,
+                false,
+            )
+            .expect("prepare content search")
+        };
+
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        spawn_content_search_with(
+            search,
+            Some(reply_tx),
+            &tokio::runtime::Handle::current(),
+            Arc::new(Semaphore::new(1)),
+            move |_search, cancelled| {
+                started_tx.send(()).expect("signal blocked search");
+                release_rx.recv().expect("release blocked search");
+                assert!(!cancelled.load(std::sync::atomic::Ordering::Relaxed));
+                CommandResult::Ok(Some(serde_json::json!(["done"])))
+            },
+        );
+
+        started_rx.await.expect("content search worker started");
+
+        let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let settings = default_settings();
+        let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+        let mut focus_manager = FocusManager::new();
+        let unrelated_result = run_main_workspace_action(
+            ActionRequest::RenameProject {
+                project_id: "p1".to_string(),
+                name: "Renamed while searching".to_string(),
+            },
+            &mut workspace.lock(),
+            &mut focus_manager,
+            &backend,
+            &terminals,
+            &settings,
+            &workspace_tick,
+            &None,
+            &None,
+        );
+        assert!(matches!(unrelated_result, CommandResult::Ok(None)));
+        assert_eq!(
+            workspace
+                .lock()
+                .project("p1")
+                .map(|project| project.name.clone()),
+            Some("Renamed while searching".to_string()),
+            "unrelated action can acquire and mutate the workspace"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), async {
+                tokio::task::yield_now().await;
+            })
+            .await
+            .is_ok(),
+            "runtime remains live while search worker is blocked"
+        );
+
+        release_tx.send(()).expect("release content search worker");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), reply_rx)
+            .await
+            .expect("content search reply timeout")
+            .expect("content search reply");
+        assert!(matches!(result, CommandResult::Ok(Some(_))));
+
+        std::fs::remove_dir_all(fixture).expect("remove content search fixture");
     }
 
     /// `materialize_uninitialized_terminals` assigns a real `terminal_id` to a
