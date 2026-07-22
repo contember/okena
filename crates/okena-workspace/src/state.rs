@@ -5,7 +5,6 @@
 //! `okena-state` / `okena-layout` and are re-exported here so existing
 //! `crate::state::*` imports keep working.
 
-use okena_core::theme::FolderColor;
 use crate::access_history::ProjectAccessHistory;
 use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
@@ -14,6 +13,7 @@ use crate::remote_sync::{PendingRemoteFocus, RemoteProjectSnapshot, RemoteSyncSt
 use crate::visibility::compute_visible_projects;
 #[cfg(feature = "gpui")]
 use gpui::*;
+use okena_core::theme::FolderColor;
 use std::collections::HashMap;
 
 pub use okena_layout::{LayoutNode, SplitDirection};
@@ -165,7 +165,12 @@ impl Workspace {
 
     /// Replace workspace data wholesale (e.g. from disk reload).
     /// Does NOT bump data_version — the data came from disk, not a user edit.
-    pub fn replace_data(&mut self, focus_manager: &mut FocusManager, data: WorkspaceData, cx: &mut impl WorkspaceCx) {
+    pub fn replace_data(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        data: WorkspaceData,
+        cx: &mut impl WorkspaceCx,
+    ) {
         self.data = data;
         self.data_replacement_epoch += 1;
         // Snapshots in pending_closes refer to the old data — drop them so an
@@ -290,7 +295,9 @@ impl Workspace {
         width: f32,
         cx: &mut impl WorkspaceCx,
     ) {
-        self.mutate_data(cx, |data| data.set_project_width(window_id, project_id, width));
+        self.mutate_data(cx, |data| {
+            data.set_project_width(window_id, project_id, width)
+        });
     }
 
     /// Set a folder's collapsed state on the targeted window.
@@ -340,12 +347,7 @@ impl Workspace {
 
     /// Set sidebar open/closed state for the targeted window. Persisted
     /// so each window remembers its own chrome layout across launches.
-    pub fn set_sidebar_open(
-        &mut self,
-        window_id: WindowId,
-        open: bool,
-        cx: &mut impl WorkspaceCx,
-    ) {
+    pub fn set_sidebar_open(&mut self, window_id: WindowId, open: bool, cx: &mut impl WorkspaceCx) {
         self.mutate_data(cx, |data| data.set_sidebar_open(window_id, open));
     }
 
@@ -388,7 +390,11 @@ impl Workspace {
 
     /// Flip the "needs attention" section opt-in for a window's manual view.
     /// Persisted via `notify_data`.
-    pub fn toggle_show_attention_section(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
+    pub fn toggle_show_attention_section(
+        &mut self,
+        window_id: WindowId,
+        cx: &mut impl WorkspaceCx,
+    ) {
         if self.data.toggle_show_attention_section(window_id).is_some() {
             self.notify_data(cx);
         }
@@ -573,12 +579,18 @@ impl Workspace {
 
     /// Update the saved service terminal IDs for a project.
     /// Called by the ServiceManager observer to persist terminal IDs across restarts.
-    pub fn sync_service_terminals(&mut self, project_id: &str, terminals: HashMap<String, String>, cx: &mut impl WorkspaceCx) {
+    pub fn sync_service_terminals(
+        &mut self,
+        project_id: &str,
+        terminals: HashMap<String, String>,
+        cx: &mut impl WorkspaceCx,
+    ) {
         if let Some(project) = self.project_mut(project_id)
-            && project.service_terminals != terminals {
-                project.service_terminals = terminals;
-                self.notify_data(cx);
-            }
+            && project.service_terminals != terminals
+        {
+            project.service_terminals = terminals;
+            self.notify_data(cx);
+        }
     }
 
     pub fn register_hook_terminal(
@@ -590,11 +602,15 @@ impl Workspace {
     ) {
         if let Some(project) = self.project_mut(project_id) {
             let label = entry.label.clone();
-            project.hook_terminals.insert(terminal_id.to_string(), entry);
+            project
+                .hook_terminals
+                .insert(terminal_id.to_string(), entry);
 
             // Hook terminals are displayed in the dedicated HookPanel (not in the layout tree).
             // Set the terminal name so the panel can display it.
-            project.terminal_names.insert(terminal_id.to_string(), label);
+            project
+                .terminal_names
+                .insert(terminal_id.to_string(), label);
 
             self.notify_data(cx);
         }
@@ -608,13 +624,18 @@ impl Workspace {
         cx: &mut impl WorkspaceCx,
     ) {
         for result in results {
-            self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
-                label: result.label,
-                status: HookTerminalStatus::Running,
-                hook_type: result.hook_type.to_string(),
-                command: result.command,
-                cwd: result.cwd,
-            }, cx);
+            self.register_hook_terminal(
+                &result.project_id,
+                &result.terminal_id,
+                HookTerminalEntry {
+                    label: result.label,
+                    status: HookTerminalStatus::Running,
+                    hook_type: result.hook_type.to_string(),
+                    command: result.command,
+                    cwd: result.cwd,
+                },
+                cx,
+            );
         }
     }
 
@@ -635,21 +656,18 @@ impl Workspace {
         }
     }
 
-    pub fn remove_hook_terminal(
-        &mut self,
-        terminal_id: &str,
-        cx: &mut impl WorkspaceCx,
-    ) {
+    pub fn remove_hook_terminal(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) {
         for project in &mut self.data.projects {
             if project.hook_terminals.remove(terminal_id).is_some() {
                 if let Some(ref layout) = project.layout
-                    && let Some(path) = layout.find_terminal_path(terminal_id) {
-                        if path.is_empty() {
-                            project.layout = None;
-                        } else if let Some(ref mut layout) = project.layout {
-                            layout.remove_at_path(&path);
-                        }
+                    && let Some(path) = layout.find_terminal_path(terminal_id)
+                {
+                    if path.is_empty() {
+                        project.layout = None;
+                    } else if let Some(ref mut layout) = project.layout {
+                        layout.remove_at_path(&path);
                     }
+                }
                 project.terminal_names.remove(terminal_id);
                 self.notify_data(cx);
                 return;
@@ -670,7 +688,9 @@ impl Workspace {
     /// Returns a reference to the `ProjectData` if found.
     pub fn find_project_for_terminal(&self, terminal_id: &str) -> Option<&ProjectData> {
         self.data.projects.iter().find(|p| {
-            p.layout.as_ref().is_some_and(|l| l.find_terminal_path(terminal_id).is_some())
+            p.layout
+                .as_ref()
+                .is_some_and(|l| l.find_terminal_path(terminal_id).is_some())
         })
     }
 
@@ -720,7 +740,10 @@ impl Workspace {
     }
 
     /// Take a pending worktree close for the given terminal ID (removes it).
-    pub fn take_pending_worktree_close(&mut self, terminal_id: &str) -> Option<PendingWorktreeClose> {
+    pub fn take_pending_worktree_close(
+        &mut self,
+        terminal_id: &str,
+    ) -> Option<PendingWorktreeClose> {
         self.lifecycle.take_pending_close(terminal_id)
     }
 
@@ -757,7 +780,10 @@ impl Workspace {
         // calling window's persisted WindowState. Fall back to main_window
         // if the targeted extra has been dropped between caller-resolve and
         // read (drop-race safety).
-        let window_state = self.data.window(window_id).unwrap_or(&self.data.main_window);
+        let window_state = self
+            .data
+            .window(window_id)
+            .unwrap_or(&self.data.main_window);
         compute_visible_projects(
             &self.data,
             focused_project_id,
@@ -775,8 +801,7 @@ impl Workspace {
     /// projects the user can actually see somewhere.
     pub fn all_visible_project_ids(&self) -> std::collections::HashSet<String> {
         let mut ids = std::collections::HashSet::new();
-        for window in
-            std::iter::once(&self.data.main_window).chain(self.data.extra_windows.iter())
+        for window in std::iter::once(&self.data.main_window).chain(self.data.extra_windows.iter())
         {
             for p in compute_visible_projects(&self.data, None, false, window) {
                 ids.insert(p.id.clone());
@@ -787,8 +812,14 @@ impl Workspace {
 
     /// Get IDs of worktree children for a given parent project.
     pub fn worktree_child_ids(&self, parent_id: &str) -> Vec<String> {
-        self.data.projects.iter()
-            .filter(|p| p.worktree_info.as_ref().is_some_and(|w| w.parent_project_id == parent_id))
+        self.data
+            .projects
+            .iter()
+            .filter(|p| {
+                p.worktree_info
+                    .as_ref()
+                    .is_some_and(|w| w.parent_project_id == parent_id)
+            })
             .map(|p| p.id.clone())
             .collect()
     }
@@ -803,7 +834,10 @@ impl Workspace {
     /// mirrored from a user-added remote connection returns false. A project
     /// with no connection is treated as local (legacy / non-headless).
     pub fn is_local_daemon_project(&self, project_id: &str) -> bool {
-        match self.project(project_id).and_then(|p| p.connection_id.as_deref()) {
+        match self
+            .project(project_id)
+            .and_then(|p| p.connection_id.as_deref())
+        {
             Some(id) => id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
             None => true,
         }
@@ -856,17 +890,19 @@ impl Workspace {
 
     /// Find which folder (if any) contains a given project
     pub fn folder_for_project(&self, project_id: &str) -> Option<&FolderData> {
-        self.data.folders.iter().find(|f| f.project_ids.contains(&project_id.to_string()))
+        self.data
+            .folders
+            .iter()
+            .find(|f| f.project_ids.contains(&project_id.to_string()))
     }
 
     /// Find folder for a project, falling back to the parent project's folder for worktrees.
     pub fn folder_for_project_or_parent(&self, project_id: &str) -> Option<&FolderData> {
-        self.folder_for_project(project_id)
-            .or_else(|| {
-                self.project(project_id)
-                    .and_then(|p| p.worktree_info.as_ref())
-                    .and_then(|wt| self.folder_for_project(&wt.parent_project_id))
-            })
+        self.folder_for_project(project_id).or_else(|| {
+            self.project(project_id)
+                .and_then(|p| p.worktree_info.as_ref())
+                .and_then(|wt| self.folder_for_project(&wt.parent_project_id))
+        })
     }
 
     /// Collect all detached terminals across all projects by traversing layout trees.
@@ -891,7 +927,12 @@ impl Workspace {
 
     /// Remove all remote projects (and their folder) for a given connection_id.
     #[allow(dead_code)]
-    pub fn remove_remote_projects(&mut self, focus_manager: &mut FocusManager, connection_id: &str, cx: &mut impl WorkspaceCx) {
+    pub fn remove_remote_projects(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        connection_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
         let prefix = format!("remote:{}:", connection_id);
 
         let removed_project_ids: Vec<String> = self
@@ -911,7 +952,9 @@ impl Workspace {
 
         self.data.projects.retain(|p| !p.id.starts_with(&prefix));
         self.data.folders.retain(|f| !f.id.starts_with(&prefix));
-        self.data.project_order.retain(|id| !id.starts_with(&prefix));
+        self.data
+            .project_order
+            .retain(|id| !id.starts_with(&prefix));
 
         for project_id in &removed_project_ids {
             self.data.delete_project_scrub_all_windows(project_id);
@@ -925,9 +968,10 @@ impl Workspace {
         }
 
         if let Some(focused) = focus_manager.focused_project_id()
-            && focused.starts_with(&prefix) {
-                focus_manager.set_focused_project_id(None);
-            }
+            && focused.starts_with(&prefix)
+        {
+            focus_manager.set_focused_project_id(None);
+        }
 
         cx.notify();
     }
@@ -984,17 +1028,24 @@ impl Workspace {
 
     /// Helper to mutate a layout node at a path, with automatic notify.
     /// Returns true if the mutation was applied.
-    pub fn with_layout_node<F>(&mut self, project_id: &str, path: &[usize], cx: &mut impl WorkspaceCx, f: F) -> bool
+    pub fn with_layout_node<F>(
+        &mut self,
+        project_id: &str,
+        path: &[usize],
+        cx: &mut impl WorkspaceCx,
+        f: F,
+    ) -> bool
     where
         F: FnOnce(&mut LayoutNode) -> bool,
     {
         if let Some(project) = self.project_mut(project_id)
             && let Some(ref mut layout) = project.layout
-                && let Some(node) = layout.get_at_path_mut(path)
-                    && f(node) {
-                        self.notify_data(cx);
-                        return true;
-                    }
+            && let Some(node) = layout.get_at_path_mut(path)
+            && f(node)
+        {
+            self.notify_data(cx);
+            return true;
+        }
         false
     }
 
@@ -1005,24 +1056,24 @@ impl Workspace {
         F: FnOnce(&mut ProjectData) -> bool,
     {
         if let Some(project) = self.project_mut(project_id)
-            && f(project) {
-                self.notify_data(cx);
-                return true;
-            }
+            && f(project)
+        {
+            self.notify_data(cx);
+            return true;
+        }
         false
     }
 }
 
-
 #[cfg(test)]
 mod workspace_tests {
+    use crate::settings::HooksConfig;
     use crate::state::{
         FolderData, LayoutNode, ProjectData, SplitDirection, WindowId, WindowState, Workspace,
         WorkspaceData, WorktreeMetadata,
     };
-    use okena_terminal::shell_config::ShellType;
     use okena_core::theme::FolderColor;
-    use crate::settings::HooksConfig;
+    use okena_terminal::shell_config::ShellType;
     use std::collections::HashMap;
 
     fn make_project(id: &str) -> ProjectData {
@@ -1099,17 +1150,19 @@ mod workspace_tests {
         let mut fm = crate::focus::FocusManager::new();
         fm.set_focused_project_id(Some("p3".to_string()));
 
-        let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), fm.is_focus_individual());
+        let visible = ws.visible_projects(
+            WindowId::Main,
+            fm.focused_project_id(),
+            fm.is_focus_individual(),
+        );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "p3");
     }
 
     #[test]
     fn test_visible_projects_with_folder() {
-        let mut data = make_workspace_data(
-            vec![make_project("p1"), make_project("p2")],
-            vec!["f1"],
-        );
+        let mut data =
+            make_workspace_data(vec![make_project("p1"), make_project("p2")], vec!["f1"]);
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
@@ -1197,8 +1250,10 @@ mod workspace_tests {
     fn test_visible_projects_with_folder_filter() {
         let mut data = make_workspace_data(
             vec![
-                make_project("p1"), make_project("p2"),
-                make_project("p3"), make_project("p4"),
+                make_project("p1"),
+                make_project("p2"),
+                make_project("p3"),
+                make_project("p4"),
                 make_project("p5"),
             ],
             vec!["f1", "f2", "p5"],
@@ -1208,13 +1263,13 @@ mod workspace_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string(), "p2".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p3".to_string(), "p4".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
         ];
 
@@ -1238,10 +1293,7 @@ mod workspace_tests {
     #[test]
     fn test_folder_filter_hides_top_level_projects() {
         let mut data = make_workspace_data(
-            vec![
-                make_project("p1"), make_project("p2"),
-                make_project("p3"),
-            ],
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["f1", "p3"],
         );
         data.folders = vec![FolderData {
@@ -1280,27 +1332,36 @@ mod workspace_tests {
             branch_name: "branch-w2".to_string(),
         });
 
-        let data = make_workspace_data(
-            vec![p1, w1, w2, make_project("p2")],
-            vec!["p1", "p2"],
-        );
+        let data = make_workspace_data(vec![p1, w1, w2, make_project("p2")], vec!["p1", "p2"]);
         let ws = Workspace::new(data);
         let mut fm = crate::focus::FocusManager::new();
 
         fm.set_focused_project_id(Some("p1".to_string()));
-        let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), fm.is_focus_individual());
+        let visible = ws.visible_projects(
+            WindowId::Main,
+            fm.focused_project_id(),
+            fm.is_focus_individual(),
+        );
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "w1");
         assert_eq!(visible[2].id, "w2");
 
         fm.set_focused_project_id(Some("w1".to_string()));
-        let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), fm.is_focus_individual());
+        let visible = ws.visible_projects(
+            WindowId::Main,
+            fm.focused_project_id(),
+            fm.is_focus_individual(),
+        );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "w1");
 
         fm.set_focused_project_id(None);
-        let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), fm.is_focus_individual());
+        let visible = ws.visible_projects(
+            WindowId::Main,
+            fm.focused_project_id(),
+            fm.is_focus_individual(),
+        );
         assert_eq!(visible.len(), 4);
     }
 
@@ -1325,10 +1386,7 @@ mod workspace_tests {
             branch_name: "branch-w2".to_string(),
         });
 
-        let mut data = make_workspace_data(
-            vec![p1, w1, w2, make_project("p2")],
-            vec!["f1", "p2"],
-        );
+        let mut data = make_workspace_data(vec![p1, w1, w2, make_project("p2")], vec!["f1", "p2"]);
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
@@ -1362,10 +1420,8 @@ mod workspace_tests {
         let mut p1 = make_project("p1");
         p1.worktree_ids = vec!["w1".to_string()];
 
-        let mut data = make_workspace_data(
-            vec![p1, w1, make_project("p2")],
-            vec!["f1", "w1", "p2"],
-        );
+        let mut data =
+            make_workspace_data(vec![p1, w1, make_project("p2")], vec!["f1", "w1", "p2"]);
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
@@ -1404,13 +1460,13 @@ mod workspace_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
         ];
 
@@ -1438,23 +1494,21 @@ mod workspace_tests {
         let mut p2 = make_project("p2");
         p2.worktree_ids = vec!["w1".to_string()];
 
-        let mut data = make_workspace_data(
-            vec![make_project("p1"), p2, w1],
-            vec!["w1", "f1", "f2"],
-        );
+        let mut data =
+            make_workspace_data(vec![make_project("p1"), p2, w1], vec!["w1", "f1", "f2"]);
         data.main_window.hidden_project_ids.insert("p2".to_string());
         data.folders = vec![
             FolderData {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
         ];
 
@@ -1481,23 +1535,21 @@ mod workspace_tests {
         let mut p1 = make_project("p1");
         p1.worktree_ids = vec!["w1".to_string()];
 
-        let mut data = make_workspace_data(
-            vec![p1, make_project("p2"), w1],
-            vec!["f1", "w1", "f2"],
-        );
+        let mut data =
+            make_workspace_data(vec![p1, make_project("p2"), w1], vec!["f1", "w1", "f2"]);
         data.main_window.hidden_project_ids.insert("p1".to_string());
         data.folders = vec![
             FolderData {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
         ];
 
@@ -1529,13 +1581,13 @@ mod workspace_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string(), "w1".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
         ];
 
@@ -1560,10 +1612,7 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
-        let mut data = make_workspace_data(
-            vec![make_project("p1"), w1],
-            vec!["p1", "w1"],
-        );
+        let mut data = make_workspace_data(vec![make_project("p1"), w1], vec!["p1", "w1"]);
         data.main_window.hidden_project_ids.insert("p1".to_string());
         let ws = Workspace::new(data);
 
@@ -1575,10 +1624,7 @@ mod workspace_tests {
     #[test]
     fn test_folder_filter_with_focus_override() {
         let mut data = make_workspace_data(
-            vec![
-                make_project("p1"), make_project("p2"),
-                make_project("p3"),
-            ],
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["f1", "p3"],
         );
         data.folders = vec![FolderData {
@@ -1594,7 +1640,11 @@ mod workspace_tests {
         let mut fm = crate::focus::FocusManager::new();
         fm.set_focused_project_id(Some("p3".to_string()));
 
-        let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), fm.is_focus_individual());
+        let visible = ws.visible_projects(
+            WindowId::Main,
+            fm.focused_project_id(),
+            fm.is_focus_individual(),
+        );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "p3");
     }
@@ -1683,7 +1733,11 @@ mod workspace_tests {
         let mut fm = crate::focus::FocusManager::new();
         fm.set_focused_project_id(Some("parent".to_string()));
 
-        let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), fm.is_focus_individual());
+        let visible = ws.visible_projects(
+            WindowId::Main,
+            fm.focused_project_id(),
+            fm.is_focus_individual(),
+        );
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "parent");
         assert_eq!(visible[1].id, "wt1");
@@ -1715,7 +1769,11 @@ mod workspace_tests {
         let mut fm = crate::focus::FocusManager::new();
         fm.set_focused_project_id(Some("wt1".to_string()));
 
-        let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), fm.is_focus_individual());
+        let visible = ws.visible_projects(
+            WindowId::Main,
+            fm.focused_project_id(),
+            fm.is_focus_individual(),
+        );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "wt1");
     }
@@ -1745,12 +1803,20 @@ mod workspace_tests {
         let mut fm = crate::focus::FocusManager::new();
 
         fm.set_focused_project_id_individual(Some("parent".to_string()));
-        let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), fm.is_focus_individual());
+        let visible = ws.visible_projects(
+            WindowId::Main,
+            fm.focused_project_id(),
+            fm.is_focus_individual(),
+        );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "parent");
 
         fm.set_focused_project_id(Some("parent".to_string()));
-        let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), fm.is_focus_individual());
+        let visible = ws.visible_projects(
+            WindowId::Main,
+            fm.focused_project_id(),
+            fm.is_focus_individual(),
+        );
         assert_eq!(visible.len(), 3);
     }
 
@@ -1783,14 +1849,14 @@ mod workspace_tests {
 
 #[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
-    use gpui::AppContext as _;
+    use crate::settings::HooksConfig;
     use crate::state::{
         HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, ProjectLayoutMode,
         WindowBounds, WindowId, WindowState, Workspace, WorkspaceData,
     };
-    use crate::settings::HooksConfig;
-    use okena_terminal::shell_config::ShellType;
+    use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
+    use okena_terminal::shell_config::ShellType;
     use std::collections::HashMap;
 
     fn make_project(id: &str) -> ProjectData {
@@ -1896,7 +1962,6 @@ mod gpui_tests {
         });
     }
 
-
     #[gpui::test]
     fn test_replace_data_resets_focus(cx: &mut gpui::TestAppContext) {
         use crate::focus::FocusManager;
@@ -1937,7 +2002,12 @@ mod gpui_tests {
         });
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut crate::focus::FocusManager::new(), WindowId::Main, "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut crate::focus::FocusManager::new(),
+                WindowId::Main,
+                "p1",
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1996,8 +2066,16 @@ mod gpui_tests {
             assert_eq!(ws.data.folders.len(), 1);
             assert_eq!(ws.data.folders[0].id, "remote:conn2:folder2");
 
-            assert!(!ws.data.project_order.contains(&"remote:conn1:folder1".to_string()));
-            assert!(ws.data.project_order.contains(&"remote:conn2:folder2".to_string()));
+            assert!(
+                !ws.data
+                    .project_order
+                    .contains(&"remote:conn1:folder1".to_string())
+            );
+            assert!(
+                ws.data
+                    .project_order
+                    .contains(&"remote:conn2:folder2".to_string())
+            );
         });
     }
 
@@ -2013,7 +2091,9 @@ mod gpui_tests {
             vec![local, remote1, remote2],
             vec!["local1", "remote:conn1:folder1"],
         );
-        data.main_window.hidden_project_ids.insert("remote:conn1:p2".to_string());
+        data.main_window
+            .hidden_project_ids
+            .insert("remote:conn1:p2".to_string());
         data.folders.push(FolderData {
             id: "remote:conn1:folder1".to_string(),
             name: "Server 1".to_string(),
@@ -2094,7 +2174,10 @@ mod gpui_tests {
             assert!(p.hook_terminals.contains_key("hook-1"));
             assert!(p.hook_terminals.contains_key("hook-2"));
             assert!(p.hook_terminals.contains_key("hook-3"));
-            assert!(matches!(p.layout.as_ref().unwrap(), LayoutNode::Terminal { .. }));
+            assert!(matches!(
+                p.layout.as_ref().unwrap(),
+                LayoutNode::Terminal { .. }
+            ));
         });
     }
 
@@ -2108,7 +2191,12 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.project("p1").unwrap().hook_terminals.contains_key("hook-1"));
+            assert!(
+                ws.project("p1")
+                    .unwrap()
+                    .hook_terminals
+                    .contains_key("hook-1")
+            );
         });
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
@@ -2128,17 +2216,27 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.register_hook_terminal("p1", "hook-1", HookTerminalEntry {
-                label: "on_project_open (feature/foo)".to_string(),
-                status: HookTerminalStatus::Running,
-                hook_type: "on_project_open".to_string(),
-                command: "echo test".to_string(),
-                cwd: ".".to_string(),
-            }, cx);
+            ws.register_hook_terminal(
+                "p1",
+                "hook-1",
+                HookTerminalEntry {
+                    label: "on_project_open (feature/foo)".to_string(),
+                    status: HookTerminalStatus::Running,
+                    hook_type: "on_project_open".to_string(),
+                    command: "echo test".to_string(),
+                    cwd: ".".to_string(),
+                },
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let name = ws.project("p1").unwrap().terminal_names.get("hook-1").unwrap();
+            let name = ws
+                .project("p1")
+                .unwrap()
+                .terminal_names
+                .get("hook-1")
+                .unwrap();
             assert_eq!(name, "on_project_open (feature/foo)");
         });
     }
@@ -2203,7 +2301,10 @@ mod gpui_tests {
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data().main_window.folder_filter.as_deref(), Some("f1"));
-            assert_eq!(ws.active_folder_filter(WindowId::Main).map(|s| s.as_str()), Some("f1"));
+            assert_eq!(
+                ws.active_folder_filter(WindowId::Main).map(|s| s.as_str()),
+                Some("f1")
+            );
             assert_eq!(ws.data_version(), 1);
         });
     }
@@ -2378,7 +2479,10 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.data().main_window.project_widths.get("p1").copied(), Some(0.42));
+            assert_eq!(
+                ws.data().main_window.project_widths.get("p1").copied(),
+                Some(0.42)
+            );
             assert_eq!(ws.data_version(), 1);
         });
     }
@@ -2393,14 +2497,20 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.project_layout_mode(WindowId::Main), ProjectLayoutMode::Columns);
+            assert_eq!(
+                ws.project_layout_mode(WindowId::Main),
+                ProjectLayoutMode::Columns
+            );
         });
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
             ws.toggle_project_layout_mode(WindowId::Main, cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.project_layout_mode(WindowId::Main), ProjectLayoutMode::Rows);
+            assert_eq!(
+                ws.project_layout_mode(WindowId::Main),
+                ProjectLayoutMode::Rows
+            );
             assert_eq!(ws.data_version(), 1);
         });
 
@@ -2408,7 +2518,10 @@ mod gpui_tests {
             ws.toggle_project_layout_mode(WindowId::Main, cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.project_layout_mode(WindowId::Main), ProjectLayoutMode::Columns);
+            assert_eq!(
+                ws.project_layout_mode(WindowId::Main),
+                ProjectLayoutMode::Columns
+            );
             assert_eq!(ws.data_version(), 2);
         });
     }
@@ -2426,7 +2539,10 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.project_layout_mode(WindowId::Main), ProjectLayoutMode::Rows);
+            assert_eq!(
+                ws.project_layout_mode(WindowId::Main),
+                ProjectLayoutMode::Rows
+            );
             assert_eq!(
                 ws.project_layout_mode(WindowId::Extra(extra_id)),
                 ProjectLayoutMode::Columns
@@ -2464,12 +2580,24 @@ mod gpui_tests {
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-            let LayoutNode::Split { direction, sizes, children } = layout else {
+            let LayoutNode::Split {
+                direction,
+                sizes,
+                children,
+            } = layout
+            else {
                 panic!("expected outer split");
             };
-            assert_eq!(*direction, SplitDirection::Horizontal, "outer stays canonical");
+            assert_eq!(
+                *direction,
+                SplitDirection::Horizontal,
+                "outer stays canonical"
+            );
             assert_eq!(sizes, &vec![0.6, 0.4], "sizes preserved");
-            let LayoutNode::Split { direction: inner, .. } = &children[1] else {
+            let LayoutNode::Split {
+                direction: inner, ..
+            } = &children[1]
+            else {
                 panic!("expected nested split");
             };
             assert_eq!(*inner, SplitDirection::Vertical, "nested stays canonical");
@@ -2492,7 +2620,10 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.data().main_window.project_widths.get("p1").copied(), Some(0.75));
+            assert_eq!(
+                ws.data().main_window.project_widths.get("p1").copied(),
+                Some(0.75)
+            );
             assert_eq!(ws.data_version(), 2);
         });
     }
@@ -2564,7 +2695,10 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.data().main_window.folder_collapsed.get("f1"), Some(&true));
+            assert_eq!(
+                ws.data().main_window.folder_collapsed.get("f1"),
+                Some(&true)
+            );
             assert_eq!(ws.data_version(), 1);
         });
     }
@@ -2577,7 +2711,9 @@ mod gpui_tests {
         // insert (which would leave Some(false) tombstones bloating the on-
         // disk shape over time).
         let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
-        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.main_window
+            .folder_collapsed
+            .insert("f1".to_string(), true);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
@@ -2769,9 +2905,8 @@ mod gpui_tests {
         let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
-        let returned = workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.spawn_extra_window(None, cx)
-        });
+        let returned =
+            workspace.update(cx, |ws: &mut Workspace, cx| ws.spawn_extra_window(None, cx));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data().extra_windows.len(), 1);
@@ -2796,9 +2931,7 @@ mod gpui_tests {
         );
         let workspace = cx.new(|_cx| Workspace::new(data));
 
-        let id = workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.spawn_extra_window(None, cx)
-        });
+        let id = workspace.update(cx, |ws: &mut Workspace, cx| ws.spawn_extra_window(None, cx));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             let spawned = ws.data().window(id).unwrap();
@@ -2940,12 +3073,17 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.active_folder_filter(WindowId::Main).map(|s| s.as_str()), Some("f1"));
+            assert_eq!(
+                ws.active_folder_filter(WindowId::Main).map(|s| s.as_str()),
+                Some("f1")
+            );
         });
     }
 
     #[gpui::test]
-    fn active_folder_filter_extra_reads_targeted_extras_folder_filter(cx: &mut gpui::TestAppContext) {
+    fn active_folder_filter_extra_reads_targeted_extras_folder_filter(
+        cx: &mut gpui::TestAppContext,
+    ) {
         // Per-window viewport model: targeting `WindowId::Extra(uuid)` reads
         // from that extra's `WindowState::folder_filter` (NOT main's). The
         // fixture pre-populates main + a sibling extra with their own
@@ -2969,11 +3107,13 @@ mod gpui_tests {
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(
-                ws.active_folder_filter(WindowId::Extra(extra_a_id)).map(|s| s.as_str()),
+                ws.active_folder_filter(WindowId::Extra(extra_a_id))
+                    .map(|s| s.as_str()),
                 Some("extra_a_folder"),
             );
             assert_eq!(
-                ws.active_folder_filter(WindowId::Extra(extra_b_id)).map(|s| s.as_str()),
+                ws.active_folder_filter(WindowId::Extra(extra_b_id))
+                    .map(|s| s.as_str()),
                 Some("extra_b_folder"),
             );
             // Main is unchanged by the extras' reads.

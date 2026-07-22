@@ -36,32 +36,32 @@ fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
         anyhow::bail!("GitHub API returned status {}", status);
     }
 
-    let resp: serde_json::Value = http_resp
-        .json()
-        .context("failed to parse release JSON")?;
+    let resp: serde_json::Value = http_resp.json().context("failed to parse release JSON")?;
 
-    let tag = resp["tag_name"]
-        .as_str()
-        .context("missing tag_name")?;
+    let tag = resp["tag_name"].as_str().context("missing tag_name")?;
 
     let remote_version_str = tag.strip_prefix('v').unwrap_or(tag);
-    let remote_version = Version::parse(remote_version_str)
-        .context("invalid remote version")?;
+    let remote_version = Version::parse(remote_version_str).context("invalid remote version")?;
 
-    let current_version = Version::parse(app_version)
-        .context("invalid current version")?;
+    let current_version = Version::parse(app_version).context("invalid current version")?;
 
     if remote_version <= current_version {
-        log::info!("No update available (current={}, latest={})", current_version, remote_version);
+        log::info!(
+            "No update available (current={}, latest={})",
+            current_version,
+            remote_version
+        );
         return Ok(None);
     }
 
-    log::info!("Update available: {} -> {}", current_version, remote_version);
+    log::info!(
+        "Update available: {} -> {}",
+        current_version,
+        remote_version
+    );
 
     let expected_asset = platform_asset_name();
-    let assets = resp["assets"]
-        .as_array()
-        .context("missing assets array")?;
+    let assets = resp["assets"].as_array().context("missing assets array")?;
 
     let mut found_asset: Option<(String, String)> = None;
     let mut checksum_url: Option<String> = None;
@@ -75,9 +75,10 @@ fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
                 .to_string();
             found_asset = Some((name.to_string(), url));
         } else if (name == "SHA256SUMS" || name == "sha256sums.txt")
-            && let Some(url) = asset["browser_download_url"].as_str() {
-                checksum_url = Some(url.to_string());
-            }
+            && let Some(url) = asset["browser_download_url"].as_str()
+        {
+            checksum_url = Some(url.to_string());
+        }
     }
 
     if let Some((asset_name, asset_url)) = found_asset {
@@ -91,7 +92,8 @@ fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
 
     log::warn!(
         "Release {} exists but no matching asset '{}' found",
-        remote_version, expected_asset
+        remote_version,
+        expected_asset
     );
     Ok(None)
 }

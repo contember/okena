@@ -1,4 +1,4 @@
-use crate::settings::{settings_entity, SettingsState};
+use crate::settings::{SettingsState, settings_entity};
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::theme::theme;
@@ -6,8 +6,8 @@ use crate::views::components::{dropdown_button, dropdown_option, dropdown_overla
 use gpui::*;
 use gpui_component::h_flex;
 
-use super::components::*;
 use super::SettingsPanel;
+use super::components::*;
 
 impl SettingsPanel {
     // GPUI render helper: params are render inputs (value, bounds, callbacks).
@@ -32,23 +32,32 @@ impl SettingsPanel {
             h_flex()
                 .gap(px(4.0))
                 .child(
-                    stepper_button(format!("{}-dec", id), "-", &t, cx)
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
+                    stepper_button(format!("{}-dec", id), "-", &t, cx).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
                             let dec_fn = dec_fn.clone();
                             settings_entity(cx).update(cx, |state, cx| {
                                 dec_fn(state, value - step, cx);
                             });
-                        })),
+                        }),
+                    ),
                 )
-                .child(value_display(format.replace("{}", &format!("{:.1}", value)), width, &t, cx))
+                .child(value_display(
+                    format.replace("{}", &format!("{:.1}", value)),
+                    width,
+                    &t,
+                    cx,
+                ))
                 .child(
-                    stepper_button(format!("{}-inc", id), "+", &t, cx)
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
+                    stepper_button(format!("{}-inc", id), "+", &t, cx).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
                             let inc_fn = inc_fn.clone();
                             settings_entity(cx).update(cx, |state, cx| {
                                 inc_fn(state, value + step, cx);
                             });
-                        })),
+                        }),
+                    ),
                 ),
         )
     }
@@ -74,23 +83,27 @@ impl SettingsPanel {
             h_flex()
                 .gap(px(4.0))
                 .child(
-                    stepper_button(format!("{}-dec", id), "-", &t, cx)
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
+                    stepper_button(format!("{}-dec", id), "-", &t, cx).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
                             let dec_fn = dec_fn.clone();
                             settings_entity(cx).update(cx, |state, cx| {
                                 dec_fn(state, value.saturating_sub(step), cx);
                             });
-                        })),
+                        }),
+                    ),
                 )
                 .child(value_display(format!("{}", value), width, &t, cx))
                 .child(
-                    stepper_button(format!("{}-inc", id), "+", &t, cx)
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
+                    stepper_button(format!("{}-inc", id), "+", &t, cx).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
                             let inc_fn = inc_fn.clone();
                             settings_entity(cx).update(cx, |state, cx| {
                                 inc_fn(state, value + step, cx);
                             });
-                        })),
+                        }),
+                    ),
                 ),
         )
     }
@@ -107,78 +120,120 @@ impl SettingsPanel {
         let t = theme(cx);
 
         settings_row(id.to_string(), label, &t, cx, has_border).child(
-            toggle_switch(format!("{}-toggle", id), enabled, &t)
-                .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
+            toggle_switch(format!("{}-toggle", id), enabled, &t).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, _, cx| {
                     let update_fn = update_fn.clone();
                     settings_entity(cx).update(cx, |state, cx| {
                         update_fn(state, !enabled, cx);
                     });
-                })),
+                }),
+            ),
         )
     }
 
-    pub(super) fn render_font_dropdown_row(&mut self, current_family: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_font_dropdown_row(
+        &mut self,
+        current_family: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
 
         let font_bounds_setter = Self::bounds_setter(cx, |s, b| s.font_button_bounds = b);
         settings_row("font-family".to_string(), "Font Family", &t, cx, true).child(
-            dropdown_button("font-family-btn", current_family, self.font_dropdown_open, &t, cx,
-                font_bounds_setter)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            dropdown_button(
+                "font-family-btn",
+                current_family,
+                self.font_dropdown_open,
+                &t,
+                cx,
+                font_bounds_setter,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
                     this.font_dropdown_open = !this.font_dropdown_open;
                     this.shell_dropdown_open = false;
                     this.session_backend_dropdown_open = false;
                     this.project_dropdown_open = false;
                     cx.notify();
-                })),
+                }),
+            ),
         )
     }
 
-    pub(super) fn render_font_dropdown_overlay(&self, current: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_font_dropdown_overlay(
+        &self,
+        current: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
 
-        dropdown_overlay("font-family-dropdown-list", &t)
-            .children(FONT_FAMILIES.iter().map(|family| {
+        dropdown_overlay("font-family-dropdown-list", &t).children(FONT_FAMILIES.iter().map(
+            |family| {
                 let is_selected = *family == current;
                 let family_str = family.to_string();
 
                 dropdown_option(format!("font-opt-{}", family), family, is_selected, &t, cx)
-                    .on_mouse_down(MouseButton::Left, cx.listener({
-                        let family = family_str.clone();
-                        move |this, _, _, cx| {
-                            let family = family.clone();
-                            settings_entity(cx).update(cx, |state, cx| {
-                                state.set_font_family(family, cx);
-                            });
-                            this.font_dropdown_open = false;
-                            cx.notify();
-                        }
-                    }))
-            }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let family = family_str.clone();
+                            move |this, _, _, cx| {
+                                let family = family.clone();
+                                settings_entity(cx).update(cx, |state, cx| {
+                                    state.set_font_family(family, cx);
+                                });
+                                this.font_dropdown_open = false;
+                                cx.notify();
+                            }
+                        }),
+                    )
+            },
+        ))
     }
 
-    pub(super) fn render_shell_dropdown_row(&mut self, current_shell: &ShellType, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_shell_dropdown_row(
+        &mut self,
+        current_shell: &ShellType,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
         let display_name = current_shell.display_name();
 
         let shell_bounds_setter = Self::bounds_setter(cx, |s, b| s.shell_button_bounds = b);
         settings_row("default-shell".to_string(), "Default Shell", &t, cx, true).child(
-            dropdown_button("default-shell-btn", &display_name, self.shell_dropdown_open, &t, cx,
-                shell_bounds_setter)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            dropdown_button(
+                "default-shell-btn",
+                &display_name,
+                self.shell_dropdown_open,
+                &t,
+                cx,
+                shell_bounds_setter,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
                     this.shell_dropdown_open = !this.shell_dropdown_open;
                     this.font_dropdown_open = false;
                     this.session_backend_dropdown_open = false;
                     this.project_dropdown_open = false;
                     cx.notify();
-                })),
+                }),
+            ),
         )
     }
 
-    pub(super) fn render_shell_dropdown_overlay(&self, current_shell: &ShellType, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_shell_dropdown_overlay(
+        &self,
+        current_shell: &ShellType,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
 
-        let available: Vec<_> = self.available_shells.iter()
+        let available: Vec<_> = self
+            .available_shells
+            .iter()
             .filter(|s| s.available)
             .collect();
 
@@ -191,39 +246,68 @@ impl SettingsPanel {
                 let name = shell_info.name.clone();
 
                 dropdown_option(format!("shell-opt-{}", name), &name, is_selected, &t, cx)
-                    .on_mouse_down(MouseButton::Left, cx.listener({
-                        let shell_type = shell_type.clone();
-                        move |this, _, _, cx| {
-                            let shell = shell_type.clone();
-                            settings_entity(cx).update(cx, |state, cx| {
-                                state.set_default_shell(shell, cx);
-                            });
-                            this.shell_dropdown_open = false;
-                            cx.notify();
-                        }
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let shell_type = shell_type.clone();
+                            move |this, _, _, cx| {
+                                let shell = shell_type.clone();
+                                settings_entity(cx).update(cx, |state, cx| {
+                                    state.set_default_shell(shell, cx);
+                                });
+                                this.shell_dropdown_open = false;
+                                cx.notify();
+                            }
+                        }),
+                    )
             }))
     }
 
-    pub(super) fn render_session_backend_dropdown_row(&mut self, current_backend: &SessionBackend, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_session_backend_dropdown_row(
+        &mut self,
+        current_backend: &SessionBackend,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
         let display_name = current_backend.display_name();
 
-        let session_bounds_setter = Self::bounds_setter(cx, |s, b| s.session_backend_button_bounds = b);
-        settings_row_with_desc("session-backend".to_string(), "Session Backend", "Requires restart", &t, cx, true).child(
-            dropdown_button("session-backend-btn", display_name, self.session_backend_dropdown_open, &t, cx,
-                session_bounds_setter)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+        let session_bounds_setter =
+            Self::bounds_setter(cx, |s, b| s.session_backend_button_bounds = b);
+        settings_row_with_desc(
+            "session-backend".to_string(),
+            "Session Backend",
+            "Requires restart",
+            &t,
+            cx,
+            true,
+        )
+        .child(
+            dropdown_button(
+                "session-backend-btn",
+                display_name,
+                self.session_backend_dropdown_open,
+                &t,
+                cx,
+                session_bounds_setter,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
                     this.session_backend_dropdown_open = !this.session_backend_dropdown_open;
                     this.font_dropdown_open = false;
                     this.shell_dropdown_open = false;
                     this.project_dropdown_open = false;
                     cx.notify();
-                })),
+                }),
+            ),
         )
     }
 
-    pub(super) fn render_session_backend_dropdown_overlay(&self, current_backend: &SessionBackend, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_session_backend_dropdown_overlay(
+        &self,
+        current_backend: &SessionBackend,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
 
         dropdown_overlay("session-backend-dropdown-list", &t)
@@ -233,14 +317,23 @@ impl SettingsPanel {
                 let backend_copy = *backend;
                 let name = backend.display_name();
 
-                dropdown_option(format!("backend-opt-{:?}", backend), name, is_selected, &t, cx)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                dropdown_option(
+                    format!("backend-opt-{:?}", backend),
+                    name,
+                    is_selected,
+                    &t,
+                    cx,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
                         settings_entity(cx).update(cx, |state, cx| {
                             state.set_session_backend(backend_copy, cx);
                         });
                         this.session_backend_dropdown_open = false;
                         cx.notify();
-                    }))
+                    }),
+                )
             }))
     }
 }

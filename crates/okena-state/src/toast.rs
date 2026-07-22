@@ -290,12 +290,10 @@ mod tests {
 
     #[test]
     fn api_round_trip_preserves_actions() {
-        let original = Toast::info("closed")
-            .with_id("sc-1")
-            .with_actions(vec![
-                ToastAction::new("soft_close_undo:p:t", "Undo", ToastActionStyle::Primary),
-                ToastAction::new("soft_close_kill:p:t", "Close now", ToastActionStyle::Danger),
-            ]);
+        let original = Toast::info("closed").with_id("sc-1").with_actions(vec![
+            ToastAction::new("soft_close_undo:p:t", "Undo", ToastActionStyle::Primary),
+            ToastAction::new("soft_close_kill:p:t", "Close now", ToastActionStyle::Danger),
+        ]);
         let restored = Toast::from_api(&original.to_api());
         assert_eq!(restored.actions.len(), 2);
         assert_eq!(restored.actions[0].id, "soft_close_undo:p:t");

@@ -27,12 +27,17 @@ impl ContentSearchDialog {
         }
 
         // Debounce: wait 200ms before starting search
-        self.debounce_task = Some(cx.spawn(async move |this: WeakEntity<ContentSearchDialog>, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
-            this.update(cx, |this, cx| {
-                this.run_search(cx);
-            }).ok();
-        }));
+        self.debounce_task = Some(cx.spawn(
+            async move |this: WeakEntity<ContentSearchDialog>, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.run_search(cx);
+                })
+                .ok();
+            },
+        ));
     }
 
     /// Actually run the search on a background thread.
@@ -74,14 +79,9 @@ impl ContentSearchDialog {
                 .background_executor()
                 .spawn(async move {
                     let mut results: Vec<FileSearchResult> = Vec::new();
-                    project_fs.search_content(
-                        &query,
-                        &config,
-                        &cancelled,
-                        &mut |result| {
-                            results.push(result);
-                        },
-                    )?;
+                    project_fs.search_content(&query, &config, &cancelled, &mut |result| {
+                        results.push(result);
+                    })?;
                     // Sort files by best match score (highest first) for fuzzy mode,
                     // breaking ties by relative_path for stable order across runs
                     // (parallel walker emits in non-deterministic order).
@@ -147,7 +147,11 @@ impl ContentSearchDialog {
             }
         }
 
-        self.selected_index = if self.rows.is_empty() { 0 } else { 1.min(self.rows.len() - 1) };
+        self.selected_index = if self.rows.is_empty() {
+            0
+        } else {
+            1.min(self.rows.len() - 1)
+        };
     }
 
     /// Get syntax-highlighted line for a file. Returns None if not yet cached
@@ -199,13 +203,8 @@ impl ContentSearchDialog {
             let _ = entity.update(cx, |this, cx| {
                 this.loading_files.remove(&fp);
                 if let Ok(content) = result {
-                    let lines = highlight_content(
-                        &content,
-                        &fp,
-                        &this.syntax_set,
-                        5000,
-                        this.is_dark,
-                    );
+                    let lines =
+                        highlight_content(&content, &fp, &this.syntax_set, 5000, this.is_dark);
                     this.highlight_cache.insert(fp, lines);
                 }
                 cx.notify();

@@ -30,10 +30,10 @@ mod client;
 mod types;
 
 use okena_core::api::ActionRequest;
-use okena_transport::client::{collect_state_terminal_ids, WsClientMessage};
 use okena_core::keys::SpecialKey;
 use okena_core::theme::DARK_THEME;
 use okena_core::types::{DiffMode, SplitDirection};
+use okena_transport::client::{WsClientMessage, collect_state_terminal_ids};
 
 use crate::client::manager::ConnectionManager;
 
@@ -70,13 +70,7 @@ pub fn connect(
     pinned_cert_fingerprint: Option<String>,
 ) -> String {
     let mgr = ConnectionManager::get();
-    let conn_id = mgr.add_connection(
-        &host,
-        port,
-        saved_token,
-        tls,
-        pinned_cert_fingerprint,
-    );
+    let conn_id = mgr.add_connection(&host, port, saved_token, tls, pinned_cert_fingerprint);
     mgr.connect(&conn_id);
     conn_id
 }
@@ -184,7 +178,12 @@ pub fn get_visible_cells_packed(conn_id: String, terminal_id: String) -> Vec<u8>
     buf.extend_from_slice(&rows.to_le_bytes());
     for cell in &cells {
         // Primary scalar; empty (wide-char spacer) or space → 0x20.
-        let codepoint: u32 = cell.character.chars().next().map(|c| c as u32).unwrap_or(0x20);
+        let codepoint: u32 = cell
+            .character
+            .chars()
+            .next()
+            .map(|c| c as u32)
+            .unwrap_or(0x20);
         let codepoint = if codepoint == 0 { 0x20 } else { codepoint };
         buf.extend_from_slice(&codepoint.to_le_bytes());
         buf.extend_from_slice(&cell.fg.to_le_bytes());
@@ -408,7 +407,7 @@ pub fn send_special_key(
     let special_key: SpecialKey = serde_json::from_value(serde_json::Value::String(key.clone()))
         .map_err(|_| MobileFfiError::Action {
             message: format!("Unknown special key: {key}"),
-    })?;
+        })?;
     let bytes = special_key.to_bytes();
     ConnectionManager::get().send_ws_message(
         &conn_id,
@@ -448,11 +447,10 @@ impl From<anyhow::Error> for MobileFfiError {
     }
 }
 
-async fn send_mobile_action(
-    conn_id: &str,
-    action: ActionRequest,
-) -> Result<(), MobileFfiError> {
-    ConnectionManager::get().send_action(conn_id, action).await?;
+async fn send_mobile_action(conn_id: &str, action: ActionRequest) -> Result<(), MobileFfiError> {
+    ConnectionManager::get()
+        .send_action(conn_id, action)
+        .await?;
     Ok(())
 }
 
@@ -527,9 +525,7 @@ pub async fn focus_terminal(
     let _ = terminal_id;
     send_mobile_action(
         &conn_id,
-        ActionRequest::RecordProjectActivity {
-            project_id,
-        },
+        ActionRequest::RecordProjectActivity { project_id },
     )
     .await
 }
@@ -737,10 +733,7 @@ pub async fn restart_service(
 
 /// Start all services in a project.
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn start_all_services(
-    conn_id: String,
-    project_id: String,
-) -> Result<(), MobileFfiError> {
+pub async fn start_all_services(conn_id: String, project_id: String) -> Result<(), MobileFfiError> {
     send_mobile_action(&conn_id, ActionRequest::StartAllServices { project_id }).await
 }
 

@@ -1,15 +1,15 @@
 //! Hook log overlay — shows recent hook execution history.
 
 use crate::Cancel;
+use gpui::prelude::*;
+use gpui::*;
+use gpui_component::v_flex;
+use okena_core::theme::ThemeColors;
 use okena_ui::badge::keyboard_hints_footer;
 use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::theme::theme;
-use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text};
+use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms};
 use okena_workspace::hook_monitor::{HookExecution, HookMonitor, HookStatus};
-use okena_core::theme::ThemeColors;
-use gpui::*;
-use gpui::prelude::*;
-use gpui_component::v_flex;
 use std::time::Duration;
 
 /// Hook log overlay — shows recent hook execution history.
@@ -52,7 +52,11 @@ impl HookLog {
         })
         .detach();
 
-        Self { focus_handle, history, last_version }
+        Self {
+            focus_handle,
+            history,
+            last_version,
+        }
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -65,7 +69,9 @@ pub enum HookLogEvent {
 }
 
 impl okena_ui::overlay::CloseEvent for HookLogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 impl EventEmitter<HookLogEvent> for HookLog {}
@@ -128,13 +134,15 @@ impl Render for HookLog {
                             .flex_1()
                             .overflow_y_scroll()
                             .children(if self.history.is_empty() {
-                                vec![div()
-                                    .px(px(16.0))
-                                    .py(px(24.0))
-                                    .text_size(ui_text(13.0, cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("No hooks have been executed yet.")
-                                    .into_any_element()]
+                                vec![
+                                    div()
+                                        .px(px(16.0))
+                                        .py(px(24.0))
+                                        .text_size(ui_text(13.0, cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child("No hooks have been executed yet.")
+                                        .into_any_element(),
+                                ]
                             } else {
                                 self.history
                                     .iter()
@@ -169,9 +177,9 @@ fn render_hook_row(
     let command = exec.command.clone();
 
     let error_detail = match &exec.status {
-        HookStatus::Failed { stderr, exit_code, .. } => {
-            Some(format!("Exit {}: {}", exit_code, stderr))
-        }
+        HookStatus::Failed {
+            stderr, exit_code, ..
+        } => Some(format!("Exit {}: {}", exit_code, stderr)),
         HookStatus::SpawnError { message } => Some(message.clone()),
         _ => None,
     };

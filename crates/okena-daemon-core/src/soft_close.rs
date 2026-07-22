@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 
 use okena_hooks::{HookMonitor, HookRunner};
-use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
 use okena_workspace::actions::soft_close::finalize_expired;
 use okena_workspace::state::Workspace;
 

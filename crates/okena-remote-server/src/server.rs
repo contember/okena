@@ -503,6 +503,8 @@ mod tests {
         assert!(tls_listener_allows_plaintext("127.0.0.1".parse().unwrap()));
         assert!(tls_listener_allows_plaintext("::1".parse().unwrap()));
         assert!(!tls_listener_allows_plaintext("0.0.0.0".parse().unwrap()));
-        assert!(!tls_listener_allows_plaintext("192.168.1.20".parse().unwrap()));
+        assert!(!tls_listener_allows_plaintext(
+            "192.168.1.20".parse().unwrap()
+        ));
     }
 }

@@ -73,10 +73,7 @@ fn hand_off_ui_owned_daemon(mut spawned_child: Option<std::process::Child>) {
         .is_some_and(|child| child.id() == daemon.pid);
     match okena_remote_server::local::request_local_shutdown(&daemon) {
         Ok(outcome) if outcome.accepted && outcome.active_clients == 0 => {
-            if !okena_remote_server::local::wait_for_pid_exit(
-                daemon.pid,
-                Duration::from_secs(3),
-            ) {
+            if !okena_remote_server::local::wait_for_pid_exit(daemon.pid, Duration::from_secs(3)) {
                 if let Some(child) = spawned_child.as_mut().filter(|_| owns_current_process) {
                     let _ = child.kill();
                 } else {
@@ -196,23 +193,29 @@ impl Okena {
         // already shown in main would create a NEW Terminal model and PTY
         // bytes (which feed the original Arc<Terminal>) would never reach
         // the extra's content pane.
-        let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let terminals: TerminalsRegistry =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
 
         // Create the main window's per-window view, sharing the registry.
         let terminals_for_main = terminals.clone();
         let main_window = cx.new(|cx| {
-            WindowView::new(WindowId::Main, workspace.clone(), terminals_for_main, window, cx)
+            WindowView::new(
+                WindowId::Main,
+                workspace.clone(),
+                terminals_for_main,
+                window,
+                cx,
+            )
         });
 
         // Listen for cross-window requests (e.g. "jump into a project's terminal"
         // from the Switch Project overlay). Okena is the only place that holds
         // every window's view + OS handle, so it executes these.
-        cx.subscribe(&main_window, Self::handle_window_view_event).detach();
+        cx.subscribe(&main_window, Self::handle_window_view_event)
+            .detach();
 
         // Create remote connection manager and wire to main window
-        let remote_manager = cx.new(|cx| {
-            RemoteConnectionManager::new(terminals.clone(), cx)
-        });
+        let remote_manager = cx.new(|cx| RemoteConnectionManager::new(terminals.clone(), cx));
         main_window.update(cx, |rv, cx| {
             rv.set_remote_manager(remote_manager.clone(), cx);
         });
@@ -309,62 +312,59 @@ impl Okena {
             .detach();
         }
 
-        cx.subscribe(
-            &remote_manager,
-            |this, _rm, event, cx| match event {
-                RemoteManagerEvent::TerminalActivity(terminal_ids) => {
-                    if !terminal_ids.is_empty() {
-                        this.process_terminal_notifications(terminal_ids, cx);
-                        // Answer (or, when disabled, drop) OSC 52 clipboard *read*
-                        // requests for remote terminals. The clipboard physically
-                        // lives on this client machine, so the reply must be
-                        // produced here and written back over the terminal's
-                        // RemoteTransport to the daemon PTY. Without this the dead
-                        // local PTY loop's clipboard-read handling no longer runs,
-                        // leaving remote OSC 52 reads unanswered.
-                        this.process_clipboard_reads(terminal_ids, cx);
-                    }
+        cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
+            RemoteManagerEvent::TerminalActivity(terminal_ids) => {
+                if !terminal_ids.is_empty() {
+                    this.process_terminal_notifications(terminal_ids, cx);
+                    // Answer (or, when disabled, drop) OSC 52 clipboard *read*
+                    // requests for remote terminals. The clipboard physically
+                    // lives on this client machine, so the reply must be
+                    // produced here and written back over the terminal's
+                    // RemoteTransport to the daemon PTY. Without this the dead
+                    // local PTY loop's clipboard-read handling no longer runs,
+                    // leaving remote OSC 52 reads unanswered.
+                    this.process_clipboard_reads(terminal_ids, cx);
                 }
-                RemoteManagerEvent::TerminalFocusRequested {
-                    project_id,
-                    terminal_id,
-                    window,
-                } => {
-                    this.jump_to_terminal(project_id, terminal_id, window.as_deref(), cx);
-                }
-                // Local daemon connection dead-ended — re-run discovery/ensure so
-                // the GUI recovers instead of staying wedged on a dead socket.
-                RemoteManagerEvent::LocalConnectionFailed => {
-                    this.recover_local_daemon(cx);
-                }
-                RemoteManagerEvent::SettingsChanged(settings) => {
-                    let settings = settings.as_ref().clone();
-                    let mode = settings.theme_mode;
-                    let custom_id = settings.custom_theme_id.clone();
-                    crate::settings::settings_entity(cx).update(cx, |state, cx| {
-                        state.replace_from_daemon(settings.clone(), cx);
-                    });
+            }
+            RemoteManagerEvent::TerminalFocusRequested {
+                project_id,
+                terminal_id,
+                window,
+            } => {
+                this.jump_to_terminal(project_id, terminal_id, window.as_deref(), cx);
+            }
+            // Local daemon connection dead-ended — re-run discovery/ensure so
+            // the GUI recovers instead of staying wedged on a dead socket.
+            RemoteManagerEvent::LocalConnectionFailed => {
+                this.recover_local_daemon(cx);
+            }
+            RemoteManagerEvent::SettingsChanged(settings) => {
+                let settings = settings.as_ref().clone();
+                let mode = settings.theme_mode;
+                let custom_id = settings.custom_theme_id.clone();
+                crate::settings::settings_entity(cx).update(cx, |state, cx| {
+                    state.replace_from_daemon(settings.clone(), cx);
+                });
 
-                    if let Some(global_theme) = cx.try_global::<crate::theme::GlobalTheme>() {
-                        let theme = global_theme.0.clone();
-                        theme.update(cx, |theme, cx| {
-                            if mode == crate::theme::ThemeMode::Custom
-                                && let Some(custom_id) = custom_id.as_ref()
-                                && let Some((_, colors)) = crate::theme::load_custom_themes()
-                                    .into_iter()
-                                    .find(|(info, _)| info.id == format!("custom:{custom_id}"))
-                            {
-                                theme.set_custom_colors(colors);
-                                theme.set_mode(crate::theme::ThemeMode::Custom);
-                            } else {
-                                theme.set_mode(mode);
-                            }
-                            cx.notify();
-                        });
-                    }
+                if let Some(global_theme) = cx.try_global::<crate::theme::GlobalTheme>() {
+                    let theme = global_theme.0.clone();
+                    theme.update(cx, |theme, cx| {
+                        if mode == crate::theme::ThemeMode::Custom
+                            && let Some(custom_id) = custom_id.as_ref()
+                            && let Some((_, colors)) = crate::theme::load_custom_themes()
+                                .into_iter()
+                                .find(|(info, _)| info.id == format!("custom:{custom_id}"))
+                        {
+                            theme.set_custom_colors(colors);
+                            theme.set_mode(crate::theme::ThemeMode::Custom);
+                        } else {
+                            theme.set_mode(mode);
+                        }
+                        cx.notify();
+                    });
                 }
-            },
-        )
+            }
+        })
         .detach();
 
         // Kill orphaned terminals when projects are deleted
@@ -384,9 +384,7 @@ impl Okena {
         // closed seconds before quitting would leak its persistent (dtach/tmux)
         // session. on_app_quit fires for every exit path.
         cx.on_app_quit(move |this: &mut Self, cx| {
-            let ids = this
-                .workspace
-                .update(cx, |ws, _| ws.drain_pending_closes());
+            let ids = this.workspace.update(cx, |ws, _| ws.drain_pending_closes());
             if !ids.is_empty() {
                 let mut reg = this.terminals.lock();
                 for tid in &ids {
@@ -410,10 +408,7 @@ impl Okena {
             // Disconnect our own loopback connection before handing lifecycle
             // to the daemon, so its live-client count excludes this GUI.
             this.remote_manager.update(cx, |rm, cx| {
-                rm.remove_connection(
-                    okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
-                    cx,
-                );
+                rm.remove_connection(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID, cx);
             });
             if this.preserve_daemon_on_quit {
                 if let Some(child) = this.spawned_daemon.as_mut() {
@@ -517,7 +512,8 @@ impl Okena {
                 .iter()
                 .map(|p| p.id.clone())
                 .collect();
-            let mut fms: Vec<Entity<crate::workspace::focus::FocusManager>> = Vec::with_capacity(1 + this.extra_windows.len());
+            let mut fms: Vec<Entity<crate::workspace::focus::FocusManager>> =
+                Vec::with_capacity(1 + this.extra_windows.len());
             fms.push(this.main_window.read(cx).focus_manager());
             for view in this.extra_windows.values() {
                 fms.push(view.read(cx).focus_manager());
@@ -608,9 +604,7 @@ fn should_escalate_recovery(
     live_unreachable_daemon: bool,
     owns_daemon: bool,
 ) -> bool {
-    failed_attempts >= RECOVERY_ESCALATE_AFTER_ATTEMPTS
-        && live_unreachable_daemon
-        && owns_daemon
+    failed_attempts >= RECOVERY_ESCALATE_AFTER_ATTEMPTS && live_unreachable_daemon && owns_daemon
 }
 
 /// Backoff before the next local-daemon recovery attempt, given how many have
@@ -841,8 +835,8 @@ impl Okena {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_okena_process, recovery_backoff_delay, should_escalate_recovery,
-        RECOVERY_ESCALATE_AFTER_ATTEMPTS, RECOVERY_TOAST_AFTER_ATTEMPTS,
+        RECOVERY_ESCALATE_AFTER_ATTEMPTS, RECOVERY_TOAST_AFTER_ATTEMPTS, is_okena_process,
+        recovery_backoff_delay, should_escalate_recovery,
     };
     use std::time::Duration;
 

@@ -1,5 +1,5 @@
-use super::super::types::TerminalSize;
 use super::super::Terminal;
+use super::super::types::TerminalSize;
 use super::NullTransport;
 use std::sync::Arc;
 

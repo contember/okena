@@ -1,6 +1,6 @@
 use crate::client::terminal_holder::TerminalHolder;
 
-use okena_transport::client::{is_remote_terminal, ConnectionHandler, WsClientMessage};
+use okena_transport::client::{ConnectionHandler, WsClientMessage, is_remote_terminal};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,7 +48,11 @@ impl ConnectionHandler for MobileConnectionHandler {
         if self.terminals.read().contains_key(prefixed_id) {
             return;
         }
-        let (c, r) = if cols > 0 && rows > 0 { (cols, rows) } else { (80, 24) };
+        let (c, r) = if cols > 0 && rows > 0 {
+            (cols, rows)
+        } else {
+            (80, 24)
+        };
         let holder = TerminalHolder::new(c, r);
         self.terminals
             .write()

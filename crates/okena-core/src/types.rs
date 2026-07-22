@@ -44,7 +44,10 @@ pub enum DiffMode {
     /// Show the diff introduced by a specific commit (hash or ref).
     Commit(String),
     /// Compare two branches (shows diff between base and head).
-    BranchCompare { base: String, head: String },
+    BranchCompare {
+        base: String,
+        head: String,
+    },
 }
 
 impl DiffMode {
@@ -79,13 +82,23 @@ mod tests {
 
     #[test]
     fn diff_mode_serde_round_trip() {
-        for mode in [DiffMode::WorkingTree, DiffMode::Staged, DiffMode::Commit("abc1234".to_string())] {
+        for mode in [
+            DiffMode::WorkingTree,
+            DiffMode::Staged,
+            DiffMode::Commit("abc1234".to_string()),
+        ] {
             let json = serde_json::to_string(&mode).unwrap();
             let parsed: DiffMode = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, mode);
         }
         // Check exact JSON values
-        assert_eq!(serde_json::to_string(&DiffMode::WorkingTree).unwrap(), "\"working_tree\"");
-        assert_eq!(serde_json::to_string(&DiffMode::Staged).unwrap(), "\"staged\"");
+        assert_eq!(
+            serde_json::to_string(&DiffMode::WorkingTree).unwrap(),
+            "\"working_tree\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiffMode::Staged).unwrap(),
+            "\"staged\""
+        );
     }
 }

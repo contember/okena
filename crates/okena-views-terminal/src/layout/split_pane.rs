@@ -1,8 +1,8 @@
 use crate::ActionDispatch;
 use crate::elements::resize_handle::ResizeHandle;
+use gpui::*;
 use okena_files::theme::theme;
 use okena_workspace::state::{SplitDirection, WindowId, Workspace};
-use gpui::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -91,7 +91,11 @@ fn resize_project_pair(
     container_size: f32,
     min_col_width: f32,
 ) -> (f32, f32) {
-    let scale = if visible_widths_sum > 0.0 { visible_widths_sum } else { 100.0 };
+    let scale = if visible_widths_sum > 0.0 {
+        visible_widths_sum
+    } else {
+        100.0
+    };
     let delta_width = delta_px / container_size * scale;
     let min_width = (min_col_width / container_size * scale).max(scale * 0.05);
     let combined_width = (left_initial + right_initial).max(2.0 * min_width);
@@ -116,7 +120,18 @@ pub fn compute_resize(
     cx: &mut App,
 ) {
     match drag_state {
-        DragState::Split { project_id, layout_path, left_child, right_child, direction, container_bounds, initial_mouse_pos, initial_sizes, visible_sizes_sum, action_dispatcher } => {
+        DragState::Split {
+            project_id,
+            layout_path,
+            left_child,
+            right_child,
+            direction,
+            container_bounds,
+            initial_mouse_pos,
+            initial_sizes,
+            visible_sizes_sum,
+            action_dispatcher,
+        } => {
             let bounds = *container_bounds;
             let is_horizontal = *direction == SplitDirection::Horizontal;
             let left_child = *left_child;
@@ -143,7 +158,11 @@ pub fn compute_resize(
             } else {
                 f32::from(mouse_pos.x) - f32::from(initial_mouse_pos.x)
             };
-            let scale = if *visible_sizes_sum > 0.0 { *visible_sizes_sum } else { 100.0 };
+            let scale = if *visible_sizes_sum > 0.0 {
+                *visible_sizes_sum
+            } else {
+                100.0
+            };
             let delta_percent = delta / container_size * scale;
 
             let min_size = scale * 0.05;
@@ -160,11 +179,14 @@ pub fn compute_resize(
             let layout_path = layout_path.clone();
 
             if let Some(dispatcher) = action_dispatcher {
-                dispatcher.dispatch_action(okena_core::api::ActionRequest::UpdateSplitSizes {
-                    project_id,
-                    path: layout_path,
-                    sizes: new_sizes,
-                }, cx);
+                dispatcher.dispatch_action(
+                    okena_core::api::ActionRequest::UpdateSplitSizes {
+                        project_id,
+                        path: layout_path,
+                        sizes: new_sizes,
+                    },
+                    cx,
+                );
             } else {
                 // Use UI-only notify during drag to avoid auto-save spam;
                 // final sizes are persisted on mouse-up via notify_data.
@@ -173,7 +195,16 @@ pub fn compute_resize(
                 });
             }
         }
-        DragState::ProjectColumn { divider_index, project_ids, available_size, visible_widths_sum, vertical, initial_mouse_pos, initial_widths, min_col_width } => {
+        DragState::ProjectColumn {
+            divider_index,
+            project_ids,
+            available_size,
+            visible_widths_sum,
+            vertical,
+            initial_mouse_pos,
+            initial_widths,
+            min_col_width,
+        } => {
             let container_size = *available_size;
             if container_size <= 0.0 {
                 return;
@@ -185,8 +216,14 @@ pub fn compute_resize(
 
             let num_projects = project_ids.len();
             let default_width = 100.0 / num_projects as f32;
-            let left_initial = initial_widths.get(left_id).copied().unwrap_or(default_width);
-            let right_initial = initial_widths.get(right_id).copied().unwrap_or(default_width);
+            let left_initial = initial_widths
+                .get(left_id)
+                .copied()
+                .unwrap_or(default_width);
+            let right_initial = initial_widths
+                .get(right_id)
+                .copied()
+                .unwrap_or(default_width);
 
             let delta_px = if *vertical {
                 f32::from(mouse_pos.y) - f32::from(initial_mouse_pos.y)
@@ -241,23 +278,31 @@ pub fn render_split_divider<D: ActionDispatch + Send + Sync>(
         move |mouse_pos, cx| {
             let bounds = *container_bounds.borrow();
 
-            let (initial_sizes, visible_sizes_sum) = workspace.read(cx).project(&project_id).and_then(|p| {
-                p.layout.as_ref()?.get_at_path(&layout_path)
-            }).and_then(|node| {
-                if let okena_workspace::state::LayoutNode::Split { sizes, children, .. } = node {
-                    let visible_sum: f32 = children.iter().enumerate()
-                        .filter(|(_, c)| !c.is_all_hidden())
-                        .map(|(i, _)| sizes.get(i).copied().unwrap_or(0.0))
-                        .sum();
-                    Some((sizes.clone(), visible_sum))
-                } else {
-                    None
-                }
-            }).unwrap_or((vec![], 100.0));
+            let (initial_sizes, visible_sizes_sum) = workspace
+                .read(cx)
+                .project(&project_id)
+                .and_then(|p| p.layout.as_ref()?.get_at_path(&layout_path))
+                .and_then(|node| {
+                    if let okena_workspace::state::LayoutNode::Split {
+                        sizes, children, ..
+                    } = node
+                    {
+                        let visible_sum: f32 = children
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| !c.is_all_hidden())
+                            .map(|(i, _)| sizes.get(i).copied().unwrap_or(0.0))
+                            .sum();
+                        Some((sizes.clone(), visible_sum))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or((vec![], 100.0));
 
-            let boxed_dispatcher: Option<Box<dyn ActionDispatchClone>> = action_dispatcher.as_ref().map(|d| {
-                Box::new(d.clone()) as Box<dyn ActionDispatchClone>
-            });
+            let boxed_dispatcher: Option<Box<dyn ActionDispatchClone>> = action_dispatcher
+                .as_ref()
+                .map(|d| Box::new(d.clone()) as Box<dyn ActionDispatchClone>);
 
             *active_drag.borrow_mut() = Some(DragState::Split {
                 project_id: project_id.clone(),
@@ -300,40 +345,41 @@ pub fn render_project_divider(
 
     // A rows grid needs a horizontal divider (full width, drag along Y); a
     // columns grid needs a vertical divider (full height, drag along X).
-    ResizeHandle::new(
-        is_rows,
-        t.border,
-        t.border_active,
-        move |mouse_pos, cx| {
-            let bounds = *container_bounds.borrow();
-            let num_projects = project_ids.len();
-            let num_dividers = num_projects.saturating_sub(1) as f32;
+    ResizeHandle::new(is_rows, t.border, t.border_active, move |mouse_pos, cx| {
+        let bounds = *container_bounds.borrow();
+        let num_projects = project_ids.len();
+        let num_dividers = num_projects.saturating_sub(1) as f32;
 
-            let viewport_size = if is_rows {
-                f32::from(bounds.size.height)
-            } else {
-                f32::from(bounds.size.width)
-            };
-            let available_size = (viewport_size - num_dividers * 1.0).max(0.0);
+        let viewport_size = if is_rows {
+            f32::from(bounds.size.height)
+        } else {
+            f32::from(bounds.size.width)
+        };
+        let available_size = (viewport_size - num_dividers * 1.0).max(0.0);
 
-            let ws = workspace.read(cx);
-            let initial_widths: HashMap<String, f32> = project_ids.iter()
-                .map(|id| (id.clone(), ws.get_project_width(window_id, id, num_projects)))
-                .collect();
-            let visible_widths_sum = initial_widths.values().sum();
+        let ws = workspace.read(cx);
+        let initial_widths: HashMap<String, f32> = project_ids
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    ws.get_project_width(window_id, id, num_projects),
+                )
+            })
+            .collect();
+        let visible_widths_sum = initial_widths.values().sum();
 
-            *active_drag.borrow_mut() = Some(DragState::ProjectColumn {
-                divider_index,
-                project_ids: project_ids.clone(),
-                available_size,
-                visible_widths_sum,
-                vertical: is_rows,
-                initial_mouse_pos: mouse_pos,
-                initial_widths,
-                min_col_width,
-            });
-        },
-    )
+        *active_drag.borrow_mut() = Some(DragState::ProjectColumn {
+            divider_index,
+            project_ids: project_ids.clone(),
+            available_size,
+            visible_widths_sum,
+            vertical: is_rows,
+            initial_mouse_pos: mouse_pos,
+            initial_widths,
+            min_col_width,
+        });
+    })
 }
 
 /// Render the sidebar resize divider
@@ -341,14 +387,9 @@ pub fn render_sidebar_divider(active_drag: &ActiveDrag, cx: &App) -> impl IntoEl
     let t = theme(cx);
     let active_drag = active_drag.clone();
 
-    ResizeHandle::new(
-        false,
-        t.border,
-        t.border_active,
-        move |_, _| {
-            *active_drag.borrow_mut() = Some(DragState::Sidebar);
-        },
-    )
+    ResizeHandle::new(false, t.border, t.border_active, move |_, _| {
+        *active_drag.borrow_mut() = Some(DragState::Sidebar);
+    })
 }
 
 #[cfg(test)]

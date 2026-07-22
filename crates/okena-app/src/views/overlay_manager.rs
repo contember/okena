@@ -5,40 +5,52 @@
 
 use gpui::*;
 
-
-use crate::terminal::shell_config::ShellType;
-use crate::views::overlays::command_palette::{CommandPalette, CommandPaletteEvent};
-use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
-use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
-use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
-use crate::views::overlays::folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
-use crate::views::overlays::content_search::{ContentSearchDialog, ContentSearchDialogEvent};
-use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
-use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
-use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
-use crate::views::overlays::{ProjectSwitcher, ProjectSwitcherEvent, ShellSelectorOverlay, ShellSelectorOverlayEvent};
-use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
-use crate::views::overlays::profile_manager::{ProfileManager, ProfileManagerEvent};
-use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
-use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
-use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent, PairingEndpoint};
-use crate::views::overlays::remote_connect_dialog::{RemoteConnectDialog, RemoteConnectDialogEvent};
-use crate::views::overlays::remote_pair_dialog::{RemotePairDialog, RemotePairDialogEvent};
-use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteContextMenuEvent};
-use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
-use crate::views::overlays::terminal_context_menu::{TerminalContextMenu, TerminalContextMenuEvent};
-use crate::views::overlays::close_worktree_dialog::{CloseWorktreeDialog, CloseWorktreeDialogEvent};
-use crate::views::overlays::hook_log::{HookLog, HookLogEvent};
-use crate::views::overlays::log_console::{LogConsole, LogConsoleEvent};
-use crate::views::overlays::rename_directory_dialog::{RenameDirectoryDialog, RenameDirectoryDialogEvent};
-use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
-use okena_views_sidebar::{WorktreeListPopover, WorktreeListPopoverEvent};
-use okena_views_sidebar::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
-use okena_transport::client::RemoteConnectionConfig;
 use crate::remote_client::manager::RemoteConnectionManager;
+use crate::terminal::shell_config::ShellType;
+use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
+use crate::views::overlays::close_worktree_dialog::{
+    CloseWorktreeDialog, CloseWorktreeDialogEvent,
+};
+use crate::views::overlays::command_palette::{CommandPalette, CommandPaletteEvent};
+use crate::views::overlays::content_search::{ContentSearchDialog, ContentSearchDialogEvent};
+use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
+use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
+use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
+use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
+use crate::views::overlays::folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
+use crate::views::overlays::hook_log::{HookLog, HookLogEvent};
+use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
+use crate::views::overlays::log_console::{LogConsole, LogConsoleEvent};
+use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent, PairingEndpoint};
+use crate::views::overlays::profile_manager::{ProfileManager, ProfileManagerEvent};
+use crate::views::overlays::remote_connect_dialog::{
+    RemoteConnectDialog, RemoteConnectDialogEvent,
+};
+use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteContextMenuEvent};
+use crate::views::overlays::remote_pair_dialog::{RemotePairDialog, RemotePairDialogEvent};
+use crate::views::overlays::rename_directory_dialog::{
+    RenameDirectoryDialog, RenameDirectoryDialogEvent,
+};
+use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
+use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
+use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
+use crate::views::overlays::terminal_context_menu::{
+    TerminalContextMenu, TerminalContextMenuEvent,
+};
+use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
+use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
+use crate::views::overlays::{
+    ProjectSwitcher, ProjectSwitcherEvent, ShellSelectorOverlay, ShellSelectorOverlayEvent,
+};
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, ProjectOverlay, ProjectOverlayKind, SidebarRequest};
+use crate::workspace::requests::{
+    ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, ProjectOverlay,
+    ProjectOverlayKind, SidebarRequest,
+};
 use crate::workspace::state::{WindowId, Workspace};
+use okena_transport::client::RemoteConnectionConfig;
+use okena_views_sidebar::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
+use okena_views_sidebar::{WorktreeListPopover, WorktreeListPopoverEvent};
 
 // Re-export generic overlay utilities from okena-ui
 pub use okena_ui::overlay::{CloseEvent, OverlaySlot};
@@ -47,22 +59,34 @@ pub use okena_ui::{open_overlay, toggle_overlay};
 // CloseEvent impls for overlay events defined in src/ (local types)
 
 impl CloseEvent for AddProjectDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 impl CloseEvent for KeybindingsHelpEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 impl CloseEvent for ThemeSelectorEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 impl CloseEvent for CommandPaletteEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 impl CloseEvent for SettingsPanelEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 impl CloseEvent for PairingDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 // ============================================================================
@@ -111,21 +135,33 @@ pub enum OverlayManagerEvent {
     CreateWorktree { project_id: String },
 
     /// Context menu: Rename project
-    RenameProject { project_id: String, project_name: String },
+    RenameProject {
+        project_id: String,
+        project_name: String,
+    },
 
     /// Context menu: Rename directory on disk
-    RenameDirectory { project_id: String, project_path: String },
+    RenameDirectory {
+        project_id: String,
+        project_path: String,
+    },
 
     /// Rename-directory dialog confirmed: the host dispatches
     /// `ActionRequest::RenameProjectDirectory`; the daemon performs the rename,
     /// updates the record, and mirrors the new path+name back.
-    RenameDirectoryConfirmed { project_id: String, new_name: String },
+    RenameDirectoryConfirmed {
+        project_id: String,
+        new_name: String,
+    },
 
     /// Context menu: Close worktree project (opens the confirm dialog)
     CloseWorktree { project_id: String },
 
     /// Context menu: Open the daemon-backed worktree list.
-    ManageWorktrees { project_id: String, position: Point<Pixels> },
+    ManageWorktrees {
+        project_id: String,
+        position: Point<Pixels>,
+    },
 
     /// Worktree list: track an already-on-disk worktree. The host dispatches
     /// `ActionRequest::AddDiscoveredWorktree`; the new project mirrors back.
@@ -151,13 +187,19 @@ pub enum OverlayManagerEvent {
     QuickCreateWorktree { project_id: String },
 
     /// Color picker: project color was changed (for remote sync)
-    ProjectColorChanged { project_id: String, color: okena_core::theme::FolderColor },
+    ProjectColorChanged {
+        project_id: String,
+        color: okena_core::theme::FolderColor,
+    },
 
     /// Color picker: a worktree project's color override was reset to its parent
     WorktreeColorReset { project_id: String },
 
     /// Color picker: folder color was changed
-    FolderColorChanged { folder_id: String, color: okena_core::theme::FolderColor },
+    FolderColorChanged {
+        folder_id: String,
+        color: okena_core::theme::FolderColor,
+    },
 
     /// Context menu: Reload services (okena.yaml) for a project
     ReloadServices { project_id: String },
@@ -176,18 +218,22 @@ pub enum OverlayManagerEvent {
     ToggleProjectVisibility(String),
 
     /// Remote connect dialog: connection paired and ready
-    RemoteConnected {
-        config: RemoteConnectionConfig,
-    },
+    RemoteConnected { config: RemoteConnectionConfig },
 
     /// Remote context menu: reconnect to a connection
     RemoteReconnect { connection_id: String },
 
     /// Remote context menu: open pair dialog
-    RemotePair { connection_id: String, connection_name: String },
+    RemotePair {
+        connection_id: String,
+        connection_name: String,
+    },
 
     /// Remote context menu: flip the connection to TLS, then re-pair to pin the cert
-    RemoteUpgradeToTls { connection_id: String, connection_name: String },
+    RemoteUpgradeToTls {
+        connection_id: String,
+        connection_name: String,
+    },
 
     /// Remote pair dialog: user submitted a code
     RemotePaired { connection_id: String, code: String },
@@ -204,16 +250,35 @@ pub enum OverlayManagerEvent {
     /// Terminal context menu: select all
     TerminalSelectAll { terminal_id: String },
     /// Terminal context menu: split
-    TerminalSplit { project_id: String, layout_path: Vec<usize>, direction: crate::workspace::state::SplitDirection },
+    TerminalSplit {
+        project_id: String,
+        layout_path: Vec<usize>,
+        direction: crate::workspace::state::SplitDirection,
+    },
     /// Terminal context menu: close terminal
-    TerminalClose { project_id: String, terminal_id: String },
+    TerminalClose {
+        project_id: String,
+        terminal_id: String,
+    },
 
     /// Tab context menu: close tab
-    TabClose { project_id: String, layout_path: Vec<usize>, tab_index: usize },
+    TabClose {
+        project_id: String,
+        layout_path: Vec<usize>,
+        tab_index: usize,
+    },
     /// Tab context menu: close other tabs
-    TabCloseOthers { project_id: String, layout_path: Vec<usize>, tab_index: usize },
+    TabCloseOthers {
+        project_id: String,
+        layout_path: Vec<usize>,
+        tab_index: usize,
+    },
     /// Tab context menu: close tabs to the right
-    TabCloseToRight { project_id: String, layout_path: Vec<usize>, tab_index: usize },
+    TabCloseToRight {
+        project_id: String,
+        layout_path: Vec<usize>,
+        tab_index: usize,
+    },
 
     /// File viewer blame click: open the named commit in the diff viewer.
     OpenCommitFromBlame { project_id: String, hash: String },
@@ -275,7 +340,12 @@ pub struct OverlayManager {
 
 impl OverlayManager {
     /// Create a new OverlayManager.
-    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, focus_manager: Entity<crate::workspace::focus::FocusManager>, request_broker: Entity<RequestBroker>) -> Self {
+    pub fn new(
+        window_id: WindowId,
+        workspace: Entity<Workspace>,
+        focus_manager: Entity<crate::workspace::focus::FocusManager>,
+        request_broker: Entity<RequestBroker>,
+    ) -> Self {
         Self {
             window_id,
             workspace,
@@ -376,8 +446,8 @@ impl OverlayManager {
 
         let title = title.into();
         let entity_for_detach = entity.clone();
-        self.detach_active_modal_fn = Some(Box::new(
-            move |this: &mut Self, cx: &mut Context<Self>| {
+        self.detach_active_modal_fn =
+            Some(Box::new(move |this: &mut Self, cx: &mut Context<Self>| {
                 before_detach(this, &entity_for_detach, cx);
                 // Clear modal slot — entity stays alive via the new window.
                 this.active_modal = None;
@@ -394,8 +464,7 @@ impl OverlayManager {
                     cx,
                 );
                 cx.notify();
-            },
-        ));
+            }));
 
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
@@ -481,23 +550,31 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let entity = cx.new(KeybindingsHelp::new);
-            cx.subscribe(&entity, |this, _, event: &KeybindingsHelpEvent, cx| {
-                match event {
+            cx.subscribe(
+                &entity,
+                |this, _, event: &KeybindingsHelpEvent, cx| match event {
                     KeybindingsHelpEvent::Close => {
                         this.close_modal(cx);
                     }
                     KeybindingsHelpEvent::ReloadBindings => {
                         crate::keybindings::reload_keybindings(cx);
                     }
-                }
-            }).detach();
+                },
+            )
+            .detach();
             self.open_modal(entity, cx);
         }
     }
 
     /// Toggle theme selector overlay.
     pub fn toggle_theme_selector(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, ThemeSelector, ThemeSelectorEvent, ThemeSelector::new);
+        toggle_overlay!(
+            self,
+            cx,
+            ThemeSelector,
+            ThemeSelectorEvent,
+            ThemeSelector::new
+        );
     }
 
     /// Toggle command palette overlay.
@@ -524,20 +601,19 @@ impl OverlayManager {
 
     /// Subscribe to a settings panel: close on `Close`, forward per-project hook
     /// edits as an `OverlayManagerEvent` the host dispatches to the daemon.
-    fn subscribe_settings_panel(
-        &mut self,
-        entity: &Entity<SettingsPanel>,
-        cx: &mut Context<Self>,
-    ) {
-        cx.subscribe(entity, |this, _, event: &SettingsPanelEvent, cx| match event {
-            SettingsPanelEvent::Close => this.close_modal(cx),
-            SettingsPanelEvent::ProjectHooksChanged { project_id, hooks } => {
-                cx.emit(OverlayManagerEvent::ProjectHooksChanged {
-                    project_id: project_id.clone(),
-                    hooks: (**hooks).clone(),
-                });
-            }
-        })
+    fn subscribe_settings_panel(&mut self, entity: &Entity<SettingsPanel>, cx: &mut Context<Self>) {
+        cx.subscribe(
+            entity,
+            |this, _, event: &SettingsPanelEvent, cx| match event {
+                SettingsPanelEvent::Close => this.close_modal(cx),
+                SettingsPanelEvent::ProjectHooksChanged { project_id, hooks } => {
+                    cx.emit(OverlayManagerEvent::ProjectHooksChanged {
+                        project_id: project_id.clone(),
+                        hooks: (**hooks).clone(),
+                    });
+                }
+            },
+        )
         .detach();
     }
 
@@ -552,7 +628,11 @@ impl OverlayManager {
     }
 
     /// Toggle pairing dialog overlay.
-    pub fn toggle_pairing_dialog(&mut self, endpoint: Option<PairingEndpoint>, cx: &mut Context<Self>) {
+    pub fn toggle_pairing_dialog(
+        &mut self,
+        endpoint: Option<PairingEndpoint>,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_modal::<PairingDialog>() {
             self.close_modal(cx);
         } else {
@@ -561,7 +641,8 @@ impl OverlayManager {
                 if event.is_close() {
                     this.close_modal(cx);
                 }
-            }).detach();
+            })
+            .detach();
             self.open_modal(entity, cx);
         }
     }
@@ -582,8 +663,9 @@ impl OverlayManager {
             let workspace = self.workspace.clone();
             let window_id = self.window_id;
             let entity = cx.new(|cx| ProjectSwitcher::new(window_id, workspace, cx));
-            cx.subscribe(&entity, |this, _, event: &ProjectSwitcherEvent, cx| {
-                match event {
+            cx.subscribe(
+                &entity,
+                |this, _, event: &ProjectSwitcherEvent, cx| match event {
                     ProjectSwitcherEvent::Close => {
                         this.close_modal(cx);
                     }
@@ -596,11 +678,13 @@ impl OverlayManager {
                         this.close_modal(cx);
                     }
                     ProjectSwitcherEvent::ToggleVisibility(project_id) => {
-                        cx.emit(OverlayManagerEvent::ToggleProjectVisibility(project_id.clone()));
+                        cx.emit(OverlayManagerEvent::ToggleProjectVisibility(
+                            project_id.clone(),
+                        ));
                         cx.notify();
                     }
-                }
-            })
+                },
+            )
             .detach();
             self.open_modal(entity, cx);
         }
@@ -648,8 +732,9 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let manager = cx.new(ProfileManager::new);
-            cx.subscribe(&manager, |this, _, event: &ProfileManagerEvent, cx| {
-                match event {
+            cx.subscribe(
+                &manager,
+                |this, _, event: &ProfileManagerEvent, cx| match event {
                     ProfileManagerEvent::Close => {
                         this.close_modal(cx);
                     }
@@ -657,8 +742,8 @@ impl OverlayManager {
                         cx.emit(OverlayManagerEvent::SwitchProfile(id.clone()));
                         this.close_modal(cx);
                     }
-                }
-            })
+                },
+            )
             .detach();
             self.open_modal(manager, cx);
         }
@@ -678,12 +763,16 @@ impl OverlayManager {
     ) {
         let context = Some((project_id.clone(), terminal_id.clone()));
         let entity = cx.new(|cx| ShellSelectorOverlay::new(current_shell, context, cx));
-        cx.subscribe(&entity, move |this, _, event: &ShellSelectorOverlayEvent, cx| {
-            match event {
+        cx.subscribe(
+            &entity,
+            move |this, _, event: &ShellSelectorOverlayEvent, cx| match event {
                 ShellSelectorOverlayEvent::Close => {
                     this.close_modal(cx);
                 }
-                ShellSelectorOverlayEvent::ShellSelected { shell_type, context } => {
+                ShellSelectorOverlayEvent::ShellSelected {
+                    shell_type,
+                    context,
+                } => {
                     if let Some((project_id, terminal_id)) = context {
                         cx.emit(OverlayManagerEvent::ShellSelected {
                             shell_type: shell_type.clone(),
@@ -693,8 +782,9 @@ impl OverlayManager {
                     }
                     this.close_modal(cx);
                 }
-            }
-        }).detach();
+            },
+        )
+        .detach();
         self.open_modal(entity, cx);
     }
 
@@ -710,15 +800,18 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let (client, daemon_project_id) = params;
-        let dialog = cx.new(|cx| {
-            WorktreeDialog::new(client, daemon_project_id, project_id, cx)
-        });
-        cx.subscribe(&dialog, |this, _, event: &WorktreeDialogEvent, cx| {
-            match event {
+        let dialog = cx.new(|cx| WorktreeDialog::new(client, daemon_project_id, project_id, cx));
+        cx.subscribe(
+            &dialog,
+            |this, _, event: &WorktreeDialogEvent, cx| match event {
                 WorktreeDialogEvent::Close => {
                     this.close_modal(cx);
                 }
-                WorktreeDialogEvent::RequestCreate { project_id, branch, create_branch } => {
+                WorktreeDialogEvent::RequestCreate {
+                    project_id,
+                    branch,
+                    create_branch,
+                } => {
                     cx.emit(OverlayManagerEvent::WorktreeCreateRequested {
                         project_id: project_id.clone(),
                         branch: branch.clone(),
@@ -726,8 +819,8 @@ impl OverlayManager {
                     });
                     this.close_modal(cx);
                 }
-            }
-        })
+            },
+        )
         .detach();
         self.open_modal(dialog, cx);
     }
@@ -748,15 +841,25 @@ impl OverlayManager {
         let focus_manager = self.focus_manager.clone();
         let app_settings = crate::settings::settings(cx);
         let entity = cx.new(|cx| {
-            CloseWorktreeDialog::new(client, daemon_id, workspace, focus_manager, project_id, app_settings.worktree, app_settings.hooks, cx)
+            CloseWorktreeDialog::new(
+                client,
+                daemon_id,
+                workspace,
+                focus_manager,
+                project_id,
+                app_settings.worktree,
+                app_settings.hooks,
+                cx,
+            )
         });
-        cx.subscribe(&entity, |this, _, event: &CloseWorktreeDialogEvent, cx| {
-            match event {
+        cx.subscribe(
+            &entity,
+            |this, _, event: &CloseWorktreeDialogEvent, cx| match event {
                 CloseWorktreeDialogEvent::Closed => {
                     this.close_modal(cx);
                 }
-            }
-        })
+            },
+        )
         .detach();
         self.open_modal(entity, cx);
     }
@@ -773,17 +876,24 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let entity = cx.new(|cx| RenameDirectoryDialog::new(project_id, project_path, cx));
-        cx.subscribe(&entity, |this, _, event: &RenameDirectoryDialogEvent, cx| {
-            if let RenameDirectoryDialogEvent::Confirmed { project_id, new_name } = event {
-                cx.emit(OverlayManagerEvent::RenameDirectoryConfirmed {
-                    project_id: project_id.clone(),
-                    new_name: new_name.clone(),
-                });
-            }
-            if event.is_close() {
-                this.close_modal(cx);
-            }
-        })
+        cx.subscribe(
+            &entity,
+            |this, _, event: &RenameDirectoryDialogEvent, cx| {
+                if let RenameDirectoryDialogEvent::Confirmed {
+                    project_id,
+                    new_name,
+                } = event
+                {
+                    cx.emit(OverlayManagerEvent::RenameDirectoryConfirmed {
+                        project_id: project_id.clone(),
+                        new_name: new_name.clone(),
+                    });
+                }
+                if event.is_close() {
+                    this.close_modal(cx);
+                }
+            },
+        )
         .detach();
         self.open_modal(entity, cx);
     }
@@ -818,14 +928,20 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
-                ContextMenuEvent::RenameProject { project_id, project_name } => {
+                ContextMenuEvent::RenameProject {
+                    project_id,
+                    project_name,
+                } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::RenameProject {
                         project_id: project_id.clone(),
                         project_name: project_name.clone(),
                     });
                 }
-                ContextMenuEvent::RenameDirectory { project_id, project_path } => {
+                ContextMenuEvent::RenameDirectory {
+                    project_id,
+                    project_path,
+                } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::RenameDirectory {
                         project_id: project_id.clone(),
@@ -862,7 +978,10 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
-                ContextMenuEvent::ManageWorktrees { project_id, position } => {
+                ContextMenuEvent::ManageWorktrees {
+                    project_id,
+                    position,
+                } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::ManageWorktrees {
                         project_id: project_id.clone(),
@@ -921,7 +1040,9 @@ impl OverlayManager {
                 }
                 ContextMenuEvent::HideProject { project_id } => {
                     this.hide_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::ToggleProjectVisibility(project_id.clone()));
+                    cx.emit(OverlayManagerEvent::ToggleProjectVisibility(
+                        project_id.clone(),
+                    ));
                 }
             }
         })
@@ -938,7 +1059,11 @@ impl OverlayManager {
     }
 
     /// Show folder context menu.
-    pub fn show_folder_context_menu(&mut self, request: FolderContextMenuRequest, cx: &mut Context<Self>) {
+    pub fn show_folder_context_menu(
+        &mut self,
+        request: FolderContextMenuRequest,
+        cx: &mut Context<Self>,
+    ) {
         self.close_modal(cx);
         self.close_all_context_menus();
 
@@ -946,18 +1071,25 @@ impl OverlayManager {
         let window_id = self.window_id;
         let menu = cx.new(|cx| FolderContextMenu::new(window_id, workspace.clone(), request, cx));
 
-        cx.subscribe(&menu, |this, _, event: &FolderContextMenuEvent, cx| {
-            match event {
+        cx.subscribe(
+            &menu,
+            |this, _, event: &FolderContextMenuEvent, cx| match event {
                 FolderContextMenuEvent::Close => {
                     this.hide_folder_context_menu(cx);
                 }
-                FolderContextMenuEvent::RenameFolder { folder_id, folder_name } => {
+                FolderContextMenuEvent::RenameFolder {
+                    folder_id,
+                    folder_name,
+                } => {
                     this.hide_folder_context_menu(cx);
                     this.request_broker.update(cx, |broker, cx| {
-                        broker.push_sidebar_request(SidebarRequest::RenameFolder {
-                            folder_id: folder_id.clone(),
-                            folder_name: folder_name.clone(),
-                        }, cx);
+                        broker.push_sidebar_request(
+                            SidebarRequest::RenameFolder {
+                                folder_id: folder_id.clone(),
+                                folder_name: folder_name.clone(),
+                            },
+                            cx,
+                        );
                     });
                 }
                 FolderContextMenuEvent::DeleteFolder { folder_id } => {
@@ -978,8 +1110,8 @@ impl OverlayManager {
                         cx.notify();
                     });
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         self.folder_context_menu.set(menu);
@@ -1016,11 +1148,19 @@ impl OverlayManager {
 
         let conn_name = connection_name.clone();
         let menu = cx.new(|cx| {
-            RemoteContextMenu::new(connection_id, connection_name, is_pairing, tls, position, cx)
+            RemoteContextMenu::new(
+                connection_id,
+                connection_name,
+                is_pairing,
+                tls,
+                position,
+                cx,
+            )
         });
 
-        cx.subscribe(&menu, move |this, _, event: &RemoteContextMenuEvent, cx| {
-            match event {
+        cx.subscribe(
+            &menu,
+            move |this, _, event: &RemoteContextMenuEvent, cx| match event {
                 RemoteContextMenuEvent::Close => {
                     this.hide_remote_context_menu(cx);
                 }
@@ -1050,8 +1190,8 @@ impl OverlayManager {
                         connection_id: connection_id.clone(),
                     });
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         self.remote_context_menu.set(menu);
@@ -1090,31 +1230,52 @@ impl OverlayManager {
         self.close_all_context_menus();
 
         let menu = cx.new(|cx| {
-            TerminalContextMenu::new(terminal_id, project_id, layout_path, position, has_selection, link_url, cx)
+            TerminalContextMenu::new(
+                terminal_id,
+                project_id,
+                layout_path,
+                position,
+                has_selection,
+                link_url,
+                cx,
+            )
         });
 
-        cx.subscribe(&menu, |this, _, event: &TerminalContextMenuEvent, cx| {
-            match event {
+        cx.subscribe(
+            &menu,
+            |this, _, event: &TerminalContextMenuEvent, cx| match event {
                 TerminalContextMenuEvent::Close => {
                     this.hide_terminal_context_menu(cx);
                 }
                 TerminalContextMenuEvent::Copy { terminal_id } => {
                     this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalCopy { terminal_id: terminal_id.clone() });
+                    cx.emit(OverlayManagerEvent::TerminalCopy {
+                        terminal_id: terminal_id.clone(),
+                    });
                 }
                 TerminalContextMenuEvent::Paste { terminal_id } => {
                     this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalPaste { terminal_id: terminal_id.clone() });
+                    cx.emit(OverlayManagerEvent::TerminalPaste {
+                        terminal_id: terminal_id.clone(),
+                    });
                 }
                 TerminalContextMenuEvent::Clear { terminal_id } => {
                     this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalClear { terminal_id: terminal_id.clone() });
+                    cx.emit(OverlayManagerEvent::TerminalClear {
+                        terminal_id: terminal_id.clone(),
+                    });
                 }
                 TerminalContextMenuEvent::SelectAll { terminal_id } => {
                     this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalSelectAll { terminal_id: terminal_id.clone() });
+                    cx.emit(OverlayManagerEvent::TerminalSelectAll {
+                        terminal_id: terminal_id.clone(),
+                    });
                 }
-                TerminalContextMenuEvent::Split { project_id, layout_path, direction } => {
+                TerminalContextMenuEvent::Split {
+                    project_id,
+                    layout_path,
+                    direction,
+                } => {
                     this.hide_terminal_context_menu(cx);
                     cx.emit(OverlayManagerEvent::TerminalSplit {
                         project_id: project_id.clone(),
@@ -1122,7 +1283,10 @@ impl OverlayManager {
                         direction: *direction,
                     });
                 }
-                TerminalContextMenuEvent::CloseTerminal { project_id, terminal_id } => {
+                TerminalContextMenuEvent::CloseTerminal {
+                    project_id,
+                    terminal_id,
+                } => {
                     this.hide_terminal_context_menu(cx);
                     cx.emit(OverlayManagerEvent::TerminalClose {
                         project_id: project_id.clone(),
@@ -1137,8 +1301,8 @@ impl OverlayManager {
                     this.hide_terminal_context_menu(cx);
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         self.terminal_context_menu.set(menu);
@@ -1177,12 +1341,17 @@ impl OverlayManager {
             TabContextMenu::new(tab_index, num_tabs, project_id, layout_path, position, cx)
         });
 
-        cx.subscribe(&menu, |this, _, event: &TabContextMenuEvent, cx| {
-            match event {
+        cx.subscribe(
+            &menu,
+            |this, _, event: &TabContextMenuEvent, cx| match event {
                 TabContextMenuEvent::Close => {
                     this.hide_tab_context_menu(cx);
                 }
-                TabContextMenuEvent::CloseTab { project_id, layout_path, tab_index } => {
+                TabContextMenuEvent::CloseTab {
+                    project_id,
+                    layout_path,
+                    tab_index,
+                } => {
                     this.hide_tab_context_menu(cx);
                     cx.emit(OverlayManagerEvent::TabClose {
                         project_id: project_id.clone(),
@@ -1190,7 +1359,11 @@ impl OverlayManager {
                         tab_index: *tab_index,
                     });
                 }
-                TabContextMenuEvent::CloseOtherTabs { project_id, layout_path, tab_index } => {
+                TabContextMenuEvent::CloseOtherTabs {
+                    project_id,
+                    layout_path,
+                    tab_index,
+                } => {
                     this.hide_tab_context_menu(cx);
                     cx.emit(OverlayManagerEvent::TabCloseOthers {
                         project_id: project_id.clone(),
@@ -1198,7 +1371,11 @@ impl OverlayManager {
                         tab_index: *tab_index,
                     });
                 }
-                TabContextMenuEvent::CloseTabsToRight { project_id, layout_path, tab_index } => {
+                TabContextMenuEvent::CloseTabsToRight {
+                    project_id,
+                    layout_path,
+                    tab_index,
+                } => {
                     this.hide_tab_context_menu(cx);
                     cx.emit(OverlayManagerEvent::TabCloseToRight {
                         project_id: project_id.clone(),
@@ -1206,8 +1383,8 @@ impl OverlayManager {
                         tab_index: *tab_index,
                     });
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         self.tab_context_menu.set(menu);
@@ -1246,10 +1423,13 @@ impl OverlayManager {
 
         let (client, daemon_id) = params;
         let workspace = self.workspace.clone();
-        let popover = cx.new(|cx| WorktreeListPopover::new(client, daemon_id, workspace, project_id, position, cx));
+        let popover = cx.new(|cx| {
+            WorktreeListPopover::new(client, daemon_id, workspace, project_id, position, cx)
+        });
 
-        cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
-            match event {
+        cx.subscribe(
+            &popover,
+            |this, _, event: &WorktreeListPopoverEvent, cx| match event {
                 WorktreeListPopoverEvent::Close => {
                     this.hide_worktree_list(cx);
                 }
@@ -1271,8 +1451,9 @@ impl OverlayManager {
                         branch: branch.clone(),
                     });
                 }
-            }
-        }).detach();
+            },
+        )
+        .detach();
 
         self.worktree_list.set(popover);
         cx.notify();
@@ -1299,7 +1480,12 @@ impl OverlayManager {
     }
 
     /// Show color picker popover.
-    pub fn show_color_picker(&mut self, target: ColorPickerTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
+    pub fn show_color_picker(
+        &mut self,
+        target: ColorPickerTarget,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
@@ -1329,7 +1515,8 @@ impl OverlayManager {
                     });
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         self.color_picker.set(popover);
         cx.notify();
@@ -1374,19 +1561,23 @@ impl OverlayManager {
         let fs_for_viewer = fs.clone();
         let blame_for_viewer = blame_provider.clone();
         let settings = crate::settings::settings(cx).file_finder.clone();
-        let dialog = cx.new(|cx| {
-            FileSearchDialog::new(fs, settings.show_ignored, cx)
-        });
+        let dialog = cx.new(|cx| FileSearchDialog::new(fs, settings.show_ignored, cx));
 
-        cx.subscribe(&dialog, move |this, _, event: &FileSearchDialogEvent, cx| {
-            match event {
+        cx.subscribe(
+            &dialog,
+            move |this, _, event: &FileSearchDialogEvent, cx| match event {
                 FileSearchDialogEvent::Close => {
                     this.close_modal(cx);
                 }
                 FileSearchDialogEvent::FileSelected(relative_path) => {
                     let relative_path = relative_path.clone();
                     this.close_modal(cx);
-                    this.show_file_viewer(relative_path, fs_for_viewer.clone(), blame_for_viewer.clone(), cx);
+                    this.show_file_viewer(
+                        relative_path,
+                        fs_for_viewer.clone(),
+                        blame_for_viewer.clone(),
+                        cx,
+                    );
                 }
                 FileSearchDialogEvent::FiltersChanged { show_ignored } => {
                     let show_ignored = *show_ignored;
@@ -1394,8 +1585,8 @@ impl OverlayManager {
                         state.set_file_finder_show_ignored(show_ignored, cx);
                     });
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         self.open_modal(dialog, cx);
@@ -1432,18 +1623,27 @@ impl OverlayManager {
         let blame_for_viewer = blame_provider.clone();
         let dialog = cx.new(|cx| ContentSearchDialog::new(fs, is_dark, cx));
 
-        cx.subscribe(&dialog, move |this, _, event: &ContentSearchDialogEvent, cx| {
-            match event {
+        cx.subscribe(
+            &dialog,
+            move |this, _, event: &ContentSearchDialogEvent, cx| match event {
                 ContentSearchDialogEvent::Close => {
                     this.close_modal(cx);
                 }
-                ContentSearchDialogEvent::FileSelected { relative_path, line: _ } => {
+                ContentSearchDialogEvent::FileSelected {
+                    relative_path,
+                    line: _,
+                } => {
                     let relative_path = relative_path.clone();
                     this.close_modal(cx);
-                    this.show_file_viewer(relative_path, fs_for_viewer.clone(), blame_for_viewer.clone(), cx);
+                    this.show_file_viewer(
+                        relative_path,
+                        fs_for_viewer.clone(),
+                        blame_for_viewer.clone(),
+                        cx,
+                    );
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         self.open_modal(dialog, cx);
@@ -1460,7 +1660,10 @@ impl OverlayManager {
         blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
         cx: &mut Context<Self>,
     ) {
-        let settings = crate::settings::settings_entity(cx).read(cx).settings.clone();
+        let settings = crate::settings::settings_entity(cx)
+            .read(cx)
+            .settings
+            .clone();
         let font_size = settings.file_font_size;
         let blame_visible = settings.blame_visible;
         let is_dark = crate::theme::theme(cx).is_dark();
@@ -1493,7 +1696,10 @@ impl OverlayManager {
         blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
         cx: &mut Context<Self>,
     ) {
-        let settings = crate::settings::settings_entity(cx).read(cx).settings.clone();
+        let settings = crate::settings::settings_entity(cx)
+            .read(cx)
+            .settings
+            .clone();
         let font_size = settings.file_font_size;
         let blame_visible = settings.blame_visible;
         let is_dark = crate::theme::theme(cx).is_dark();
@@ -1567,43 +1773,46 @@ impl OverlayManager {
     /// Detach moves it to a separate OS window, OpenCommit bubbles up to
     /// RootView, SendToTerminal routes to the focused terminal via the broker.
     fn subscribe_file_viewer(&mut self, viewer: &Entity<FileViewer>, cx: &mut Context<Self>) {
-        cx.subscribe(viewer, |this, viewer_entity, event: &FileViewerEvent, cx| {
-            match event {
-                FileViewerEvent::Close => {
-                    // Closing keeps the cached viewer alive (cache holds its own
-                    // clone); only the modal slot is cleared.
-                    this.close_modal(cx);
-                }
-                FileViewerEvent::Detach => {
-                    this.detach_active_modal(cx);
-                }
-                FileViewerEvent::OpenCommit(hash) => {
-                    // Look up which project this FileViewer belongs to so the
-                    // host can pick the right GitProvider.
-                    if let Some(project_id) = this
-                        .cached_file_viewers
-                        .iter()
-                        .find(|(_, v)| **v == viewer_entity)
-                        .map(|(k, _)| k.clone())
-                    {
-                        cx.emit(OverlayManagerEvent::OpenCommitFromBlame {
-                            project_id,
-                            hash: hash.clone(),
+        cx.subscribe(
+            viewer,
+            |this, viewer_entity, event: &FileViewerEvent, cx| {
+                match event {
+                    FileViewerEvent::Close => {
+                        // Closing keeps the cached viewer alive (cache holds its own
+                        // clone); only the modal slot is cleared.
+                        this.close_modal(cx);
+                    }
+                    FileViewerEvent::Detach => {
+                        this.detach_active_modal(cx);
+                    }
+                    FileViewerEvent::OpenCommit(hash) => {
+                        // Look up which project this FileViewer belongs to so the
+                        // host can pick the right GitProvider.
+                        if let Some(project_id) = this
+                            .cached_file_viewers
+                            .iter()
+                            .find(|(_, v)| **v == viewer_entity)
+                            .map(|(k, _)| k.clone())
+                        {
+                            cx.emit(OverlayManagerEvent::OpenCommitFromBlame {
+                                project_id,
+                                hash: hash.clone(),
+                            });
+                        }
+                    }
+                    FileViewerEvent::BlamePreferenceChanged(visible) => {
+                        crate::settings::settings_entity(cx).update(cx, |state, cx| {
+                            state.set_blame_visible(*visible, cx);
+                        });
+                    }
+                    FileViewerEvent::SendToTerminal(payload) => {
+                        this.request_broker.update(cx, |broker, cx| {
+                            broker.push_send_to_terminal(payload.clone(), cx);
                         });
                     }
                 }
-                FileViewerEvent::BlamePreferenceChanged(visible) => {
-                    crate::settings::settings_entity(cx).update(cx, |state, cx| {
-                        state.set_blame_visible(*visible, cx);
-                    });
-                }
-                FileViewerEvent::SendToTerminal(payload) => {
-                    this.request_broker.update(cx, |broker, cx| {
-                        broker.push_send_to_terminal(payload.clone(), cx);
-                    });
-                }
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -1640,7 +1849,15 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let viewer = cx.new(|cx| {
-            DiffViewer::new(provider, select_file, mode, commit_message, commits, commit_index, cx)
+            DiffViewer::new(
+                provider,
+                select_file,
+                mode,
+                commit_message,
+                commits,
+                commit_index,
+                cx,
+            )
         });
 
         cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
@@ -1686,8 +1903,9 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let entity = cx.new(|cx| RemoteConnectDialog::new(remote_manager, cx));
-            cx.subscribe(&entity, |this, _, event: &RemoteConnectDialogEvent, cx| {
-                match event {
+            cx.subscribe(
+                &entity,
+                |this, _, event: &RemoteConnectDialogEvent, cx| match event {
                     RemoteConnectDialogEvent::Close => {
                         this.close_modal(cx);
                     }
@@ -1697,8 +1915,8 @@ impl OverlayManager {
                         });
                         this.close_modal(cx);
                     }
-                }
-            })
+                },
+            )
             .detach();
             self.open_modal(entity, cx);
         }
@@ -1716,20 +1934,24 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let entity = cx.new(|cx| RemotePairDialog::new(connection_id, connection_name, cx));
-        cx.subscribe(&entity, |this, _, event: &RemotePairDialogEvent, cx| {
-            match event {
+        cx.subscribe(
+            &entity,
+            |this, _, event: &RemotePairDialogEvent, cx| match event {
                 RemotePairDialogEvent::Close => {
                     this.close_modal(cx);
                 }
-                RemotePairDialogEvent::Pair { connection_id, code } => {
+                RemotePairDialogEvent::Pair {
+                    connection_id,
+                    code,
+                } => {
                     cx.emit(OverlayManagerEvent::RemotePaired {
                         connection_id: connection_id.clone(),
                         code: code.clone(),
                     });
                     this.close_modal(cx);
                 }
-            }
-        })
+            },
+        )
         .detach();
         self.open_modal(entity, cx);
     }

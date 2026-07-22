@@ -9,8 +9,8 @@ use crate::docker_compose;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 impl ServiceManager {
@@ -25,7 +25,10 @@ impl ServiceManager {
         cx: &mut impl ServiceCx,
     ) {
         // Check if explicitly disabled
-        if docker_config.as_ref().is_some_and(|dc| dc.enabled == Some(false)) {
+        if docker_config
+            .as_ref()
+            .is_some_and(|dc| dc.enabled == Some(false))
+        {
             return;
         }
 
@@ -34,7 +37,9 @@ impl ServiceManager {
             .and_then(|dc| dc.file.clone())
             .or_else(|| docker_compose::detect_compose_file(project_path));
 
-        let Some(compose_file) = compose_file else { return };
+        let Some(compose_file) = compose_file else {
+            return;
+        };
 
         // Extract what we need from the reference before spawning
         let filter: Option<Vec<String>> = docker_config
@@ -64,30 +69,36 @@ impl ServiceManager {
                 .await
             };
 
-            let Some(service_names) = service_names else { return };
+            let Some(service_names) = service_names else {
+                return;
+            };
 
             let _ = this.update(cx, |this, cx| {
                 for name in &service_names {
                     let is_extra = filter.as_ref().is_some_and(|f| !f.contains(name));
 
                     let key = (project_id.clone(), name.clone());
-                    this.instances.entry(key).or_insert_with(|| ServiceInstance {
-                                definition: ServiceDefinition {
-                                    name: name.clone(),
-                                    command: String::new(),
-                                    cwd: ".".to_string(),
-                                    env: HashMap::new(),
-                                    auto_start: false,
-                                    restart_on_crash: false,
-                                    restart_delay_ms: 0,
-                                },
-                                kind: ServiceKind::DockerCompose { compose_file: compose_file.clone() },
-                                status: ServiceStatus::Stopped,
-                                terminal_id: None,
-                                restart_count: 0,
-                                detected_ports: Vec::new(),
-                                is_extra,
-                            });
+                    this.instances
+                        .entry(key)
+                        .or_insert_with(|| ServiceInstance {
+                            definition: ServiceDefinition {
+                                name: name.clone(),
+                                command: String::new(),
+                                cwd: ".".to_string(),
+                                env: HashMap::new(),
+                                auto_start: false,
+                                restart_on_crash: false,
+                                restart_delay_ms: 0,
+                            },
+                            kind: ServiceKind::DockerCompose {
+                                compose_file: compose_file.clone(),
+                            },
+                            status: ServiceStatus::Stopped,
+                            terminal_id: None,
+                            restart_count: 0,
+                            detected_ports: Vec::new(),
+                            is_extra,
+                        });
                 }
 
                 // Start status poller
@@ -111,19 +122,23 @@ impl ServiceManager {
         }
 
         // Remove old Docker instances
-        let docker_keys: Vec<(String, String)> = self.instances
+        let docker_keys: Vec<(String, String)> = self
+            .instances
             .iter()
-            .filter(|((pid, _), inst)| pid == project_id && matches!(inst.kind, ServiceKind::DockerCompose { .. }))
+            .filter(|((pid, _), inst)| {
+                pid == project_id && matches!(inst.kind, ServiceKind::DockerCompose { .. })
+            })
             .map(|(k, _)| k.clone())
             .collect();
 
         for key in docker_keys {
             if let Some(instance) = self.instances.get(&key)
-                && let Some(terminal_id) = &instance.terminal_id {
-                    self.backend.kill(terminal_id);
-                    self.terminals.lock().remove(terminal_id);
-                    self.terminal_to_service.remove(terminal_id);
-                }
+                && let Some(terminal_id) = &instance.terminal_id
+            {
+                self.backend.kill(terminal_id);
+                self.terminals.lock().remove(terminal_id);
+                self.terminal_to_service.remove(terminal_id);
+            }
             self.instances.remove(&key);
         }
 
@@ -183,7 +198,10 @@ impl ServiceManager {
                     clippy::expect_used,
                     reason = "Docker log instance ensured earlier in this function, absence is a bug"
                 )]
-                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
+                let instance = self
+                    .instances
+                    .get_mut(&key)
+                    .expect("bug: service instance must exist");
                 instance.terminal_id = Some(terminal_id.clone());
                 self.terminal_to_service.insert(
                     terminal_id,
@@ -193,7 +211,9 @@ impl ServiceManager {
             Err(e) => {
                 log::error!(
                     "Failed to open Docker logs for '{}' in project {}: {}",
-                    service_name, project_id, e
+                    service_name,
+                    project_id,
+                    e
                 );
             }
         }
@@ -215,7 +235,8 @@ impl ServiceManager {
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
-        self.docker_pollers.insert(project_id.to_string(), cancel.clone());
+        self.docker_pollers
+            .insert(project_id.to_string(), cancel.clone());
 
         let pid = project_id.to_string();
         let path = project_path.to_string();
@@ -248,15 +269,20 @@ impl ServiceManager {
                 match result {
                     Ok(statuses) => {
                         consecutive_failures = 0;
-                        let should_stop = this.update(cx, |this, cx| {
-                            let mut any_docker = false;
-                            let mut changed = false;
-                            for ds in &statuses {
-                                let key = (pid.clone(), ds.name.clone());
-                                if let Some(inst) = this.instances.get_mut(&key)
-                                    && matches!(inst.kind, ServiceKind::DockerCompose { .. }) {
+                        let should_stop = this
+                            .update(cx, |this, cx| {
+                                let mut any_docker = false;
+                                let mut changed = false;
+                                for ds in &statuses {
+                                    let key = (pid.clone(), ds.name.clone());
+                                    if let Some(inst) = this.instances.get_mut(&key)
+                                        && matches!(inst.kind, ServiceKind::DockerCompose { .. })
+                                    {
                                         any_docker = true;
-                                        let new_status = docker_compose::map_docker_state(&ds.state, ds.exit_code);
+                                        let new_status = docker_compose::map_docker_state(
+                                            &ds.state,
+                                            ds.exit_code,
+                                        );
                                         if inst.status != new_status {
                                             inst.status = new_status;
                                             changed = true;
@@ -266,12 +292,13 @@ impl ServiceManager {
                                             changed = true;
                                         }
                                     }
-                            }
-                            if changed {
-                                cx.notify();
-                            }
-                            !any_docker
-                        }).unwrap_or(true);
+                                }
+                                if changed {
+                                    cx.notify();
+                                }
+                                !any_docker
+                            })
+                            .unwrap_or(true);
 
                         if should_stop {
                             return;

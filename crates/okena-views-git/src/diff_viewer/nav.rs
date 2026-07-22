@@ -1,9 +1,9 @@
 //! Navigation actions for the diff viewer: file/commit/folder selection,
 //! view-mode toggles, detach handling, close.
 
-use super::side_by_side;
 use super::DiffViewer;
 use super::DiffViewerEvent;
+use super::side_by_side;
 use crate::settings::{git_settings, set_git_settings};
 
 use okena_core::types::DiffViewMode;
@@ -125,13 +125,17 @@ impl DiffViewer {
     }
 
     pub(super) fn prev_commit(&mut self, cx: &mut Context<Self>) {
-        if !self.can_prev_commit() { return; }
+        if !self.can_prev_commit() {
+            return;
+        }
         self.commit_index -= 1;
         self.navigate_to_current_commit(cx);
     }
 
     pub(super) fn next_commit(&mut self, cx: &mut Context<Self>) {
-        if !self.can_next_commit() { return; }
+        if !self.can_next_commit() {
+            return;
+        }
         self.commit_index += 1;
         self.navigate_to_current_commit(cx);
     }

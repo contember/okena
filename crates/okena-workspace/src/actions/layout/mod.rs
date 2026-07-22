@@ -22,11 +22,15 @@ impl Workspace {
             return vec![];
         };
 
-        let layout_ids: std::collections::HashSet<String> = project.layout.as_ref()
+        let layout_ids: std::collections::HashSet<String> = project
+            .layout
+            .as_ref()
             .map(|l| l.collect_terminal_ids().into_iter().collect())
             .unwrap_or_default();
 
-        let orphaned: Vec<String> = project.terminal_names.keys()
+        let orphaned: Vec<String> = project
+            .terminal_names
+            .keys()
             .filter(|id| !layout_ids.contains(id.as_str()))
             .cloned()
             .collect();

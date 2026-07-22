@@ -26,7 +26,9 @@ mod tests {
     fn loopback_peers_can_reload_tokens() {
         assert!(PeerInfo::Local.is_local_trusted());
         assert!(PeerInfo::Tcp(SocketAddr::from(([127, 0, 0, 1], 19100))).is_local_trusted());
-        assert!(PeerInfo::Tcp(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 19100))).is_local_trusted());
+        assert!(
+            PeerInfo::Tcp(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 19100))).is_local_trusted()
+        );
     }
 
     #[test]

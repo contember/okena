@@ -24,15 +24,13 @@ impl ProfileManager {
 
         let profiles = okena_core::profiles::all_profiles().unwrap_or_default();
 
-        let default_profile_id = okena_core::profiles::ProfileIndex::load(
-            &okena_core::profiles::config_root(),
-        )
-        .map(|idx| idx.default_profile)
-        .unwrap_or_else(|_| "default".to_string());
+        let default_profile_id =
+            okena_core::profiles::ProfileIndex::load(&okena_core::profiles::config_root())
+                .map(|idx| idx.default_profile)
+                .unwrap_or_else(|_| "default".to_string());
 
-        let new_profile_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("New profile name...")
-        });
+        let new_profile_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("New profile name..."));
 
         Self {
             focus_handle,

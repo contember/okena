@@ -117,11 +117,16 @@ impl HooksConfig {
 }
 
 const FLAT_HOOK_KEYS: &[&str] = &[
-    "on_project_open", "on_project_close",
-    "on_worktree_create", "on_worktree_close",
-    "pre_merge", "post_merge",
-    "before_worktree_remove", "worktree_removed",
-    "on_rebase_conflict", "on_dirty_worktree_close",
+    "on_project_open",
+    "on_project_close",
+    "on_worktree_create",
+    "on_worktree_close",
+    "pre_merge",
+    "post_merge",
+    "before_worktree_remove",
+    "worktree_removed",
+    "on_rebase_conflict",
+    "on_dirty_worktree_close",
 ];
 
 impl<'de> Deserialize<'de> for HooksConfig {
@@ -132,7 +137,9 @@ impl<'de> Deserialize<'de> for HooksConfig {
             None => return Ok(HooksConfig::default()),
         };
 
-        let is_new_format = obj.contains_key("project") || obj.contains_key("terminal") || obj.contains_key("worktree");
+        let is_new_format = obj.contains_key("project")
+            || obj.contains_key("terminal")
+            || obj.contains_key("worktree");
         let has_flat_keys = !is_new_format && FLAT_HOOK_KEYS.iter().any(|k| obj.contains_key(*k));
 
         if has_flat_keys {
@@ -158,15 +165,21 @@ impl<'de> Deserialize<'de> for HooksConfig {
             })
         } else {
             let deser = |key: &str| -> serde_json::Value {
-                obj.get(key).cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+                obj.get(key)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
             };
-            let project: ProjectHooks = serde_json::from_value(deser("project"))
-                .unwrap_or_default();
-            let terminal: TerminalHooks = serde_json::from_value(deser("terminal"))
-                .unwrap_or_default();
-            let worktree: WorktreeHooks = serde_json::from_value(deser("worktree"))
-                .unwrap_or_default();
-            Ok(HooksConfig { project, terminal, worktree })
+            let project: ProjectHooks =
+                serde_json::from_value(deser("project")).unwrap_or_default();
+            let terminal: TerminalHooks =
+                serde_json::from_value(deser("terminal")).unwrap_or_default();
+            let worktree: WorktreeHooks =
+                serde_json::from_value(deser("worktree")).unwrap_or_default();
+            Ok(HooksConfig {
+                project,
+                terminal,
+                worktree,
+            })
         }
     }
 }
@@ -199,10 +212,22 @@ mod tests {
         assert_eq!(config.worktree.on_close.as_deref(), Some("echo wt-close"));
         assert_eq!(config.worktree.pre_merge.as_deref(), Some("echo pre"));
         assert_eq!(config.worktree.post_merge.as_deref(), Some("echo post"));
-        assert_eq!(config.worktree.before_remove.as_deref(), Some("echo before-rm"));
-        assert_eq!(config.worktree.after_remove.as_deref(), Some("echo after-rm"));
-        assert_eq!(config.worktree.on_rebase_conflict.as_deref(), Some("echo rebase"));
-        assert_eq!(config.worktree.on_dirty_close.as_deref(), Some("echo dirty"));
+        assert_eq!(
+            config.worktree.before_remove.as_deref(),
+            Some("echo before-rm")
+        );
+        assert_eq!(
+            config.worktree.after_remove.as_deref(),
+            Some("echo after-rm")
+        );
+        assert_eq!(
+            config.worktree.on_rebase_conflict.as_deref(),
+            Some("echo rebase")
+        );
+        assert_eq!(
+            config.worktree.on_dirty_close.as_deref(),
+            Some("echo dirty")
+        );
         // Terminal section never existed in the legacy format.
         assert_eq!(config.terminal, TerminalHooks::default());
     }
@@ -231,7 +256,10 @@ mod tests {
         assert_eq!(config.project.on_open.as_deref(), Some("echo open"));
         assert_eq!(config.project.on_close.as_deref(), Some("echo close"));
         assert_eq!(config.terminal.on_create.as_deref(), Some("echo tc"));
-        assert_eq!(config.terminal.shell_wrapper.as_deref(), Some("wrap {shell}"));
+        assert_eq!(
+            config.terminal.shell_wrapper.as_deref(),
+            Some("wrap {shell}")
+        );
         assert_eq!(config.worktree.on_create.as_deref(), Some("echo wtc"));
         assert_eq!(config.worktree.pre_merge.as_deref(), Some("echo pm"));
     }
@@ -268,11 +296,23 @@ mod tests {
 
         let json = serde_json::to_value(&config).unwrap();
         // is_default subgroups are skipped on serialization.
-        assert!(json.get("terminal").is_none(), "default terminal should be omitted");
-        assert!(json.get("worktree").is_none(), "default worktree should be omitted");
+        assert!(
+            json.get("terminal").is_none(),
+            "default terminal should be omitted"
+        );
+        assert!(
+            json.get("worktree").is_none(),
+            "default worktree should be omitted"
+        );
         let project = json.get("project").expect("project group present");
-        assert_eq!(project.get("on_open").and_then(|v| v.as_str()), Some("setup"));
-        assert!(project.get("on_close").is_none(), "None on_close should be omitted");
+        assert_eq!(
+            project.get("on_open").and_then(|v| v.as_str()),
+            Some("setup")
+        );
+        assert!(
+            project.get("on_close").is_none(),
+            "None on_close should be omitted"
+        );
     }
 
     #[test]
@@ -288,9 +328,18 @@ mod tests {
         let serialized = serde_json::to_string(&config).unwrap();
 
         // The serialized output must be in the new grouped format.
-        assert!(serialized.contains("\"project\""), "expected grouped 'project' key");
-        assert!(serialized.contains("\"worktree\""), "expected grouped 'worktree' key");
-        assert!(!serialized.contains("\"on_project_open\""), "legacy keys must not survive");
+        assert!(
+            serialized.contains("\"project\""),
+            "expected grouped 'project' key"
+        );
+        assert!(
+            serialized.contains("\"worktree\""),
+            "expected grouped 'worktree' key"
+        );
+        assert!(
+            !serialized.contains("\"on_project_open\""),
+            "legacy keys must not survive"
+        );
 
         // And re-parsing must yield the same content.
         let reparsed: HooksConfig = serde_json::from_str(&serialized).unwrap();

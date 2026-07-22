@@ -21,9 +21,10 @@ fn active_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
 
     // Main worktree, resolved via common_dir so this works from a linked worktree.
     if let Ok(main_repo) = gix::open(repo.common_dir())
-        && let Some(workdir) = main_repo.workdir() {
-            paths.push(workdir.to_path_buf());
-        }
+        && let Some(workdir) = main_repo.workdir()
+    {
+        paths.push(workdir.to_path_buf());
+    }
 
     // Linked worktrees from .git/worktrees/*; base() resolves even if the
     // worktree directory is currently inaccessible.
@@ -63,11 +64,10 @@ fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> GitResult<(
         "Removing stale worktree directory: {}",
         target_path.display()
     );
-    std::fs::remove_dir_all(target_path)
-        .map_err(|e| GitError::RemoveFailed {
-            path: target_path.to_path_buf(),
-            source: e,
-        })?;
+    std::fs::remove_dir_all(target_path).map_err(|e| GitError::RemoveFailed {
+        path: target_path.to_path_buf(),
+        source: e,
+    })?;
 
     let _ = safe_output(command("git").args(["-C", repo_str, "worktree", "prune"]));
 
@@ -75,7 +75,12 @@ fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> GitResult<(
 }
 
 /// Create a new worktree.
-pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, create_branch: bool) -> GitResult<()> {
+pub fn create_worktree(
+    repo_path: &Path,
+    branch: &str,
+    target_path: &Path,
+    create_branch: bool,
+) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
     clean_stale_worktree_dir(repo_path, target_path)?;
 
@@ -93,7 +98,13 @@ pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, creat
         args.push(branch);
         args.push(target_str);
         if let Some(default_branch) = get_default_branch(repo_path) {
-            let _ = safe_output(command("git").args(["-C", repo_str, "fetch", "origin", &default_branch]));
+            let _ = safe_output(command("git").args([
+                "-C",
+                repo_str,
+                "fetch",
+                "origin",
+                &default_branch,
+            ]));
             start_point = format!("origin/{}", default_branch);
             args.push(&start_point);
         }
@@ -203,10 +214,12 @@ pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> GitR
     match std::fs::remove_dir_all(worktree_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(GitError::RemoveFailed {
-            path: worktree_path.to_path_buf(),
-            source: e,
-        }),
+        Err(e) => {
+            return Err(GitError::RemoveFailed {
+                path: worktree_path.to_path_buf(),
+                source: e,
+            });
+        }
     }
 
     // Prune stale worktree entries from the main repo
@@ -233,15 +246,20 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
     // Main worktree: open via common_dir, which always resolves to the main
     // repository even when `repo_path` lives in a linked worktree.
     if let Ok(main_repo) = gix::open(repo.common_dir())
-        && let (Some(workdir), Some(branch)) = (main_repo.workdir(), head_branch_short(&main_repo)) {
-            result.push((workdir.to_string_lossy().into_owned(), branch));
-        }
+        && let (Some(workdir), Some(branch)) = (main_repo.workdir(), head_branch_short(&main_repo))
+    {
+        result.push((workdir.to_string_lossy().into_owned(), branch));
+    }
 
     // Linked worktrees from .git/worktrees/*.
     if let Ok(worktrees) = repo.worktrees() {
         for proxy in worktrees {
-            let Some(workdir) = proxy.base().ok() else { continue };
-            let Ok(wt_repo) = proxy.into_repo_with_possibly_inaccessible_worktree() else { continue };
+            let Some(workdir) = proxy.base().ok() else {
+                continue;
+            };
+            let Ok(wt_repo) = proxy.into_repo_with_possibly_inaccessible_worktree() else {
+                continue;
+            };
             if let Some(branch) = head_branch_short(&wt_repo) {
                 result.push((workdir.to_string_lossy().into_owned(), branch));
             }
@@ -268,7 +286,10 @@ mod tests {
         let (_tmp, repo) = init_temp_repo();
         let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
         let wt_path = wt_tmp.path().join("wt-feat");
-        git_in(&repo, &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"]);
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
 
         let mut entries = list_git_worktrees(&repo);
         entries.sort_by(|a, b| a.1.cmp(&b.1));
@@ -281,7 +302,10 @@ mod tests {
         let (_tmp, repo) = init_temp_repo();
         let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
         let wt_path = wt_tmp.path().join("wt-feat");
-        git_in(&repo, &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"]);
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
 
         let mut branches = crate::repository::get_worktree_branches(&repo);
         branches.sort();

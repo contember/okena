@@ -74,7 +74,11 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
             };
             let (git_branch, git_lines_added, git_lines_removed) =
                 if let Some(ref gs) = p.git_status {
-                    (gs.branch.clone(), gs.lines_added as u32, gs.lines_removed as u32)
+                    (
+                        gs.branch.clone(),
+                        gs.lines_added as u32,
+                        gs.lines_removed as u32,
+                    )
                 } else {
                     (None, 0, 0)
                 };

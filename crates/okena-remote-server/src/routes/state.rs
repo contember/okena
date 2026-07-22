@@ -22,9 +22,7 @@ pub async fn get_state(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     match reply_rx.await {
-        Ok(CommandResult::Ok(Some(value))) => {
-            (StatusCode::OK, Json(value)).into_response()
-        }
+        Ok(CommandResult::Ok(Some(value))) => (StatusCode::OK, Json(value)).into_response(),
         Ok(CommandResult::Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),

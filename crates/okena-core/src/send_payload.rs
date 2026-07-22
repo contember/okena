@@ -117,10 +117,7 @@ pub fn markdown_lang_hint(path: &Path) -> &'static str {
             _ => {}
         }
     }
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "rs" => "rust",
         "ts" => "typescript",
@@ -219,7 +216,10 @@ mod tests {
     #[test]
     fn special_filenames_get_language_hint() {
         assert_eq!(markdown_lang_hint(Path::new("Makefile")), "make");
-        assert_eq!(markdown_lang_hint(Path::new("/proj/Dockerfile")), "dockerfile");
+        assert_eq!(
+            markdown_lang_hint(Path::new("/proj/Dockerfile")),
+            "dockerfile"
+        );
         assert_eq!(markdown_lang_hint(Path::new("CMakeLists.txt")), "cmake");
         assert_eq!(markdown_lang_hint(Path::new("Cargo.toml")), "toml");
     }

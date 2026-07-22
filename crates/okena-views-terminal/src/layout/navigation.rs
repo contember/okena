@@ -52,7 +52,14 @@ impl PaneMap {
 
     /// Register (or update) a pane's bounds.
     /// Uses upsert semantics so cached views that skip prepaint keep their entry.
-    pub fn register(&mut self, window_id: WindowId, project_id: String, layout_path: Vec<usize>, bounds: Bounds<Pixels>, focus_handle: Option<FocusHandle>) {
+    pub fn register(
+        &mut self,
+        window_id: WindowId,
+        project_id: String,
+        layout_path: Vec<usize>,
+        bounds: Bounds<Pixels>,
+        focus_handle: Option<FocusHandle>,
+    ) {
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
             return;
         }
@@ -78,15 +85,17 @@ impl PaneMap {
     /// Remove a pane from the map (e.g. when the terminal pane is dropped).
     pub fn deregister(&mut self, window_id: WindowId, project_id: &str, layout_path: &[usize]) {
         self.panes.retain(|p| {
-            !(p.window_id == window_id && p.project_id == project_id && p.layout_path == layout_path)
+            !(p.window_id == window_id
+                && p.project_id == project_id
+                && p.layout_path == layout_path)
         });
     }
 
     /// Find the pane at the given project_id and layout_path
     pub fn find_pane(&self, project_id: &str, layout_path: &[usize]) -> Option<&PaneBounds> {
-        self.panes.iter().find(|p| {
-            p.project_id == project_id && p.layout_path == layout_path
-        })
+        self.panes
+            .iter()
+            .find(|p| p.project_id == project_id && p.layout_path == layout_path)
     }
 
     /// Find the nearest pane in the given direction from the source pane
@@ -97,9 +106,13 @@ impl PaneMap {
     ) -> Option<&PaneBounds> {
         let source_center = source.bounds.center();
 
-        self.panes.iter()
+        self.panes
+            .iter()
             .filter(|p| {
-                if p.window_id == source.window_id && p.project_id == source.project_id && p.layout_path == source.layout_path {
+                if p.window_id == source.window_id
+                    && p.project_id == source.project_id
+                    && p.layout_path == source.layout_path
+                {
                     return false;
                 }
 
@@ -115,7 +128,9 @@ impl PaneMap {
             .min_by(|a, b| {
                 let dist_a = weighted_distance(&source_center, &a.bounds.center(), direction);
                 let dist_b = weighted_distance(&source_center, &b.bounds.center(), direction);
-                dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+                dist_a
+                    .partial_cmp(&dist_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
     }
 
@@ -138,12 +153,18 @@ impl PaneMap {
     /// Called during render to evict stale entries from hidden projects
     /// (e.g. worktree columns that are retained but not currently visible).
     pub fn retain_projects(&mut self, visible_ids: &std::collections::HashSet<&str>) {
-        self.panes.retain(|p| visible_ids.contains(p.project_id.as_str()));
+        self.panes
+            .retain(|p| visible_ids.contains(p.project_id.as_str()));
     }
 
     /// Retain visible projects for one window while leaving other windows' panes untouched.
-    pub fn retain_window_projects(&mut self, window_id: WindowId, visible_ids: &std::collections::HashSet<&str>) {
-        self.panes.retain(|p| p.window_id != window_id || visible_ids.contains(p.project_id.as_str()));
+    pub fn retain_window_projects(
+        &mut self,
+        window_id: WindowId,
+        visible_ids: &std::collections::HashSet<&str>,
+    ) {
+        self.panes
+            .retain(|p| p.window_id != window_id || visible_ids.contains(p.project_id.as_str()));
     }
 
     /// Get all registered panes
@@ -154,7 +175,12 @@ impl PaneMap {
     /// Return a copy containing only panes for one window.
     pub fn for_window(&self, window_id: WindowId) -> Self {
         Self {
-            panes: self.panes.iter().filter(|p| p.window_id == window_id).cloned().collect(),
+            panes: self
+                .panes
+                .iter()
+                .filter(|p| p.window_id == window_id)
+                .cloned()
+                .collect(),
         }
     }
 
@@ -189,15 +215,25 @@ impl PaneMap {
         // Sort groups by minimum origin.x, then project_id as tiebreaker
         let mut group_entries: Vec<(&str, Vec<&PaneBounds>)> = groups.into_iter().collect();
         group_entries.sort_by(|(id_a, panes_a), (id_b, panes_b)| {
-            let min_x_a = panes_a.iter().map(|p| f32::from(p.bounds.origin.x)).fold(f32::INFINITY, f32::min);
-            let min_x_b = panes_b.iter().map(|p| f32::from(p.bounds.origin.x)).fold(f32::INFINITY, f32::min);
-            min_x_a.partial_cmp(&min_x_b)
+            let min_x_a = panes_a
+                .iter()
+                .map(|p| f32::from(p.bounds.origin.x))
+                .fold(f32::INFINITY, f32::min);
+            let min_x_b = panes_b
+                .iter()
+                .map(|p| f32::from(p.bounds.origin.x))
+                .fold(f32::INFINITY, f32::min);
+            min_x_a
+                .partial_cmp(&min_x_b)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| id_a.cmp(id_b))
         });
 
         // Flatten
-        group_entries.into_iter().flat_map(|(_, panes)| panes).collect()
+        group_entries
+            .into_iter()
+            .flat_map(|(_, panes)| panes)
+            .collect()
     }
 
     /// Find the previous pane in reading order (top-to-bottom, left-to-right, cycles)
@@ -260,40 +296,67 @@ pub fn register_pane_bounds(
     bounds: Bounds<Pixels>,
     focus_handle: Option<FocusHandle>,
 ) {
-    pane_map_lock().lock().register(window_id, project_id, layout_path, bounds, focus_handle);
+    pane_map_lock()
+        .lock()
+        .register(window_id, project_id, layout_path, bounds, focus_handle);
 }
 
 /// Remove a pane from the global map (call when a terminal pane is dropped)
 pub fn deregister_pane_bounds(window_id: WindowId, project_id: &str, layout_path: &[usize]) {
-    pane_map_lock().lock().deregister(window_id, project_id, layout_path);
+    pane_map_lock()
+        .lock()
+        .deregister(window_id, project_id, layout_path);
 }
 
 /// Remove pane entries for projects not in the visible set.
 /// Prevents stale entries from hidden columns (e.g. worktree projects with
 /// show_in_overview=false) from blocking spatial navigation.
 pub fn prune_pane_map(window_id: WindowId, visible_project_ids: &std::collections::HashSet<&str>) {
-    pane_map_lock().lock().retain_window_projects(window_id, visible_project_ids);
+    pane_map_lock()
+        .lock()
+        .retain_window_projects(window_id, visible_project_ids);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PaneMap, NavigationDirection};
-    use gpui::{px, Bounds, Point, Size};
+    use super::{NavigationDirection, PaneMap};
+    use gpui::{Bounds, Point, Size, px};
     use okena_workspace::state::WindowId;
 
     fn make_bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<gpui::Pixels> {
         Bounds {
             origin: Point { x: px(x), y: px(y) },
-            size: Size { width: px(w), height: px(h) },
+            size: Size {
+                width: px(w),
+                height: px(h),
+            },
         }
     }
 
     #[test]
     fn sorted_by_reading_order_horizontal_row() {
         let mut map = PaneMap::new();
-        map.register(WindowId::Main, "c".into(), vec![0], make_bounds(600.0, 0.0, 300.0, 400.0), None);
-        map.register(WindowId::Main, "a".into(), vec![0], make_bounds(0.0, 0.0, 300.0, 400.0), None);
-        map.register(WindowId::Main, "b".into(), vec![0], make_bounds(300.0, 0.0, 300.0, 400.0), None);
+        map.register(
+            WindowId::Main,
+            "c".into(),
+            vec![0],
+            make_bounds(600.0, 0.0, 300.0, 400.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "a".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 300.0, 400.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "b".into(),
+            vec![0],
+            make_bounds(300.0, 0.0, 300.0, 400.0),
+            None,
+        );
 
         let sorted = map.sorted_by_reading_order();
         assert_eq!(sorted[0].project_id, "a");
@@ -305,11 +368,35 @@ mod tests {
     fn sorted_by_reading_order_2x2_grid() {
         let mut map = PaneMap::new();
         // Left column (project "left") — two stacked panes
-        map.register(WindowId::Main, "left".into(), vec![1], make_bounds(0.0, 300.0, 400.0, 300.0), None);
-        map.register(WindowId::Main, "left".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 300.0), None);
+        map.register(
+            WindowId::Main,
+            "left".into(),
+            vec![1],
+            make_bounds(0.0, 300.0, 400.0, 300.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "left".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 300.0),
+            None,
+        );
         // Right column (project "right") — two stacked panes
-        map.register(WindowId::Main, "right".into(), vec![1], make_bounds(400.0, 300.0, 400.0, 300.0), None);
-        map.register(WindowId::Main, "right".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 300.0), None);
+        map.register(
+            WindowId::Main,
+            "right".into(),
+            vec![1],
+            make_bounds(400.0, 300.0, 400.0, 300.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "right".into(),
+            vec![0],
+            make_bounds(400.0, 0.0, 400.0, 300.0),
+            None,
+        );
 
         let sorted = map.sorted_by_reading_order();
         // Left column first (top then bottom), then right column
@@ -327,10 +414,28 @@ mod tests {
     fn sorted_by_reading_order_multi_column_different_heights() {
         let mut map = PaneMap::new();
         // Column A (left): one full-height pane, center Y=300
-        map.register(WindowId::Main, "col_a".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
+        map.register(
+            WindowId::Main,
+            "col_a".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 600.0),
+            None,
+        );
         // Column B (right): two stacked panes, center Y=150 and Y=450
-        map.register(WindowId::Main, "col_b".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 300.0), None);
-        map.register(WindowId::Main, "col_b".into(), vec![1], make_bounds(400.0, 300.0, 400.0, 300.0), None);
+        map.register(
+            WindowId::Main,
+            "col_b".into(),
+            vec![0],
+            make_bounds(400.0, 0.0, 400.0, 300.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "col_b".into(),
+            vec![1],
+            make_bounds(400.0, 300.0, 400.0, 300.0),
+            None,
+        );
 
         let sorted = map.sorted_by_reading_order();
         // Column A first (leftmost), then column B top-to-bottom
@@ -345,7 +450,13 @@ mod tests {
     #[test]
     fn sorted_by_reading_order_single_pane() {
         let mut map = PaneMap::new();
-        map.register(WindowId::Main, "only".into(), vec![0], make_bounds(0.0, 0.0, 800.0, 600.0), None);
+        map.register(
+            WindowId::Main,
+            "only".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 800.0, 600.0),
+            None,
+        );
 
         let sorted = map.sorted_by_reading_order();
         assert_eq!(sorted.len(), 1);
@@ -356,10 +467,22 @@ mod tests {
     fn register_upserts_existing_entry() {
         let mut map = PaneMap::new();
 
-        map.register(WindowId::Main, "p".into(), vec![0, 1], make_bounds(0.0, 0.0, 400.0, 300.0), None);
+        map.register(
+            WindowId::Main,
+            "p".into(),
+            vec![0, 1],
+            make_bounds(0.0, 0.0, 400.0, 300.0),
+            None,
+        );
         assert_eq!(map.panes().len(), 1);
 
-        map.register(WindowId::Main, "p".into(), vec![0, 1], make_bounds(100.0, 0.0, 500.0, 300.0), None);
+        map.register(
+            WindowId::Main,
+            "p".into(),
+            vec![0, 1],
+            make_bounds(100.0, 0.0, 500.0, 300.0),
+            None,
+        );
         assert_eq!(map.panes().len(), 1);
         assert_eq!(f32::from(map.panes()[0].bounds.origin.x), 100.0);
     }
@@ -369,8 +492,20 @@ mod tests {
         let mut map = PaneMap::new();
         let extra = WindowId::Extra(okena_workspace::state::WindowState::default().id);
 
-        map.register(WindowId::Main, "p".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 300.0), None);
-        map.register(extra, "p".into(), vec![0], make_bounds(500.0, 0.0, 400.0, 300.0), None);
+        map.register(
+            WindowId::Main,
+            "p".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 300.0),
+            None,
+        );
+        map.register(
+            extra,
+            "p".into(),
+            vec![0],
+            make_bounds(500.0, 0.0, 400.0, 300.0),
+            None,
+        );
 
         assert_eq!(map.panes().len(), 2);
         assert_eq!(map.for_window(WindowId::Main).panes().len(), 1);
@@ -390,8 +525,20 @@ mod tests {
     #[test]
     fn deregister_removes_matching_entry() {
         let mut map = PaneMap::new();
-        map.register(WindowId::Main, "a".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 300.0), None);
-        map.register(WindowId::Main, "b".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 300.0), None);
+        map.register(
+            WindowId::Main,
+            "a".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 300.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "b".into(),
+            vec![0],
+            make_bounds(400.0, 0.0, 400.0, 300.0),
+            None,
+        );
         assert_eq!(map.panes().len(), 2);
 
         map.deregister(WindowId::Main, "a", &[0]);
@@ -402,7 +549,13 @@ mod tests {
     #[test]
     fn deregister_noop_when_not_found() {
         let mut map = PaneMap::new();
-        map.register(WindowId::Main, "a".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 300.0), None);
+        map.register(
+            WindowId::Main,
+            "a".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 300.0),
+            None,
+        );
 
         map.deregister(WindowId::Main, "nonexistent", &[0]);
         assert_eq!(map.panes().len(), 1);
@@ -411,9 +564,27 @@ mod tests {
     #[test]
     fn retain_projects_removes_hidden() {
         let mut map = PaneMap::new();
-        map.register(WindowId::Main, "parent".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
-        map.register(WindowId::Main, "worktree".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 600.0), None);
-        map.register(WindowId::Main, "other".into(), vec![0], make_bounds(800.0, 0.0, 400.0, 600.0), None);
+        map.register(
+            WindowId::Main,
+            "parent".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 600.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "worktree".into(),
+            vec![0],
+            make_bounds(400.0, 0.0, 400.0, 600.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "other".into(),
+            vec![0],
+            make_bounds(800.0, 0.0, 400.0, 600.0),
+            None,
+        );
         assert_eq!(map.panes().len(), 3);
 
         // Only parent and other are visible (worktree hidden in overview)
@@ -428,9 +599,27 @@ mod tests {
     #[test]
     fn retain_projects_allows_navigation_past_hidden() {
         let mut map = PaneMap::new();
-        map.register(WindowId::Main, "a".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
-        map.register(WindowId::Main, "hidden_wt".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 600.0), None);
-        map.register(WindowId::Main, "b".into(), vec![0], make_bounds(800.0, 0.0, 400.0, 600.0), None);
+        map.register(
+            WindowId::Main,
+            "a".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 600.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "hidden_wt".into(),
+            vec![0],
+            make_bounds(400.0, 0.0, 400.0, 600.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "b".into(),
+            vec![0],
+            make_bounds(800.0, 0.0, 400.0, 600.0),
+            None,
+        );
 
         // Prune hidden worktree
         let visible: std::collections::HashSet<&str> = ["a", "b"].into_iter().collect();
@@ -447,25 +636,65 @@ mod tests {
     fn retain_window_projects_does_not_prune_other_windows() {
         let mut map = PaneMap::new();
         let extra = WindowId::Extra(okena_workspace::state::WindowState::default().id);
-        map.register(WindowId::Main, "visible".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
-        map.register(WindowId::Main, "hidden".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 600.0), None);
-        map.register(extra, "hidden".into(), vec![0], make_bounds(800.0, 0.0, 400.0, 600.0), None);
+        map.register(
+            WindowId::Main,
+            "visible".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 600.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "hidden".into(),
+            vec![0],
+            make_bounds(400.0, 0.0, 400.0, 600.0),
+            None,
+        );
+        map.register(
+            extra,
+            "hidden".into(),
+            vec![0],
+            make_bounds(800.0, 0.0, 400.0, 600.0),
+            None,
+        );
 
         let visible: std::collections::HashSet<&str> = ["visible"].into_iter().collect();
         map.retain_window_projects(WindowId::Main, &visible);
 
-        assert!(map.for_window(WindowId::Main).find_pane("hidden", &[0]).is_none());
+        assert!(
+            map.for_window(WindowId::Main)
+                .find_pane("hidden", &[0])
+                .is_none()
+        );
         assert!(map.for_window(extra).find_pane("hidden", &[0]).is_some());
     }
 
     #[test]
     fn navigation_works_after_upsert() {
         let mut map = PaneMap::new();
-        map.register(WindowId::Main, "a".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
-        map.register(WindowId::Main, "b".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 600.0), None);
+        map.register(
+            WindowId::Main,
+            "a".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 600.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "b".into(),
+            vec![0],
+            make_bounds(400.0, 0.0, 400.0, 600.0),
+            None,
+        );
 
         // Upsert pane "a" with same bounds (simulates cached re-register)
-        map.register(WindowId::Main, "a".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
+        map.register(
+            WindowId::Main,
+            "a".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 600.0),
+            None,
+        );
         assert_eq!(map.panes().len(), 2);
 
         let source = map.find_pane("a", &[0]).unwrap();
@@ -479,9 +708,27 @@ mod tests {
         let mut map = PaneMap::new();
         // Register in non-visual order to prove insertion order is ignored
         // Left column: one full-height pane; Right column: two stacked panes
-        map.register(WindowId::Main, "right".into(), vec![1], make_bounds(400.0, 300.0, 400.0, 300.0), None);
-        map.register(WindowId::Main, "left".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
-        map.register(WindowId::Main, "right".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 300.0), None);
+        map.register(
+            WindowId::Main,
+            "right".into(),
+            vec![1],
+            make_bounds(400.0, 300.0, 400.0, 300.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "left".into(),
+            vec![0],
+            make_bounds(0.0, 0.0, 400.0, 600.0),
+            None,
+        );
+        map.register(
+            WindowId::Main,
+            "right".into(),
+            vec![0],
+            make_bounds(400.0, 0.0, 400.0, 300.0),
+            None,
+        );
 
         // From left (first in reading order), next should be right[0] (top of right column)
         let source_left = map.find_pane("left", &[0]).unwrap().clone();

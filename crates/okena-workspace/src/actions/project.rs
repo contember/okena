@@ -2,12 +2,12 @@
 //!
 //! Actions for creating, modifying, and deleting projects.
 
-use okena_core::theme::FolderColor;
 use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
-use crate::state::{LayoutNode, ProjectData, Workspace, WindowId};
+use crate::state::{LayoutNode, ProjectData, WindowId, Workspace};
+use okena_core::theme::FolderColor;
 use std::collections::HashMap;
 
 /// Pick a replacement focus target after hiding `hidden_id`.
@@ -41,10 +41,11 @@ fn pick_focus_replacement(
 /// Does not expand `~user/...` syntax (other user's home directories).
 fn expand_tilde(path: &str) -> String {
     if (path == "~" || path.starts_with("~/"))
-        && let Some(home) = dirs::home_dir() {
-            let rest = &path[1..]; // "" or "/..."
-            return format!("{}{}", home.display(), rest);
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        let rest = &path[1..]; // "" or "/..."
+        return format!("{}{}", home.display(), rest);
+    }
     path.to_string()
 }
 
@@ -167,14 +168,24 @@ impl Workspace {
     /// `Okena::focus_manager_for_active_window` (slice 05 cri 13). When
     /// only main exists (zero extras), the rule degenerates to a no-op
     /// for the hide-elsewhere step, matching pre-multi-window behavior.
-    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, global_hooks: &HooksConfig, window_id: WindowId, cx: &mut impl WorkspaceCx) -> String {
+    pub fn add_project(
+        &mut self,
+        name: String,
+        path: String,
+        with_terminal: bool,
+        global_hooks: &HooksConfig,
+        window_id: WindowId,
+        cx: &mut impl WorkspaceCx,
+    ) -> String {
         let path = expand_tilde(&path);
 
         // Auto-detect WSL UNC paths and set default shell accordingly
         #[cfg(windows)]
-        let default_shell = okena_terminal::shell_config::parse_wsl_unc_path(&path)
-            .map(|(distro, _)| okena_terminal::shell_config::ShellType::Wsl {
-                distro: Some(distro),
+        let default_shell =
+            okena_terminal::shell_config::parse_wsl_unc_path(&path).map(|(distro, _)| {
+                okena_terminal::shell_config::ShellType::Wsl {
+                    distro: Some(distro),
+                }
             });
         #[cfg(not(windows))]
         let default_shell: Option<okena_terminal::shell_config::ShellType> = None;
@@ -184,7 +195,11 @@ impl Workspace {
             id: id.clone(),
             name: name.clone(),
             path: path.clone(),
-            layout: if with_terminal { Some(LayoutNode::new_terminal()) } else { None },
+            layout: if with_terminal {
+                Some(LayoutNode::new_terminal())
+            } else {
+                None
+            },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
@@ -212,7 +227,17 @@ impl Workspace {
         let folder_name = folder.map(|f| f.name.as_str());
         let runner = cx.hook_runner();
         let monitor = cx.hook_monitor();
-        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, folder_id, folder_name, global_hooks, runner.as_ref(), monitor.as_ref());
+        let hook_results = hooks::fire_on_project_open(
+            &project_hooks,
+            &id,
+            &name,
+            &path,
+            folder_id,
+            folder_name,
+            global_hooks,
+            runner.as_ref(),
+            monitor.as_ref(),
+        );
         self.register_hook_results(hook_results, cx);
         id
     }
@@ -230,8 +255,15 @@ impl Workspace {
     /// avoid phantom rows (whose rerun/dismiss fail with "hook terminal not
     /// found") and to stop entries accumulating on every restart. No-ops the
     /// fire when no `on_open` hook resolves.
-    pub fn fire_project_open_hooks(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
-        let Some(project) = self.project(project_id) else { return };
+    pub fn fire_project_open_hooks(
+        &mut self,
+        project_id: &str,
+        global_hooks: &HooksConfig,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let Some(project) = self.project(project_id) else {
+            return;
+        };
         let project_hooks = project.hooks.clone();
         let name = project.name.clone();
         let path = project.path.clone();
@@ -243,7 +275,17 @@ impl Workspace {
         let folder_name = folder.map(|f| f.name.as_str());
         let runner = cx.hook_runner();
         let monitor = cx.hook_monitor();
-        let hook_results = hooks::fire_on_project_open(&project_hooks, project_id, &name, &path, folder_id, folder_name, global_hooks, runner.as_ref(), monitor.as_ref());
+        let hook_results = hooks::fire_on_project_open(
+            &project_hooks,
+            project_id,
+            &name,
+            &path,
+            folder_id,
+            folder_name,
+            global_hooks,
+            runner.as_ref(),
+            monitor.as_ref(),
+        );
         // Drop stale (dead-PTY) hook terminals restored from disk before
         // registering the freshly-fired ones, so the panel shows only live rows.
         if let Some(p) = self.project_mut(project_id) {
@@ -257,7 +299,12 @@ impl Workspace {
     }
 
     /// Add a new terminal to a project by splitting the root layout
-    pub fn add_terminal(&mut self, focus_manager: &mut FocusManager, project_id: &str, cx: &mut impl WorkspaceCx) {
+    pub fn add_terminal(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
         if let Some(project) = self.project_mut(project_id) {
             if let Some(ref old_layout) = project.layout {
                 let old_layout = old_layout.clone();
@@ -274,7 +321,8 @@ impl Workspace {
         }
 
         // Focus the newly created terminal (terminal_id: None)
-        let new_path = self.project(project_id)
+        let new_path = self
+            .project(project_id)
             .and_then(|p| p.layout.as_ref())
             .and_then(|l| l.find_uninitialized_terminal_path());
         if let Some(path) = new_path {
@@ -307,7 +355,12 @@ impl Workspace {
     }
 
     /// Rename a project
-    pub fn rename_project(&mut self, project_id: &str, new_name: String, cx: &mut impl WorkspaceCx) {
+    pub fn rename_project(
+        &mut self,
+        project_id: &str,
+        new_name: String,
+        cx: &mut impl WorkspaceCx,
+    ) {
         self.with_project(project_id, cx, |project| {
             project.name = new_name;
             true
@@ -315,7 +368,13 @@ impl Workspace {
     }
 
     /// Rename a project's directory path and update the project name to match
-    pub fn rename_project_directory(&mut self, project_id: &str, new_path: String, new_name: String, cx: &mut impl WorkspaceCx) {
+    pub fn rename_project_directory(
+        &mut self,
+        project_id: &str,
+        new_path: String,
+        new_name: String,
+        cx: &mut impl WorkspaceCx,
+    ) {
         self.with_project(project_id, cx, |project| {
             project.path = new_path;
             project.name = new_name;
@@ -324,8 +383,14 @@ impl Workspace {
     }
 
     /// Set the folder color for a project (also propagates to worktree children without overrides)
-    pub fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut impl WorkspaceCx) {
-        let is_worktree = self.project(project_id)
+    pub fn set_folder_color(
+        &mut self,
+        project_id: &str,
+        color: FolderColor,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let is_worktree = self
+            .project(project_id)
             .and_then(|p| p.worktree_info.as_ref())
             .is_some();
 
@@ -333,7 +398,8 @@ impl Workspace {
             self.set_worktree_color_override(project_id, Some(color), cx);
         } else {
             // Collect child IDs from the parent's worktree_ids to avoid a full scan
-            let child_ids: Vec<String> = self.project(project_id)
+            let child_ids: Vec<String> = self
+                .project(project_id)
                 .map(|p| p.worktree_ids.clone())
                 .unwrap_or_default();
 
@@ -345,7 +411,9 @@ impl Workspace {
             }
             for child_id in &child_ids {
                 if let Some(child) = self.project_mut(child_id) {
-                    let has_override = child.worktree_info.as_ref()
+                    let has_override = child
+                        .worktree_info
+                        .as_ref()
                         .and_then(|wt| wt.color_override)
                         .is_some();
                     if !has_override {
@@ -360,7 +428,13 @@ impl Workspace {
     }
 
     /// Delete a project
-    pub fn delete_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, global_hooks: &HooksConfig, cx: &mut impl WorkspaceCx) {
+    pub fn delete_project(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        global_hooks: &HooksConfig,
+        cx: &mut impl WorkspaceCx,
+    ) {
         // Queue all project terminals for killing before removing state.
         // Okena (which owns PtyManager) drains this queue via observer.
         if let Some(project) = self.project(project_id) {
@@ -386,11 +460,17 @@ impl Workspace {
         let hook_folder_id = folder.map(|f| f.id.clone());
         let hook_folder_name = folder.map(|f| f.name.clone());
         let hook_info = self.project(project_id).map(|p| {
-            (p.hooks.clone(), p.id.clone(), p.name.clone(), p.path.clone())
+            (
+                p.hooks.clone(),
+                p.id.clone(),
+                p.name.clone(),
+                p.path.clone(),
+            )
         });
 
         // Collect orphaned worktree children (if deleting a parent)
-        let orphaned_worktrees: Vec<String> = self.project(project_id)
+        let orphaned_worktrees: Vec<String> = self
+            .project(project_id)
             .map(|p| p.worktree_ids.clone())
             .unwrap_or_default();
 
@@ -410,7 +490,9 @@ impl Workspace {
 
         // Re-home orphaned worktrees to project_order
         for wt_id in orphaned_worktrees {
-            if self.data.projects.iter().any(|p| p.id == wt_id) && !self.data.project_order.contains(&wt_id) {
+            if self.data.projects.iter().any(|p| p.id == wt_id)
+                && !self.data.project_order.contains(&wt_id)
+            {
                 self.data.project_order.push(wt_id);
             }
         }
@@ -436,7 +518,16 @@ impl Workspace {
 
         if let Some((project_hooks, id, name, path)) = hook_info {
             let monitor = cx.hook_monitor();
-            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, monitor.as_ref());
+            hooks::fire_on_project_close(
+                &project_hooks,
+                &id,
+                &name,
+                &path,
+                hook_folder_id.as_deref(),
+                hook_folder_name.as_deref(),
+                global_hooks,
+                monitor.as_ref(),
+            );
         }
     }
 
@@ -500,7 +591,12 @@ impl Workspace {
     /// layer setter does not notify, so the single trailing `notify_data` keeps
     /// the auto-save observer's debounce cadence identical to the pre-migration
     /// body.
-    pub fn update_project_widths(&mut self, window_id: WindowId, widths: HashMap<String, f32>, cx: &mut impl WorkspaceCx) {
+    pub fn update_project_widths(
+        &mut self,
+        window_id: WindowId,
+        widths: HashMap<String, f32>,
+        cx: &mut impl WorkspaceCx,
+    ) {
         for (id, w) in widths {
             self.data.set_project_width(window_id, &id, w);
         }
@@ -508,14 +604,28 @@ impl Workspace {
     }
 
     /// Update service panel height for a project
-    pub fn update_service_panel_height(&mut self, project_id: &str, height: f32, cx: &mut impl WorkspaceCx) {
-        self.data.service_panel_heights.insert(project_id.to_string(), height);
+    pub fn update_service_panel_height(
+        &mut self,
+        project_id: &str,
+        height: f32,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.data
+            .service_panel_heights
+            .insert(project_id.to_string(), height);
         self.notify_data(cx);
     }
 
     /// Update hook panel height for a project
-    pub fn update_hook_panel_height(&mut self, project_id: &str, height: f32, cx: &mut impl WorkspaceCx) {
-        self.data.hook_panel_heights.insert(project_id.to_string(), height);
+    pub fn update_hook_panel_height(
+        &mut self,
+        project_id: &str,
+        height: f32,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.data
+            .hook_panel_heights
+            .insert(project_id.to_string(), height);
         self.notify_data(cx);
     }
 
@@ -528,20 +638,24 @@ impl Workspace {
     /// default, matching the "missing entry == default" contract on the lookup
     /// side. Default is `100.0 / visible_count` so a render path that asks for
     /// every visible column gets a balanced grid when no widths are set yet.
-    pub fn get_project_width(&self, window_id: WindowId, project_id: &str, visible_count: usize) -> f32 {
+    pub fn get_project_width(
+        &self,
+        window_id: WindowId,
+        project_id: &str,
+        visible_count: usize,
+    ) -> f32 {
         self.data
             .window(window_id)
             .and_then(|w| w.project_widths.get(project_id).copied())
             .unwrap_or_else(|| 100.0 / visible_count as f32)
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::{expand_tilde, pick_focus_replacement};
-    use crate::state::*;
     use crate::settings::HooksConfig;
+    use crate::state::*;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
@@ -618,7 +732,9 @@ mod tests {
     #[test]
     fn test_get_project_width_custom() {
         let mut data = make_workspace_data();
-        data.main_window.project_widths.insert("p1".to_string(), 60.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 60.0);
         let ws = Workspace::new(data);
         assert_eq!(ws.get_project_width(WindowId::Main, "p1", 2), 60.0);
     }
@@ -628,7 +744,9 @@ mod tests {
         // Per-window viewport model: WindowId::Main routes through
         // data.window(...) and reads main_window.project_widths.
         let mut data = make_workspace_data();
-        data.main_window.project_widths.insert("p1".to_string(), 75.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 75.0);
         let ws = Workspace::new(data);
         assert_eq!(ws.get_project_width(WindowId::Main, "p1", 2), 75.0);
     }
@@ -648,7 +766,10 @@ mod tests {
         data.extra_windows.push(extra);
         let ws = Workspace::new(data);
 
-        assert_eq!(ws.get_project_width(WindowId::Extra(extra_id), "p1", 2), 80.0);
+        assert_eq!(
+            ws.get_project_width(WindowId::Extra(extra_id), "p1", 2),
+            80.0
+        );
         // Main has no entry for p1 -> equal-distribution default of 50.0 (2 visible).
         assert_eq!(ws.get_project_width(WindowId::Main, "p1", 2), 50.0);
     }
@@ -663,12 +784,17 @@ mod tests {
         let mut data = make_workspace_data();
         // Pre-populate main with a value to ensure the unknown-extra path
         // does NOT silently read from main as a fallback.
-        data.main_window.project_widths.insert("p1".to_string(), 90.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 90.0);
         let ws = Workspace::new(data);
 
         let unknown = uuid::Uuid::new_v4();
         // Default for visible_count = 4 -> 25.0, NOT 90.0 (main's value).
-        assert_eq!(ws.get_project_width(WindowId::Extra(unknown), "p1", 4), 25.0);
+        assert_eq!(
+            ws.get_project_width(WindowId::Extra(unknown), "p1", 4),
+            25.0
+        );
     }
 
     #[test]
@@ -711,14 +837,20 @@ mod tests {
     fn pick_focus_replacement_prefers_next() {
         let before = s(&["a", "b", "c", "d"]);
         let after = s(&["a", "b", "d"]);
-        assert_eq!(pick_focus_replacement(&before, &after, "c").as_deref(), Some("d"));
+        assert_eq!(
+            pick_focus_replacement(&before, &after, "c").as_deref(),
+            Some("d")
+        );
     }
 
     #[test]
     fn pick_focus_replacement_falls_back_to_previous() {
         let before = s(&["a", "b", "c"]);
         let after = s(&["a", "b"]);
-        assert_eq!(pick_focus_replacement(&before, &after, "c").as_deref(), Some("b"));
+        assert_eq!(
+            pick_focus_replacement(&before, &after, "c").as_deref(),
+            Some("b")
+        );
     }
 
     #[test]
@@ -726,7 +858,10 @@ mod tests {
         // Hiding "b" while "c" is also no longer visible should jump to "d".
         let before = s(&["a", "b", "c", "d"]);
         let after = s(&["a", "d"]);
-        assert_eq!(pick_focus_replacement(&before, &after, "b").as_deref(), Some("d"));
+        assert_eq!(
+            pick_focus_replacement(&before, &after, "b").as_deref(),
+            Some("d")
+        );
     }
 
     #[test]
@@ -746,10 +881,10 @@ mod tests {
 
 #[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
-    use gpui::AppContext as _;
     use crate::focus::FocusManager;
-    use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
+    use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
+    use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
@@ -807,7 +942,14 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         let new_id = workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("p1".to_string(), "/tmp/p1".to_string(), false, &HooksConfig::default(), WindowId::Main, cx)
+            ws.add_project(
+                "p1".to_string(),
+                "/tmp/p1".to_string(),
+                false,
+                &HooksConfig::default(),
+                WindowId::Main,
+                cx,
+            )
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -835,7 +977,14 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         let new_id = workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("p1".to_string(), "/tmp/p1".to_string(), false, &HooksConfig::default(), WindowId::Extra(extra_a_id), cx)
+            ws.add_project(
+                "p1".to_string(),
+                "/tmp/p1".to_string(),
+                false,
+                &HooksConfig::default(),
+                WindowId::Extra(extra_a_id),
+                cx,
+            )
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -852,7 +1001,14 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("Test".to_string(), "/tmp/test".to_string(), true, &HooksConfig::default(), WindowId::Main, cx);
+            ws.add_project(
+                "Test".to_string(),
+                "/tmp/test".to_string(),
+                true,
+                &HooksConfig::default(),
+                WindowId::Main,
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -870,7 +1026,14 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("Bookmark".to_string(), "/tmp/bm".to_string(), false, &HooksConfig::default(), WindowId::Main, cx);
+            ws.add_project(
+                "Bookmark".to_string(),
+                "/tmp/bm".to_string(),
+                false,
+                &HooksConfig::default(),
+                WindowId::Main,
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -926,7 +1089,12 @@ mod gpui_tests {
 
         // First toggle: visible -> hidden. main_window inserts the id.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Main, "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Main,
+                "p1",
+                cx,
+            );
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
@@ -934,7 +1102,12 @@ mod gpui_tests {
 
         // Second toggle: hidden -> visible. main_window removes the entry.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Main, "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Main,
+                "p1",
+                cx,
+            );
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
@@ -983,13 +1156,20 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.data().main_window.hidden_project_ids.contains("unknown_id"));
+            assert!(
+                ws.data()
+                    .main_window
+                    .hidden_project_ids
+                    .contains("unknown_id")
+            );
             assert_eq!(ws.data_version(), 1);
         });
     }
 
     #[gpui::test]
-    fn toggle_worktree_visibility_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+    fn toggle_worktree_visibility_extra_writes_only_to_targeted_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
         // Per-window viewport model: toggling on WindowId::Extra(uuid) flips
         // only that extra's hidden_project_ids -- main and any sibling extras
         // stay untouched. Defends against a regression that ignores window_id
@@ -1082,17 +1262,29 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Main, "unknown_id", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Main,
+                "unknown_id",
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(!ws.data().main_window.hidden_project_ids.contains("unknown_id"));
+            assert!(
+                !ws.data()
+                    .main_window
+                    .hidden_project_ids
+                    .contains("unknown_id")
+            );
             assert_eq!(ws.data_version(), 0);
         });
     }
 
     #[gpui::test]
-    fn toggle_project_overview_visibility_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+    fn toggle_project_overview_visibility_extra_writes_only_to_targeted_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
         // Per-window viewport model: toggling on WindowId::Extra(uuid) flips
         // only that extra's hidden_project_ids -- main and any sibling extras
         // stay untouched. Defends against a regression that ignores window_id
@@ -1113,7 +1305,12 @@ mod gpui_tests {
 
         // First toggle: visible -> hidden in extra_a.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Extra(extra_a_id), "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Extra(extra_a_id),
+                "p1",
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1133,7 +1330,12 @@ mod gpui_tests {
         // semantic so a regression that hard-codes insert-only or remove-only
         // would surface here.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Extra(extra_a_id), "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Extra(extra_a_id),
+                "p1",
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1142,7 +1344,9 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn toggle_project_overview_visibility_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+    fn toggle_project_overview_visibility_unknown_extra_is_silent_noop(
+        cx: &mut gpui::TestAppContext,
+    ) {
         // Close-race contract: a fresh uuid that does not match any extra
         // produces no panic; main_window stays untouched. Pre-populate main
         // with hidden state for p1 to ensure the unknown-extra path does NOT
@@ -1160,7 +1364,12 @@ mod gpui_tests {
         let unknown = uuid::Uuid::new_v4();
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Extra(unknown), "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Extra(unknown),
+                "p1",
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1195,7 +1404,9 @@ mod gpui_tests {
         // Hidden projects are absent from a resize update but must retain their
         // width for when they become visible again.
         let mut data = make_workspace_data();
-        data.main_window.project_widths.insert("p1".to_string(), 0.50);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 0.50);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
@@ -1205,8 +1416,14 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.data().main_window.project_widths.get("p1").copied(), Some(0.50));
-            assert_eq!(ws.data().main_window.project_widths.get("p2").copied(), Some(0.40));
+            assert_eq!(
+                ws.data().main_window.project_widths.get("p1").copied(),
+                Some(0.50)
+            );
+            assert_eq!(
+                ws.data().main_window.project_widths.get("p2").copied(),
+                Some(0.40)
+            );
         });
     }
 
@@ -1245,7 +1462,9 @@ mod gpui_tests {
         let mut extra_b = WindowState::default();
         let extra_b_id = extra_b.id;
         // Pre-populate sibling state on main + extra_b to verify isolation.
-        data.main_window.project_widths.insert("p1".to_string(), 100.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 100.0);
         extra_b.project_widths.insert("p1".to_string(), 200.0);
         // extra_a starts empty.
         let _ = extra_a_id;
@@ -1267,7 +1486,10 @@ mod gpui_tests {
             // Main's p1 width is untouched.
             assert_eq!(ws.data().main_window.project_widths.get("p1"), Some(&100.0));
             // Sibling extra's p1 width is untouched.
-            assert_eq!(ws.data().extra_windows[1].project_widths.get("p1"), Some(&200.0));
+            assert_eq!(
+                ws.data().extra_windows[1].project_widths.get("p1"),
+                Some(&200.0)
+            );
             // Sibling extra has no p2 from the targeted write.
             assert!(!ws.data().extra_windows[1].project_widths.contains_key("p2"));
             // Main has no p2 from the targeted write.
@@ -1284,7 +1506,9 @@ mod gpui_tests {
         // main as a default. data_version still bumps via notify_data,
         // matching the silent-no-op contract on the data-layer setters.
         let mut data = make_workspace_data();
-        data.main_window.project_widths.insert("p1".to_string(), 50.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 50.0);
         let workspace = cx.new(|_cx| Workspace::new(data));
         let unknown = uuid::Uuid::new_v4();
 
@@ -1308,8 +1532,12 @@ mod gpui_tests {
         let mut data = make_workspace_data();
         data.projects = vec![make_project("p1"), make_project("p2")];
         data.project_order = vec!["p1".to_string(), "p2".to_string()];
-        data.main_window.project_widths.insert("p1".to_string(), 60.0);
-        data.main_window.project_widths.insert("p2".to_string(), 40.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 60.0);
+        data.main_window
+            .project_widths
+            .insert("p2".to_string(), 40.0);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
@@ -1339,7 +1567,9 @@ mod gpui_tests {
         let mut data = make_workspace_data();
         data.projects = vec![make_project("p1"), make_project("p2")];
         data.project_order = vec!["p1".to_string(), "p2".to_string()];
-        data.main_window.project_widths.insert("p1".to_string(), 60.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 60.0);
         data.main_window.hidden_project_ids.insert("p1".to_string());
         let mut extra1 = WindowState::default();
         extra1.project_widths.insert("p1".to_string(), 30.0);
@@ -1384,8 +1614,12 @@ mod gpui_tests {
         let wt = make_worktree_project("wt1", "parent");
         data.projects = vec![parent, wt];
         data.project_order = vec!["parent".to_string()];
-        data.main_window.project_widths.insert("wt1".to_string(), 35.0);
-        data.main_window.hidden_project_ids.insert("wt1".to_string());
+        data.main_window
+            .project_widths
+            .insert("wt1".to_string(), 35.0);
+        data.main_window
+            .hidden_project_ids
+            .insert("wt1".to_string());
         let mut extra = WindowState::default();
         extra.project_widths.insert("wt1".to_string(), 20.0);
         extra.hidden_project_ids.insert("wt1".to_string());
@@ -1399,8 +1633,16 @@ mod gpui_tests {
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.project_widths.contains_key("wt1"));
             assert!(!ws.data().main_window.hidden_project_ids.contains("wt1"));
-            assert!(!ws.data().extra_windows[0].project_widths.contains_key("wt1"));
-            assert!(!ws.data().extra_windows[0].hidden_project_ids.contains("wt1"));
+            assert!(
+                !ws.data().extra_windows[0]
+                    .project_widths
+                    .contains_key("wt1")
+            );
+            assert!(
+                !ws.data().extra_windows[0]
+                    .hidden_project_ids
+                    .contains("wt1")
+            );
         });
     }
 
@@ -1437,7 +1679,11 @@ mod gpui_tests {
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
         let mut data = make_workspace_data();
-        data.projects = vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")];
+        data.projects = vec![
+            parent,
+            make_worktree_project("wt1", "parent"),
+            make_worktree_project("wt2", "parent"),
+        ];
         data.project_order = vec!["parent".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -1457,12 +1703,21 @@ mod gpui_tests {
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
         let mut data = make_workspace_data();
-        data.projects = vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")];
+        data.projects = vec![
+            parent,
+            make_worktree_project("wt1", "parent"),
+            make_worktree_project("wt2", "parent"),
+        ];
         data.project_order = vec!["parent".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project(&mut FocusManager::new(), "parent", &HooksConfig::default(), cx);
+            ws.delete_project(
+                &mut FocusManager::new(),
+                "parent",
+                &HooksConfig::default(),
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1478,7 +1733,12 @@ mod gpui_tests {
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string(), "wt3".to_string()];
         let mut data = make_workspace_data();
-        data.projects = vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent"), make_worktree_project("wt3", "parent")];
+        data.projects = vec![
+            parent,
+            make_worktree_project("wt1", "parent"),
+            make_worktree_project("wt2", "parent"),
+            make_worktree_project("wt3", "parent"),
+        ];
         data.project_order = vec!["parent".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -1549,7 +1809,10 @@ mod gpui_tests {
         });
 
         // Modal context survives the hide — the switcher keeps keyboard focus.
-        assert!(fm.is_modal(), "switcher must keep keyboard focus after hiding");
+        assert!(
+            fm.is_modal(),
+            "switcher must keep keyboard focus after hiding"
+        );
 
         // Closing the switcher restores focus to the neighbor (p3), not the
         // now-hidden p2, and leaves the modal context.
@@ -1613,7 +1876,10 @@ mod gpui_tests {
 
         ws.remove_stale_worktree("wt1");
 
-        assert!(ws.project("wt1").is_some(), "closing project should not be removed");
+        assert!(
+            ws.project("wt1").is_some(),
+            "closing project should not be removed"
+        );
     }
 
     #[test]
@@ -1627,7 +1893,10 @@ mod gpui_tests {
 
         ws.remove_stale_worktree("wt1");
 
-        assert!(ws.project("wt1").is_some(), "creating project should not be removed");
+        assert!(
+            ws.project("wt1").is_some(),
+            "creating project should not be removed"
+        );
     }
 
     #[test]
@@ -1640,7 +1909,10 @@ mod gpui_tests {
 
         ws.remove_stale_worktree("wt1");
 
-        assert!(ws.project("wt1").is_none(), "unmanaged stale worktree should be removed");
+        assert!(
+            ws.project("wt1").is_none(),
+            "unmanaged stale worktree should be removed"
+        );
     }
 
     #[gpui::test]
@@ -1659,12 +1931,16 @@ mod gpui_tests {
 
         let err = workspace.update(cx, |ws: &mut Workspace, cx| {
             ws.mark_creating_project("wt1");
-            ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx).err()
+            ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx)
+                .err()
         });
 
         assert_eq!(err.as_deref(), Some("worktree is still being created"));
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.project("wt1").is_some(), "row survives the rejected removal");
+            assert!(
+                ws.project("wt1").is_some(),
+                "row survives the rejected removal"
+            );
             assert!(ws.is_creating_project("wt1"), "creating flag untouched");
         });
     }
@@ -1679,15 +1955,14 @@ mod gpui_tests {
         // project carries a before_remove hook that writes one, and it must not
         // exist after the rejected call. (The project path must be a real dir —
         // the headless hook spawns with cwd = OKENA_PROJECT_PATH.)
-        let marker = std::env::temp_dir()
-            .join(format!("okena_close_guard_marker_{}", std::process::id()));
+        let marker =
+            std::env::temp_dir().join(format!("okena_close_guard_marker_{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string()];
         let mut wt = make_worktree_project("wt1", "parent");
         wt.path = std::env::temp_dir().to_string_lossy().into_owned();
-        wt.hooks.worktree.before_remove =
-            Some(format!("echo x > \"{}\"", marker.display()));
+        wt.hooks.worktree.before_remove = Some(format!("echo x > \"{}\"", marker.display()));
         let mut data = make_workspace_data();
         data.projects = vec![parent, wt];
         data.project_order = vec!["parent".to_string()];
@@ -1715,9 +1990,15 @@ mod gpui_tests {
             "before_remove hook must not fire on a rejected mid-create close",
         );
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.project("wt1").is_some(), "row survives the rejected close");
+            assert!(
+                ws.project("wt1").is_some(),
+                "row survives the rejected close"
+            );
             assert!(ws.is_creating_project("wt1"), "creating flag untouched");
-            assert!(!ws.is_project_closing("wt1"), "no pending close registered (tracker)");
+            assert!(
+                !ws.is_project_closing("wt1"),
+                "no pending close registered (tracker)"
+            );
             assert!(
                 !ws.project("wt1").unwrap().is_closing,
                 "no pending close registered (wire-facing closing flag stays clear)",

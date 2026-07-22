@@ -1,19 +1,19 @@
 use crate::connection::RemoteConnection;
+use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::Terminal;
+use okena_workspace::settings::{AppSettings, load_settings, update_remote_connections};
 use okena_workspace::toast::{Toast, ToastManager};
-use okena_terminal::TerminalsRegistry;
-use okena_workspace::settings::{load_settings, update_remote_connections, AppSettings};
 
 use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
 use okena_core::soft_close::{
-    decode_action, encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX,
-};
-use okena_transport::client::{
-    make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
-    LOCAL_DAEMON_CONNECTION_ID,
+    SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX, decode_action, encode_action,
 };
 use okena_transport::client::connection::try_refresh_token;
+use okena_transport::client::{
+    ConnectionEvent, ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID, RemoteConnectionConfig,
+    make_prefixed_id,
+};
 
 use gpui::*;
 use std::collections::HashMap;
@@ -530,12 +530,7 @@ impl RemoteConnectionManager {
     /// Send an action to a remote server via HTTP POST /v1/actions.
     ///
     /// Fire-and-forget from the UI thread, but FIFO within each connection.
-    pub fn send_action(
-        &self,
-        connection_id: &str,
-        action: ActionRequest,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn send_action(&self, connection_id: &str, action: ActionRequest, cx: &mut Context<Self>) {
         let config = match self.connections.get(connection_id) {
             Some(conn) => conn.config().clone(),
             None => {
@@ -546,7 +541,10 @@ impl RemoteConnectionManager {
         let token = match config.effective_auth_token() {
             Some(t) => t,
             None => {
-                log::error!("send_action: no auth token for connection {}", connection_id);
+                log::error!(
+                    "send_action: no auth token for connection {}",
+                    connection_id
+                );
                 ToastManager::error("No auth token for remote connection".to_string(), cx);
                 return;
             }
@@ -608,13 +606,7 @@ impl RemoteConnectionManager {
                 bytes,
             })
             .collect();
-        self.upload_pastes(
-            connection_id,
-            terminal_id,
-            "File drop",
-            uploads,
-            cx,
-        );
+        self.upload_pastes(connection_id, terminal_id, "File drop", uploads, cx);
     }
 
     fn upload_pastes(
@@ -653,23 +645,19 @@ impl RemoteConnectionManager {
         let terminal_id = terminal_id.to_string();
 
         self.runtime.spawn(async move {
-            let (client, base_url) = match okena_transport::remote_http::async_client_and_url(
-                &config, "",
-            ) {
-                Ok(client_and_url) => client_and_url,
-                Err(error) => {
-                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
-                        connection_id,
-                        message: format!("{label} client initialisation failed: {error}"),
-                    });
-                    return;
-                }
-            };
+            let (client, base_url) =
+                match okena_transport::remote_http::async_client_and_url(&config, "") {
+                    Ok(client_and_url) => client_and_url,
+                    Err(error) => {
+                        let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
+                            connection_id,
+                            message: format!("{label} client initialisation failed: {error}"),
+                        });
+                        return;
+                    }
+                };
             for upload in uploads {
-                let url = format!(
-                    "{base_url}/v1/terminals/{terminal_id}/{}",
-                    upload.endpoint
-                );
+                let url = format!("{base_url}/v1/terminals/{terminal_id}/{}", upload.endpoint);
                 let mut request = client
                     .post(&url)
                     .header("Authorization", format!("Bearer {}", token))
@@ -850,11 +838,12 @@ impl RemoteConnectionManager {
                 statuses,
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection_id)
-                    && let Some(state) = conn.remote_state_mut() {
-                        for project in &mut state.projects {
-                            project.git_status = statuses.get(&project.id).cloned();
-                        }
+                    && let Some(state) = conn.remote_state_mut()
+                {
+                    for project in &mut state.projects {
+                        project.git_status = statuses.get(&project.id).cloned();
                     }
+                }
                 cx.notify();
             }
             ConnectionEvent::SystemStatsChanged {
@@ -1018,8 +1007,8 @@ fn now_unix_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        activity_changed, is_local_connection_terminal_failure, ActionQueues, QueuedAction,
-        RemoteConnectionManager,
+        ActionQueues, QueuedAction, RemoteConnectionManager, activity_changed,
+        is_local_connection_terminal_failure,
     };
     use okena_core::api::ActionRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
@@ -1185,8 +1174,8 @@ mod tests {
         let current = gens(&[("b", 3)]);
         assert!(activity_changed(&last, &current));
     }
-    use okena_terminal::TerminalsRegistry;
     use gpui::AppContext as _;
+    use okena_terminal::TerminalsRegistry;
     use okena_transport::client::RemoteConnectionConfig;
     use parking_lot::Mutex as PMutex;
     use std::collections::HashMap;

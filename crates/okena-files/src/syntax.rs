@@ -276,12 +276,12 @@ pub fn highlight_content(
                     // Try to merge with previous span if same color
                     if let Some(last) = merged.last_mut()
                         && (last.color.r - color.r).abs() < 0.01
-                            && (last.color.g - color.g).abs() < 0.01
-                            && (last.color.b - color.b).abs() < 0.01
-                        {
-                            last.text.push_str(&processed);
-                            continue;
-                        }
+                        && (last.color.g - color.g).abs() < 0.01
+                        && (last.color.b - color.b).abs() < 0.01
+                    {
+                        last.text.push_str(&processed);
+                        continue;
+                    }
 
                     merged.push(HighlightedSpan {
                         color,

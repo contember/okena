@@ -8,7 +8,7 @@ use okena_ui::button::button;
 use okena_ui::icon_button::icon_button_sized;
 use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
 use okena_ui::modal::{modal_backdrop, modal_content};
-use okena_ui::rename_state::{start_rename_with_blur, RenameState};
+use okena_ui::rename_state::{RenameState, start_rename_with_blur};
 use okena_ui::simple_input::SimpleInput;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_xl};
 use std::path::{Path, PathBuf};
@@ -40,8 +40,13 @@ fn parent_relative_of_target(
 
 /// What kind of tree node was right-clicked.
 pub(crate) enum TreeNodeTarget {
-    File { path: PathBuf },
-    Folder { folder_path: String, abs_path: PathBuf },
+    File {
+        path: PathBuf,
+    },
+    Folder {
+        folder_path: String,
+        abs_path: PathBuf,
+    },
 }
 
 impl TreeNodeTarget {
@@ -276,9 +281,10 @@ impl FileViewer {
             if tab.file_path == *old_path {
                 tab.file_path = new_path.to_path_buf();
             } else if tab.file_path.starts_with(old_path)
-                && let Ok(relative) = tab.file_path.strip_prefix(old_path) {
-                    tab.file_path = new_path.join(relative);
-                }
+                && let Ok(relative) = tab.file_path.strip_prefix(old_path)
+            {
+                tab.file_path = new_path.join(relative);
+            }
 
             if let (Some(old_rel), Some(new_rel)) = (old_rel, new_rel) {
                 if tab.relative_path == old_rel {
@@ -286,11 +292,8 @@ impl FileViewer {
                 } else {
                     let prefix = format!("{}/", old_rel);
                     if tab.relative_path.starts_with(&prefix) {
-                        tab.relative_path = format!(
-                            "{}/{}",
-                            new_rel,
-                            &tab.relative_path[prefix.len()..],
-                        );
+                        tab.relative_path =
+                            format!("{}/{}", new_rel, &tab.relative_path[prefix.len()..],);
                     }
                 }
             }
@@ -464,10 +467,11 @@ impl FileViewer {
                     anchored().position(position).snap_to_window().child(
                         context_menu_panel("fv-tree-context-menu", t)
                             .child(
-                                menu_item("fv-ctx-rename", "icons/edit.svg", "Rename", t)
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                menu_item("fv-ctx-rename", "icons/edit.svg", "Rename", t).on_click(
+                                    cx.listener(|this, _, window, cx| {
                                         this.start_rename(window, cx);
-                                    })),
+                                    }),
+                                ),
                             )
                             .when_some(send_path, |d, path| {
                                 d.child(
@@ -477,12 +481,16 @@ impl FileViewer {
                                         "Send to Terminal",
                                         t,
                                     )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.close_context_menu(cx);
-                                        cx.emit(super::FileViewerEvent::SendToTerminal(
-                                            okena_core::send_payload::SendPayload::Path(path.clone()),
-                                        ));
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.close_context_menu(cx);
+                                            cx.emit(super::FileViewerEvent::SendToTerminal(
+                                                okena_core::send_payload::SendPayload::Path(
+                                                    path.clone(),
+                                                ),
+                                            ));
+                                        },
+                                    )),
                                 )
                             })
                             .child(
@@ -492,12 +500,14 @@ impl FileViewer {
                                     "Copy Relative Path",
                                     t,
                                 )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        rel_path.clone(),
-                                    ));
-                                    this.close_context_menu(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            rel_path.clone(),
+                                        ));
+                                        this.close_context_menu(cx);
+                                    },
+                                )),
                             )
                             .child(
                                 menu_item(
@@ -506,30 +516,30 @@ impl FileViewer {
                                     "Copy Absolute Path",
                                     t,
                                 )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        abs_to_copy.clone(),
-                                    ));
-                                    this.close_context_menu(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            abs_to_copy.clone(),
+                                        ));
+                                        this.close_context_menu(cx);
+                                    },
+                                )),
                             )
                             .child(menu_separator(t))
                             .child(
                                 menu_item_with_color(
                                     "fv-ctx-delete",
                                     "icons/trash.svg",
-                                    if is_folder {
-                                        "Delete Folder"
-                                    } else {
-                                        "Delete"
-                                    },
+                                    if is_folder { "Delete Folder" } else { "Delete" },
                                     t.error,
                                     t.error,
                                     t,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_delete(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.start_delete(cx);
+                                    },
+                                )),
                             ),
                     ),
                 ))
@@ -546,16 +556,16 @@ impl FileViewer {
         let position = menu.position;
         let tab_index = menu.tab_index;
 
-        let send_path: Option<PathBuf> = self
-            .tabs
-            .get(tab_index)
-            .filter(|t| !t.is_empty())
-            .map(|tab| {
-                self.project_fs
-                    .absolute_path(&tab.relative_path)
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| tab.file_path.clone())
-            });
+        let send_path: Option<PathBuf> =
+            self.tabs
+                .get(tab_index)
+                .filter(|t| !t.is_empty())
+                .map(|tab| {
+                    self.project_fs
+                        .absolute_path(&tab.relative_path)
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| tab.file_path.clone())
+                });
 
         Some(
             div()
@@ -587,13 +597,17 @@ impl FileViewer {
                                         "Send to Terminal",
                                         t,
                                     )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.tab_context_menu = None;
-                                        cx.emit(super::FileViewerEvent::SendToTerminal(
-                                            okena_core::send_payload::SendPayload::Path(path.clone()),
-                                        ));
-                                        cx.notify();
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.tab_context_menu = None;
+                                            cx.emit(super::FileViewerEvent::SendToTerminal(
+                                                okena_core::send_payload::SendPayload::Path(
+                                                    path.clone(),
+                                                ),
+                                            ));
+                                            cx.notify();
+                                        },
+                                    )),
                                 )
                                 .child(menu_separator(t))
                             })
@@ -611,10 +625,12 @@ impl FileViewer {
                                     "Close Others",
                                     t,
                                 )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.tab_context_menu = None;
-                                    this.close_other_tabs(tab_index, cx);
-                                })),
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.tab_context_menu = None;
+                                        this.close_other_tabs(tab_index, cx);
+                                    },
+                                )),
                             )
                             .child(
                                 menu_item(
@@ -623,10 +639,12 @@ impl FileViewer {
                                     "Close All",
                                     t,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.tab_context_menu = None;
-                                    this.close_all_tabs(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab_context_menu = None;
+                                        this.close_all_tabs(cx);
+                                    },
+                                )),
                             ),
                     ),
                 ))

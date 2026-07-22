@@ -61,7 +61,7 @@ impl Render for WorktreeDragView {
                 svg()
                     .path("icons/git-branch.svg")
                     .size(px(12.0))
-                    .text_color(rgb(0xcccccc))
+                    .text_color(rgb(0xcccccc)),
             )
             .child(self.name.clone())
     }
@@ -98,7 +98,7 @@ impl Render for FolderDragView {
                 svg()
                     .path("icons/folder.svg")
                     .size(px(12.0))
-                    .text_color(rgb(0xcccccc))
+                    .text_color(rgb(0xcccccc)),
             )
             .child(self.name.clone())
     }

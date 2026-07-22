@@ -196,9 +196,7 @@ fn test_jump_to_failed_jumps_to_failure() {
 
     // A single prompt whose command fails (exit code 1), then a fresh
     // prompt with enough output to scroll the failure into history.
-    terminal.process_output(
-        b"\x1b]133;A\x1b\\$ boom\r\nerr\r\nmore\r\n\x1b]133;D;1\x1b\\",
-    );
+    terminal.process_output(b"\x1b]133;A\x1b\\$ boom\r\nerr\r\nmore\r\n\x1b]133;D;1\x1b\\");
     terminal.process_output(b"\x1b]133;A\x1b\\$ ok\r\n");
 
     // First Above press engages the walker and lands on the failure.

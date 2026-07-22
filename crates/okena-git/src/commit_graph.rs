@@ -78,9 +78,10 @@ fn collect_refs(repo: &gix::Repository) -> HashMap<ObjectId, Vec<String>> {
 
     // Detached HEAD: emit a bare "HEAD" label if HEAD doesn't point to a branch.
     if head_branch.is_none()
-        && let Some(oid) = head_id {
-            map.entry(oid).or_default().insert(0, "HEAD".to_string());
-        }
+        && let Some(oid) = head_id
+    {
+        map.entry(oid).or_default().insert(0, "HEAD".to_string());
+    }
 
     map
 }
@@ -94,9 +95,10 @@ fn resolve_tip(repo: &gix::Repository, branch: Option<&str>) -> Option<ObjectId>
             // Try as a ref first (covers "main", "origin/main", "refs/heads/foo"),
             // then fall back to a full rev_parse for SHAs / advanced specs.
             if let Ok(Some(mut r)) = repo.try_find_reference(name)
-                && let Ok(id) = r.peel_to_id() {
-                    return Some(id.detach());
-                }
+                && let Ok(id) = r.peel_to_id()
+            {
+                return Some(id.detach());
+            }
             repo.rev_parse_single(name).ok().map(|id| id.detach())
         }
     }

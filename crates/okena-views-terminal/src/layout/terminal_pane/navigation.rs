@@ -1,10 +1,10 @@
 //! Terminal pane navigation, search, and key handling.
 
 use crate::ActionDispatch;
-use okena_terminal::input::{KeyEvent, KeyModifiers, key_to_bytes};
-use crate::layout::navigation::{get_pane_map, PaneBounds, NavigationDirection};
-use okena_workspace::state::LayoutNode;
+use crate::layout::navigation::{NavigationDirection, PaneBounds, get_pane_map};
 use gpui::*;
+use okena_terminal::input::{KeyEvent, KeyModifiers, key_to_bytes};
+use okena_workspace::state::LayoutNode;
 
 use super::TerminalPane;
 
@@ -46,7 +46,11 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             return false;
         }
 
-        let new_tab = if next { current_tab_index + 1 } else { current_tab_index - 1 };
+        let new_tab = if next {
+            current_tab_index + 1
+        } else {
+            current_tab_index - 1
+        };
         let project_id = self.project_id.clone();
         let mut new_layout_path = parent_path.to_vec();
         new_layout_path.push(new_tab);
@@ -54,7 +58,12 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| {
-                ws.set_active_tab(&project_id, &new_layout_path[..new_layout_path.len() - 1], new_tab, cx);
+                ws.set_active_tab(
+                    &project_id,
+                    &new_layout_path[..new_layout_path.len() - 1],
+                    new_tab,
+                    cx,
+                );
                 ws.set_focused_terminal(fm, project_id, new_layout_path, cx);
             });
             cx.notify();
@@ -69,7 +78,10 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         cx: &mut Context<Self>,
     ) {
         // Left/Right: try switching tabs first, fall through to spatial nav at edges
-        if matches!(direction, NavigationDirection::Left | NavigationDirection::Right) {
+        if matches!(
+            direction,
+            NavigationDirection::Left | NavigationDirection::Right
+        ) {
             let next = matches!(direction, NavigationDirection::Right);
             if self.try_switch_tab(next, cx) {
                 return;
@@ -188,9 +200,10 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 && !terminal.is_mouse_mode()
                 && !terminal.is_alt_screen()
                 && !terminal.has_running_child()
-                && terminal.delete_selection() {
-                    return;
-                }
+                && terminal.delete_selection()
+            {
+                return;
+            }
 
             // Opt-in: Ctrl+C copies selection (and clears it) instead of sending SIGINT.
             // Without a (non-empty) selection, falls through to the normal Ctrl+C → SIGINT path.
@@ -202,12 +215,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 && !event.keystroke.modifiers.platform
                 && crate::terminal_view_settings(cx).ctrl_c_copies_selection
                 && let Some(text) = terminal.get_selected_text()
-                    && !text.is_empty() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        terminal.clear_selection();
-                        cx.notify();
-                        return;
-                    }
+                && !text.is_empty()
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                terminal.clear_selection();
+                cx.notify();
+                return;
+            }
 
             let app_cursor_mode = terminal.is_app_cursor_mode();
             let kitty = terminal.kitty_keyboard_flags();

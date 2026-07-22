@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod blame;
+pub mod close_worktree_dialog;
 pub mod commit_send;
 pub mod diff_viewer;
 pub mod git_header;
@@ -9,6 +10,5 @@ pub mod settings;
 pub mod simple_input;
 pub mod watcher;
 pub mod worktree_dialog;
-pub mod close_worktree_dialog;
 
 gpui::actions!(okena_views_git, [Cancel]);

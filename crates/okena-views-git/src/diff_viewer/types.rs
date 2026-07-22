@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use okena_git::{DiffLineType, FileDiff};
-pub use okena_files::syntax::HighlightedSpan;
 pub use okena_core::types::DiffViewMode;
+pub use okena_files::syntax::HighlightedSpan;
+use okena_git::{DiffLineType, FileDiff};
 
 pub use okena_files::file_tree::FileTreeNode;
 

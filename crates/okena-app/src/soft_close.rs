@@ -17,7 +17,7 @@
 // Re-exported under the historical local names so existing callers
 // (`crate::soft_close::{UNDO_PREFIX, KILL_PREFIX, decode_action}`) keep working.
 pub use okena_core::soft_close::{
-    decode_action, SOFT_CLOSE_KILL_PREFIX as KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX as UNDO_PREFIX,
+    SOFT_CLOSE_KILL_PREFIX as KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX as UNDO_PREFIX, decode_action,
 };
 
 /// Stable id for the "Restart the daemon?" confirmation toast (so it can be

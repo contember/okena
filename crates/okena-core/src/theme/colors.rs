@@ -502,28 +502,80 @@ mod tests {
     fn ansi_to_argb_named_colors() {
         let t = &DARK_THEME;
         // Check all 16 named colors resolve to the theme's term_* values
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::Black)), 0xFF000000 | t.term_black);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::Red)), 0xFF000000 | t.term_red);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::Green)), 0xFF000000 | t.term_green);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::Yellow)), 0xFF000000 | t.term_yellow);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::Blue)), 0xFF000000 | t.term_blue);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::Magenta)), 0xFF000000 | t.term_magenta);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::Cyan)), 0xFF000000 | t.term_cyan);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::White)), 0xFF000000 | t.term_white);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::BrightBlack)), 0xFF000000 | t.term_bright_black);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::BrightRed)), 0xFF000000 | t.term_bright_red);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::BrightGreen)), 0xFF000000 | t.term_bright_green);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::BrightYellow)), 0xFF000000 | t.term_bright_yellow);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::BrightBlue)), 0xFF000000 | t.term_bright_blue);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::BrightMagenta)), 0xFF000000 | t.term_bright_magenta);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::BrightCyan)), 0xFF000000 | t.term_bright_cyan);
-        assert_eq!(t.ansi_to_argb(&Color::Named(NamedColor::BrightWhite)), 0xFF000000 | t.term_bright_white);
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::Black)),
+            0xFF000000 | t.term_black
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::Red)),
+            0xFF000000 | t.term_red
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::Green)),
+            0xFF000000 | t.term_green
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::Yellow)),
+            0xFF000000 | t.term_yellow
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::Blue)),
+            0xFF000000 | t.term_blue
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::Magenta)),
+            0xFF000000 | t.term_magenta
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::Cyan)),
+            0xFF000000 | t.term_cyan
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::White)),
+            0xFF000000 | t.term_white
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::BrightBlack)),
+            0xFF000000 | t.term_bright_black
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::BrightRed)),
+            0xFF000000 | t.term_bright_red
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::BrightGreen)),
+            0xFF000000 | t.term_bright_green
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::BrightYellow)),
+            0xFF000000 | t.term_bright_yellow
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::BrightBlue)),
+            0xFF000000 | t.term_bright_blue
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::BrightMagenta)),
+            0xFF000000 | t.term_bright_magenta
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::BrightCyan)),
+            0xFF000000 | t.term_bright_cyan
+        );
+        assert_eq!(
+            t.ansi_to_argb(&Color::Named(NamedColor::BrightWhite)),
+            0xFF000000 | t.term_bright_white
+        );
     }
 
     #[test]
     fn ansi_to_argb_spec_rgb() {
         let t = &DARK_THEME;
-        let color = Color::Spec(Rgb { r: 0xAB, g: 0xCD, b: 0xEF });
+        let color = Color::Spec(Rgb {
+            r: 0xAB,
+            g: 0xCD,
+            b: 0xEF,
+        });
         assert_eq!(t.ansi_to_argb(&color), 0xFFABCDEF);
     }
 

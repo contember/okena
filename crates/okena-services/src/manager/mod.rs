@@ -15,11 +15,11 @@ mod port_detection;
 pub use context::{ServiceAsyncCx, ServiceCx, ServiceHandle};
 
 use crate::config::ServiceDefinition;
-use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub struct ServiceManager {
     pub(super) configs: HashMap<String, Vec<ServiceDefinition>>,
@@ -230,7 +230,10 @@ impl ServiceManager {
             .iter()
             .filter(|((pid, _), inst)| pid == project_id && inst.kind == ServiceKind::Okena)
             .filter_map(|((_, name), instance)| {
-                instance.terminal_id.as_ref().map(|tid| (name.clone(), tid.clone()))
+                instance
+                    .terminal_id
+                    .as_ref()
+                    .map(|tid| (name.clone(), tid.clone()))
             })
             .collect()
     }
@@ -252,7 +255,9 @@ impl ServiceManager {
         }
 
         // Docker services (sorted by name, non-extra before extra)
-        let mut docker: Vec<&ServiceInstance> = self.instances.iter()
+        let mut docker: Vec<&ServiceInstance> = self
+            .instances
+            .iter()
             .filter(|((pid, name), inst)| {
                 pid == project_id
                     && matches!(inst.kind, ServiceKind::DockerCompose { .. })
@@ -261,7 +266,8 @@ impl ServiceManager {
             .map(|(_, inst)| inst)
             .collect();
         docker.sort_by(|a, b| {
-            a.is_extra.cmp(&b.is_extra)
+            a.is_extra
+                .cmp(&b.is_extra)
                 .then_with(|| a.definition.name.cmp(&b.definition.name))
         });
         result.extend(docker);
@@ -290,9 +296,7 @@ impl ServiceManager {
 
     /// Whether the project has any service definitions loaded (Okena or Docker).
     pub fn has_services(&self, project_id: &str) -> bool {
-        self.configs
-            .get(project_id)
-            .is_some_and(|v| !v.is_empty())
+        self.configs.get(project_id).is_some_and(|v| !v.is_empty())
             || self.instances.keys().any(|(pid, _)| pid == project_id)
     }
 

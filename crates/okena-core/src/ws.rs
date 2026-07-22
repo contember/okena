@@ -242,7 +242,12 @@ mod tests {
         let json = r#"{"type":"terminal_resized","terminal_id":"t1","cols":80,"rows":24}"#;
         let parsed: WsOutbound = serde_json::from_str(json).unwrap();
         match parsed {
-            WsOutbound::TerminalResized { server_owns, cols, rows, .. } => {
+            WsOutbound::TerminalResized {
+                server_owns,
+                cols,
+                rows,
+                ..
+            } => {
                 assert!(!server_owns);
                 assert_eq!((cols, rows), (80, 24));
             }

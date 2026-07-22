@@ -30,7 +30,9 @@ impl WorktreeSyncWatcher {
                 // Collect current worktree projects, skipping those being actively managed
                 let current_worktrees: Vec<(String, String)> = cx.update(|cx| {
                     let ws = workspace.read(cx);
-                    ws.data().projects.iter()
+                    ws.data()
+                        .projects
+                        .iter()
                         .filter(|p| p.worktree_info.is_some())
                         .filter(|p| !p.is_remote)
                         .filter(|p| !ws.is_project_closing(&p.id))
@@ -43,12 +45,14 @@ impl WorktreeSyncWatcher {
                 // Check for stale worktrees on blocking thread
                 let stale_ids = smol::unblock({
                     move || {
-                        current_worktrees.iter()
+                        current_worktrees
+                            .iter()
                             .filter(|(_, path)| !Path::new(path).exists())
                             .map(|(id, _)| id.clone())
                             .collect::<Vec<_>>()
                     }
-                }).await;
+                })
+                .await;
 
                 // Remove stale worktrees
                 if !stale_ids.is_empty() {
@@ -68,6 +72,7 @@ impl WorktreeSyncWatcher {
                     break;
                 }
             }
-        }).detach();
+        })
+        .detach();
     }
 }

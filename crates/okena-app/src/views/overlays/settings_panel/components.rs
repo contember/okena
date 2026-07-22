@@ -1,5 +1,5 @@
 use crate::theme::ThemeColors;
-use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_md};
+use crate::ui::tokens::{ui_text, ui_text_md, ui_text_sm};
 use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use gpui::*;
 use gpui_component::v_flex;
@@ -80,5 +80,9 @@ pub(super) fn hook_input_row(
 
 /// Convert empty string to None, non-empty to Some
 pub(super) fn opt_string(s: &str) -> Option<String> {
-    if s.is_empty() { None } else { Some(s.to_string()) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }

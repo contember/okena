@@ -132,7 +132,13 @@ async fn workspace_tick_task(
 
     // Mirror the GUI's initial load: run one diff pass before awaiting ticks so
     // persisted projects get their services loaded at startup.
-    run_services_sync(&workspace, &service_manager, &runtime, &service_tick, &mut known);
+    run_services_sync(
+        &workspace,
+        &service_manager,
+        &runtime,
+        &service_tick,
+        &mut known,
+    );
 
     loop {
         if tick_rx.changed().await.is_err() {
@@ -146,7 +152,13 @@ async fn workspace_tick_task(
         state_version.send_modify(|v| *v += 1);
 
         // ── project → services load/unload diff ─────────────────────────────
-        run_services_sync(&workspace, &service_manager, &runtime, &service_tick, &mut known);
+        run_services_sync(
+            &workspace,
+            &service_manager,
+            &runtime,
+            &service_tick,
+            &mut known,
+        );
     }
 }
 
@@ -377,7 +389,9 @@ mod tests {
     /// Build a top-level `DaemonServiceCx` over a throwaway reactor for tests
     /// that need to pass a `cx` into `sync_services`. The notify just bumps a
     /// detached watch channel.
-    fn reactor_ref(manager: &std::sync::Arc<parking_lot::Mutex<ServiceManager>>) -> ServiceReactorRef {
+    fn reactor_ref(
+        manager: &std::sync::Arc<parking_lot::Mutex<ServiceManager>>,
+    ) -> ServiceReactorRef {
         let (tick, _rx) = tokio::sync::watch::channel(0u64);
         ServiceReactorRef::new(manager.clone(), tokio::runtime::Handle::current(), tick)
     }
@@ -505,7 +519,10 @@ mod tests {
                 // Wait for state_version to advance (the workspace-tick task ran).
                 sv_rx.changed().await.expect("state_version sender alive");
                 let after = *sv_rx.borrow();
-                assert!(after > before, "state_version should advance on workspace_tick");
+                assert!(
+                    after > before,
+                    "state_version should advance on workspace_tick"
+                );
             })
             .await;
     }

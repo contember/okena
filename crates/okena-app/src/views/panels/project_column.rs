@@ -1,26 +1,26 @@
+use crate::action_dispatch::ActionDispatcher;
 use crate::git;
 use crate::git::watcher::GitStatusWatcher;
-use crate::action_dispatch::ActionDispatcher;
-use okena_views_git::git_header::GitHeader;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
-use crate::theme::{theme, ThemeColors};
+use crate::theme::{ThemeColors, theme};
+use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::split_pane::ActiveDrag;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{ProjectData, WindowId, Workspace};
-use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
+use okena_views_git::git_header::GitHeader;
 use std::sync::Arc;
 
-use okena_core::api::ActionRequest;
-use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
-use okena_views_services::service_panel::ServicePanel;
 use crate::views::panels::hook_panel::HookPanel;
 use crate::views::window::TerminalsRegistry;
+use okena_core::api::ActionRequest;
+use okena_views_services::service_panel::ServicePanel;
+use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 
 fn project_header_display_name(project: &ProjectData) -> String {
     project.name.clone()
@@ -155,8 +155,13 @@ impl ProjectColumn {
         // hit this because ServicePanel already observes the workspace.
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
 
-        let initial_service_height = workspace.read(cx).data.service_panel_heights
-            .get(&project_id).copied().unwrap_or(200.0);
+        let initial_service_height = workspace
+            .read(cx)
+            .data
+            .service_panel_heights
+            .get(&project_id)
+            .copied()
+            .unwrap_or(200.0);
 
         let git_header = {
             let pid = project_id.clone();
@@ -178,14 +183,30 @@ impl ProjectColumn {
             let ts = terminals.clone();
             let ad = active_drag.clone();
             cx.new(move |cx| {
-                ServicePanel::new(pid, ws, fm, rb, be, ts, ad, window_id, initial_service_height, cx)
+                ServicePanel::new(
+                    pid,
+                    ws,
+                    fm,
+                    rb,
+                    be,
+                    ts,
+                    ad,
+                    window_id,
+                    initial_service_height,
+                    cx,
+                )
             })
         };
         // Observe service_panel so ProjectColumn re-renders when panel state changes
         cx.observe(&service_panel, |_, _, cx| cx.notify()).detach();
 
-        let initial_hook_height = workspace.read(cx).data.hook_panel_heights
-            .get(&project_id).copied().unwrap_or(200.0);
+        let initial_hook_height = workspace
+            .read(cx)
+            .data
+            .hook_panel_heights
+            .get(&project_id)
+            .copied()
+            .unwrap_or(200.0);
 
         let hook_panel = {
             let pid = project_id.clone();
@@ -196,7 +217,18 @@ impl ProjectColumn {
             let ts = terminals.clone();
             let ad = active_drag.clone();
             cx.new(move |cx| {
-                HookPanel::new(pid, ws, fm, rb, be, ts, ad, window_id, initial_hook_height, cx)
+                HookPanel::new(
+                    pid,
+                    ws,
+                    fm,
+                    rb,
+                    be,
+                    ts,
+                    ad,
+                    window_id,
+                    initial_hook_height,
+                    cx,
+                )
             })
         };
         cx.observe(&hook_panel, |_, _, cx| cx.notify()).detach();
@@ -306,13 +338,15 @@ impl ProjectColumn {
         provider: Arc<dyn okena_views_git::diff_viewer::provider::GitProvider>,
         cx: &mut Context<Self>,
     ) {
-        self.git_header.update(cx, |gh, cx| gh.set_git_provider(provider, cx));
+        self.git_header
+            .update(cx, |gh, cx| gh.set_git_provider(provider, cx));
     }
 
     /// Open the branch switcher popover for this project's header.
     /// No-op when the provider is read-only (remote-mirrored project).
     pub fn show_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.git_header.update(cx, |gh, cx| gh.show_branch_picker(window, cx));
+        self.git_header
+            .update(cx, |gh, cx| gh.show_branch_picker(window, cx));
     }
 
     /// Show a hook terminal in the hook panel.
@@ -331,7 +365,11 @@ impl ProjectColumn {
     }
 
     /// Observe workspace for remote service state changes (used for remote project columns).
-    pub fn observe_remote_services(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) {
+    pub fn observe_remote_services(
+        &mut self,
+        workspace: Entity<Workspace>,
+        cx: &mut Context<Self>,
+    ) {
         // Sync dispatcher to service + hook panels (may have been set before the
         // panels were created). This is the sync point for daemon-client columns,
         // which is how the hook panel gets its dispatcher to route RerunHook.
@@ -381,11 +419,20 @@ impl ProjectColumn {
         workspace.project(&self.project_id)
     }
 
-    fn render_hidden_taskbar(&self, project: &ProjectData, t: ThemeColors, cx: &App) -> impl IntoElement {
-        let minimized_terminals = project.layout.as_ref()
+    fn render_hidden_taskbar(
+        &self,
+        project: &ProjectData,
+        t: ThemeColors,
+        cx: &App,
+    ) -> impl IntoElement {
+        let minimized_terminals = project
+            .layout
+            .as_ref()
             .map(|l| l.collect_minimized_terminals())
             .unwrap_or_default();
-        let detached_terminals = project.layout.as_ref()
+        let detached_terminals = project
+            .layout
+            .as_ref()
             .map(|l| l.collect_detached_terminals())
             .unwrap_or_default();
 
@@ -397,74 +444,82 @@ impl ProjectColumn {
         h_flex()
             // Minimized terminals
             .children(
-                minimized_terminals.into_iter().map(|(terminal_id, layout_path)| {
-                    let workspace = self.workspace.clone();
-                    let project_id = self.project_id.clone();
+                minimized_terminals
+                    .into_iter()
+                    .map(|(terminal_id, layout_path)| {
+                        let workspace = self.workspace.clone();
+                        let project_id = self.project_id.clone();
 
-                    let terminal_name = {
-                        let osc_title = self.terminals.lock().get(&terminal_id).and_then(|t| t.title());
-                        project.terminal_display_name(&terminal_id, osc_title)
-                    };
+                        let terminal_name = {
+                            let osc_title = self
+                                .terminals
+                                .lock()
+                                .get(&terminal_id)
+                                .and_then(|t| t.title());
+                            project.terminal_display_name(&terminal_id, osc_title)
+                        };
 
-                    div()
-                        .id(ElementId::Name(format!("minimized-{}", terminal_id).into()))
-                        .cursor_pointer()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .border_l_1()
-                        .border_color(rgb(t.border))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .text_size(ui_text_sm(cx))
-                        .child(
-                            svg()
-                                .path("icons/terminal-minimized.svg")
-                                .size(px(10.0))
-                                .text_color(rgb(t.text_muted))
-                        )
-                        .child(
-                            div()
-                                .text_color(rgb(t.text_primary))
-                                .child(terminal_name)
-                        )
-                        .on_click(move |_, _window, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                ws.restore_terminal(&project_id, &layout_path, cx);
-                            });
-                        })
-                })
+                        div()
+                            .id(ElementId::Name(format!("minimized-{}", terminal_id).into()))
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .border_l_1()
+                            .border_color(rgb(t.border))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .text_size(ui_text_sm(cx))
+                            .child(
+                                svg()
+                                    .path("icons/terminal-minimized.svg")
+                                    .size(px(10.0))
+                                    .text_color(rgb(t.text_muted)),
+                            )
+                            .child(div().text_color(rgb(t.text_primary)).child(terminal_name))
+                            .on_click(move |_, _window, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.restore_terminal(&project_id, &layout_path, cx);
+                                });
+                            })
+                    }),
             )
             // Detached terminals (with different styling)
             .children(
-                detached_terminals.into_iter().map(|(terminal_id, _layout_path)| {
-                    let workspace = self.workspace.clone();
-                    let terminal_id_for_click = terminal_id.clone();
+                detached_terminals
+                    .into_iter()
+                    .map(|(terminal_id, _layout_path)| {
+                        let workspace = self.workspace.clone();
+                        let terminal_id_for_click = terminal_id.clone();
 
-                    let terminal_name = {
-                        let osc_title = self.terminals.lock().get(&terminal_id).and_then(|t| t.title());
-                        project.terminal_display_name(&terminal_id, osc_title)
-                    };
+                        let terminal_name = {
+                            let osc_title = self
+                                .terminals
+                                .lock()
+                                .get(&terminal_id)
+                                .and_then(|t| t.title());
+                            project.terminal_display_name(&terminal_id, osc_title)
+                        };
 
-                    div()
-                        .id(ElementId::Name(format!("detached-{}", terminal_id).into()))
-                        .cursor_pointer()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .border_l_1()
-                        .border_color(rgb(t.border))
-                        .bg(rgb(t.bg_hover))
-                        .hover(|s| s.bg(rgb(t.bg_selection)))
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_primary))
-                        .child(format!("\u{2197} {}", terminal_name))
-                        .on_click(move |_, _window, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                ws.attach_terminal(&terminal_id_for_click, cx);
-                            });
-                        })
-                })
+                        div()
+                            .id(ElementId::Name(format!("detached-{}", terminal_id).into()))
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .border_l_1()
+                            .border_color(rgb(t.border))
+                            .bg(rgb(t.bg_hover))
+                            .hover(|s| s.bg(rgb(t.bg_selection)))
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(format!("\u{2197} {}", terminal_name))
+                            .on_click(move |_, _window, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.attach_terminal(&terminal_id_for_click, cx);
+                                });
+                            })
+                    }),
             )
             .into_any_element()
     }
@@ -518,7 +573,11 @@ impl ProjectColumn {
         // In the rows layout each project is short, so vertical space is
         // precious: collapse the comfortable two-row header back to a single
         // row (git info still shows, just inline) when the grid is stacked.
-        let is_rows = self.workspace.read(cx).project_layout_mode(self.window_id).is_rows();
+        let is_rows = self
+            .workspace
+            .read(cx)
+            .project_layout_mode(self.window_id)
+            .is_rows();
         let is_comfortable =
             density == crate::workspace::settings::HeaderDensity::Comfortable && !is_rows;
 
@@ -653,7 +712,10 @@ impl ProjectColumn {
                                     focus_manager_for_hide.update(cx, |fm, cx| {
                                         workspace_for_hide.update(cx, |ws, cx| {
                                             ws.toggle_project_overview_visibility(
-                                                fm, window_id_for_hide, &project_id_for_hide, cx,
+                                                fm,
+                                                window_id_for_hide,
+                                                &project_id_for_hide,
+                                                cx,
                                             );
                                         });
                                     });
@@ -689,7 +751,8 @@ impl ProjectColumn {
                                         workspace.update(cx, |ws, cx| {
                                             // Toggle: when already focused, clear
                                             // focus to return to the overview.
-                                            let target = if is_focused_view { None } else { Some(pid) };
+                                            let target =
+                                                if is_focused_view { None } else { Some(pid) };
                                             ws.set_focused_project(fm, target, cx);
                                         });
                                         cx.notify();
@@ -707,21 +770,22 @@ impl ProjectColumn {
                         )
                     })
                     .child({
-                        self.hook_panel.update(cx, |hp, cx| {
-                            hp.render_hook_indicator(&t, cx)
-                        })
+                        self.hook_panel
+                            .update(cx, |hp, cx| hp.render_hook_indicator(&t, cx))
                     })
                     .child({
-                        self.service_panel.update(cx, |sp, cx| {
-                            sp.render_service_indicator(&t, cx)
-                        })
+                        self.service_panel
+                            .update(cx, |sp, cx| sp.render_service_indicator(&t, cx))
                     }),
             );
 
         let git_status_el = self.git_header.update(cx, |gh, cx| {
             gh.render_git_status(git_status.clone(), &t, cx)
         });
-        let has_git = git_status.as_ref().and_then(|g| g.branch.as_ref()).is_some();
+        let has_git = git_status
+            .as_ref()
+            .and_then(|g| g.branch.as_ref())
+            .is_some();
 
         let context_menu_handler = {
             let request_broker = self.request_broker.clone();
@@ -845,13 +909,13 @@ impl ProjectColumn {
                 svg()
                     .path("icons/git-branch.svg")
                     .size(px(48.0))
-                    .text_color(rgb(t.text_muted))
+                    .text_color(rgb(t.text_muted)),
             )
             .child(
                 div()
                     .text_size(ui_text_xl(cx))
                     .text_color(rgb(t.text_secondary))
-                    .child("Closing worktree\u{2026}")
+                    .child("Closing worktree\u{2026}"),
             )
             .child(
                 div()
@@ -862,7 +926,7 @@ impl ProjectColumn {
                     // Deliberately not "removing the checkout": the before_remove
                     // hook phase reaches this screen too, and that phase is still
                     // abortable — nothing has been deleted yet.
-                    .child("This project disappears once the worktree is gone.")
+                    .child("This project disappears once the worktree is gone."),
             )
     }
 
@@ -911,13 +975,13 @@ impl ProjectColumn {
                 svg()
                     .path("icons/folder.svg")
                     .size(px(48.0))
-                    .text_color(rgb(t.text_muted))
+                    .text_color(rgb(t.text_muted)),
             )
             .child(
                 div()
                     .text_size(ui_text_xl(cx))
                     .text_color(rgb(t.text_muted))
-                    .child("No terminal attached")
+                    .child("No terminal attached"),
             )
             .child(
                 div()
@@ -935,14 +999,14 @@ impl ProjectColumn {
                         svg()
                             .path("icons/terminal.svg")
                             .size(px(14.0))
-                            .text_color(rgb(t.button_primary_fg))
+                            .text_color(rgb(t.button_primary_fg)),
                     )
                     .child(
                         div()
                             .text_size(ui_text_md(cx))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(t.button_primary_fg))
-                            .child("Start Terminal")
+                            .child("Start Terminal"),
                     )
                     .on_click({
                         let dispatcher = self.action_dispatcher.clone();
@@ -956,7 +1020,7 @@ impl ProjectColumn {
                                 );
                             }
                         }
-                    })
+                    }),
             )
             .child(self.render_tip(cx))
     }
@@ -1035,11 +1099,7 @@ impl ProjectColumn {
                             .size(px(11.0))
                             .text_color(rgb(t.text_muted)),
                     )
-                    .child(
-                        div()
-                            .text_size(ui_text_sm(cx))
-                            .child("Another tip"),
-                    )
+                    .child(div().text_size(ui_text_sm(cx)).child("Another tip"))
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         this.tip_index = this.tip_index.wrapping_add(1);
                         cx.notify();
@@ -1066,7 +1126,11 @@ impl Render for ProjectColumn {
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {
                     let color = workspace.effective_folder_color(&project);
                     if color != crate::theme::FolderColor::Default {
-                        rgb(crate::ui::tint_color(t.bg_primary, t.get_folder_color(color), 0.025))
+                        rgb(crate::ui::tint_color(
+                            t.bg_primary,
+                            t.get_folder_color(color),
+                            0.025,
+                        ))
                     } else {
                         rgb(t.bg_primary)
                     }
@@ -1085,9 +1149,10 @@ impl Render for ProjectColumn {
                             .min_h_0()
                             .overflow_hidden()
                             .when_some(self.layout_container.clone(), |d, container| {
-                                d.child(AnyView::from(container).cached(
-                                    StyleRefinement::default().size_full(),
-                                ))
+                                d.child(
+                                    AnyView::from(container)
+                                        .cached(StyleRefinement::default().size_full()),
+                                )
                             })
                             .into_any_element()
                     }
@@ -1115,20 +1180,16 @@ impl Render for ProjectColumn {
                     .child(self.render_header(&project, cx))
                     .child(content)
                     // Hook panel (delegated to HookPanel entity)
-                    .child(self.hook_panel.update(cx, |hp, cx| {
-                        hp.render_panel(&t, cx)
-                    }))
+                    .child(self.hook_panel.update(cx, |hp, cx| hp.render_panel(&t, cx)))
                     // Service panel (delegated to ServicePanel entity)
                     .child({
-                        self.service_panel.update(cx, |sp, cx| {
-                            sp.render_panel(&t, cx)
-                        })
+                        self.service_panel
+                            .update(cx, |sp, cx| sp.render_panel(&t, cx))
                     })
                     // Diff popover (delegated to GitHeader entity)
                     .child({
-                        self.git_header.update(cx, |gh, cx| {
-                            gh.render_diff_popover(&t, cx)
-                        })
+                        self.git_header
+                            .update(cx, |gh, cx| gh.render_diff_popover(&t, cx))
                     })
                     // Commit log popover (delegated to GitHeader entity)
                     .child({
@@ -1138,9 +1199,8 @@ impl Render for ProjectColumn {
                     })
                     // Branch picker popover (delegated to GitHeader entity)
                     .child({
-                        self.git_header.update(cx, |gh, cx| {
-                            gh.render_branch_picker(window, &t, cx)
-                        })
+                        self.git_header
+                            .update(cx, |gh, cx| gh.render_branch_picker(window, &t, cx))
                     })
                     // CI checks popover (delegated to GitHeader entity).
                     // Resolve via the same path as the badge: in daemon-client
@@ -1152,7 +1212,12 @@ impl Render for ProjectColumn {
                         let ci_checks = git_status.as_ref().and_then(|g| g.ci_checks.clone());
                         let pr_info = git_status.and_then(|g| g.pr_info);
                         self.git_header.update(cx, |gh, cx| {
-                            gh.render_ci_checks_popover(ci_checks.as_ref(), pr_info.as_ref(), &t, cx)
+                            gh.render_ci_checks_popover(
+                                ci_checks.as_ref(),
+                                pr_info.as_ref(),
+                                &t,
+                                cx,
+                            )
                         })
                     })
                     .into_any_element()
@@ -1172,7 +1237,7 @@ impl Render for ProjectColumn {
 
 #[cfg(test)]
 mod tests {
-    use super::{column_content, project_header_display_name, ColumnContent};
+    use super::{ColumnContent, column_content, project_header_display_name};
     use crate::workspace::settings::HooksConfig;
     use crate::workspace::state::{LayoutNode, ProjectData, SplitDirection, WorktreeMetadata};
     use okena_core::theme::FolderColor;

@@ -50,12 +50,14 @@ pub fn window_drag_spacer(enabled: bool) -> Stateful<Div> {
         .flex_1()
         .h_full()
         .when(enabled, |d| {
-            d.window_control_area(WindowControlArea::Drag)
-                .when(cfg!(any(target_os = "linux", target_os = "macos")), |d| {
+            d.window_control_area(WindowControlArea::Drag).when(
+                cfg!(any(target_os = "linux", target_os = "macos")),
+                |d| {
                     d.on_mouse_down(MouseButton::Left, |_, window, _cx| {
                         window.start_window_move();
                     })
-                })
+                },
+            )
         })
 }
 

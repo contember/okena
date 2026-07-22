@@ -14,7 +14,11 @@ impl Workspace {
         direction: SplitDirection,
         cx: &mut impl WorkspaceCx,
     ) {
-        log::info!("Workspace::split_terminal called for project {} at path {:?}", project_id, path);
+        log::info!(
+            "Workspace::split_terminal called for project {} at path {:?}",
+            project_id,
+            path
+        );
 
         // If the target node is inside a Tabs container, split the Tabs container
         // instead of splitting inside the tab. This avoids nested splits within tabs
@@ -100,29 +104,38 @@ impl Workspace {
     ) {
         if let Some(project) = self.project_mut(project_id)
             && let Some(ref mut layout) = project.layout
-                && let Some(node) = layout.get_at_path_mut(path)
-                    && let LayoutNode::Split { sizes, .. } = node {
-                        *sizes = new_sizes;
-                        self.notify_ui_only(cx);
-                    }
+            && let Some(node) = layout.get_at_path_mut(path)
+            && let LayoutNode::Split { sizes, .. } = node
+        {
+            *sizes = new_sizes;
+            self.notify_ui_only(cx);
+        }
     }
 
     /// Equalize pane sizes in the focused terminal's parent split.
-    pub fn equalize_focused_split(&mut self, focus_manager: &FocusManager, cx: &mut impl WorkspaceCx) {
+    pub fn equalize_focused_split(
+        &mut self,
+        focus_manager: &FocusManager,
+        cx: &mut impl WorkspaceCx,
+    ) {
         if let Some(target) = focus_manager.focused_terminal_state()
             && let Some(project) = self.project_mut(&target.project_id)
-                && let Some(ref mut layout) = project.layout {
-                    let parent_path = if target.layout_path.is_empty() {
-                        &target.layout_path[..]
-                    } else {
-                        &target.layout_path[..target.layout_path.len() - 1]
-                    };
-                    if let Some(node) = layout.get_at_path_mut(parent_path)
-                        && let LayoutNode::Split { sizes, children, .. } = node {
-                            let n = children.len();
-                            *sizes = vec![100.0 / n as f32; n];
-                        }
-                }
+            && let Some(ref mut layout) = project.layout
+        {
+            let parent_path = if target.layout_path.is_empty() {
+                &target.layout_path[..]
+            } else {
+                &target.layout_path[..target.layout_path.len() - 1]
+            };
+            if let Some(node) = layout.get_at_path_mut(parent_path)
+                && let LayoutNode::Split {
+                    sizes, children, ..
+                } = node
+            {
+                let n = children.len();
+                *sizes = vec![100.0 / n as f32; n];
+            }
+        }
         self.notify_data(cx);
     }
 }

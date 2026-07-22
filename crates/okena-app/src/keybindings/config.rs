@@ -139,9 +139,7 @@ impl KeybindingConfig {
         // Fullscreen keybindings
         bindings.insert(
             "ToggleFullscreen".to_string(),
-            vec![
-                KeybindingEntry::new("shift-escape", Some("TerminalPane")),
-            ],
+            vec![KeybindingEntry::new("shift-escape", Some("TerminalPane"))],
         );
         bindings.insert(
             "FullscreenNextTerminal".to_string(),
@@ -378,16 +376,18 @@ impl KeybindingConfig {
     /// Update the keystroke for a specific binding entry
     pub fn update_binding(&mut self, action: &str, entry_index: usize, new_keystroke: String) {
         if let Some(entries) = self.bindings.get_mut(action)
-            && let Some(entry) = entries.get_mut(entry_index) {
-                entry.keystroke = new_keystroke;
-            }
+            && let Some(entry) = entries.get_mut(entry_index)
+        {
+            entry.keystroke = new_keystroke;
+        }
     }
 
     /// Reset a single action's bindings back to defaults
     pub fn reset_single_action(&mut self, action: &str) {
         let defaults = Self::defaults();
         if let Some(default_entries) = defaults.bindings.get(action) {
-            self.bindings.insert(action.to_string(), default_entries.clone());
+            self.bindings
+                .insert(action.to_string(), default_entries.clone());
         } else {
             // Action doesn't exist in defaults — remove it
             self.bindings.remove(action);
@@ -406,19 +406,21 @@ impl KeybindingConfig {
     /// Returns true if the entry was removed
     pub fn remove_binding(&mut self, action: &str, entry_index: usize) -> bool {
         if let Some(entries) = self.bindings.get_mut(action)
-            && entry_index < entries.len() {
-                entries.remove(entry_index);
-                return true;
-            }
+            && entry_index < entries.len()
+        {
+            entries.remove(entry_index);
+            return true;
+        }
         false
     }
 
     /// Toggle the enabled state of a specific binding entry
     pub fn toggle_binding(&mut self, action: &str, entry_index: usize) {
         if let Some(entries) = self.bindings.get_mut(action)
-            && let Some(entry) = entries.get_mut(entry_index) {
-                entry.enabled = !entry.enabled;
-            }
+            && let Some(entry) = entries.get_mut(entry_index)
+        {
+            entry.enabled = !entry.enabled;
+        }
     }
 
     /// Get all actions that have custom (non-default) bindings
@@ -446,7 +448,6 @@ impl KeybindingConfig {
 
         customized
     }
-
 }
 
 /// Get the keybindings configuration file path
@@ -465,29 +466,30 @@ pub fn get_keybindings_path() -> PathBuf {
 pub fn load_keybindings() -> KeybindingConfig {
     let path = get_keybindings_path();
     if path.exists()
-        && let Ok(content) = std::fs::read_to_string(&path) {
-            match serde_json::from_str::<KeybindingConfig>(&content) {
-                Ok(mut config) => {
-                    // Merge in any new default actions missing from the saved config
-                    let defaults = KeybindingConfig::defaults();
-                    for (action, entries) in &defaults.bindings {
-                        if !config.bindings.contains_key(action) {
-                            config.bindings.insert(action.clone(), entries.clone());
-                        }
+        && let Ok(content) = std::fs::read_to_string(&path)
+    {
+        match serde_json::from_str::<KeybindingConfig>(&content) {
+            Ok(mut config) => {
+                // Merge in any new default actions missing from the saved config
+                let defaults = KeybindingConfig::defaults();
+                for (action, entries) in &defaults.bindings {
+                    if !config.bindings.contains_key(action) {
+                        config.bindings.insert(action.clone(), entries.clone());
                     }
+                }
 
-                    // Check for conflicts and log warnings
-                    let conflicts = config.detect_conflicts();
-                    for conflict in &conflicts {
-                        log::warn!("Keybinding conflict: {}", conflict);
-                    }
-                    return config;
+                // Check for conflicts and log warnings
+                let conflicts = config.detect_conflicts();
+                for conflict in &conflicts {
+                    log::warn!("Keybinding conflict: {}", conflict);
                 }
-                Err(e) => {
-                    log::warn!("Failed to parse keybindings config: {}, using defaults", e);
-                }
+                return config;
+            }
+            Err(e) => {
+                log::warn!("Failed to parse keybindings config: {}, using defaults", e);
             }
         }
+    }
     KeybindingConfig::defaults()
 }
 
@@ -510,7 +512,10 @@ mod tests {
     fn test_default_config_has_no_conflicts() {
         let config = KeybindingConfig::defaults();
         let conflicts = config.detect_conflicts();
-        assert!(conflicts.is_empty(), "Default config should have no conflicts");
+        assert!(
+            conflicts.is_empty(),
+            "Default config should have no conflicts"
+        );
     }
 
     #[test]
@@ -537,9 +542,15 @@ mod tests {
             "Action2".to_string(),
             vec![KeybindingEntry::new("cmd-d", Some("TerminalPane"))], // scoped
         );
-        let config = KeybindingConfig { version: 1, bindings };
+        let config = KeybindingConfig {
+            version: 1,
+            bindings,
+        };
         let conflicts = config.detect_conflicts();
-        assert!(conflicts.is_empty(), "Different contexts should not conflict");
+        assert!(
+            conflicts.is_empty(),
+            "Different contexts should not conflict"
+        );
     }
 
     #[test]
@@ -551,11 +562,11 @@ mod tests {
         );
         let mut disabled = KeybindingEntry::new("cmd-x", None);
         disabled.enabled = false;
-        bindings.insert(
-            "Action2".to_string(),
-            vec![disabled],
-        );
-        let config = KeybindingConfig { version: 1, bindings };
+        bindings.insert("Action2".to_string(), vec![disabled]);
+        let config = KeybindingConfig {
+            version: 1,
+            bindings,
+        };
         let conflicts = config.detect_conflicts();
         assert!(conflicts.is_empty(), "Disabled binding should not conflict");
     }
@@ -569,7 +580,10 @@ mod tests {
             vec![KeybindingEntry::new("ctrl-shift-b", None)], // changed from default
         );
         let customized = config.get_customized_actions();
-        assert!(customized.contains("ToggleSidebar"), "Modified action should be detected");
+        assert!(
+            customized.contains("ToggleSidebar"),
+            "Modified action should be detected"
+        );
     }
 
     #[test]

@@ -38,9 +38,9 @@ use std::sync::Arc;
 use async_channel::Receiver;
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_services::manager::ServiceManager;
+use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
-use okena_terminal::TerminalsRegistry;
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::persistence::AppSettings;
 use okena_workspace::state::{HookTerminalStatus, Workspace};
@@ -235,7 +235,10 @@ fn process_event(
             }
             dirty_terminal_ids.push(terminal_id.clone());
         }
-        PtyEvent::Exit { terminal_id, exit_code } => {
+        PtyEvent::Exit {
+            terminal_id,
+            exit_code,
+        } => {
             // Clean up the PtyHandle (reader/writer threads) but don't remove
             // the Terminal yet — the service manager may keep it so users can
             // see crash output.
@@ -412,7 +415,13 @@ fn handle_exits(
     // must be present. Collect the args under a workspace read lock, then fire
     // the hooks (which spawn background subprocesses) outside it.
     let global_hooks = reactor.settings.lock().hooks.clone();
-    let close_infos = collect_terminal_close_infos(exit_events, &service_tids, &hook_tids, reactor, &global_hooks);
+    let close_infos = collect_terminal_close_infos(
+        exit_events,
+        &service_tids,
+        &hook_tids,
+        reactor,
+        &global_hooks,
+    );
     let monitor = reactor.hook_monitor.as_ref();
     for info in close_infos {
         okena_hooks::fire_terminal_on_close_with_services(
@@ -527,7 +536,9 @@ fn handle_hook_terminal_exits(
         let status = if success {
             HookTerminalStatus::Succeeded
         } else {
-            let code = exit_code.map(|c| i32::try_from(c).unwrap_or(i32::MAX)).unwrap_or(-1);
+            let code = exit_code
+                .map(|c| i32::try_from(c).unwrap_or(i32::MAX))
+                .unwrap_or(-1);
             HookTerminalStatus::Failed { exit_code: code }
         };
         ws.update_hook_terminal_status(&tid, status, &mut cx);
@@ -999,7 +1010,10 @@ mod tests {
 
         let (service_tick, _srx) = watch::channel(0u64);
         let (state_version, _vrx) = watch::channel(0u64);
-        let reactor = test_reactor(Workspace::new(WorkspaceData::empty()), AppSettings::default());
+        let reactor = test_reactor(
+            Workspace::new(WorkspaceData::empty()),
+            AppSettings::default(),
+        );
 
         let local = tokio::task::LocalSet::new();
         local

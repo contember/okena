@@ -1,13 +1,13 @@
 //! Syntax highlighting for the diff viewer.
 
 use super::types::{DiffDisplayFile, DisplayItem, DisplayLine, ExpanderRow, HighlightedSpan};
-use okena_git::{DiffLineType, FileDiff};
-use okena_git::diff::DiffHunk;
+use gpui::Rgba;
+use okena_files::markdown_highlight::{highlight_markdown_file, is_markdown_path};
 use okena_files::syntax::{
     default_text_color, get_syntax_for_path, highlight_line, load_syntax_theme,
 };
-use okena_files::markdown_highlight::{highlight_markdown_file, is_markdown_path};
-use gpui::Rgba;
+use okena_git::diff::DiffHunk;
+use okena_git::{DiffLineType, FileDiff};
 use std::collections::HashMap;
 use syntect::easy::HighlightLines;
 use syntect::parsing::SyntaxSet;
@@ -77,11 +77,19 @@ pub fn process_file(
 
     let t1 = std::time::Instant::now();
     let old_highlighted = old_content.as_deref().map(&highlight).unwrap_or_default();
-    log::debug!("[process_file] highlight old: {:?}, lines: {}", t1.elapsed(), old_highlighted.len());
+    log::debug!(
+        "[process_file] highlight old: {:?}, lines: {}",
+        t1.elapsed(),
+        old_highlighted.len()
+    );
 
     let t2 = std::time::Instant::now();
     let new_highlighted = new_content.as_deref().map(&highlight).unwrap_or_default();
-    log::debug!("[process_file] highlight new: {:?}, lines: {}", t2.elapsed(), new_highlighted.len());
+    log::debug!(
+        "[process_file] highlight new: {:?}, lines: {}",
+        t2.elapsed(),
+        new_highlighted.len()
+    );
 
     let old_line_count = old_content.as_ref().map(|c| c.lines().count()).unwrap_or(0);
     let new_line_count = new_content.as_ref().map(|c| c.lines().count()).unwrap_or(0);
@@ -158,7 +166,10 @@ pub fn process_file(
     }
 
     // Pre-compute per-hunk last line numbers (before draining)
-    let hunk_last_lines: Vec<(usize, usize)> = file.hunks.iter().enumerate()
+    let hunk_last_lines: Vec<(usize, usize)> = file
+        .hunks
+        .iter()
+        .enumerate()
         .map(|(idx, hunk)| last_line_nums(&hunk_items[idx], hunk))
         .collect();
 
@@ -211,7 +222,12 @@ pub fn process_file(
         }
     }
 
-    log::debug!("[process_file] total: {:?}, display items: {}, file: {}", t_total.elapsed(), items.len(), path);
+    log::debug!(
+        "[process_file] total: {:?}, display items: {}, file: {}",
+        t_total.elapsed(),
+        items.len(),
+        path
+    );
     DiffDisplayFile {
         items,
         old_highlighted,

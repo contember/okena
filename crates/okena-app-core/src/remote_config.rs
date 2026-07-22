@@ -24,11 +24,11 @@
 use okena_core::api::CommandResult;
 use okena_theme::custom::{get_themes_dir, load_custom_themes};
 use okena_theme::{
-    CustomThemeColors, CustomThemeConfig, ThemeColors, ThemeMode, DARK_THEME, HIGH_CONTRAST_THEME,
-    LIGHT_THEME, PASTEL_DARK_THEME,
+    CustomThemeColors, CustomThemeConfig, DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME,
+    PASTEL_DARK_THEME, ThemeColors, ThemeMode,
 };
 use okena_workspace::persistence::AppSettings;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Abstracts the three front-end-specific pieces of the settings/theme handlers
 /// (backing store, live-theme application, active-theme color source) so the
@@ -126,7 +126,11 @@ pub fn get_themes<B: ConfigBackend>(b: &mut B) -> CommandResult {
     let custom_refs: Vec<(String, String, bool)> = custom
         .iter()
         .map(|(info, _colors)| {
-            let cid = info.id.strip_prefix("custom:").unwrap_or(&info.id).to_string();
+            let cid = info
+                .id
+                .strip_prefix("custom:")
+                .unwrap_or(&info.id)
+                .to_string();
             (cid, info.name.clone(), info.is_dark)
         })
         .collect();
@@ -154,7 +158,10 @@ pub fn get_theme<B: ConfigBackend>(b: &mut B, id: Option<String>) -> CommandResu
             None => {
                 let cid = raw.strip_prefix("custom:").unwrap_or(raw);
                 let target = format!("custom:{cid}");
-                match load_custom_themes().into_iter().find(|(i, _)| i.id == target) {
+                match load_custom_themes()
+                    .into_iter()
+                    .find(|(i, _)| i.id == target)
+                {
                     Some((info, colors)) => (info.name, info.is_dark, colors),
                     None => return CommandResult::Err(format!("theme not found: {raw}")),
                 }
@@ -188,7 +195,10 @@ pub fn set_theme<B: ConfigBackend>(b: &mut B, id: String) -> CommandResult {
     } else {
         let cid = id.strip_prefix("custom:").unwrap_or(&id).to_string();
         let target = format!("custom:{cid}");
-        match load_custom_themes().into_iter().find(|(i, _)| i.id == target) {
+        match load_custom_themes()
+            .into_iter()
+            .find(|(i, _)| i.id == target)
+        {
             Some((_, colors)) => apply_custom(b, cid, colors),
             None => CommandResult::Err(format!("theme not found: {id}")),
         }
@@ -204,7 +214,11 @@ pub fn save_custom_theme<B: ConfigBackend>(
     activate: bool,
 ) -> CommandResult {
     let cid = id.strip_prefix("custom:").unwrap_or(&id).to_string();
-    if cid.is_empty() || !cid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if cid.is_empty()
+        || !cid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return CommandResult::Err(format!(
             "invalid theme id '{cid}' (use letters, digits, '-' or '_')"
         ));
@@ -231,7 +245,9 @@ pub fn save_custom_theme<B: ConfigBackend>(
         let colors = parsed.colors.to_theme_colors();
         return apply_custom(b, cid, colors);
     }
-    CommandResult::Ok(Some(json!({ "id": cid, "path": path.display().to_string() })))
+    CommandResult::Ok(Some(
+        json!({ "id": cid, "path": path.display().to_string() }),
+    ))
 }
 
 /// Persist a custom theme preference and apply it to any live surface.

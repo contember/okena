@@ -223,7 +223,10 @@ impl Okena {
             let reg = self.terminals.lock();
             dirty_terminal_ids
                 .iter()
-                .filter(|tid| reg.get(*tid).is_some_and(|t| t.has_pending_clipboard_reads()))
+                .filter(|tid| {
+                    reg.get(*tid)
+                        .is_some_and(|t| t.has_pending_clipboard_reads())
+                })
                 .cloned()
                 .collect()
         };
@@ -309,7 +312,9 @@ impl Okena {
             None => None,
             Some("main") => Some(WindowId::Main),
             Some(id) => {
-                let Ok(id) = uuid::Uuid::parse_str(id) else { return };
+                let Ok(id) = uuid::Uuid::parse_str(id) else {
+                    return;
+                };
                 Some(WindowId::Extra(id))
             }
         };
@@ -361,7 +366,10 @@ impl Okena {
     ) -> Option<(Entity<WindowView>, AnyWindowHandle)> {
         match window_id {
             WindowId::Main => Some((self.main_window.clone(), self.main_window_handle)),
-            id => match (self.extra_windows.get(&id), self.extra_window_handles.get(&id)) {
+            id => match (
+                self.extra_windows.get(&id),
+                self.extra_window_handles.get(&id),
+            ) {
                 (Some(v), Some(h)) => Some((v.clone(), *h)),
                 _ => None,
             },

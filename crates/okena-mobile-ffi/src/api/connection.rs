@@ -23,7 +23,9 @@ pub enum ConnectionStatus {
 impl From<okena_transport::client::ConnectionStatus> for ConnectionStatus {
     fn from(status: okena_transport::client::ConnectionStatus) -> Self {
         match status {
-            okena_transport::client::ConnectionStatus::Disconnected => ConnectionStatus::Disconnected,
+            okena_transport::client::ConnectionStatus::Disconnected => {
+                ConnectionStatus::Disconnected
+            }
             okena_transport::client::ConnectionStatus::Connecting => ConnectionStatus::Connecting,
             okena_transport::client::ConnectionStatus::Connected => ConnectionStatus::Connected,
             okena_transport::client::ConnectionStatus::Pairing => ConnectionStatus::Pairing,

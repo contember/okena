@@ -6,12 +6,12 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::{ActionResult, spawn_uninitialized_terminals};
-use crate::workspace::persistence::AppSettings;
-use okena_terminal::backend::TerminalBackend;
 use crate::workspace::focus::FocusManager;
+use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{DropZone, Workspace};
-use okena_workspace::context::WorkspaceCx;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
+use okena_workspace::context::WorkspaceCx;
 
 pub(super) fn add_tab(
     ws: &mut Workspace,
@@ -32,7 +32,15 @@ pub(super) fn add_tab(
     } else {
         ws.add_tab(focus_manager, &project_id, &path, cx);
     }
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, inherit_cwd, cx)
+    spawn_uninitialized_terminals(
+        ws,
+        &project_id,
+        backend,
+        terminals,
+        settings,
+        inherit_cwd,
+        cx,
+    )
 }
 
 pub(super) fn set_active_tab(
@@ -69,7 +77,15 @@ pub(super) fn move_terminal_to_tab_group(
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let target_pid = target_project_id.as_deref().unwrap_or(&project_id);
-    ws.move_terminal_to_tab_group(focus_manager, &project_id, &terminal_id, target_pid, &target_path, position, cx);
+    ws.move_terminal_to_tab_group(
+        focus_manager,
+        &project_id,
+        &terminal_id,
+        target_pid,
+        &target_path,
+        position,
+        cx,
+    );
     ActionResult::Ok(None)
 }
 
@@ -91,6 +107,14 @@ pub(super) fn move_pane_to(
         "center" => DropZone::Center,
         _ => return ActionResult::Err(format!("invalid drop zone: {}", zone)),
     };
-    ws.move_pane(focus_manager, &project_id, &terminal_id, &target_project_id, &target_terminal_id, drop_zone, cx);
+    ws.move_pane(
+        focus_manager,
+        &project_id,
+        &terminal_id,
+        &target_project_id,
+        &target_terminal_id,
+        drop_zone,
+        cx,
+    );
     ActionResult::Ok(None)
 }

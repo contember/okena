@@ -2,7 +2,9 @@
 pub use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastLevel, ToastManager};
 
 use crate::theme::theme;
-use crate::ui::tokens::{RADIUS_STD, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, ICON_SM, ui_text_ms, ui_text_xs};
+use crate::ui::tokens::{
+    ICON_SM, RADIUS_STD, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, ui_text_ms, ui_text_xs,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::time::Duration;
@@ -77,7 +79,9 @@ impl ToastOverlay {
 
                 let result = this.update(cx, |this, cx| {
                     // Drain pending toasts from HookMonitor into ToastManager
-                    if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
+                    if let Some(monitor) =
+                        cx.try_global::<crate::workspace::hook_monitor::HookMonitor>()
+                    {
                         let hook_toasts = monitor.drain_pending_toasts();
                         ToastManager::post_batch(hook_toasts, cx);
                     }
@@ -110,7 +114,6 @@ impl ToastOverlay {
         Self { toasts: Vec::new() }
     }
 }
-
 
 impl EventEmitter<ToastActionEvent> for ToastOverlay {}
 
@@ -327,7 +330,10 @@ fn action_button(
     };
 
     div()
-        .id(SharedString::from(format!("toast-action-{}-{}", toast_id, action.id)))
+        .id(SharedString::from(format!(
+            "toast-action-{}-{}",
+            toast_id, action.id
+        )))
         .cursor_pointer()
         .px(SPACE_SM)
         .py(px(2.0))

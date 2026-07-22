@@ -61,7 +61,8 @@ impl Terminal {
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
         if sequence != 0 {
-            self.processed_output_sequence.store(sequence, Ordering::Release);
+            self.processed_output_sequence
+                .store(sequence, Ordering::Release);
         }
         *self.last_output_time.lock() = Instant::now();
     }
@@ -151,7 +152,8 @@ impl Terminal {
     pub fn send_input(&self, input: &str) {
         self.had_user_input.store(true, Ordering::Relaxed);
         self.scroll_to_bottom();
-        self.transport.send_input(&self.terminal_id, input.as_bytes());
+        self.transport
+            .send_input(&self.terminal_id, input.as_bytes());
     }
 
     /// Send pasted text to the PTY, wrapping in bracketed paste sequences if the
@@ -168,7 +170,8 @@ impl Terminal {
             // No bracketed paste mode: convert all newlines to CR so each line lands
             // as Enter for the shell. (Multi-line content will execute line-by-line.)
             let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
-            self.transport.send_input(&self.terminal_id, normalized.as_bytes());
+            self.transport
+                .send_input(&self.terminal_id, normalized.as_bytes());
         }
     }
 
@@ -196,9 +199,7 @@ impl Terminal {
         let normalized = text.replace("\r\n", "\n");
         // Strip any embedded paste markers so callers can't smuggle an early
         // `\x1b[201~` and break out into raw input.
-        let sanitized = normalized
-            .replace("\x1b[200~", "")
-            .replace("\x1b[201~", "");
+        let sanitized = normalized.replace("\x1b[200~", "").replace("\x1b[201~", "");
         let mut buf = Vec::with_capacity(sanitized.len() + 12);
         buf.extend_from_slice(b"\x1b[200~");
         buf.extend_from_slice(sanitized.as_bytes());
@@ -227,7 +228,10 @@ impl Terminal {
         let event = crate::input::KeyEvent {
             key: key.to_string(),
             key_char: None,
-            modifiers: crate::input::KeyModifiers { shift, ..Default::default() },
+            modifiers: crate::input::KeyModifiers {
+                shift,
+                ..Default::default()
+            },
         };
         if let Some(bytes) = crate::input::key_to_bytes(
             &event,
@@ -258,7 +262,8 @@ impl Terminal {
         // Send ANSI escape sequence to clear screen and move cursor to home
         // \x1b[2J = clear entire screen
         // \x1b[H = move cursor to home position (0,0)
-        self.transport.send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
+        self.transport
+            .send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
         self.scroll_to_bottom();
     }
 }

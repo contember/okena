@@ -90,10 +90,8 @@ impl GitHeader {
         let page = COMMIT_PAGE_SIZE;
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let result = smol::unblock(move || {
-                provider.get_commit_graph(page, branch.as_deref())
-            })
-            .await;
+            let result =
+                smol::unblock(move || provider.get_commit_graph(page, branch.as_deref())).await;
 
             let _ = this.update(cx, |this, cx| {
                 this.commit_log_loading = false;
@@ -128,10 +126,9 @@ impl GitHeader {
         let new_total = already_loaded + page;
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let result = smol::unblock(move || {
-                provider.get_commit_graph(new_total, branch.as_deref())
-            })
-            .await;
+            let result =
+                smol::unblock(move || provider.get_commit_graph(new_total, branch.as_deref()))
+                    .await;
 
             let _ = this.update(cx, |this, cx| {
                 this.commit_log_loading = false;
@@ -187,47 +184,61 @@ impl GitHeader {
                     None
                 } else {
                     let all_commits: Vec<CommitLogEntry> = self.commit_log_entries.clone();
-                    Some(Arc::new(move |hash: &str, msg: &str, commit_idx: usize, _window: &mut Window, cx: &mut App| {
-                        let commit_hash = hash.to_string();
-                        let commit_msg = msg.to_string();
-                        let commits_vec = all_commits.clone();
-                        entity_handle.update(cx, |this: &mut GitHeader, cx| {
-                            this.hide_commit_log(cx);
-                        });
-                        request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
-                                project_id: project_id.clone(),
-                                kind: ProjectOverlayKind::DiffViewer {
-                                    file: None,
-                                    mode: Some(DiffMode::Commit(commit_hash)),
-                                    commit_message: Some(commit_msg),
-                                    commits: Some(commits_vec),
-                                    commit_index: Some(commit_idx),
-                                },
-                            }), cx);
-                        });
-                    }))
+                    Some(Arc::new(
+                        move |hash: &str,
+                              msg: &str,
+                              commit_idx: usize,
+                              _window: &mut Window,
+                              cx: &mut App| {
+                            let commit_hash = hash.to_string();
+                            let commit_msg = msg.to_string();
+                            let commits_vec = all_commits.clone();
+                            entity_handle.update(cx, |this: &mut GitHeader, cx| {
+                                this.hide_commit_log(cx);
+                            });
+                            request_broker.update(cx, |broker, cx| {
+                                broker.push_overlay_request(
+                                    OverlayRequest::Project(ProjectOverlay {
+                                        project_id: project_id.clone(),
+                                        kind: ProjectOverlayKind::DiffViewer {
+                                            file: None,
+                                            mode: Some(DiffMode::Commit(commit_hash)),
+                                            commit_message: Some(commit_msg),
+                                            commits: Some(commits_vec),
+                                            commit_index: Some(commit_idx),
+                                        },
+                                    }),
+                                    cx,
+                                );
+                            });
+                        },
+                    ))
                 };
             let on_commit_right_click: crate::project_header::CommitRightClickCallback = {
                 let entity_handle = cx.entity().clone();
-                Some(Arc::new(move |hash: &str, position: Point<Pixels>, _window: &mut Window, cx: &mut App| {
-                    let hash = hash.to_string();
-                    entity_handle.update(cx, |this, cx| {
-                        let entry = this
-                            .commit_log_entries
-                            .iter()
-                            .find(|e| e.hash == hash)
-                            .cloned();
-                        if let Some(entry) = entry {
-                            this.commit_row_menu = Some(CommitRowContextMenu {
-                                position,
-                                hash: entry.hash.clone(),
-                                send_text: crate::commit_send::format_commit_entry(&entry),
-                            });
-                            cx.notify();
-                        }
-                    });
-                }))
+                Some(Arc::new(
+                    move |hash: &str,
+                          position: Point<Pixels>,
+                          _window: &mut Window,
+                          cx: &mut App| {
+                        let hash = hash.to_string();
+                        entity_handle.update(cx, |this, cx| {
+                            let entry = this
+                                .commit_log_entries
+                                .iter()
+                                .find(|e| e.hash == hash)
+                                .cloned();
+                            if let Some(entry) = entry {
+                                this.commit_row_menu = Some(CommitRowContextMenu {
+                                    position,
+                                    hash: entry.hash.clone(),
+                                    send_text: crate::commit_send::format_commit_entry(&entry),
+                                });
+                                cx.notify();
+                            }
+                        });
+                    },
+                ))
             };
             let graph = project_header::render_commit_log_content(
                 &self.commit_log_entries,
@@ -654,12 +665,13 @@ impl GitHeader {
             )
             .child(menu_separator(t))
             .child(
-                menu_item("commit-row-ctx-copy", "icons/copy.svg", "Copy Hash", t)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                menu_item("commit-row-ctx-copy", "icons/copy.svg", "Copy Hash", t).on_click(
+                    cx.listener(move |this, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(hash_for_copy.clone()));
                         this.commit_row_menu = None;
                         cx.notify();
-                    })),
+                    }),
+                ),
             );
 
         Some(

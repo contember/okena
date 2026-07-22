@@ -3,16 +3,16 @@ pub mod parser;
 pub mod register;
 pub mod resolve;
 
-use okena_core::process::is_process_alive;
-use okena_workspace::persistence::config_dir;
 use clap::Parser as _;
+use okena_core::process::is_process_alive;
+use okena_transport::client::{LocalEndpoint, RemoteConnectionConfig};
+use okena_workspace::persistence::config_dir;
 use parser::{
     Cli, Command, FolderCmd, PaletteCmd, ProjectCmd, ServiceCmd, SettingsCmd, SkillCmd, TermCmd,
     ThemeCmd, WorktreeCmd,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use okena_transport::client::{LocalEndpoint, RemoteConnectionConfig};
 
 /// CLI config stored in `~/.config/okena/cli.json`.
 #[derive(Serialize, Deserialize)]
@@ -34,8 +34,7 @@ pub fn try_handle_cli() -> Option<i32> {
     let first = args.get(1)?.as_str();
 
     // Explicit top-level help / version request → let clap render it.
-    let is_help_or_version =
-        matches!(first, "-h" | "--help" | "help" | "-V" | "--version");
+    let is_help_or_version = matches!(first, "-h" | "--help" | "help" | "-V" | "--version");
 
     // Only claim the args if the first token is one of our subcommands.
     if !is_help_or_version && !parser::subcommand_names().contains(&first) {
@@ -49,8 +48,7 @@ pub fn try_handle_cli() -> Option<i32> {
             // use exit code 2 for genuine parse errors (0 for --help/--version).
             let _ = e.print();
             let code = match e.kind() {
-                clap::error::ErrorKind::DisplayHelp
-                | clap::error::ErrorKind::DisplayVersion => 0,
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
                 _ => 2,
             };
             Some(code)
@@ -92,19 +90,23 @@ fn dispatch(cli: Cli) -> i32 {
         Command::Health { json } => commands::cli_health(json),
         Command::State => commands::cli_state(),
         Command::Action { json } => commands::cli_action(&json),
-        Command::Services { project, json } => {
-            commands::cli_services(project.as_deref(), json)
-        }
+        Command::Services { project, json } => commands::cli_services(project.as_deref(), json),
         Command::Service { cmd } => match cmd {
-            ServiceCmd::Start { name, project, json } => {
-                commands::cli_service("start", &name, project.as_deref(), json)
-            }
-            ServiceCmd::Stop { name, project, json } => {
-                commands::cli_service("stop", &name, project.as_deref(), json)
-            }
-            ServiceCmd::Restart { name, project, json } => {
-                commands::cli_service("restart", &name, project.as_deref(), json)
-            }
+            ServiceCmd::Start {
+                name,
+                project,
+                json,
+            } => commands::cli_service("start", &name, project.as_deref(), json),
+            ServiceCmd::Stop {
+                name,
+                project,
+                json,
+            } => commands::cli_service("stop", &name, project.as_deref(), json),
+            ServiceCmd::Restart {
+                name,
+                project,
+                json,
+            } => commands::cli_service("restart", &name, project.as_deref(), json),
         },
         Command::Whoami { json } => commands::cli_whoami(json),
         Command::Ls { json } => commands::cli_ls(json),
@@ -115,22 +117,14 @@ fn dispatch(cli: Cli) -> i32 {
                 name,
                 hidden,
                 folder,
-            } => commands::cli_project_add(
-                &path,
-                name.as_deref(),
-                hidden,
-                folder.as_deref(),
-                window,
-            ),
+            } => {
+                commands::cli_project_add(&path, name.as_deref(), hidden, folder.as_deref(), window)
+            }
             ProjectCmd::Rm { project } => commands::cli_project_rm(&project),
             ProjectCmd::Show { project } => commands::cli_project_show(&project, true, window),
             ProjectCmd::Hide { project } => commands::cli_project_show(&project, false, window),
-            ProjectCmd::Rename { project, name } => {
-                commands::cli_project_rename(&project, &name)
-            }
-            ProjectCmd::Color { project, color } => {
-                commands::cli_project_color(&project, &color)
-            }
+            ProjectCmd::Rename { project, name } => commands::cli_project_rename(&project, &name),
+            ProjectCmd::Color { project, color } => commands::cli_project_color(&project, &color),
             ProjectCmd::Focus { project } => commands::cli_project_focus(&project, window),
         },
 
@@ -155,9 +149,10 @@ fn dispatch(cli: Cli) -> i32 {
             TermCmd::Close { terminal } => commands::cli_term_close(&terminal),
             TermCmd::Focus { terminal } => commands::cli_term_focus(&terminal, window),
             TermCmd::Rename { terminal, name } => commands::cli_term_rename(&terminal, &name),
-            TermCmd::Split { terminal, direction } => {
-                commands::cli_term_split(&terminal, &direction)
-            }
+            TermCmd::Split {
+                terminal,
+                direction,
+            } => commands::cli_term_split(&terminal, &direction),
             TermCmd::Tab { terminal } => commands::cli_term_tab(&terminal),
             TermCmd::Minimize { terminal } => commands::cli_term_minimize(&terminal),
             TermCmd::Fullscreen { terminal, off } => {
@@ -189,9 +184,11 @@ fn dispatch(cli: Cli) -> i32 {
             ThemeCmd::List { json } => commands::cli_theme_list(json),
             ThemeCmd::Show { id } => commands::cli_theme_show(id.as_deref()),
             ThemeCmd::Set { id } => commands::cli_theme_set(&id),
-            ThemeCmd::Save { id, json, no_activate } => {
-                commands::cli_theme_save(&id, json.as_deref(), !no_activate)
-            }
+            ThemeCmd::Save {
+                id,
+                json,
+                no_activate,
+            } => commands::cli_theme_save(&id, json.as_deref(), !no_activate),
         },
         Command::Cmd { cmd } => match cmd {
             PaletteCmd::List { json } => commands::cli_command_list(json),
@@ -218,8 +215,7 @@ fn save_cli_config(config: &CliConfig) -> Result<(), String> {
     }
     let json =
         serde_json::to_string_pretty(config).map_err(|e| format!("Failed to serialize: {e}"))?;
-    std::fs::write(&path, json.as_bytes())
-        .map_err(|e| format!("Failed to write cli.json: {e}"))?;
+    std::fs::write(&path, json.as_bytes()).map_err(|e| format!("Failed to write cli.json: {e}"))?;
 
     #[cfg(unix)]
     {
@@ -240,7 +236,10 @@ pub(crate) struct DiscoveredServer {
 }
 
 impl DiscoveredServer {
-    pub fn client_and_url(&self, path: &str) -> Result<(reqwest::blocking::Client, String), String> {
+    pub fn client_and_url(
+        &self,
+        path: &str,
+    ) -> Result<(reqwest::blocking::Client, String), String> {
         #[cfg(unix)]
         if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = &self.local_endpoint {
             let client = reqwest::blocking::Client::builder()
@@ -257,7 +256,10 @@ impl DiscoveredServer {
             std::time::Duration::from_secs(10),
         )?;
         let scheme = if self.tls { "https" } else { "http" };
-        Ok((client, format!("{scheme}://{}:{}{path}", self.host, self.port)))
+        Ok((
+            client,
+            format!("{scheme}://{}:{}{path}", self.host, self.port),
+        ))
     }
 }
 
@@ -283,14 +285,22 @@ fn discover_server() -> Result<DiscoveredServer, String> {
     let local_endpoint = json
         .get("local_endpoint")
         .and_then(|value| serde_json::from_value::<LocalEndpoint>(value.clone()).ok());
-    let tls = json.get("tls").and_then(|value| value.as_bool()).unwrap_or(false);
+    let tls = json
+        .get("tls")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
 
     let pid = json.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     if pid != 0 && !is_process_alive(pid) {
         return Err("Okena is not running (stale remote.json).".to_string());
     }
 
-    Ok(DiscoveredServer { host, port, tls, local_endpoint })
+    Ok(DiscoveredServer {
+        host,
+        port,
+        tls,
+        local_endpoint,
+    })
 }
 
 /// Ensure we have a valid token, auto-registering if needed.
@@ -354,8 +364,9 @@ fn api_action(token: &str, body: &str) -> Result<String, String> {
     match okena_transport::remote_action::RemoteActionClient::new(config, token.to_string())
         .post_action(action)?
     {
-        Some(value) => serde_json::to_string(&value)
-            .map_err(|e| format!("Failed to serialize response: {e}")),
+        Some(value) => {
+            serde_json::to_string(&value).map_err(|e| format!("Failed to serialize response: {e}"))
+        }
         None => Ok(String::new()),
     }
 }

@@ -1,11 +1,11 @@
 use crate::theme::theme;
 use crate::ui::tokens::ui_text_md;
-use gpui::*;
 use gpui::prelude::*;
+use gpui::*;
 use okena_extensions::ExtensionRegistry;
 
-use super::categories::SettingsCategory;
 use super::SettingsPanel;
+use super::categories::SettingsCategory;
 
 impl SettingsPanel {
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -17,10 +17,14 @@ impl SettingsPanel {
         };
 
         // Collect extension categories (extensions with settings_view that are enabled)
-        let ext_categories: Vec<(SettingsCategory, String)> = if self.selected_project_id.is_none() {
+        let ext_categories: Vec<(SettingsCategory, String)> = if self.selected_project_id.is_none()
+        {
             cx.try_global::<ExtensionRegistry>()
                 .map(|registry| {
-                    let settings = crate::settings::settings_entity(cx).read(cx).settings.clone();
+                    let settings = crate::settings::settings_entity(cx)
+                        .read(cx)
+                        .settings
+                        .clone();
                     registry
                         .extensions()
                         .iter()

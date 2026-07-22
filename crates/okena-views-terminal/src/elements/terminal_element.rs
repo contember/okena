@@ -1,19 +1,19 @@
 use crate::terminal_view_settings;
-use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_files::theme::theme;
-use okena_ui::theme::ansi_to_hsla;
-use okena_ui::color_utils::tint_color;
-use okena_workspace::settings::CursorShape;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::grid::Dimensions;
 use gpui::*;
+use okena_files::theme::theme;
+use okena_terminal::terminal::{Terminal, TerminalSize};
+use okena_ui::color_utils::tint_color;
+use okena_ui::theme::ansi_to_hsla;
+use okena_workspace::settings::CursorShape;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::terminal_input::TerminalInputHandler;
 use super::terminal_rendering::{BatchedTextRun, LayoutRect, is_default_bg};
@@ -111,8 +111,16 @@ fn shared_resize_target(
     viewers.insert(viewer_id, desired_size);
 
     let viewer_count = viewers.len();
-    let min_cols = viewers.values().map(|size| size.cols).min().unwrap_or(desired_size.cols);
-    let min_rows = viewers.values().map(|size| size.rows).min().unwrap_or(desired_size.rows);
+    let min_cols = viewers
+        .values()
+        .map(|size| size.cols)
+        .min()
+        .unwrap_or(desired_size.cols);
+    let min_rows = viewers
+        .values()
+        .map(|size| size.rows)
+        .min()
+        .unwrap_or(desired_size.rows);
 
     (
         viewer_count,
@@ -139,10 +147,7 @@ pub enum LinkKind {
     /// A web URL (http/https)
     Url,
     /// A file path, optionally with line and column numbers
-    FilePath {
-        line: Option<u32>,
-        col: Option<u32>,
-    },
+    FilePath { line: Option<u32>, col: Option<u32> },
 }
 
 /// A detected URL or file path in the terminal grid
@@ -326,7 +331,8 @@ impl Element for TerminalElement {
         let font_id = text_system.resolve_font(&font);
 
         // Use advance() for proper cell width (like Zed)
-        let cell_width = text_system.advance(font_id, font_size, 'm')
+        let cell_width = text_system
+            .advance(font_id, font_size, 'm')
             .map(|size| size.width)
             .unwrap_or(font_size * 0.6);
 
@@ -413,7 +419,8 @@ impl Element for TerminalElement {
         );
 
         let current_size = self.terminal.resize_state.lock().size;
-        let cols_rows_changed = resize_size.cols != current_size.cols || resize_size.rows != current_size.rows;
+        let cols_rows_changed =
+            resize_size.cols != current_size.cols || resize_size.rows != current_size.rows;
         let cell_size_changed = (cell_width_f - current_size.cell_width).abs() > 0.001
             || (line_height_f - current_size.cell_height).abs() > 0.001;
 
@@ -423,7 +430,11 @@ impl Element for TerminalElement {
             // desired by all live viewers. This avoids ping-pong between
             // differently shaped windows while still allowing growth once every
             // visible viewer can fit the larger dimension.
-            let target = if n_viewers <= 1 { desired_size } else { resize_size };
+            let target = if n_viewers <= 1 {
+                desired_size
+            } else {
+                resize_size
+            };
             self.terminal.resize(target);
         } else if cell_size_changed {
             let mut rs = self.terminal.resize_state.lock();
@@ -496,14 +507,24 @@ impl Element for TerminalElement {
 
                     if cell.flags.contains(Flags::BOLD) {
                         fg = match fg {
-                            Color::Named(NamedColor::Black) => Color::Named(NamedColor::BrightBlack),
+                            Color::Named(NamedColor::Black) => {
+                                Color::Named(NamedColor::BrightBlack)
+                            }
                             Color::Named(NamedColor::Red) => Color::Named(NamedColor::BrightRed),
-                            Color::Named(NamedColor::Green) => Color::Named(NamedColor::BrightGreen),
-                            Color::Named(NamedColor::Yellow) => Color::Named(NamedColor::BrightYellow),
+                            Color::Named(NamedColor::Green) => {
+                                Color::Named(NamedColor::BrightGreen)
+                            }
+                            Color::Named(NamedColor::Yellow) => {
+                                Color::Named(NamedColor::BrightYellow)
+                            }
                             Color::Named(NamedColor::Blue) => Color::Named(NamedColor::BrightBlue),
-                            Color::Named(NamedColor::Magenta) => Color::Named(NamedColor::BrightMagenta),
+                            Color::Named(NamedColor::Magenta) => {
+                                Color::Named(NamedColor::BrightMagenta)
+                            }
                             Color::Named(NamedColor::Cyan) => Color::Named(NamedColor::BrightCyan),
-                            Color::Named(NamedColor::White) => Color::Named(NamedColor::BrightWhite),
+                            Color::Named(NamedColor::White) => {
+                                Color::Named(NamedColor::BrightWhite)
+                            }
                             Color::Indexed(idx @ 0..=7) => Color::Indexed(idx + 8),
                             other => other,
                         };
@@ -513,28 +534,31 @@ impl Element for TerminalElement {
                         std::mem::swap(&mut fg, &mut bg);
                     }
 
-                    let is_selected = if let Some(((start_col, start_row), (end_col, end_row))) = selection {
-                        let (start_row, start_col, end_row, end_col) = if start_row < end_row || (start_row == end_row && start_col <= end_col) {
-                            (start_row, start_col, end_row, end_col)
-                        } else {
-                            (end_row, end_col, start_row, start_col)
-                        };
-                        if buffer_line >= start_row && buffer_line <= end_row {
-                            if start_row == end_row {
-                                col >= start_col && col <= end_col
-                            } else if buffer_line == start_row {
-                                col >= start_col
-                            } else if buffer_line == end_row {
-                                col <= end_col
+                    let is_selected =
+                        if let Some(((start_col, start_row), (end_col, end_row))) = selection {
+                            let (start_row, start_col, end_row, end_col) = if start_row < end_row
+                                || (start_row == end_row && start_col <= end_col)
+                            {
+                                (start_row, start_col, end_row, end_col)
                             } else {
-                                true
+                                (end_row, end_col, start_row, start_col)
+                            };
+                            if buffer_line >= start_row && buffer_line <= end_row {
+                                if start_row == end_row {
+                                    col >= start_col && col <= end_col
+                                } else if buffer_line == start_row {
+                                    col >= start_col
+                                } else if buffer_line == end_row {
+                                    col <= end_col
+                                } else {
+                                    true
+                                }
+                            } else {
+                                false
                             }
                         } else {
                             false
-                        }
-                    } else {
-                        false
-                    };
+                        };
 
                     let bg_color = if is_selected {
                         Some(rgb(t.selection_bg).into())
@@ -567,7 +591,8 @@ impl Element for TerminalElement {
                     if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                         continue;
                     }
-                    if cell.c == ' ' && !cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKEOUT) {
+                    if cell.c == ' ' && !cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKEOUT)
+                    {
                         continue;
                     }
 
@@ -629,7 +654,12 @@ impl Element for TerminalElement {
                         if let Some(prev) = current_batch.take() {
                             batched_runs.push(prev);
                         }
-                        current_batch = Some(BatchedTextRun::new(visual_line, col_i32, cell.c, text_style));
+                        current_batch = Some(BatchedTextRun::new(
+                            visual_line,
+                            col_i32,
+                            cell.c,
+                            text_style,
+                        ));
                     }
                 }
             }
@@ -657,10 +687,20 @@ impl Element for TerminalElement {
                 let is_current = self.current_match_index == Some(idx);
                 let highlight_color = if is_current {
                     let c = rgb(t.search_current_bg);
-                    Hsla::from(Rgba { r: c.r, g: c.g, b: c.b, a: 0.7 })
+                    Hsla::from(Rgba {
+                        r: c.r,
+                        g: c.g,
+                        b: c.b,
+                        a: 0.7,
+                    })
                 } else {
                     let c = rgb(t.search_match_bg);
-                    Hsla::from(Rgba { r: c.r, g: c.g, b: c.b, a: 0.5 })
+                    Hsla::from(Rgba {
+                        r: c.r,
+                        g: c.g,
+                        b: c.b,
+                        a: 0.5,
+                    })
                 };
 
                 let position = point(
@@ -688,7 +728,12 @@ impl Element for TerminalElement {
                 let url_width = px((cell_width_f * url_match.len as f32).ceil());
 
                 if is_hovered {
-                    let hover_bg = Hsla::from(Rgba { r: 0.0, g: 0.48, b: 0.8, a: 0.2 });
+                    let hover_bg = Hsla::from(Rgba {
+                        r: 0.0,
+                        g: 0.48,
+                        b: 0.8,
+                        a: 0.2,
+                    });
                     let hover_bounds = Bounds {
                         origin: point(url_x, url_y),
                         size: size(url_width, line_height),
@@ -703,7 +748,12 @@ impl Element for TerminalElement {
                     };
                     window.paint_quad(fill(underline_bounds, underline_color));
                 } else {
-                    let underline_color = Hsla::from(Rgba { r: 0.5, g: 0.5, b: 0.5, a: 0.5 });
+                    let underline_color = Hsla::from(Rgba {
+                        r: 0.5,
+                        g: 0.5,
+                        b: 0.5,
+                        a: 0.5,
+                    });
                     let underline_y = url_y + line_height - px(2.0);
                     let underline_bounds = Bounds {
                         origin: point(url_x, underline_y),
@@ -724,12 +774,19 @@ impl Element for TerminalElement {
                 let cursor_visual_line = cursor_point.line.0 + display_offset;
 
                 if cursor_visual_line >= 0 && cursor_visual_line < screen_lines as i32 {
-                    let cursor_x = px((f32::from(origin.x) + cursor_point.column.0 as f32 * cell_width_f).floor());
-                    let cursor_y = px((f32::from(origin.y) + cursor_visual_line as f32 * line_height_f).floor());
+                    let cursor_x = px((f32::from(origin.x)
+                        + cursor_point.column.0 as f32 * cell_width_f)
+                        .floor());
+                    let cursor_y = px((f32::from(origin.y)
+                        + cursor_visual_line as f32 * line_height_f)
+                        .floor());
 
                     let cursor_rgba = rgb(t.cursor);
                     let cursor_color = Hsla::from(Rgba {
-                        r: cursor_rgba.r, g: cursor_rgba.g, b: cursor_rgba.b, a: 0.8,
+                        r: cursor_rgba.r,
+                        g: cursor_rgba.g,
+                        b: cursor_rgba.b,
+                        a: 0.8,
                     });
 
                     let cursor_bounds = match cursor_style {
@@ -755,7 +812,10 @@ impl Element for TerminalElement {
         if !is_focused {
             let bg_rgba = rgb(bg_color);
             let fog = Hsla::from(Rgba {
-                r: bg_rgba.r, g: bg_rgba.g, b: bg_rgba.b, a: 0.2,
+                r: bg_rgba.r,
+                g: bg_rgba.g,
+                b: bg_rgba.b,
+                a: 0.2,
             });
             window.paint_quad(fill(bounds, fog));
         }

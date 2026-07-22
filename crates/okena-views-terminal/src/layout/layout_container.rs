@@ -1,20 +1,20 @@
 //! Recursive layout container that renders terminal/split/tabs nodes
 
 use crate::ActionDispatch;
-use okena_core::api::ActionRequest;
-use okena_terminal::backend::TerminalBackend;
-use okena_files::theme::theme;
-use okena_ui::theme::with_alpha;
-use okena_ui::click_detector::ClickDetector;
-use crate::layout::pane_drag::{PaneDrag, DropZone};
+use crate::layout::pane_drag::{DropZone, PaneDrag};
 use crate::layout::split_pane::{ActiveDrag, render_split_divider};
 use crate::layout::terminal_pane::TerminalPane;
+use gpui::prelude::*;
+use gpui::*;
+use okena_core::api::ActionRequest;
+use okena_files::theme::theme;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
+use okena_ui::click_detector::ClickDetector;
+use okena_ui::theme::with_alpha;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{LayoutNode, SplitDirection, WindowId, Workspace};
-use gpui::*;
-use gpui::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -77,7 +77,10 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             child_containers: HashMap::new(),
             container_bounds_ref: Rc::new(RefCell::new(Bounds {
                 origin: Point::default(),
-                size: Size { width: px(800.0), height: px(600.0) },
+                size: Size {
+                    width: px(800.0),
+                    height: px(600.0),
+                },
             })),
             drop_animation: None,
             active_drag,
@@ -207,9 +210,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let parent_path = &self.layout_path[..self.layout_path.len() - 1];
         let ws = self.workspace.read(cx);
         if let Some(project) = ws.project(&self.project_id)
-            && let Some(LayoutNode::Tabs { .. }) = project.layout.as_ref().and_then(|l| l.get_at_path(parent_path)) {
-                return true;
-            }
+            && let Some(LayoutNode::Tabs { .. }) = project
+                .layout
+                .as_ref()
+                .and_then(|l| l.get_at_path(parent_path))
+        {
+            return true;
+        }
         false
     }
 
@@ -240,16 +247,17 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
     pub(super) fn finish_tab_rename(&mut self, cx: &mut Context<Self>) {
         if let Some((terminal_id, new_name)) = finish_rename(&mut self.tab_rename_state, cx)
-            && let Some(ref dispatcher) = self.action_dispatcher {
-                dispatcher.dispatch(
-                    ActionRequest::RenameTerminal {
-                        project_id: self.project_id.clone(),
-                        terminal_id,
-                        name: new_name,
-                    },
-                    cx,
-                );
-            }
+            && let Some(ref dispatcher) = self.action_dispatcher
+        {
+            dispatcher.dispatch(
+                ActionRequest::RenameTerminal {
+                    project_id: self.project_id.clone(),
+                    terminal_id,
+                    name: new_name,
+                },
+                cx,
+            );
+        }
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
@@ -284,30 +292,22 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             fm.is_terminal_fullscreened(&self.project_id, tid)
         });
 
-        let mut container = div()
-            .size_full()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .relative();
+        let mut container = div().size_full().min_h_0().flex().flex_col().relative();
 
         if !in_tab_group && !is_zoomed {
             container = container.child(self.render_standalone_tab_bar(window, cx));
         }
 
-        container
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .when_some(self.terminal_pane.clone(), |d, pane| {
-                        d.child(AnyView::from(pane).cached(
-                            StyleRefinement::default().size_full(),
-                        ))
-                    })
-                    .child(self.render_drop_zones(terminal_id, cx, &self.active_drag.clone())),
-            )
+        container.child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .when_some(self.terminal_pane.clone(), |d, pane| {
+                    d.child(AnyView::from(pane).cached(StyleRefinement::default().size_full()))
+                })
+                .child(self.render_drop_zones(terminal_id, cx, &self.active_drag.clone())),
+        )
     }
 
     fn render_drop_zones(
@@ -323,53 +323,58 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let id_suffix = terminal_id.unwrap_or_else(|| format!("none-{:?}", self.layout_path));
         let dispatcher = self.action_dispatcher.clone();
 
-        let make_zone = |zone: DropZone, id_suffix: &str, active_drag: &ActiveDrag| -> Stateful<Div> {
-            let zone_id = format!("drop-zone-{}-{:?}", id_suffix, zone);
-            let pid = project_id.clone();
-            let this_tid = tid.clone();
-            let active_drag_for_hover = active_drag.clone();
-            let active_drag_for_drop = active_drag.clone();
-            let dispatcher = dispatcher.clone();
+        let make_zone =
+            |zone: DropZone, id_suffix: &str, active_drag: &ActiveDrag| -> Stateful<Div> {
+                let zone_id = format!("drop-zone-{}-{:?}", id_suffix, zone);
+                let pid = project_id.clone();
+                let this_tid = tid.clone();
+                let active_drag_for_hover = active_drag.clone();
+                let active_drag_for_drop = active_drag.clone();
+                let dispatcher = dispatcher.clone();
 
-            let zone_str = match zone {
-                DropZone::Top => "top",
-                DropZone::Bottom => "bottom",
-                DropZone::Left => "left",
-                DropZone::Right => "right",
-                DropZone::Center => "center",
-            };
+                let zone_str = match zone {
+                    DropZone::Top => "top",
+                    DropZone::Bottom => "bottom",
+                    DropZone::Left => "left",
+                    DropZone::Right => "right",
+                    DropZone::Center => "center",
+                };
 
-            div()
-                .id(ElementId::Name(zone_id.into()))
-                .drag_over::<PaneDrag>(move |style, _, _, _| {
-                    if active_drag_for_hover.borrow().is_some() {
-                        return style;
-                    }
-                    style.bg(highlight)
-                })
-                .on_drop(cx.listener({
-                    let pid = pid.clone();
-                    let this_tid = this_tid.clone();
-                    move |_this, drag: &PaneDrag, _window, cx| {
-                        if active_drag_for_drop.borrow().is_some() {
-                            return;
+                div()
+                    .id(ElementId::Name(zone_id.into()))
+                    .drag_over::<PaneDrag>(move |style, _, _, _| {
+                        if active_drag_for_hover.borrow().is_some() {
+                            return style;
                         }
-                        if Some(drag.terminal_id.as_str()) == this_tid.as_deref() {
-                            return;
-                        }
-                        if let Some(ref target_id) = this_tid
-                            && let Some(ref dispatcher) = dispatcher {
-                                dispatcher.dispatch(ActionRequest::MovePaneTo {
-                                    project_id: drag.project_id.clone(),
-                                    terminal_id: drag.terminal_id.clone(),
-                                    target_project_id: pid.clone(),
-                                    target_terminal_id: target_id.clone(),
-                                    zone: zone_str.to_string(),
-                                }, cx);
+                        style.bg(highlight)
+                    })
+                    .on_drop(cx.listener({
+                        let pid = pid.clone();
+                        let this_tid = this_tid.clone();
+                        move |_this, drag: &PaneDrag, _window, cx| {
+                            if active_drag_for_drop.borrow().is_some() {
+                                return;
                             }
-                    }
-                }))
-        };
+                            if Some(drag.terminal_id.as_str()) == this_tid.as_deref() {
+                                return;
+                            }
+                            if let Some(ref target_id) = this_tid
+                                && let Some(ref dispatcher) = dispatcher
+                            {
+                                dispatcher.dispatch(
+                                    ActionRequest::MovePaneTo {
+                                        project_id: drag.project_id.clone(),
+                                        terminal_id: drag.terminal_id.clone(),
+                                        target_project_id: pid.clone(),
+                                        target_terminal_id: target_id.clone(),
+                                        zone: zone_str.to_string(),
+                                    },
+                                    cx,
+                                );
+                            }
+                        }
+                    }))
+            };
 
         div()
             .absolute()
@@ -454,13 +459,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .clone();
 
             return div()
-                .id(ElementId::Name(format!("split-container-{}-{:?}", project_id, layout_path).into()))
+                .id(ElementId::Name(
+                    format!("split-container-{}-{:?}", project_id, layout_path).into(),
+                ))
                 .size_full()
                 .min_h_0()
                 .min_w_0()
-                .child(AnyView::from(container).cached(
-                    StyleRefinement::default().size_full()
-                ));
+                .child(AnyView::from(container).cached(StyleRefinement::default().size_full()));
         }
 
         let is_horizontal = direction == SplitDirection::Horizontal;
@@ -489,13 +494,17 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             })
             .collect();
         self.deregister_child_resize_viewers_except(&visible_paths, cx);
-        self.child_containers.retain(|path, _| valid_paths.contains(path));
+        self.child_containers
+            .retain(|path, _| valid_paths.contains(path));
 
         let container_bounds_ref = self.container_bounds_ref.clone();
 
         let total_visible_size: f32 = visible_children_info.iter().map(|(_, s)| s).sum();
         let normalized_sizes: Vec<f32> = if total_visible_size > 0.0 {
-            visible_children_info.iter().map(|(_, s)| s / total_visible_size * 100.0).collect()
+            visible_children_info
+                .iter()
+                .map(|(_, s)| s / total_visible_size * 100.0)
+                .collect()
         } else {
             vec![100.0 / visible_children_info.len().max(1) as f32; visible_children_info.len()]
         };
@@ -550,25 +559,29 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .flex_basis(relative(size_percent / 100.0))
                 .min_w_0()
                 .min_h_0()
-                .child(AnyView::from(container).cached(
-                    StyleRefinement::default().size_full()
-                ))
+                .child(AnyView::from(container).cached(StyleRefinement::default().size_full()))
                 .into_any_element();
 
             elements.push(child_element);
         }
 
         div()
-            .id(ElementId::Name(format!("split-container-{}-{:?}", project_id, layout_path).into()))
-            .child(canvas(
-                {
-                    let container_bounds_ref = container_bounds_ref.clone();
-                    move |bounds, _window, _cx| {
-                        *container_bounds_ref.borrow_mut() = bounds;
-                    }
-                },
-                |_bounds, _prepaint, _window, _cx| {},
-            ).absolute().size_full())
+            .id(ElementId::Name(
+                format!("split-container-{}-{:?}", project_id, layout_path).into(),
+            ))
+            .child(
+                canvas(
+                    {
+                        let container_bounds_ref = container_bounds_ref.clone();
+                        move |bounds, _window, _cx| {
+                            *container_bounds_ref.borrow_mut() = bounds;
+                        }
+                    },
+                    |_bounds, _prepaint, _window, _cx| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .flex()
             .when(is_horizontal, |d| d.flex_col())
             .flex_nowrap()

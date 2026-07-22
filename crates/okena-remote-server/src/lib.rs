@@ -87,4 +87,3 @@ pub struct GlobalRemoteInfo(pub RemoteInfo);
 
 #[cfg(feature = "gpui")]
 impl gpui::Global for GlobalRemoteInfo {}
-

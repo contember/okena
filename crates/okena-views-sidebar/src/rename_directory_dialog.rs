@@ -1,15 +1,15 @@
 //! Dialog for renaming a project's directory on disk.
 
 use crate::Cancel;
+use gpui::prelude::*;
+use gpui::*;
+use gpui_component::h_flex;
 use okena_ui::button::{button, button_primary};
 use okena_ui::input::input_container;
 use okena_ui::modal::{modal_backdrop, modal_content};
 use okena_ui::simple_input::{SimpleInput, SimpleInputState};
 use okena_ui::theme::theme;
-use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_xl, ui_text};
-use gpui::prelude::*;
-use gpui::*;
-use gpui_component::h_flex;
+use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_xl};
 use std::path::Path;
 
 /// Events emitted by the rename directory dialog
@@ -19,11 +19,16 @@ pub enum RenameDirectoryDialogEvent {
     Close,
     /// Rename was confirmed: the daemon performs the rename, updates the
     /// record, and mirrors the new path+name back.
-    Confirmed { project_id: String, new_name: String },
+    Confirmed {
+        project_id: String,
+        new_name: String,
+    },
 }
 
 impl okena_ui::overlay::CloseEvent for RenameDirectoryDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close | Self::Confirmed { .. }) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close | Self::Confirmed { .. })
+    }
 }
 
 impl EventEmitter<RenameDirectoryDialogEvent> for RenameDirectoryDialog {}
@@ -39,11 +44,7 @@ pub struct RenameDirectoryDialog {
 }
 
 impl RenameDirectoryDialog {
-    pub fn new(
-        project_id: String,
-        project_path: String,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(project_id: String, project_path: String, cx: &mut Context<Self>) -> Self {
         let current_name = Path::new(&project_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -51,8 +52,7 @@ impl RenameDirectoryDialog {
             .to_string();
 
         let name_input = cx.new(|cx| {
-            let mut input = SimpleInputState::new(cx)
-                .placeholder("Directory name...");
+            let mut input = SimpleInputState::new(cx).placeholder("Directory name...");
             input.set_value(&current_name, cx);
             input
         });
@@ -135,9 +135,12 @@ impl Render for RenameDirectoryDialog {
                     this.confirm(cx);
                 }
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.close(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close(cx);
+                }),
+            )
             .child(
                 modal_content("rename-dir-dialog", &t)
                     .w(px(420.0))
@@ -208,8 +211,9 @@ impl Render for RenameDirectoryDialog {
                                     .child(path_display),
                             )
                             .child(
-                                input_container(&t, Some(input_focused))
-                                    .child(SimpleInput::new(&name_input).text_size(ui_text(13.0, cx))),
+                                input_container(&t, Some(input_focused)).child(
+                                    SimpleInput::new(&name_input).text_size(ui_text(13.0, cx)),
+                                ),
                             ),
                     )
                     .when_some(error_msg, |d, msg| {

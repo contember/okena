@@ -247,9 +247,8 @@ impl DaemonCore {
         // producer; each connected client subscribes a receiver. Capacity bounds
         // the per-client backlog — a lagging client drops non-critical toasts.
         let toast_tx = Arc::new(tokio::sync::broadcast::channel::<ApiToast>(64).0);
-        let terminal_focus_tx = Arc::new(
-            tokio::sync::broadcast::channel::<ApiTerminalFocusRequest>(64).0,
-        );
+        let terminal_focus_tx =
+            Arc::new(tokio::sync::broadcast::channel::<ApiTerminalFocusRequest>(64).0);
         let auth_store = Arc::new(AuthStore::new());
         let remote_subscribed_terminals = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let next_connection_id = Arc::new(AtomicU64::new(0));

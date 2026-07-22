@@ -251,56 +251,54 @@ impl GitHeader {
         });
 
         deferred(
-            anchored()
-                .position(position)
-                .snap_to_window()
-                .child(
-                    v_flex()
-                        .id("ci-checks-popover")
-                        .occlude()
-                        .w(px(360.0))
-                        .max_h(px(420.0))
-                        .bg(rgb(t.bg_primary))
-                        .border_1()
-                        .border_color(rgb(t.border))
-                        .rounded(px(8.0))
-                        .shadow_lg()
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.hide_ci_checks(cx);
-                        }))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(header)
-                        .child({
-                            let body = v_flex()
-                                .id("ci-checks-scroll")
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .py(px(4.0));
-                            if checks.is_empty() {
-                                body.child(
-                                    div()
-                                        .px(px(10.0))
-                                        .py(px(8.0))
-                                        .text_size(ui_text_sm(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child("No checks reported"),
-                                )
-                            } else {
-                                body.children(
-                                    checks.into_iter().enumerate().map(|(i, c)| {
-                                        row(c, format!("ci-check-{}", i), cx)
-                                    }),
-                                )
-                            }
-                        })
-                        .when_some(footer, |d, f| d.child(f)),
-                ),
+            anchored().position(position).snap_to_window().child(
+                v_flex()
+                    .id("ci-checks-popover")
+                    .occlude()
+                    .w(px(360.0))
+                    .max_h(px(420.0))
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(8.0))
+                    .shadow_lg()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.hide_ci_checks(cx);
+                    }))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_scroll_wheel(|_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(header)
+                    .child({
+                        let body = v_flex()
+                            .id("ci-checks-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .py(px(4.0));
+                        if checks.is_empty() {
+                            body.child(
+                                div()
+                                    .px(px(10.0))
+                                    .py(px(8.0))
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_muted))
+                                    .child("No checks reported"),
+                            )
+                        } else {
+                            body.children(
+                                checks
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, c)| row(c, format!("ci-check-{}", i), cx)),
+                            )
+                        }
+                    })
+                    .when_some(footer, |d, f| d.child(f)),
+            ),
         )
         .into_any_element()
     }

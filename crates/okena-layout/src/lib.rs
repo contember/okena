@@ -48,7 +48,11 @@ impl LayoutNode {
     /// Returns true if this node is effectively hidden (all terminals within it are minimized or detached).
     pub fn is_all_hidden(&self) -> bool {
         match self {
-            LayoutNode::Terminal { minimized, detached, .. } => *minimized || *detached,
+            LayoutNode::Terminal {
+                minimized,
+                detached,
+                ..
+            } => *minimized || *detached,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 children.iter().all(|c| c.is_all_hidden())
             }
@@ -80,7 +84,11 @@ impl LayoutNode {
     pub fn transpose(&mut self) {
         match self {
             LayoutNode::Terminal { .. } => {}
-            LayoutNode::Split { direction, children, .. } => {
+            LayoutNode::Split {
+                direction,
+                children,
+                ..
+            } => {
                 *direction = direction.flipped();
                 for child in children {
                     child.transpose();
@@ -195,9 +203,13 @@ impl LayoutNode {
     /// Kept terminals preserve their ID, minimized, and detached state.
     pub fn clear_terminal_ids_except(&mut self, keep: &HashSet<&str>) {
         match self {
-            LayoutNode::Terminal { terminal_id, minimized, detached, .. } => {
-                let should_keep = terminal_id.as_deref()
-                    .is_some_and(|id| keep.contains(id));
+            LayoutNode::Terminal {
+                terminal_id,
+                minimized,
+                detached,
+                ..
+            } => {
+                let should_keep = terminal_id.as_deref().is_some_and(|id| keep.contains(id));
                 if !should_keep {
                     *terminal_id = None;
                     *minimized = false;
@@ -217,7 +229,11 @@ impl LayoutNode {
         self.find_terminal_path_recursive(target_id, vec![])
     }
 
-    fn find_terminal_path_recursive(&self, target_id: &str, current_path: Vec<usize>) -> Option<Vec<usize>> {
+    fn find_terminal_path_recursive(
+        &self,
+        target_id: &str,
+        current_path: Vec<usize>,
+    ) -> Option<Vec<usize>> {
         match self {
             LayoutNode::Terminal { terminal_id, .. } => {
                 if terminal_id.as_deref() == Some(target_id) {
@@ -230,7 +246,9 @@ impl LayoutNode {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
                     child_path.push(i);
-                    if let Some(found_path) = child.find_terminal_path_recursive(target_id, child_path) {
+                    if let Some(found_path) =
+                        child.find_terminal_path_recursive(target_id, child_path)
+                    {
                         return Some(found_path);
                     }
                 }
@@ -252,9 +270,9 @@ impl LayoutNode {
                     None
                 }
             }
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
-                children.iter().find_map(|c| c.find_terminal_node(target_id))
-            }
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children
+                .iter()
+                .find_map(|c| c.find_terminal_node(target_id)),
         }
     }
 
@@ -268,19 +286,27 @@ impl LayoutNode {
     /// - bare Terminal: wrapped together with `node` into a horizontal Split.
     pub fn append_to_root(&mut self, node: LayoutNode) {
         match self {
-            LayoutNode::Split { children, sizes, .. } => {
+            LayoutNode::Split {
+                children, sizes, ..
+            } => {
                 children.push(node);
                 let n = children.len();
                 *sizes = vec![1.0 / n as f32; n];
             }
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 children.push(node);
                 *active_tab = children.len() - 1;
             }
             LayoutNode::Terminal { .. } => {
                 let existing = std::mem::replace(
                     self,
-                    LayoutNode::Tabs { children: Vec::new(), active_tab: 0 },
+                    LayoutNode::Tabs {
+                        children: Vec::new(),
+                        active_tab: 0,
+                    },
                 );
                 *self = LayoutNode::Split {
                     direction: SplitDirection::Horizontal,
@@ -299,20 +325,26 @@ impl LayoutNode {
         result
     }
 
-    fn collect_inactive_tabs_recursive(&self, result: &mut HashSet<String>, is_behind_inactive_tab: bool) {
+    fn collect_inactive_tabs_recursive(
+        &self,
+        result: &mut HashSet<String>,
+        is_behind_inactive_tab: bool,
+    ) {
         match self {
             LayoutNode::Terminal { terminal_id, .. } => {
-                if is_behind_inactive_tab
-                    && let Some(id) = terminal_id {
-                        result.insert(id.clone());
-                    }
+                if is_behind_inactive_tab && let Some(id) = terminal_id {
+                    result.insert(id.clone());
+                }
             }
             LayoutNode::Split { children, .. } => {
                 for child in children {
                     child.collect_inactive_tabs_recursive(result, is_behind_inactive_tab);
                 }
             }
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 for (i, child) in children.iter().enumerate() {
                     let inactive = is_behind_inactive_tab || i != *active_tab;
                     child.collect_inactive_tabs_recursive(result, inactive);
@@ -332,10 +364,9 @@ impl LayoutNode {
     fn collect_tab_group_recursive(&self, result: &mut HashSet<String>, inside_tab_group: bool) {
         match self {
             LayoutNode::Terminal { terminal_id, .. } => {
-                if inside_tab_group
-                    && let Some(id) = terminal_id {
-                        result.insert(id.clone());
-                    }
+                if inside_tab_group && let Some(id) = terminal_id {
+                    result.insert(id.clone());
+                }
             }
             LayoutNode::Split { children, .. } => {
                 for child in children {
@@ -365,7 +396,10 @@ impl LayoutNode {
                     child.activate_tabs_along_path(&path[1..]);
                 }
             }
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 *active_tab = path[0];
                 if let Some(child) = children.get_mut(path[0]) {
                     child.activate_tabs_along_path(&path[1..]);
@@ -381,13 +415,20 @@ impl LayoutNode {
         result
     }
 
-    fn collect_minimized_recursive(&self, result: &mut Vec<(String, Vec<usize>)>, current_path: Vec<usize>) {
+    fn collect_minimized_recursive(
+        &self,
+        result: &mut Vec<(String, Vec<usize>)>,
+        current_path: Vec<usize>,
+    ) {
         match self {
-            LayoutNode::Terminal { terminal_id, minimized, .. } => {
-                if *minimized
-                    && let Some(id) = terminal_id {
-                        result.push((id.clone(), current_path));
-                    }
+            LayoutNode::Terminal {
+                terminal_id,
+                minimized,
+                ..
+            } => {
+                if *minimized && let Some(id) = terminal_id {
+                    result.push((id.clone(), current_path));
+                }
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
@@ -406,13 +447,20 @@ impl LayoutNode {
         result
     }
 
-    fn collect_detached_recursive(&self, result: &mut Vec<(String, Vec<usize>)>, current_path: Vec<usize>) {
+    fn collect_detached_recursive(
+        &self,
+        result: &mut Vec<(String, Vec<usize>)>,
+        current_path: Vec<usize>,
+    ) {
         match self {
-            LayoutNode::Terminal { terminal_id, detached, .. } => {
-                if *detached
-                    && let Some(id) = terminal_id {
-                        result.push((id.clone(), current_path));
-                    }
+            LayoutNode::Terminal {
+                terminal_id,
+                detached,
+                ..
+            } => {
+                if *detached && let Some(id) = terminal_id {
+                    result.push((id.clone(), current_path));
+                }
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
@@ -429,15 +477,21 @@ impl LayoutNode {
         self.find_uninitialized_terminal_path_recursive(vec![])
     }
 
-    fn find_uninitialized_terminal_path_recursive(&self, current_path: Vec<usize>) -> Option<Vec<usize>> {
+    fn find_uninitialized_terminal_path_recursive(
+        &self,
+        current_path: Vec<usize>,
+    ) -> Option<Vec<usize>> {
         match self {
-            LayoutNode::Terminal { terminal_id: None, .. } => Some(current_path),
+            LayoutNode::Terminal {
+                terminal_id: None, ..
+            } => Some(current_path),
             LayoutNode::Terminal { .. } => None,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
                     child_path.push(i);
-                    if let Some(path) = child.find_uninitialized_terminal_path_recursive(child_path) {
+                    if let Some(path) = child.find_uninitialized_terminal_path_recursive(child_path)
+                    {
                         return Some(path);
                     }
                 }
@@ -462,7 +516,11 @@ impl LayoutNode {
         self.find_terminal_path_recursive_impl(vec![], follow_active_tab)
     }
 
-    fn find_terminal_path_recursive_impl(&self, current_path: Vec<usize>, follow_active_tab: bool) -> Vec<usize> {
+    fn find_terminal_path_recursive_impl(
+        &self,
+        current_path: Vec<usize>,
+        follow_active_tab: bool,
+    ) -> Vec<usize> {
         match self {
             LayoutNode::Terminal { .. } => current_path,
             LayoutNode::Split { children, .. } => {
@@ -474,7 +532,11 @@ impl LayoutNode {
                     current_path
                 }
             }
-            LayoutNode::Tabs { children, active_tab, .. } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+                ..
+            } => {
                 let idx = if follow_active_tab {
                     (*active_tab).min(children.len().saturating_sub(1))
                 } else {
@@ -507,7 +569,9 @@ impl LayoutNode {
 
         match parent {
             LayoutNode::Terminal { .. } => None,
-            LayoutNode::Split { children, sizes, .. } => {
+            LayoutNode::Split {
+                children, sizes, ..
+            } => {
                 if child_index >= children.len() {
                     return None;
                 }
@@ -525,7 +589,10 @@ impl LayoutNode {
                 }
                 Some(removed)
             }
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 if child_index >= children.len() {
                     return None;
                 }
@@ -556,27 +623,40 @@ impl LayoutNode {
             }
         }
 
-        if let LayoutNode::Tabs { children, active_tab } = self {
+        if let LayoutNode::Tabs {
+            children,
+            active_tab,
+        } = self
+        {
             *active_tab = (*active_tab).min(children.len().saturating_sub(1));
         }
 
-        if let LayoutNode::Split { sizes, children, .. } = self
-            && sizes.len() != children.len() {
-                sizes.truncate(children.len());
-                while sizes.len() < children.len() {
-                    sizes.push(100.0 / children.len() as f32);
-                }
+        if let LayoutNode::Split {
+            sizes, children, ..
+        } = self
+            && sizes.len() != children.len()
+        {
+            sizes.truncate(children.len());
+            while sizes.len() < children.len() {
+                sizes.push(100.0 / children.len() as f32);
             }
+        }
 
         // Sizes are relative weights — the tiny-pair threshold is 10% of the total
         // sum so the check works regardless of overall scale.
-        if let LayoutNode::Split { sizes, children, .. } = self {
+        if let LayoutNode::Split {
+            sizes, children, ..
+        } = self
+        {
             let has_invalid = sizes.iter().any(|s| *s <= 0.0 || !s.is_finite());
             let total: f32 = sizes.iter().sum();
             let min_resize = total * 0.1;
             let has_tiny_pair = sizes.windows(2).any(|w| w[0] + w[1] <= min_resize);
             if has_invalid || has_tiny_pair {
-                log::warn!("Layout has invalid/too-small sizes {:?}, resetting to equal", sizes);
+                log::warn!(
+                    "Layout has invalid/too-small sizes {:?}, resetting to equal",
+                    sizes
+                );
                 let equal = 100.0 / children.len() as f32;
                 for s in sizes.iter_mut() {
                     *s = equal;
@@ -585,7 +665,9 @@ impl LayoutNode {
         }
 
         let should_unwrap = match self {
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children.len() <= 1,
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                children.len() <= 1
+            }
             _ => false,
         };
         if should_unwrap {
@@ -602,8 +684,15 @@ impl LayoutNode {
             return;
         }
 
-        if let LayoutNode::Split { direction, sizes, children } = self {
-            let has_same_dir_child = children.iter().any(|c| matches!(c, LayoutNode::Split { direction: d, .. } if d == direction));
+        if let LayoutNode::Split {
+            direction,
+            sizes,
+            children,
+        } = self
+        {
+            let has_same_dir_child = children
+                .iter()
+                .any(|c| matches!(c, LayoutNode::Split { direction: d, .. } if d == direction));
             if has_same_dir_child {
                 let dir = *direction;
                 let mut new_children = Vec::new();
@@ -612,7 +701,11 @@ impl LayoutNode {
                 for (i, child) in children.drain(..).enumerate() {
                     let parent_size = sizes[i];
                     match child {
-                        LayoutNode::Split { direction: child_dir, sizes: child_sizes, children: grandchildren } if child_dir == dir => {
+                        LayoutNode::Split {
+                            direction: child_dir,
+                            sizes: child_sizes,
+                            children: grandchildren,
+                        } if child_dir == dir => {
                             let child_total: f32 = child_sizes.iter().sum();
                             for (j, grandchild) in grandchildren.into_iter().enumerate() {
                                 new_children.push(grandchild);
@@ -636,19 +729,30 @@ impl LayoutNode {
     /// Used when creating worktree projects to duplicate layout with fresh terminals.
     pub fn clone_structure(&self) -> Self {
         match self {
-            LayoutNode::Terminal { shell_type, zoom_level, .. } => LayoutNode::Terminal {
+            LayoutNode::Terminal {
+                shell_type,
+                zoom_level,
+                ..
+            } => LayoutNode::Terminal {
                 terminal_id: None,
                 minimized: false,
                 detached: false,
                 shell_type: shell_type.clone(),
                 zoom_level: *zoom_level,
             },
-            LayoutNode::Split { direction, sizes, children } => LayoutNode::Split {
+            LayoutNode::Split {
+                direction,
+                sizes,
+                children,
+            } => LayoutNode::Split {
                 direction: *direction,
                 sizes: sizes.clone(),
                 children: children.iter().map(|c| c.clone_structure()).collect(),
             },
-            LayoutNode::Tabs { children, active_tab } => LayoutNode::Tabs {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => LayoutNode::Tabs {
                 children: children.iter().map(|c| c.clone_structure()).collect(),
                 active_tab: *active_tab,
             },
@@ -678,14 +782,16 @@ impl LayoutNode {
                     sizes: s_sizes,
                     children: s_children,
                 },
-                LayoutNode::Split { direction: l_dir, sizes: l_sizes, children: l_children, .. },
+                LayoutNode::Split {
+                    direction: l_dir,
+                    sizes: l_sizes,
+                    children: l_children,
+                    ..
+                },
             ) if s_dir == l_dir => {
                 let mapping = LayoutNode::matching_child_indices(s_children, l_children);
-                let merged_children = LayoutNode::merge_mapped_children(
-                    s_children,
-                    l_children,
-                    mapping.as_deref(),
-                );
+                let merged_children =
+                    LayoutNode::merge_mapped_children(s_children, l_children, mapping.as_deref());
                 let sizes = mapping
                     .filter(|indices| l_sizes.len() == indices.len())
                     .map(|indices| indices.into_iter().map(|index| l_sizes[index]).collect())
@@ -701,21 +807,19 @@ impl LayoutNode {
                     children: s_children,
                     active_tab: s_active,
                 },
-                LayoutNode::Tabs { children: l_children, active_tab: l_active, .. },
+                LayoutNode::Tabs {
+                    children: l_children,
+                    active_tab: l_active,
+                    ..
+                },
             ) => {
                 let mapping = LayoutNode::matching_child_indices(s_children, l_children);
-                let merged_children = LayoutNode::merge_mapped_children(
-                    s_children,
-                    l_children,
-                    mapping.as_deref(),
-                );
+                let merged_children =
+                    LayoutNode::merge_mapped_children(s_children, l_children, mapping.as_deref());
                 LayoutNode::Tabs {
                     children: merged_children,
                     active_tab: LayoutNode::merged_active_tab(
-                        s_children,
-                        *s_active,
-                        l_children,
-                        *l_active,
+                        s_children, *s_active, l_children, *l_active,
                     ),
                 }
             }
@@ -745,10 +849,7 @@ impl LayoutNode {
 
     /// Map every server child to the corresponding local child. Exact subtree
     /// identities handle reorder; positional overlap handles a child that grew.
-    fn matching_child_indices(
-        server: &[LayoutNode],
-        local: &[LayoutNode],
-    ) -> Option<Vec<usize>> {
+    fn matching_child_indices(server: &[LayoutNode], local: &[LayoutNode]) -> Option<Vec<usize>> {
         let server_ids: Vec<HashSet<String>> = server
             .iter()
             .map(|child| child.collect_terminal_ids().into_iter().collect())
@@ -798,10 +899,8 @@ impl LayoutNode {
         let Some(local_child) = local_children.get(local_active) else {
             return fallback;
         };
-        let selected_ids: HashSet<String> = local_child
-            .collect_terminal_ids()
-            .into_iter()
-            .collect();
+        let selected_ids: HashSet<String> =
+            local_child.collect_terminal_ids().into_iter().collect();
         if selected_ids.is_empty() {
             return local_active.min(server_children.len().saturating_sub(1));
         }
@@ -980,13 +1079,19 @@ impl LayoutNode {
             } => okena_core::api::ApiLayoutNode::Split {
                 direction: *direction,
                 sizes: split_sizes.clone(),
-                children: children.iter().map(|c| c.to_api_with_sizes(sizes)).collect(),
+                children: children
+                    .iter()
+                    .map(|c| c.to_api_with_sizes(sizes))
+                    .collect(),
             },
             LayoutNode::Tabs {
                 children,
                 active_tab,
             } => okena_core::api::ApiLayoutNode::Tabs {
-                children: children.iter().map(|c| c.to_api_with_sizes(sizes)).collect(),
+                children: children
+                    .iter()
+                    .map(|c| c.to_api_with_sizes(sizes))
+                    .collect(),
                 active_tab: *active_tab,
             },
         }
@@ -1042,15 +1147,27 @@ mod tests {
         ]);
         tree.transpose();
 
-        let LayoutNode::Split { direction, children, .. } = &tree else {
+        let LayoutNode::Split {
+            direction,
+            children,
+            ..
+        } = &tree
+        else {
             panic!("expected split");
         };
         assert_eq!(*direction, SplitDirection::Vertical);
-        let LayoutNode::Tabs { children: tab_children, active_tab } = &children[1] else {
+        let LayoutNode::Tabs {
+            children: tab_children,
+            active_tab,
+        } = &children[1]
+        else {
             panic!("expected tabs");
         };
         assert_eq!(*active_tab, 0, "tab structure preserved");
-        let LayoutNode::Split { direction: inner, .. } = &tab_children[0] else {
+        let LayoutNode::Split {
+            direction: inner, ..
+        } = &tab_children[0]
+        else {
             panic!("expected nested split inside tabs");
         };
         assert_eq!(*inner, SplitDirection::Horizontal, "nested split flipped");
@@ -1080,7 +1197,10 @@ mod tests {
     fn append_to_root_split_pushes_and_rebalances() {
         let mut tree = hsplit(vec![terminal("a"), terminal("b")]);
         tree.append_to_root(terminal("c"));
-        let LayoutNode::Split { children, sizes, .. } = &tree else {
+        let LayoutNode::Split {
+            children, sizes, ..
+        } = &tree
+        else {
             panic!("expected split");
         };
         assert_eq!(children.len(), 3);
@@ -1098,7 +1218,11 @@ mod tests {
             active_tab: 0,
         };
         tree.append_to_root(terminal("c"));
-        let LayoutNode::Tabs { children, active_tab } = &tree else {
+        let LayoutNode::Tabs {
+            children,
+            active_tab,
+        } = &tree
+        else {
             panic!("expected tabs");
         };
         assert_eq!(children.len(), 3);
@@ -1109,7 +1233,10 @@ mod tests {
     fn append_to_root_bare_terminal_wraps_in_split() {
         let mut tree = terminal("a");
         tree.append_to_root(terminal("b"));
-        let LayoutNode::Split { children, sizes, .. } = &tree else {
+        let LayoutNode::Split {
+            children, sizes, ..
+        } = &tree
+        else {
             panic!("expected split after wrapping a bare terminal");
         };
         assert_eq!(children.len(), 2);
@@ -1234,16 +1361,18 @@ mod tests {
 
     #[test]
     fn clear_terminal_ids_resets_all() {
-        let mut node = hsplit(vec![
-            terminal_minimized("t1"),
-            terminal_detached("t2"),
-        ]);
+        let mut node = hsplit(vec![terminal_minimized("t1"), terminal_detached("t2")]);
         node.clear_terminal_ids_except(&HashSet::new());
         assert!(node.collect_terminal_ids().is_empty());
         match &node {
             LayoutNode::Split { children, .. } => {
                 for child in children {
-                    if let LayoutNode::Terminal { minimized, detached, .. } = child {
+                    if let LayoutNode::Terminal {
+                        minimized,
+                        detached,
+                        ..
+                    } = child
+                    {
                         assert!(!minimized);
                         assert!(!detached);
                     }
@@ -1326,10 +1455,7 @@ mod tests {
 
     #[test]
     fn collect_detached_terminals_finds_correct() {
-        let node = hsplit(vec![
-            terminal_detached("t1"),
-            terminal("t2"),
-        ]);
+        let node = hsplit(vec![terminal_detached("t1"), terminal("t2")]);
         let detached = node.collect_detached_terminals();
         assert_eq!(detached.len(), 1);
         assert_eq!(detached[0].0, "t1");
@@ -1402,7 +1528,12 @@ mod tests {
             ],
         };
         node.normalize();
-        if let LayoutNode::Split { children, direction, sizes } = &node {
+        if let LayoutNode::Split {
+            children,
+            direction,
+            sizes,
+        } = &node
+        {
             assert_eq!(*direction, SplitDirection::Horizontal);
             assert_eq!(children.len(), 3);
             assert_eq!(sizes.len(), 3);
@@ -1419,16 +1550,24 @@ mod tests {
         let mut node = LayoutNode::Split {
             direction: SplitDirection::Horizontal,
             sizes: vec![50.0, 50.0],
-            children: vec![
-                vsplit(vec![terminal("t1"), terminal("t2")]),
-                terminal("t3"),
-            ],
+            children: vec![vsplit(vec![terminal("t1"), terminal("t2")]), terminal("t3")],
         };
         node.normalize();
-        if let LayoutNode::Split { children, direction, .. } = &node {
+        if let LayoutNode::Split {
+            children,
+            direction,
+            ..
+        } = &node
+        {
             assert_eq!(*direction, SplitDirection::Horizontal);
             assert_eq!(children.len(), 2);
-            assert!(matches!(&children[0], LayoutNode::Split { direction: SplitDirection::Vertical, .. }));
+            assert!(matches!(
+                &children[0],
+                LayoutNode::Split {
+                    direction: SplitDirection::Vertical,
+                    ..
+                }
+            ));
         } else {
             panic!("Expected horizontal split with nested vertical");
         }
@@ -1448,7 +1587,11 @@ mod tests {
             active_tab: 5,
         };
         node.normalize();
-        if let LayoutNode::Tabs { children, active_tab } = &node {
+        if let LayoutNode::Tabs {
+            children,
+            active_tab,
+        } = &node
+        {
             assert_eq!(*active_tab, children.len() - 1);
         } else {
             panic!("Expected tabs after normalize");
@@ -1472,7 +1615,12 @@ mod tests {
         let mut node = LayoutNode::Split {
             direction: SplitDirection::Horizontal,
             sizes: vec![5.0, 2.5, 2.5, -12.0],
-            children: vec![terminal("t1"), terminal("t2"), terminal("t3"), terminal("t4")],
+            children: vec![
+                terminal("t1"),
+                terminal("t2"),
+                terminal("t3"),
+                terminal("t4"),
+            ],
         };
         node.normalize();
         if let LayoutNode::Split { sizes, .. } = &node {
@@ -1567,7 +1715,9 @@ mod tests {
             LayoutNode::Split { children, .. } => {
                 assert_eq!(children.len(), 2);
                 assert!(matches!(&children[0], LayoutNode::Terminal { .. }));
-                assert!(matches!(&children[1], LayoutNode::Tabs { children, .. } if children.len() == 2));
+                assert!(
+                    matches!(&children[1], LayoutNode::Tabs { children, .. } if children.len() == 2)
+                );
             }
             _ => panic!("Expected split"),
         }
@@ -1596,7 +1746,9 @@ mod tests {
         let removed = node.remove_at_path(&[1]);
         assert!(removed.is_some());
         match &node {
-            LayoutNode::Split { children, sizes, .. } => {
+            LayoutNode::Split {
+                children, sizes, ..
+            } => {
                 assert_eq!(children.len(), 2);
                 assert_eq!(sizes, &[66.0, 34.0]);
             }
@@ -1764,7 +1916,10 @@ mod tests {
                 args: vec!["--private".to_string()],
             }
         );
-        assert_eq!(zoom_level, 1.0, "client zoom is not daemon-owned wire state");
+        assert_eq!(
+            zoom_level, 1.0,
+            "client zoom is not daemon-owned wire state"
+        );
     }
 
     #[test]
@@ -1773,7 +1928,11 @@ mod tests {
         let local = terminal_minimized("t2");
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match merged {
-            LayoutNode::Terminal { terminal_id, minimized, .. } => {
+            LayoutNode::Terminal {
+                terminal_id,
+                minimized,
+                ..
+            } => {
                 assert_eq!(terminal_id.as_deref(), Some("t1"));
                 assert!(!minimized, "server state should win on ID mismatch");
             }
@@ -1796,7 +1955,10 @@ mod tests {
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match merged {
             LayoutNode::Split { sizes, .. } => {
-                assert!((sizes[0] - 30.0).abs() < f32::EPSILON, "local sizes should be preserved");
+                assert!(
+                    (sizes[0] - 30.0).abs() < f32::EPSILON,
+                    "local sizes should be preserved"
+                );
                 assert!((sizes[1] - 70.0).abs() < f32::EPSILON);
             }
             _ => panic!("Expected split"),
@@ -1817,9 +1979,14 @@ mod tests {
         };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match merged {
-            LayoutNode::Split { children, sizes, .. } => {
+            LayoutNode::Split {
+                children, sizes, ..
+            } => {
                 assert_eq!(children.len(), 3, "server child count should win");
-                assert!((sizes[0] - 33.0).abs() < f32::EPSILON, "server sizes should be used");
+                assert!(
+                    (sizes[0] - 33.0).abs() < f32::EPSILON,
+                    "server sizes should be used"
+                );
             }
             _ => panic!("Expected split"),
         }
@@ -1936,7 +2103,11 @@ mod tests {
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match merged {
             LayoutNode::Split { children, .. } => {
-                assert_eq!(children.len(), 2, "server structure should win on type mismatch");
+                assert_eq!(
+                    children.len(),
+                    2,
+                    "server structure should win on type mismatch"
+                );
             }
             _ => panic!("Expected split"),
         }
@@ -1970,7 +2141,9 @@ mod tests {
         };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match &merged {
-            LayoutNode::Split { sizes, children, .. } => {
+            LayoutNode::Split {
+                sizes, children, ..
+            } => {
                 assert!((sizes[0] - 25.0).abs() < f32::EPSILON);
                 assert!((sizes[1] - 75.0).abs() < f32::EPSILON);
                 match &children[0] {
@@ -2008,13 +2181,20 @@ mod tests {
                         ..
                     } => {
                         assert_eq!(terminal_id.as_deref(), Some("t1"));
-                        assert!(*minimized, "minimized state should be preserved after split");
+                        assert!(
+                            *minimized,
+                            "minimized state should be preserved after split"
+                        );
                         assert_eq!(*zoom_level, 1.5, "zoom should survive structure changes");
                     }
                     _ => panic!("Expected terminal"),
                 }
                 match &children[1] {
-                    LayoutNode::Terminal { terminal_id, minimized, .. } => {
+                    LayoutNode::Terminal {
+                        terminal_id,
+                        minimized,
+                        ..
+                    } => {
                         assert_eq!(terminal_id.as_deref(), Some("t2"));
                         assert!(!*minimized, "new terminal should not be minimized");
                     }
@@ -2031,14 +2211,12 @@ mod tests {
         let local = terminal_detached("t1");
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match &merged {
-            LayoutNode::Split { children, .. } => {
-                match &children[0] {
-                    LayoutNode::Terminal { detached, .. } => {
-                        assert!(*detached, "detached state should be preserved");
-                    }
-                    _ => panic!("Expected terminal"),
+            LayoutNode::Split { children, .. } => match &children[0] {
+                LayoutNode::Terminal { detached, .. } => {
+                    assert!(*detached, "detached state should be preserved");
                 }
-            }
+                _ => panic!("Expected terminal"),
+            },
             _ => panic!("Expected split"),
         }
     }

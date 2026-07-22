@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use okena_core::soft_close::{encode_action, SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX};
+use okena_core::soft_close::{SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX, encode_action};
 use okena_state::{Toast, ToastAction, ToastActionStyle};
-use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
 
 use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
@@ -73,7 +73,11 @@ pub fn build_soft_close_toast(
             // name or non-prompt OSC title) wins; else the live foreground
             // command; else a generic "Terminal closed".
             let display = p.terminal_display_name(terminal_id, osc_title);
-            let label = if display == p.directory_name() { command } else { Some(display) };
+            let label = if display == p.directory_name() {
+                command
+            } else {
+                Some(display)
+            };
             let title = match label {
                 Some(l) => format!("Closed \u{201c}{}\u{201d}", truncate_label(&l)),
                 None => "Terminal closed".to_string(),
@@ -104,7 +108,11 @@ pub fn build_soft_close_toast(
         .with_id(toast_id)
         .with_ttl(Duration::from_secs(grace as u64))
         .with_actions(actions);
-    if detail.is_empty() { base } else { base.with_detail(detail) }
+    if detail.is_empty() {
+        base
+    } else {
+        base.with_detail(detail)
+    }
 }
 
 /// Cap a terminal label so the toast stays tidy. OSC titles can be arbitrarily
@@ -171,8 +179,15 @@ pub fn begin_soft_close_flow(
         .and_then(|l| l.find_terminal_path(terminal_id))?;
 
     let toast_id = format!("soft-close:{terminal_id}");
-    let toast =
-        build_soft_close_toast(ws, terminals, project_id, terminal_id, command, &toast_id, grace);
+    let toast = build_soft_close_toast(
+        ws,
+        terminals,
+        project_id,
+        terminal_id,
+        command,
+        &toast_id,
+        grace,
+    );
     ws.begin_soft_close(focus_manager, project_id, &path, terminal_id, &toast_id, cx);
     deadlines.lock().insert(
         terminal_id.to_string(),
@@ -233,8 +248,11 @@ pub fn finalize_expired(
     let expired: Vec<String> = {
         let now = Instant::now();
         let mut d = deadlines.lock();
-        let exp: Vec<String> =
-            d.iter().filter(|(_, dl)| **dl <= now).map(|(t, _)| t.clone()).collect();
+        let exp: Vec<String> = d
+            .iter()
+            .filter(|(_, dl)| **dl <= now)
+            .map(|(t, _)| t.clone())
+            .collect();
         for t in &exp {
             d.remove(t);
         }
@@ -303,7 +321,8 @@ impl Workspace {
 
         // A fresh close supersedes any earlier restore-race breadcrumb for this
         // terminal (e.g. close → undo → close again).
-        self.restored_closes.retain(|r| r.terminal_id != terminal_id);
+        self.restored_closes
+            .retain(|r| r.terminal_id != terminal_id);
     }
 
     /// True if the terminal is currently waiting out its grace period.
@@ -403,7 +422,12 @@ impl Workspace {
                 .and_then(|l| l.find_terminal_node(terminal_id))
                 .cloned();
             if let Some(mut node) = node {
-                if let LayoutNode::Terminal { minimized, detached, .. } = &mut node {
+                if let LayoutNode::Terminal {
+                    minimized,
+                    detached,
+                    ..
+                } = &mut node
+                {
                     *minimized = false;
                     *detached = false;
                 }
@@ -430,7 +454,8 @@ impl Workspace {
         // (its exit event still queued). If that exit lands, the exit handler
         // calls `reap_restored_close` to tear this pane back out — see
         // [`RestoredClose`].
-        self.restored_closes.retain(|r| r.terminal_id != terminal_id);
+        self.restored_closes
+            .retain(|r| r.terminal_id != terminal_id);
         self.restored_closes.push(RestoredClose {
             terminal_id: terminal_id.to_string(),
             project_id,
@@ -506,17 +531,17 @@ mod tests {
     use gpui::AppContext as _;
 
     use super::{
-        begin_soft_close_flow, build_soft_close_toast, close_now_flow, finalize_expired, undo_soft_close_flow,
-        PendingDecision, SoftCloseDeadlines,
+        PendingDecision, SoftCloseDeadlines, begin_soft_close_flow, build_soft_close_toast,
+        close_now_flow, finalize_expired, undo_soft_close_flow,
     };
     use crate::focus::FocusManager;
     use crate::settings::HooksConfig;
     use crate::state::{LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
     use okena_core::theme::FolderColor;
+    use okena_terminal::TerminalsRegistry;
     use okena_terminal::backend::TerminalBackend;
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
-    use okena_terminal::TerminalsRegistry;
     use parking_lot::Mutex;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -652,7 +677,10 @@ mod tests {
 
             // Busy → keep the pending record (no kill queued) so the caller can
             // offer an undo.
-            assert_eq!(ws.decide_pending_close("a", true, cx), PendingDecision::KeepForUndo);
+            assert_eq!(
+                ws.decide_pending_close("a", true, cx),
+                PendingDecision::KeepForUndo
+            );
             assert!(ws.has_pending_close("a"));
             assert!(ws.drain_pending_terminal_kills().is_empty());
         });
@@ -668,7 +696,10 @@ mod tests {
             ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
 
             // Idle → kill immediately, pending record dropped.
-            assert_eq!(ws.decide_pending_close("a", false, cx), PendingDecision::Finalized);
+            assert_eq!(
+                ws.decide_pending_close("a", false, cx),
+                PendingDecision::Finalized
+            );
             assert!(!ws.has_pending_close("a"));
             assert_eq!(ws.drain_pending_terminal_kills(), vec!["a".to_string()]);
         });
@@ -686,7 +717,10 @@ mod tests {
             ws.cancel_pending_close("a");
 
             // Whatever the busy result, there's nothing left to decide.
-            assert_eq!(ws.decide_pending_close("a", true, cx), PendingDecision::Raced);
+            assert_eq!(
+                ws.decide_pending_close("a", true, cx),
+                PendingDecision::Raced
+            );
             assert!(ws.drain_pending_terminal_kills().is_empty());
         });
     }
@@ -705,7 +739,10 @@ mod tests {
             // Undo can't restore the exact spot — it appends "a" to the root group.
             assert!(ws.undo_soft_close(&mut fm, "a", true, cx));
             let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-            assert!(layout.find_terminal_path("a").is_some(), "a is back in the tree");
+            assert!(
+                layout.find_terminal_path("a").is_some(),
+                "a is back in the tree"
+            );
             assert!(layout.find_terminal_path("b").is_some(), "b retained");
         });
     }
@@ -735,7 +772,10 @@ mod tests {
             // dead pane back out instead of leaving it to linger / respawn.
             assert!(ws.reap_restored_close("a", cx));
             let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-            assert!(layout.find_terminal_path("a").is_none(), "dead pane removed");
+            assert!(
+                layout.find_terminal_path("a").is_none(),
+                "dead pane removed"
+            );
             assert!(layout.find_terminal_path("b").is_some(), "sibling retained");
 
             // Idempotent — nothing left to reap.
@@ -756,7 +796,10 @@ mod tests {
             // Soft-closing "a" again supersedes the earlier restore breadcrumb,
             // so a later stray exit can't reap the freshly-closed pane.
             ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a2", cx);
-            assert!(!ws.reap_restored_close("a", cx), "breadcrumb cleared by re-close");
+            assert!(
+                !ws.reap_restored_close("a", cx),
+                "breadcrumb cleared by re-close"
+            );
         });
     }
 
@@ -834,7 +877,11 @@ mod tests {
         fn transport(&self) -> Arc<dyn TerminalTransport> {
             Arc::new(StubTransport)
         }
-        fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
             anyhow::bail!("stub backend: create_terminal not supported")
         }
         fn reconnect_terminal(
@@ -884,7 +931,15 @@ mod tests {
             let terminals = empty_registry();
 
             let toast = begin_soft_close_flow(
-                &deadlines, ws, &mut fm, &terminals, "p1", "a", 5, Some("make".into()), cx,
+                &deadlines,
+                ws,
+                &mut fm,
+                &terminals,
+                "p1",
+                "a",
+                5,
+                Some("make".into()),
+                cx,
             );
 
             let toast = toast.expect("terminal in layout → toast returned");
@@ -939,9 +994,8 @@ mod tests {
             let terminals = empty_registry();
 
             // "z" is not in the layout → caller should immediate-close instead.
-            let toast = begin_soft_close_flow(
-                &deadlines, ws, &mut fm, &terminals, "p1", "z", 5, None, cx,
-            );
+            let toast =
+                begin_soft_close_flow(&deadlines, ws, &mut fm, &terminals, "p1", "z", 5, None, cx);
             assert!(toast.is_none());
             assert!(!ws.has_pending_close("z"));
             assert!(deadlines.lock().is_empty(), "no deadline armed");
@@ -956,7 +1010,9 @@ mod tests {
         workspace.update(cx, |ws: &mut Workspace, cx| {
             let mut fm = FocusManager::new();
             let killed = Arc::new(Mutex::new(Vec::new()));
-            let backend = RecordingBackend { killed: killed.clone() };
+            let backend = RecordingBackend {
+                killed: killed.clone(),
+            };
             let terminals = empty_registry();
             let deadlines = empty_deadlines();
 
@@ -973,9 +1029,19 @@ mod tests {
 
             finalize_expired(&deadlines, ws, &backend, &terminals, cx);
 
-            assert_eq!(&*killed.lock(), &vec!["a".to_string()], "only past-deadline killed");
-            assert!(!deadlines.lock().contains_key("a"), "expired deadline removed");
-            assert!(deadlines.lock().contains_key("b"), "future deadline retained");
+            assert_eq!(
+                &*killed.lock(),
+                &vec!["a".to_string()],
+                "only past-deadline killed"
+            );
+            assert!(
+                !deadlines.lock().contains_key("a"),
+                "expired deadline removed"
+            );
+            assert!(
+                deadlines.lock().contains_key("b"),
+                "future deadline retained"
+            );
             assert!(!ws.has_pending_close("a"), "finalized");
             assert!(ws.has_pending_close("b"), "still pending");
         });
@@ -989,7 +1055,9 @@ mod tests {
         workspace.update(cx, |ws: &mut Workspace, cx| {
             let mut fm = FocusManager::new();
             let killed = Arc::new(Mutex::new(Vec::new()));
-            let backend = RecordingBackend { killed: killed.clone() };
+            let backend = RecordingBackend {
+                killed: killed.clone(),
+            };
             let terminals = empty_registry();
             let deadlines = empty_deadlines();
 

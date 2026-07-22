@@ -150,9 +150,7 @@ mod tests {
     // Import specific items rather than `use super::*` — the latter pulls in
     // `gpui`'s `test` proc-macro (re-exported via `use gpui::*`), which shadows
     // the std `#[test]` attribute and blows the macro recursion limit.
-    use super::{
-        ExtensionInstance, ExtensionManifest, ExtensionRegistration, ExtensionRegistry,
-    };
+    use super::{ExtensionInstance, ExtensionManifest, ExtensionRegistration, ExtensionRegistry};
     use std::sync::Arc;
 
     #[test]

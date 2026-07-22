@@ -47,7 +47,10 @@ impl FileViewer {
         if tab.relative_path.is_empty() {
             return;
         }
-        if matches!(tab.blame, BlameLoadState::Loading | BlameLoadState::Loaded(_)) {
+        if matches!(
+            tab.blame,
+            BlameLoadState::Loading | BlameLoadState::Loaded(_)
+        ) {
             return;
         }
         tab.blame = BlameLoadState::Loading;

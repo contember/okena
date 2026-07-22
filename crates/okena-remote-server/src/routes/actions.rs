@@ -83,9 +83,11 @@ mod tests {
         assert_eq!(request.project_id, "project-1");
         assert_eq!(request.terminal_id, "terminal-1");
         assert_eq!(request.window.as_deref(), Some("main"));
-        assert!(terminal_focus_request(&ActionRequest::RecordProjectActivity {
-            project_id: "project-1".into(),
-        })
-        .is_none());
+        assert!(
+            terminal_focus_request(&ActionRequest::RecordProjectActivity {
+                project_id: "project-1".into(),
+            })
+            .is_none()
+        );
     }
 }

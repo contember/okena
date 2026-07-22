@@ -16,8 +16,8 @@ pub mod request_broker;
 #[cfg(feature = "gpui")]
 pub mod requests;
 pub mod sessions;
-pub mod sidebar_controller;
 pub mod settings;
+pub mod sidebar_controller;
 pub mod state;
 pub mod toast;
 pub mod visibility;

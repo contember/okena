@@ -3,12 +3,12 @@
 //! Shows all git worktrees for a project with checkboxes to toggle sidebar visibility.
 //! Rendered at WindowView level via OverlayManager, like context menus.
 
+use gpui::prelude::*;
+use gpui::*;
 use okena_ui::overlay::CloseEvent;
 use okena_ui::theme::theme;
-use okena_ui::tokens::{ui_text_ms, ui_text_md};
+use okena_ui::tokens::{ui_text_md, ui_text_ms};
 use okena_workspace::state::Workspace;
-use gpui::*;
-use gpui::prelude::*;
 
 use crate::Cancel;
 use okena_core::api::ApiWorktreeEntry;
@@ -19,7 +19,9 @@ pub enum WorktreeListPopoverEvent {
     /// Untrack (delete) a tracked worktree project. The daemon owns the
     /// project, so the host routes this to `ActionRequest::DeleteProject`
     /// rather than mutating the read-only mirror here.
-    DeleteProject { project_id: String },
+    DeleteProject {
+        project_id: String,
+    },
     /// Track an already-on-disk worktree as a project. The daemon owns the
     /// project list, so the host routes this to
     /// `ActionRequest::AddDiscoveredWorktree` rather than mutating the mirror.
@@ -31,7 +33,9 @@ pub enum WorktreeListPopoverEvent {
 }
 
 impl CloseEvent for WorktreeListPopoverEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 impl EventEmitter<WorktreeListPopoverEvent> for WorktreeListPopover {}
@@ -114,10 +118,15 @@ impl WorktreeListPopover {
     /// bare worktree root for backwards compatibility with older workspace files.
     fn find_tracked_project_id(&self, entry: &ApiWorktreeEntry, cx: &App) -> Option<String> {
         let ws = self.workspace.read(cx);
-        ws.data().projects.iter()
-            .find(|p| (p.path == entry.project_path || p.path == entry.worktree_path)
-                && p.worktree_info.as_ref()
-                    .is_some_and(|wt| wt.parent_project_id == self.project_id))
+        ws.data()
+            .projects
+            .iter()
+            .find(|p| {
+                (p.path == entry.project_path || p.path == entry.worktree_path)
+                    && p.worktree_info
+                        .as_ref()
+                        .is_some_and(|wt| wt.parent_project_id == self.project_id)
+            })
             .map(|p| p.id.clone())
     }
 
@@ -139,13 +148,21 @@ impl Render for WorktreeListPopover {
         let ws = self.workspace.read(cx);
         let project_id = &self.project_id;
 
-        let tracked_project_paths: std::collections::HashSet<String> = ws.data().projects.iter()
-            .filter(|p| p.worktree_info.as_ref()
-                .is_some_and(|wt| wt.parent_project_id == *project_id))
+        let tracked_project_paths: std::collections::HashSet<String> = ws
+            .data()
+            .projects
+            .iter()
+            .filter(|p| {
+                p.worktree_info
+                    .as_ref()
+                    .is_some_and(|wt| wt.parent_project_id == *project_id)
+            })
             .map(|p| p.path.clone())
             .collect();
 
-        let worktrees: Vec<(ApiWorktreeEntry, bool)> = self.entries.iter()
+        let worktrees: Vec<(ApiWorktreeEntry, bool)> = self
+            .entries
+            .iter()
             .filter(|entry| !entry.is_main)
             .map(|entry| {
                 let is_tracked = tracked_project_paths.contains(&entry.project_path)
@@ -168,7 +185,7 @@ impl Render for WorktreeListPopover {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_secondary))
                     .pb(px(6.0))
-                    .child("WORKTREES")
+                    .child("WORKTREES"),
             )
             .child(
                 div()
@@ -181,7 +198,7 @@ impl Render for WorktreeListPopover {
                                 .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.text_muted))
                                 .py(px(8.0))
-                                .child("Loading\u{2026}")
+                                .child("Loading\u{2026}"),
                         )
                     })
                     .when_some(error_message, |d, error| {
@@ -190,88 +207,98 @@ impl Render for WorktreeListPopover {
                                 .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.error))
                                 .py(px(8.0))
-                                .child(error)
+                                .child(error),
                         )
                     })
-                    .when(worktrees.is_empty() && !loading && self.error_message.is_none(), |d| {
-                        d.child(
-                            div()
-                                .text_size(ui_text_md(cx))
-                                .text_color(rgb(t.text_muted))
-                                .py(px(8.0))
-                                .child("No worktrees found")
-                        )
-                    })
-                    .children(worktrees.into_iter().map(|(entry, is_tracked)| {
-                let project_id = self.project_id.clone();
-                let entry_for_click = entry.clone();
-
-                div()
-                    .id(ElementId::Name(format!("wt-list-{}", entry.worktree_path).into()))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(4.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        if is_tracked {
-                            if let Some(id) = this.find_tracked_project_id(&entry_for_click, cx) {
-                                // Daemon owns the project — emit an event so the
-                                // host dispatches DeleteProject; the removal
-                                // mirrors back. No direct mirror mutation here.
-                                cx.emit(WorktreeListPopoverEvent::DeleteProject { project_id: id });
-                            }
-                        } else {
-                            // The daemon owns the project list — emit an event so
-                            // the host dispatches AddDiscoveredWorktree; the new
-                            // worktree project mirrors back. No direct mirror
-                            // mutation here.
-                            cx.emit(WorktreeListPopoverEvent::AddDiscoveredWorktree {
-                                parent_project_id: project_id.clone(),
-                                worktree_path: entry_for_click.worktree_path.clone(),
-                                branch: entry_for_click.branch.clone(),
-                            });
-                        }
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(14.0))
-                            .h(px(14.0))
-                            .rounded(px(3.0))
-                            .border_1()
-                            .border_color(rgb(if is_tracked { t.border_active } else { t.border }))
-                            .when(is_tracked, |d| d.bg(rgb(t.border_active)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(is_tracked, |d| {
-                                d.child(
-                                    svg()
-                                        .path("icons/check.svg")
-                                        .size(px(10.0))
-                                        .text_color(rgb(t.bg_primary))
-                                )
-                            })
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
+                    .when(
+                        worktrees.is_empty() && !loading && self.error_message.is_none(),
+                        |d| {
+                            d.child(
                                 div()
                                     .text_size(ui_text_md(cx))
-                                    .text_color(rgb(t.text_primary))
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(entry.branch.clone())
+                                    .text_color(rgb(t.text_muted))
+                                    .py(px(8.0))
+                                    .child("No worktrees found"),
                             )
+                        },
                     )
-            }))
+                    .children(worktrees.into_iter().map(|(entry, is_tracked)| {
+                        let project_id = self.project_id.clone();
+                        let entry_for_click = entry.clone();
+
+                        div()
+                            .id(ElementId::Name(
+                                format!("wt-list-{}", entry.worktree_path).into(),
+                            ))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(4.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                if is_tracked {
+                                    if let Some(id) =
+                                        this.find_tracked_project_id(&entry_for_click, cx)
+                                    {
+                                        // Daemon owns the project — emit an event so the
+                                        // host dispatches DeleteProject; the removal
+                                        // mirrors back. No direct mirror mutation here.
+                                        cx.emit(WorktreeListPopoverEvent::DeleteProject {
+                                            project_id: id,
+                                        });
+                                    }
+                                } else {
+                                    // The daemon owns the project list — emit an event so
+                                    // the host dispatches AddDiscoveredWorktree; the new
+                                    // worktree project mirrors back. No direct mirror
+                                    // mutation here.
+                                    cx.emit(WorktreeListPopoverEvent::AddDiscoveredWorktree {
+                                        parent_project_id: project_id.clone(),
+                                        worktree_path: entry_for_click.worktree_path.clone(),
+                                        branch: entry_for_click.branch.clone(),
+                                    });
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .w(px(14.0))
+                                    .h(px(14.0))
+                                    .rounded(px(3.0))
+                                    .border_1()
+                                    .border_color(rgb(if is_tracked {
+                                        t.border_active
+                                    } else {
+                                        t.border
+                                    }))
+                                    .when(is_tracked, |d| d.bg(rgb(t.border_active)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(is_tracked, |d| {
+                                        d.child(
+                                            svg()
+                                                .path("icons/check.svg")
+                                                .size(px(10.0))
+                                                .text_color(rgb(t.bg_primary)),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    div()
+                                        .text_size(ui_text_md(cx))
+                                        .text_color(rgb(t.text_primary))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(entry.branch.clone()),
+                                ),
+                            )
+                    })),
             );
 
         let position = self.position;
@@ -286,18 +313,23 @@ impl Render for WorktreeListPopover {
             .inset_0()
             .occlude()
             .id("worktree-list-backdrop")
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_scroll_wheel(|_, _, cx| { cx.stop_propagation(); })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
             .child(deferred(
-                anchored()
-                    .position(position)
-                    .snap_to_window()
-                    .child(panel)
+                anchored().position(position).snap_to_window().child(panel),
             ))
     }
 }

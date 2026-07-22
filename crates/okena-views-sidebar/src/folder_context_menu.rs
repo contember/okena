@@ -1,23 +1,32 @@
 //! Folder context menu overlay.
 
 use crate::Cancel;
+use gpui::prelude::*;
+use gpui::*;
 use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
 use okena_ui::theme::theme;
 use okena_workspace::requests::FolderContextMenuRequest;
 use okena_workspace::state::{WindowId, Workspace};
-use gpui::prelude::*;
-use gpui::*;
 
 /// Event emitted by FolderContextMenu
 pub enum FolderContextMenuEvent {
     Close,
-    RenameFolder { folder_id: String, folder_name: String },
-    DeleteFolder { folder_id: String },
-    FilterToFolder { folder_id: String },
+    RenameFolder {
+        folder_id: String,
+        folder_name: String,
+    },
+    DeleteFolder {
+        folder_id: String,
+    },
+    FilterToFolder {
+        folder_id: String,
+    },
 }
 
 impl okena_ui::overlay::CloseEvent for FolderContextMenuEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 /// Folder context menu component
@@ -108,7 +117,8 @@ impl Render for FolderContextMenu {
         let ws = self.workspace.read(cx);
         let folder = ws.folder(&self.request.folder_id);
         let project_count = folder.map(|f| f.project_ids.len()).unwrap_or(0);
-        let is_active_filter = ws.active_folder_filter(self.window_id) == Some(&self.request.folder_id);
+        let is_active_filter =
+            ws.active_folder_filter(self.window_id) == Some(&self.request.folder_id);
 
         div()
             .track_focus(&self.focus_handle)
@@ -119,57 +129,75 @@ impl Render for FolderContextMenu {
             .absolute()
             .inset_0()
             .id("folder-context-menu-backdrop")
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
             .child(deferred(
-                anchored()
-                    .position(position)
-                    .snap_to_window()
-                    .child(
-                        context_menu_panel("folder-context-menu", &t)
-                    // Filter option
-                    .child(
-                        menu_item(
-                            "folder-ctx-filter",
-                            if is_active_filter { "icons/eye-off.svg" } else { "icons/eye.svg" },
-                            if is_active_filter { "Show All Projects" } else { "Show Only This Folder" },
-                            &t,
+                anchored().position(position).snap_to_window().child(
+                    context_menu_panel("folder-context-menu", &t)
+                        // Filter option
+                        .child(
+                            menu_item(
+                                "folder-ctx-filter",
+                                if is_active_filter {
+                                    "icons/eye-off.svg"
+                                } else {
+                                    "icons/eye.svg"
+                                },
+                                if is_active_filter {
+                                    "Show All Projects"
+                                } else {
+                                    "Show Only This Folder"
+                                },
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.toggle_folder_filter(cx);
+                                },
+                            )),
                         )
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            this.toggle_folder_filter(cx);
-                        })),
-                    )
-                    // Rename option
-                    .child(
-                        menu_item("folder-ctx-rename", "icons/edit.svg", "Rename Folder", &t)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.rename_folder(cx);
-                            })),
-                    )
-                    // Separator
-                    .child(menu_separator(&t))
-                    // Delete option
-                    .child(
-                        menu_item_with_color(
-                            "folder-ctx-delete",
-                            "icons/trash.svg",
-                            if project_count > 0 {
-                                format!("Delete Folder ({} projects will be ungrouped)", project_count)
-                            } else {
-                                "Delete Folder".to_string()
-                            },
-                            t.error,
-                            t.error,
-                            &t,
+                        // Rename option
+                        .child(
+                            menu_item("folder-ctx-rename", "icons/edit.svg", "Rename Folder", &t)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.rename_folder(cx);
+                                })),
                         )
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            this.delete_folder(cx);
-                        })),
-                    ),
+                        // Separator
+                        .child(menu_separator(&t))
+                        // Delete option
+                        .child(
+                            menu_item_with_color(
+                                "folder-ctx-delete",
+                                "icons/trash.svg",
+                                if project_count > 0 {
+                                    format!(
+                                        "Delete Folder ({} projects will be ungrouped)",
+                                        project_count
+                                    )
+                                } else {
+                                    "Delete Folder".to_string()
+                                },
+                                t.error,
+                                t.error,
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.delete_folder(cx);
+                                },
+                            )),
+                        ),
                 ),
             ))
     }

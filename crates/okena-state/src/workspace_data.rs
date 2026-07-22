@@ -2,9 +2,9 @@
 
 use crate::hooks_config::HooksConfig;
 use crate::window_state::WindowState;
+use okena_core::shell::ShellType;
 use okena_core::theme::FolderColor;
 use okena_layout::LayoutNode;
-use okena_core::shell::ShellType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -74,11 +74,15 @@ impl WorkspaceData {
     /// would silently miss any field added after this function was last
     /// touched.
     pub fn without_remote_projects(&self) -> Self {
-        let remote_ids: HashSet<String> = self.projects.iter()
+        let remote_ids: HashSet<String> = self
+            .projects
+            .iter()
             .filter(|p| p.is_remote)
             .map(|p| p.id.clone())
             .collect();
-        let remote_folder_ids: HashSet<String> = self.folders.iter()
+        let remote_folder_ids: HashSet<String> = self
+            .folders
+            .iter()
             .filter(|f| f.id.starts_with("remote:"))
             .map(|f| f.id.clone())
             .collect();
@@ -89,9 +93,12 @@ impl WorkspaceData {
 
         let mut data = self.clone();
         data.projects.retain(|p| !p.is_remote);
-        data.project_order.retain(|id| !id.starts_with("remote:") && !remote_ids.contains(id));
-        data.service_panel_heights.retain(|id, _| !remote_ids.contains(id));
-        data.hook_panel_heights.retain(|id, _| !remote_ids.contains(id));
+        data.project_order
+            .retain(|id| !id.starts_with("remote:") && !remote_ids.contains(id));
+        data.service_panel_heights
+            .retain(|id, _| !remote_ids.contains(id));
+        data.hook_panel_heights
+            .retain(|id, _| !remote_ids.contains(id));
         data.folders.retain(|f| !f.id.starts_with("remote:"));
 
         for project_id in &remote_ids {
@@ -160,7 +167,9 @@ impl HookTerminalStatus {
         match self {
             HookTerminalStatus::Running => A::Running,
             HookTerminalStatus::Succeeded => A::Succeeded,
-            HookTerminalStatus::Failed { exit_code } => A::Failed { exit_code: *exit_code },
+            HookTerminalStatus::Failed { exit_code } => A::Failed {
+                exit_code: *exit_code,
+            },
         }
     }
 
@@ -170,7 +179,9 @@ impl HookTerminalStatus {
         match api {
             A::Running => HookTerminalStatus::Running,
             A::Succeeded => HookTerminalStatus::Succeeded,
-            A::Failed { exit_code } => HookTerminalStatus::Failed { exit_code: *exit_code },
+            A::Failed { exit_code } => HookTerminalStatus::Failed {
+                exit_code: *exit_code,
+            },
         }
     }
 }
@@ -290,9 +301,10 @@ impl ProjectData {
             return custom_name.clone();
         }
         if let Some(ref title) = osc_title
-            && !is_generated_terminal_title(title) {
-                return title.clone();
-            }
+            && !is_generated_terminal_title(title)
+        {
+            return title.clone();
+        }
         self.directory_name()
     }
 
@@ -365,14 +377,19 @@ mod tests {
 
     #[test]
     fn directory_name_from_path() {
-        assert_eq!(make_project("/home/user/myproject").directory_name(), "myproject");
+        assert_eq!(
+            make_project("/home/user/myproject").directory_name(),
+            "myproject"
+        );
         assert_eq!(make_project("/").directory_name(), "Terminal");
     }
 
     #[test]
     fn terminal_display_name_prefers_custom_name() {
         let mut project = make_project("/home/user/myproject");
-        project.terminal_names.insert("t1".to_string(), "My Terminal".to_string());
+        project
+            .terminal_names
+            .insert("t1".to_string(), "My Terminal".to_string());
         assert_eq!(
             project.terminal_display_name("t1", Some("osc-title".to_string())),
             "My Terminal"
@@ -391,17 +408,17 @@ mod tests {
     #[test]
     fn terminal_display_name_falls_back_to_directory() {
         let project = make_project("/home/user/myproject");
-        assert_eq!(
-            project.terminal_display_name("t1", None),
-            "myproject"
-        );
+        assert_eq!(project.terminal_display_name("t1", None), "myproject");
     }
 
     #[test]
     fn terminal_display_name_ignores_bash_prompt_title() {
         let project = make_project("/home/user/myproject");
         assert_eq!(
-            project.terminal_display_name("t1", Some("matej21@matej21-hp: ~/projects/myproject".to_string())),
+            project.terminal_display_name(
+                "t1",
+                Some("matej21@matej21-hp: ~/projects/myproject".to_string())
+            ),
             "myproject"
         );
         assert_eq!(
@@ -466,8 +483,14 @@ mod tests {
         assert!(project.layout.is_none());
         // Legacy hooks should be mapped to the new grouped layout.
         assert_eq!(project.hooks.project.on_open.as_deref(), Some("init.sh"));
-        assert_eq!(project.hooks.worktree.pre_merge.as_deref(), Some("check.sh"));
-        assert_eq!(project.hooks.worktree.after_remove.as_deref(), Some("cleanup.sh"));
+        assert_eq!(
+            project.hooks.worktree.pre_merge.as_deref(),
+            Some("check.sh")
+        );
+        assert_eq!(
+            project.hooks.worktree.after_remove.as_deref(),
+            Some("cleanup.sh")
+        );
         // Untouched fields remain default.
         assert!(project.hooks.project.on_close.is_none());
         assert!(project.hooks.worktree.on_create.is_none());
@@ -517,8 +540,14 @@ mod tests {
         let json = serde_json::to_string(&data).unwrap();
         let reloaded: WorkspaceData = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(reloaded.main_window.hidden_project_ids, data.main_window.hidden_project_ids);
-        assert_eq!(reloaded.main_window.folder_filter, data.main_window.folder_filter);
+        assert_eq!(
+            reloaded.main_window.hidden_project_ids,
+            data.main_window.hidden_project_ids
+        );
+        assert_eq!(
+            reloaded.main_window.folder_filter,
+            data.main_window.folder_filter
+        );
         assert_eq!(reloaded.extra_windows.len(), 1);
     }
 
@@ -538,9 +567,15 @@ mod tests {
         let saved = serde_json::to_string(&project).unwrap();
 
         // After saving the migrated config, no legacy keys should remain.
-        assert!(!saved.contains("\"on_project_open\""), "legacy key must not survive a save");
+        assert!(
+            !saved.contains("\"on_project_open\""),
+            "legacy key must not survive a save"
+        );
         // The grouped key should be present.
-        assert!(saved.contains("\"project\""), "expected grouped project key");
+        assert!(
+            saved.contains("\"project\""),
+            "expected grouped project key"
+        );
 
         let reloaded: ProjectData = serde_json::from_str(&saved).unwrap();
         assert_eq!(reloaded.hooks.project.on_open.as_deref(), Some("init.sh"));
@@ -555,8 +590,10 @@ mod tests {
         let project = make_project("/tmp/test");
         let saved = serde_json::to_string(&project).unwrap();
         let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert!(!value.as_object().unwrap().contains_key("show_in_overview"),
-            "ProjectData.show_in_overview must not appear in serialized form (field removed)");
+        assert!(
+            !value.as_object().unwrap().contains_key("show_in_overview"),
+            "ProjectData.show_in_overview must not appear in serialized form (field removed)"
+        );
     }
 
     #[test]
@@ -590,43 +627,100 @@ mod tests {
             },
         ];
         data.service_panel_heights.insert("local".to_string(), 1.0);
-        data.service_panel_heights.insert("remote:c1:p1".to_string(), 2.0);
+        data.service_panel_heights
+            .insert("remote:c1:p1".to_string(), 2.0);
         data.hook_panel_heights.insert("local".to_string(), 3.0);
-        data.hook_panel_heights.insert("remote:c1:p1".to_string(), 4.0);
+        data.hook_panel_heights
+            .insert("remote:c1:p1".to_string(), 4.0);
 
-        data.main_window.hidden_project_ids.insert("local".to_string());
-        data.main_window.hidden_project_ids.insert("remote:c1:p1".to_string());
-        data.main_window.project_widths.insert("local".to_string(), 0.25);
-        data.main_window.project_widths.insert("remote:c1:p1".to_string(), 0.75);
+        data.main_window
+            .hidden_project_ids
+            .insert("local".to_string());
+        data.main_window
+            .hidden_project_ids
+            .insert("remote:c1:p1".to_string());
+        data.main_window
+            .project_widths
+            .insert("local".to_string(), 0.25);
+        data.main_window
+            .project_widths
+            .insert("remote:c1:p1".to_string(), 0.75);
         data.main_window.folder_filter = Some("remote:c1:f1".to_string());
-        data.main_window.folder_collapsed.insert("local-folder".to_string(), true);
-        data.main_window.folder_collapsed.insert("remote:c1:f1".to_string(), true);
+        data.main_window
+            .folder_collapsed
+            .insert("local-folder".to_string(), true);
+        data.main_window
+            .folder_collapsed
+            .insert("remote:c1:f1".to_string(), true);
 
         let mut extra = WindowState::default();
         let extra_id = extra.id;
         extra.hidden_project_ids.insert("remote:c1:p1".to_string());
-        extra.project_widths.insert("remote:c1:p1".to_string(), 0.50);
+        extra
+            .project_widths
+            .insert("remote:c1:p1".to_string(), 0.50);
         extra.folder_filter = Some("remote:c1:f1".to_string());
-        extra.folder_collapsed.insert("remote:c1:f1".to_string(), true);
+        extra
+            .folder_collapsed
+            .insert("remote:c1:f1".to_string(), true);
         data.extra_windows.push(extra);
 
         let saved = data.without_remote_projects();
 
-        assert_eq!(saved.projects.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["local"]);
+        assert_eq!(
+            saved
+                .projects
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local"]
+        );
         assert_eq!(saved.project_order, vec!["local"]);
-        assert_eq!(saved.folders.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec!["local-folder"]);
+        assert_eq!(
+            saved
+                .folders
+                .iter()
+                .map(|f| f.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local-folder"]
+        );
         assert_eq!(saved.service_panel_heights.get("local").copied(), Some(1.0));
         assert!(!saved.service_panel_heights.contains_key("remote:c1:p1"));
         assert_eq!(saved.hook_panel_heights.get("local").copied(), Some(3.0));
         assert!(!saved.hook_panel_heights.contains_key("remote:c1:p1"));
 
         assert!(saved.main_window.hidden_project_ids.contains("local"));
-        assert!(!saved.main_window.hidden_project_ids.contains("remote:c1:p1"));
-        assert_eq!(saved.main_window.project_widths.get("local").copied(), Some(0.25));
-        assert!(!saved.main_window.project_widths.contains_key("remote:c1:p1"));
+        assert!(
+            !saved
+                .main_window
+                .hidden_project_ids
+                .contains("remote:c1:p1")
+        );
+        assert_eq!(
+            saved.main_window.project_widths.get("local").copied(),
+            Some(0.25)
+        );
+        assert!(
+            !saved
+                .main_window
+                .project_widths
+                .contains_key("remote:c1:p1")
+        );
         assert!(saved.main_window.folder_filter.is_none());
-        assert_eq!(saved.main_window.folder_collapsed.get("local-folder").copied(), Some(true));
-        assert!(!saved.main_window.folder_collapsed.contains_key("remote:c1:f1"));
+        assert_eq!(
+            saved
+                .main_window
+                .folder_collapsed
+                .get("local-folder")
+                .copied(),
+            Some(true)
+        );
+        assert!(
+            !saved
+                .main_window
+                .folder_collapsed
+                .contains_key("remote:c1:f1")
+        );
 
         let saved_extra = saved.window(WindowId::Extra(extra_id)).unwrap();
         assert!(!saved_extra.hidden_project_ids.contains("remote:c1:p1"));
@@ -650,8 +744,10 @@ mod tests {
         };
         let saved = serde_json::to_string(&folder).unwrap();
         let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert!(!value.as_object().unwrap().contains_key("collapsed"),
-            "FolderData.collapsed must not appear in serialized form (field removed)");
+        assert!(
+            !value.as_object().unwrap().contains_key("collapsed"),
+            "FolderData.collapsed must not appear in serialized form (field removed)"
+        );
     }
 
     #[test]
@@ -721,7 +817,9 @@ mod tests {
         // contract so the upcoming window-scoped setters can rely on Main
         // always producing a writable handle.
         let mut data = make_workspace();
-        let target = data.window_mut(WindowId::Main).expect("main always present");
+        let target = data
+            .window_mut(WindowId::Main)
+            .expect("main always present");
         target.hidden_project_ids.insert("p1".to_string());
         assert!(data.main_window.hidden_project_ids.contains("p1"));
     }
@@ -764,10 +862,18 @@ mod tests {
         data.set_folder_filter(WindowId::Extra(a_id), Some("f1".to_string()));
 
         assert_eq!(
-            data.window(WindowId::Extra(a_id)).unwrap().folder_filter.as_deref(),
+            data.window(WindowId::Extra(a_id))
+                .unwrap()
+                .folder_filter
+                .as_deref(),
             Some("f1"),
         );
-        assert!(data.window(WindowId::Extra(b_id)).unwrap().folder_filter.is_none());
+        assert!(
+            data.window(WindowId::Extra(b_id))
+                .unwrap()
+                .folder_filter
+                .is_none()
+        );
         assert!(data.main_window.folder_filter.is_none());
     }
 
@@ -785,7 +891,12 @@ mod tests {
         let unknown = uuid::Uuid::new_v4();
         data.set_folder_filter(WindowId::Extra(unknown), Some("f1".to_string()));
 
-        assert!(data.window(WindowId::Extra(extra_id)).unwrap().folder_filter.is_none());
+        assert!(
+            data.window(WindowId::Extra(extra_id))
+                .unwrap()
+                .folder_filter
+                .is_none()
+        );
         assert!(data.main_window.folder_filter.is_none());
     }
 
@@ -831,16 +942,19 @@ mod tests {
 
         data.toggle_hidden(WindowId::Extra(a_id), "p1");
 
-        assert!(data
-            .window(WindowId::Extra(a_id))
-            .unwrap()
-            .hidden_project_ids
-            .contains("p1"));
-        assert!(!data
-            .window(WindowId::Extra(b_id))
-            .unwrap()
-            .hidden_project_ids
-            .contains("p1"));
+        assert!(
+            data.window(WindowId::Extra(a_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("p1")
+        );
+        assert!(
+            !data
+                .window(WindowId::Extra(b_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("p1")
+        );
         assert!(!data.main_window.hidden_project_ids.contains("p1"));
     }
 
@@ -858,11 +972,12 @@ mod tests {
         let unknown = uuid::Uuid::new_v4();
         data.toggle_hidden(WindowId::Extra(unknown), "p1");
 
-        assert!(data
-            .window(WindowId::Extra(extra_id))
-            .unwrap()
-            .hidden_project_ids
-            .is_empty());
+        assert!(
+            data.window(WindowId::Extra(extra_id))
+                .unwrap()
+                .hidden_project_ids
+                .is_empty()
+        );
         assert!(data.main_window.hidden_project_ids.is_empty());
     }
 
@@ -873,7 +988,10 @@ mod tests {
         // single (project_id, width) pair lands on main_window.project_widths.
         let mut data = make_workspace();
         data.set_project_width(WindowId::Main, "p1", 0.42);
-        assert_eq!(data.main_window.project_widths.get("p1").copied(), Some(0.42));
+        assert_eq!(
+            data.main_window.project_widths.get("p1").copied(),
+            Some(0.42)
+        );
     }
 
     #[test]
@@ -885,7 +1003,10 @@ mod tests {
         let mut data = make_workspace();
         data.set_project_width(WindowId::Main, "p1", 0.25);
         data.set_project_width(WindowId::Main, "p1", 0.75);
-        assert_eq!(data.main_window.project_widths.get("p1").copied(), Some(0.75));
+        assert_eq!(
+            data.main_window.project_widths.get("p1").copied(),
+            Some(0.75)
+        );
     }
 
     #[test]
@@ -906,10 +1027,19 @@ mod tests {
         data.set_project_width(WindowId::Extra(a_id), "p1", 0.42);
 
         assert_eq!(
-            data.window(WindowId::Extra(a_id)).unwrap().project_widths.get("p1").copied(),
+            data.window(WindowId::Extra(a_id))
+                .unwrap()
+                .project_widths
+                .get("p1")
+                .copied(),
             Some(0.42),
         );
-        assert!(data.window(WindowId::Extra(b_id)).unwrap().project_widths.is_empty());
+        assert!(
+            data.window(WindowId::Extra(b_id))
+                .unwrap()
+                .project_widths
+                .is_empty()
+        );
         assert!(data.main_window.project_widths.is_empty());
     }
 
@@ -927,7 +1057,12 @@ mod tests {
         let unknown = uuid::Uuid::new_v4();
         data.set_project_width(WindowId::Extra(unknown), "p1", 0.42);
 
-        assert!(data.window(WindowId::Extra(extra_id)).unwrap().project_widths.is_empty());
+        assert!(
+            data.window(WindowId::Extra(extra_id))
+                .unwrap()
+                .project_widths
+                .is_empty()
+        );
         assert!(data.main_window.project_widths.is_empty());
     }
 
@@ -938,7 +1073,10 @@ mod tests {
         // the smallest leg of the per-window folder-collapse contract.
         let mut data = make_workspace();
         data.set_folder_collapsed(WindowId::Main, "f1", true);
-        assert_eq!(data.main_window.folder_collapsed.get("f1").copied(), Some(true));
+        assert_eq!(
+            data.main_window.folder_collapsed.get("f1").copied(),
+            Some(true)
+        );
     }
 
     #[test]
@@ -951,7 +1089,9 @@ mod tests {
         // unconditionally (which would store explicit `false` entries and
         // diverge from the runtime convention).
         let mut data = make_workspace();
-        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.main_window
+            .folder_collapsed
+            .insert("f1".to_string(), true);
         data.set_folder_collapsed(WindowId::Main, "f1", false);
         assert!(!data.main_window.folder_collapsed.contains_key("f1"));
     }
@@ -984,10 +1124,19 @@ mod tests {
         data.set_folder_collapsed(WindowId::Extra(a_id), "f1", true);
 
         assert_eq!(
-            data.window(WindowId::Extra(a_id)).unwrap().folder_collapsed.get("f1").copied(),
+            data.window(WindowId::Extra(a_id))
+                .unwrap()
+                .folder_collapsed
+                .get("f1")
+                .copied(),
             Some(true),
         );
-        assert!(data.window(WindowId::Extra(b_id)).unwrap().folder_collapsed.is_empty());
+        assert!(
+            data.window(WindowId::Extra(b_id))
+                .unwrap()
+                .folder_collapsed
+                .is_empty()
+        );
         assert!(data.main_window.folder_collapsed.is_empty());
     }
 
@@ -1005,7 +1154,12 @@ mod tests {
         let unknown = uuid::Uuid::new_v4();
         data.set_folder_collapsed(WindowId::Extra(unknown), "f1", true);
 
-        assert!(data.window(WindowId::Extra(extra_id)).unwrap().folder_collapsed.is_empty());
+        assert!(
+            data.window(WindowId::Extra(extra_id))
+                .unwrap()
+                .folder_collapsed
+                .is_empty()
+        );
         assert!(data.main_window.folder_collapsed.is_empty());
     }
 
@@ -1068,7 +1222,12 @@ mod tests {
             data.window(WindowId::Extra(a_id)).unwrap().os_bounds,
             Some(bounds),
         );
-        assert!(data.window(WindowId::Extra(b_id)).unwrap().os_bounds.is_none());
+        assert!(
+            data.window(WindowId::Extra(b_id))
+                .unwrap()
+                .os_bounds
+                .is_none()
+        );
         assert!(data.main_window.os_bounds.is_none());
     }
 
@@ -1092,7 +1251,12 @@ mod tests {
         };
         data.set_os_bounds(WindowId::Extra(unknown), Some(bounds));
 
-        assert!(data.window(WindowId::Extra(extra_id)).unwrap().os_bounds.is_none());
+        assert!(
+            data.window(WindowId::Extra(extra_id))
+                .unwrap()
+                .os_bounds
+                .is_none()
+        );
         assert!(data.main_window.os_bounds.is_none());
     }
 
@@ -1106,7 +1270,9 @@ mod tests {
         // entries in workspace.json over time.
         let mut data = make_workspace();
         data.main_window.hidden_project_ids.insert("p1".to_string());
-        data.main_window.project_widths.insert("p1".to_string(), 0.42);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 0.42);
         data.service_panel_heights.insert("p1".to_string(), 180.0);
         data.hook_panel_heights.insert("p1".to_string(), 220.0);
 
@@ -1154,8 +1320,12 @@ mod tests {
         let mut data = make_workspace();
         data.main_window.hidden_project_ids.insert("p1".to_string());
         data.main_window.hidden_project_ids.insert("p2".to_string());
-        data.main_window.project_widths.insert("p1".to_string(), 0.25);
-        data.main_window.project_widths.insert("p2".to_string(), 0.75);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 0.25);
+        data.main_window
+            .project_widths
+            .insert("p2".to_string(), 0.75);
         let mut extra = WindowState::default();
         extra.hidden_project_ids.insert("p2".to_string());
         extra.project_widths.insert("p2".to_string(), 0.50);
@@ -1165,7 +1335,10 @@ mod tests {
         data.delete_project_scrub_all_windows("p1");
 
         assert!(data.main_window.hidden_project_ids.contains("p2"));
-        assert_eq!(data.main_window.project_widths.get("p2").copied(), Some(0.75));
+        assert_eq!(
+            data.main_window.project_widths.get("p2").copied(),
+            Some(0.75)
+        );
         let after = data.window(WindowId::Extra(extra_id)).unwrap();
         assert!(after.hidden_project_ids.contains("p2"));
         assert_eq!(after.project_widths.get("p2").copied(), Some(0.50));
@@ -1181,7 +1354,9 @@ mod tests {
         // assertion checks "nothing was touched", not "everything is empty".
         let mut data = make_workspace();
         data.main_window.hidden_project_ids.insert("p2".to_string());
-        data.main_window.project_widths.insert("p2".to_string(), 0.42);
+        data.main_window
+            .project_widths
+            .insert("p2".to_string(), 0.42);
         let mut extra = WindowState::default();
         extra.hidden_project_ids.insert("p2".to_string());
         let extra_id = extra.id;
@@ -1190,7 +1365,10 @@ mod tests {
         data.delete_project_scrub_all_windows("unknown_id");
 
         assert!(data.main_window.hidden_project_ids.contains("p2"));
-        assert_eq!(data.main_window.project_widths.get("p2").copied(), Some(0.42));
+        assert_eq!(
+            data.main_window.project_widths.get("p2").copied(),
+            Some(0.42)
+        );
         let after = data.window(WindowId::Extra(extra_id)).unwrap();
         assert!(after.hidden_project_ids.contains("p2"));
     }
@@ -1206,8 +1384,12 @@ mod tests {
         // every project delete.
         let mut data = make_workspace();
         data.main_window.hidden_project_ids.insert("p1".to_string());
-        data.main_window.project_widths.insert("p1".to_string(), 0.42);
-        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 0.42);
+        data.main_window
+            .folder_collapsed
+            .insert("f1".to_string(), true);
         data.main_window.folder_filter = Some("f1".to_string());
         data.main_window.os_bounds = Some(WindowBounds {
             origin_x: 1.0,
@@ -1218,7 +1400,10 @@ mod tests {
 
         data.delete_project_scrub_all_windows("p1");
 
-        assert_eq!(data.main_window.folder_collapsed.get("f1").copied(), Some(true));
+        assert_eq!(
+            data.main_window.folder_collapsed.get("f1").copied(),
+            Some(true)
+        );
         assert_eq!(data.main_window.folder_filter.as_deref(), Some("f1"));
         assert!(data.main_window.os_bounds.is_some());
     }
@@ -1241,12 +1426,24 @@ mod tests {
         });
 
         // main_window: one live ref + several orphans across every storage.
-        data.main_window.hidden_project_ids.insert("present".to_string());
-        data.main_window.hidden_project_ids.insert("ghost".to_string());
-        data.main_window.project_widths.insert("present".to_string(), 0.4);
-        data.main_window.project_widths.insert("ghost".to_string(), 0.6);
-        data.main_window.folder_collapsed.insert("live-folder".to_string(), true);
-        data.main_window.folder_collapsed.insert("dead-folder".to_string(), true);
+        data.main_window
+            .hidden_project_ids
+            .insert("present".to_string());
+        data.main_window
+            .hidden_project_ids
+            .insert("ghost".to_string());
+        data.main_window
+            .project_widths
+            .insert("present".to_string(), 0.4);
+        data.main_window
+            .project_widths
+            .insert("ghost".to_string(), 0.6);
+        data.main_window
+            .folder_collapsed
+            .insert("live-folder".to_string(), true);
+        data.main_window
+            .folder_collapsed
+            .insert("dead-folder".to_string(), true);
         data.main_window.folder_filter = Some("dead-folder".to_string());
 
         // An extra whose filter points at a live folder must be preserved.
@@ -1263,8 +1460,17 @@ mod tests {
         assert!(!data.main_window.hidden_project_ids.contains("ghost"));
         assert!(data.main_window.project_widths.contains_key("present"));
         assert!(!data.main_window.project_widths.contains_key("ghost"));
-        assert!(data.main_window.folder_collapsed.contains_key("live-folder"));
-        assert!(!data.main_window.folder_collapsed.contains_key("dead-folder"));
+        assert!(
+            data.main_window
+                .folder_collapsed
+                .contains_key("live-folder")
+        );
+        assert!(
+            !data
+                .main_window
+                .folder_collapsed
+                .contains_key("dead-folder")
+        );
         assert_eq!(data.main_window.folder_filter, None);
 
         let after = data.window(WindowId::Extra(extra_id)).unwrap();
@@ -1297,8 +1503,10 @@ mod tests {
         let data = make_workspace();
         let saved = serde_json::to_string(&data).unwrap();
         let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert!(!value.as_object().unwrap().contains_key("project_widths"),
-            "top-level project_widths must not appear in serialized form (field removed)");
+        assert!(
+            !value.as_object().unwrap().contains_key("project_widths"),
+            "top-level project_widths must not appear in serialized form (field removed)"
+        );
     }
 
     #[test]
@@ -1455,7 +1663,9 @@ mod tests {
         // hidden state to ensure the call doesn't accidentally touch other
         // entries on main.
         let mut data = make_workspace();
-        data.main_window.hidden_project_ids.insert("sibling".to_string());
+        data.main_window
+            .hidden_project_ids
+            .insert("sibling".to_string());
 
         data.add_project_hide_in_other_windows("p1", WindowId::Main);
 
@@ -1522,7 +1732,14 @@ mod tests {
 
         let after = data.window(WindowId::Extra(extra_id)).unwrap();
         assert!(after.hidden_project_ids.contains("p1"));
-        assert_eq!(after.hidden_project_ids.iter().filter(|id| *id == "p1").count(), 1);
+        assert_eq!(
+            after
+                .hidden_project_ids
+                .iter()
+                .filter(|id| *id == "p1")
+                .count(),
+            1
+        );
     }
 
     #[test]

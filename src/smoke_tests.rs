@@ -11,16 +11,14 @@ mod tests {
     fn init_globals(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             // Settings entity
-            let settings_entity = cx.new(|_cx| {
-                okena_app::settings::SettingsState::new(Default::default())
-            });
+            let settings_entity =
+                cx.new(|_cx| okena_app::settings::SettingsState::new(Default::default()));
             cx.set_global(okena_app::settings::GlobalSettings(settings_entity));
 
             // Theme — AppTheme is a GPUI Entity, not a Global
-            let theme_entity = cx.new(|_cx| okena_app::theme::AppTheme::new(
-                okena_core::theme::ThemeMode::Dark,
-                false,
-            ));
+            let theme_entity = cx.new(|_cx| {
+                okena_app::theme::AppTheme::new(okena_core::theme::ThemeMode::Dark, false)
+            });
             cx.set_global(okena_app::theme::GlobalTheme(theme_entity));
 
             // Theme provider for view crates
@@ -30,7 +28,10 @@ mod tests {
 
             // UI font size provider for view crates
             cx.set_global(okena_ui::tokens::GlobalUiFontSize(|cx| {
-                okena_app::settings::settings_entity(cx).read(cx).settings.ui_font_size
+                okena_app::settings::settings_entity(cx)
+                    .read(cx)
+                    .settings
+                    .ui_font_size
             }));
 
             // Extension settings store (used by terminal and git view crates)
@@ -38,27 +39,35 @@ mod tests {
                 |namespace, cx| {
                     let s = okena_app::settings::settings_entity(cx).read(cx);
                     match namespace {
-                        "terminal" => serde_json::to_value(&okena_views_terminal::TerminalViewSettings {
-                            font_size: s.settings.font_size,
-                            line_height: s.settings.line_height,
-                            font_family: s.settings.font_family.clone(),
-                            cursor_style: s.settings.cursor_style,
-                            cursor_blink: s.settings.cursor_blink,
-                            show_focused_border: s.settings.show_focused_border,
-                            show_shell_selector: s.settings.show_shell_selector,
-                            idle_timeout_secs: s.settings.idle_timeout_secs,
-                            color_tinted_background: s.settings.color_tinted_background,
-                            file_opener: s.settings.file_opener.clone(),
-                            default_shell: s.settings.default_shell.clone(),
-                            hooks: s.settings.hooks.clone(),
-                            ctrl_c_copies_selection: s.settings.terminal_ctrl_c_copies_selection,
-                        }).ok(),
-                        "git" => serde_json::to_value(&okena_views_git::settings::GitViewSettings {
-                            diff_view_mode: s.settings.diff_view_mode,
-                            diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
-                            file_font_size: s.settings.file_font_size,
-                            is_dark: true,
-                        }).ok(),
+                        "terminal" => {
+                            serde_json::to_value(&okena_views_terminal::TerminalViewSettings {
+                                font_size: s.settings.font_size,
+                                line_height: s.settings.line_height,
+                                font_family: s.settings.font_family.clone(),
+                                cursor_style: s.settings.cursor_style,
+                                cursor_blink: s.settings.cursor_blink,
+                                show_focused_border: s.settings.show_focused_border,
+                                show_shell_selector: s.settings.show_shell_selector,
+                                idle_timeout_secs: s.settings.idle_timeout_secs,
+                                color_tinted_background: s.settings.color_tinted_background,
+                                file_opener: s.settings.file_opener.clone(),
+                                default_shell: s.settings.default_shell.clone(),
+                                hooks: s.settings.hooks.clone(),
+                                ctrl_c_copies_selection: s
+                                    .settings
+                                    .terminal_ctrl_c_copies_selection,
+                            })
+                            .ok()
+                        }
+                        "git" => {
+                            serde_json::to_value(&okena_views_git::settings::GitViewSettings {
+                                diff_view_mode: s.settings.diff_view_mode,
+                                diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
+                                file_font_size: s.settings.file_font_size,
+                                is_dark: true,
+                            })
+                            .ok()
+                        }
                         _ => s.settings.extension_settings.get(namespace).cloned(),
                     }
                 },

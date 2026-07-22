@@ -178,9 +178,10 @@ impl AuthStore {
 
         // Return existing code if still valid (60s TTL)
         if let Some(ref code) = inner.current_code
-            && now.duration_since(inner.code_created_at) < Duration::from_secs(60) {
-                return code.clone();
-            }
+            && now.duration_since(inner.code_created_at) < Duration::from_secs(60)
+        {
+            return code.clone();
+        }
 
         // Generate new code
         let code = generate_pairing_code();
@@ -209,7 +210,9 @@ impl AuthStore {
         let inner = self.inner.lock();
         match &inner.current_code {
             Some(_) => {
-                let elapsed = Instant::now().duration_since(inner.code_created_at).as_secs();
+                let elapsed = Instant::now()
+                    .duration_since(inner.code_created_at)
+                    .as_secs();
                 60u64.saturating_sub(elapsed)
             }
             None => 0,
@@ -229,7 +232,8 @@ impl AuthStore {
         let in_memory_valid = match &inner.current_code {
             Some(current) => {
                 let now = Instant::now();
-                let not_expired = now.duration_since(inner.code_created_at) < Duration::from_secs(60);
+                let not_expired =
+                    now.duration_since(inner.code_created_at) < Duration::from_secs(60);
                 not_expired && constant_time_eq(current.as_bytes(), code.as_bytes())
             }
             None => false,
@@ -350,9 +354,7 @@ impl AuthStore {
         let before = inner.tokens.len();
         inner.tokens.retain(|r| r.id != id);
         let removed = inner.tokens.len() < before;
-        if removed
-            && let Err(error) = remove_persisted_token(&self.tokens_path, id)
-        {
+        if removed && let Err(error) = remove_persisted_token(&self.tokens_path, id) {
             log::error!("Failed to persist token revocation: {error}");
         }
         removed
@@ -730,7 +732,10 @@ fn save_tokens_to(path: &std::path::Path, tokens: &[TokenRecord]) {
         }
     };
     for token in persisted_tokens(tokens) {
-        if let Some(existing) = persisted.iter_mut().find(|existing| existing.id == token.id) {
+        if let Some(existing) = persisted
+            .iter_mut()
+            .find(|existing| existing.id == token.id)
+        {
             *existing = token;
         } else {
             persisted.push(token);
@@ -788,7 +793,9 @@ mod tests {
     /// Helper: pair and return a valid token.
     fn pair_token(store: &AuthStore) -> String {
         let code = store.get_or_create_code();
-        store.try_pair(&code, test_ip()).expect("pairing should succeed")
+        store
+            .try_pair(&code, test_ip())
+            .expect("pairing should succeed")
     }
 
     #[test]
@@ -796,8 +803,13 @@ mod tests {
         let store = test_store();
         let original = pair_token(&store);
 
-        let refreshed = store.refresh_token(&original).expect("refresh should succeed");
-        assert_ne!(original, refreshed, "refreshed token should differ from original");
+        let refreshed = store
+            .refresh_token(&original)
+            .expect("refresh should succeed");
+        assert_ne!(
+            original, refreshed,
+            "refreshed token should differ from original"
+        );
     }
 
     #[test]
@@ -812,10 +824,18 @@ mod tests {
         let store = test_store();
         let original = pair_token(&store);
 
-        let refreshed = store.refresh_token(&original).expect("refresh should succeed");
+        let refreshed = store
+            .refresh_token(&original)
+            .expect("refresh should succeed");
 
-        assert!(store.validate_token(&original), "original token should still be valid");
-        assert!(store.validate_token(&refreshed), "refreshed token should be valid");
+        assert!(
+            store.validate_token(&original),
+            "original token should still be valid"
+        );
+        assert!(
+            store.validate_token(&refreshed),
+            "refreshed token should be valid"
+        );
     }
 
     #[test]
@@ -828,7 +848,10 @@ mod tests {
 
         let result = store.try_pair(&code, test_ip());
         assert!(result.is_ok(), "file-based pairing should succeed");
-        assert!(!store.pair_code_path.exists(), "pair_code file should be deleted after successful pairing");
+        assert!(
+            !store.pair_code_path.exists(),
+            "pair_code file should be deleted after successful pairing"
+        );
     }
 
     #[test]
@@ -876,7 +899,9 @@ mod tests {
         let _token1 = pair_token(&store);
         // Generate a fresh code for second pairing
         let code2 = store.generate_fresh_code();
-        let _token2 = store.try_pair(&code2, test_ip()).expect("second pairing should succeed");
+        let _token2 = store
+            .try_pair(&code2, test_ip())
+            .expect("second pairing should succeed");
 
         let tokens = store.list_tokens();
         assert_eq!(tokens.len(), 2, "should list 2 paired tokens");
@@ -899,18 +924,26 @@ mod tests {
         let store = test_store();
         let token1 = pair_token(&store);
         let code2 = store.generate_fresh_code();
-        let token2 = store.try_pair(&code2, test_ip()).expect("second pairing should succeed");
+        let token2 = store
+            .try_pair(&code2, test_ip())
+            .expect("second pairing should succeed");
 
         let tokens = store.list_tokens();
         assert_eq!(tokens.len(), 2);
 
         // Revoke the first token by ID
         let id_to_revoke = tokens[0].id.clone();
-        assert!(store.revoke_token(&id_to_revoke), "revoke should return true");
+        assert!(
+            store.revoke_token(&id_to_revoke),
+            "revoke should return true"
+        );
 
         let remaining = store.list_tokens();
         assert_eq!(remaining.len(), 1, "should have 1 token after revoke");
-        assert_ne!(remaining[0].id, id_to_revoke, "revoked token should be gone");
+        assert_ne!(
+            remaining[0].id, id_to_revoke,
+            "revoked token should be gone"
+        );
 
         // The revoked token should fail validation, the other should pass
         // (We don't know which token maps to which ID, so just verify counts)
@@ -924,7 +957,10 @@ mod tests {
     #[test]
     fn revoke_nonexistent_returns_false() {
         let store = test_store();
-        assert!(!store.revoke_token("nonexistent-id"), "revoking nonexistent token should return false");
+        assert!(
+            !store.revoke_token("nonexistent-id"),
+            "revoking nonexistent token should return false"
+        );
     }
 
     #[test]
@@ -945,7 +981,10 @@ mod tests {
 
         // A check from ip2 triggers pruning; ip1's empty entry should be removed
         assert!(limiter.check(ip2).is_ok());
-        assert!(!limiter.per_ip.contains_key(&ip1), "empty IP entry should be pruned");
+        assert!(
+            !limiter.per_ip.contains_key(&ip1),
+            "empty IP entry should be pruned"
+        );
         assert!(limiter.per_ip.contains_key(&ip2));
     }
 
@@ -1020,7 +1059,10 @@ mod tests {
         assert!(store.reload_tokens());
 
         // After reload: both tokens are valid
-        assert!(store.validate_token(&token1), "original token should still work");
+        assert!(
+            store.validate_token(&token1),
+            "original token should still work"
+        );
         assert!(
             store.validate_token(external_token),
             "externally written token should be valid after reload"

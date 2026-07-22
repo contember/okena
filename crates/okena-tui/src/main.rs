@@ -22,11 +22,11 @@ use okena_core::api::{ApiLayoutNode, ApiProject, StateResponse};
 use okena_terminal::input::{KeyEvent, KeyModifiers, key_to_bytes};
 use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
 use okena_transport::client::{
-    ConnectionEvent, ConnectionHandler, ConnectionStatus, LocalEndpoint, RemoteClient,
-    RemoteConnectionConfig, WsClientMessage, is_remote_terminal, make_prefixed_id,
-    resize_remote_terminal, send_remote_terminal_input, strip_prefix,
+    ConnectionEvent, ConnectionHandler, ConnectionStatus, LocalEndpoint,
     REMOTE_TERMINAL_ANSWERS_QUERIES, REMOTE_TERMINAL_RESIZE_DEBOUNCE_MS,
-    REMOTE_TERMINAL_USES_MOUSE_BACKEND,
+    REMOTE_TERMINAL_USES_MOUSE_BACKEND, RemoteClient, RemoteConnectionConfig, WsClientMessage,
+    is_remote_terminal, make_prefixed_id, resize_remote_terminal, send_remote_terminal_input,
+    strip_prefix,
 };
 use parking_lot::RwLock;
 

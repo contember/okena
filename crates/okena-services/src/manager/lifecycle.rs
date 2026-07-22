@@ -6,8 +6,8 @@ use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 impl ServiceManager {
     /// Parse `okena.yaml` for a project, create `ServiceInstance` entries,
@@ -20,10 +20,17 @@ impl ServiceManager {
         saved_terminal_ids: &HashMap<String, String>,
         cx: &mut impl ServiceCx,
     ) {
-        log::info!("[services] load_project_services project_id={} path={}", project_id, project_path);
+        log::info!(
+            "[services] load_project_services project_id={} path={}",
+            project_id,
+            project_path
+        );
         let config = match load_project_config(project_path) {
             Ok(Some(config)) => {
-                log::info!("[services] Found okena.yaml with {} services", config.services.len());
+                log::info!(
+                    "[services] Found okena.yaml with {} services",
+                    config.services.len()
+                );
                 config
             }
             Ok(None) => {
@@ -35,7 +42,11 @@ impl ServiceManager {
                 return;
             }
             Err(e) => {
-                log::error!("Failed to load okena.yaml for project {}: {}", project_id, e);
+                log::error!(
+                    "Failed to load okena.yaml for project {}: {}",
+                    project_id,
+                    e
+                );
                 return;
             }
         };
@@ -66,8 +77,7 @@ impl ServiceManager {
             );
         }
 
-        self.configs
-            .insert(project_id.to_string(), config.services);
+        self.configs.insert(project_id.to_string(), config.services);
 
         // Try to reconnect services that have saved terminal IDs
         for def in self.configs.get(project_id).cloned().unwrap_or_default() {
@@ -80,13 +90,19 @@ impl ServiceManager {
         for name in auto_start_names {
             let key = (project_id.to_string(), name.clone());
             if let Some(instance) = self.instances.get(&key)
-                && instance.status == ServiceStatus::Stopped {
-                    self.start_service(project_id, &name, project_path, cx);
-                }
+                && instance.status == ServiceStatus::Stopped
+            {
+                self.start_service(project_id, &name, project_path, cx);
+            }
         }
 
         // Load Docker Compose services
-        self.load_docker_compose_services(project_id, project_path, config.docker_compose.as_ref(), cx);
+        self.load_docker_compose_services(
+            project_id,
+            project_path,
+            config.docker_compose.as_ref(),
+            cx,
+        );
 
         cx.notify();
     }
@@ -115,7 +131,10 @@ impl ServiceManager {
 
         let shell = ShellType::for_command(command);
 
-        match self.backend.reconnect_terminal(saved_terminal_id, &cwd, Some(&shell)) {
+        match self
+            .backend
+            .reconnect_terminal(saved_terminal_id, &cwd, Some(&shell))
+        {
             Ok(terminal_id) => {
                 let terminal = Arc::new(Terminal::new(
                     terminal_id.clone(),
@@ -129,20 +148,31 @@ impl ServiceManager {
                     clippy::expect_used,
                     reason = "instance inserted earlier in this function, absence is a bug"
                 )]
-                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
+                let instance = self
+                    .instances
+                    .get_mut(&key)
+                    .expect("bug: service instance must exist");
                 instance.status = ServiceStatus::Running;
                 instance.terminal_id = Some(terminal_id.clone());
                 self.terminal_to_service.insert(
                     terminal_id,
                     (project_id.to_string(), service_name.to_string()),
                 );
-                log::info!("Reconnected service '{}' for project {} (terminal {})", service_name, project_id, saved_terminal_id);
+                log::info!(
+                    "Reconnected service '{}' for project {} (terminal {})",
+                    service_name,
+                    project_id,
+                    saved_terminal_id
+                );
                 self.start_port_detection(project_id, service_name, cx);
             }
             Err(e) => {
                 log::warn!(
                     "Failed to reconnect service '{}' for project {} (terminal {}): {}",
-                    service_name, project_id, saved_terminal_id, e
+                    service_name,
+                    project_id,
+                    saved_terminal_id,
+                    e
                 );
                 // Leave as Stopped — auto_start will create a fresh terminal if configured
             }
@@ -167,11 +197,12 @@ impl ServiceManager {
 
         for key in keys {
             if let Some(instance) = self.instances.get(&key)
-                && let Some(terminal_id) = &instance.terminal_id {
-                    self.backend.kill(terminal_id);
-                    self.terminals.lock().remove(terminal_id);
-                    self.terminal_to_service.remove(terminal_id);
-                }
+                && let Some(terminal_id) = &instance.terminal_id
+            {
+                self.backend.kill(terminal_id);
+                self.terminals.lock().remove(terminal_id);
+                self.terminal_to_service.remove(terminal_id);
+            }
             self.instances.remove(&key);
         }
 
@@ -217,7 +248,9 @@ impl ServiceManager {
             .filter(|(pid, name)| {
                 pid == project_id
                     && !new_names.contains(name)
-                    && self.instances.get(&(pid.clone(), name.clone()))
+                    && self
+                        .instances
+                        .get(&(pid.clone(), name.clone()))
                         .is_some_and(|i| i.kind == ServiceKind::Okena)
             })
             .cloned()
@@ -225,11 +258,12 @@ impl ServiceManager {
 
         for key in removed_keys {
             if let Some(instance) = self.instances.get(&key)
-                && let Some(terminal_id) = &instance.terminal_id {
-                    self.backend.kill(terminal_id);
-                    self.terminals.lock().remove(terminal_id);
-                    self.terminal_to_service.remove(terminal_id);
-                }
+                && let Some(terminal_id) = &instance.terminal_id
+            {
+                self.backend.kill(terminal_id);
+                self.terminals.lock().remove(terminal_id);
+                self.terminal_to_service.remove(terminal_id);
+            }
             self.instances.remove(&key);
         }
 
@@ -258,7 +292,12 @@ impl ServiceManager {
             .insert(project_id.to_string(), new_config.services.clone());
 
         // Reload Docker Compose services
-        self.reload_docker_compose_services(project_id, project_path, new_config.docker_compose.as_ref(), cx);
+        self.reload_docker_compose_services(
+            project_id,
+            project_path,
+            new_config.docker_compose.as_ref(),
+            cx,
+        );
 
         cx.notify();
     }

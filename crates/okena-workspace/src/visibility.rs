@@ -40,9 +40,7 @@ pub fn compute_visible_projects<'a>(
             .filter(|p| {
                 p.worktree_info
                     .as_ref()
-                    .is_some_and(|wi| {
-                        folder_project_ids.contains(wi.parent_project_id.as_str())
-                    })
+                    .is_some_and(|wi| folder_project_ids.contains(wi.parent_project_id.as_str()))
             })
             .map(|p| p.id.as_str())
             .collect()
@@ -55,24 +53,25 @@ pub fn compute_visible_projects<'a>(
         if let Some(folder) = data.folders.iter().find(|f| f.id == *id) {
             // When folder filter is active, skip folders that don't match
             if let Some(filter_id) = folder_filter
-                && &folder.id != filter_id {
-                    // Still allow the focused project (or its worktree) through
-                    if focused.is_some() {
-                        for pid in &folder.project_ids {
-                            if let Some(p) = data.projects.iter().find(|p| &p.id == pid) {
-                                push_project_with_worktrees(
-                                    data,
-                                    p,
-                                    focused,
-                                    focus_individual,
-                                    window,
-                                    &mut result,
-                                );
-                            }
+                && &folder.id != filter_id
+            {
+                // Still allow the focused project (or its worktree) through
+                if focused.is_some() {
+                    for pid in &folder.project_ids {
+                        if let Some(p) = data.projects.iter().find(|p| &p.id == pid) {
+                            push_project_with_worktrees(
+                                data,
+                                p,
+                                focused,
+                                focus_individual,
+                                window,
+                                &mut result,
+                            );
                         }
                     }
-                    continue;
                 }
+                continue;
+            }
             // Folder: include its projects and their worktree children.
             // Worktree children live in project_order (not folder.project_ids),
             // so we expand them here to keep them positioned within their folder's section.
@@ -132,9 +131,12 @@ pub fn compute_visible_projects<'a>(
         let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
         for p in &result {
             if let Some(ref wi) = p.worktree_info
-                && result_ids.contains(wi.parent_project_id.as_str()) {
-                    map.entry(wi.parent_project_id.as_str()).or_default().push(p);
-                }
+                && result_ids.contains(wi.parent_project_id.as_str())
+            {
+                map.entry(wi.parent_project_id.as_str())
+                    .or_default()
+                    .push(p);
+            }
         }
         map
     };
@@ -277,11 +279,7 @@ mod tests {
     #[test]
     fn filters_hidden_projects() {
         let data = make_data(
-            vec![
-                make_project("p1"),
-                make_project("p2"),
-                make_project("p3"),
-            ],
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["p1", "p2", "p3"],
             &["p2"],
         );
@@ -294,17 +292,12 @@ mod tests {
     #[test]
     fn focused_project_shown_even_when_hidden() {
         let data = make_data(
-            vec![
-                make_project("p1"),
-                make_project("p2"),
-                make_project("p3"),
-            ],
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["p1", "p2", "p3"],
             &["p3"],
         );
         let focused = "p3".to_string();
-        let visible =
-            compute_visible_projects(&data, Some(&focused), false, &data.main_window);
+        let visible = compute_visible_projects(&data, Some(&focused), false, &data.main_window);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "p3");
     }
@@ -329,11 +322,7 @@ mod tests {
     #[test]
     fn folder_filter_hides_top_level() {
         let mut data = make_data(
-            vec![
-                make_project("p1"),
-                make_project("p2"),
-                make_project("p3"),
-            ],
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["f1", "p3"],
             &[],
         );
@@ -408,11 +397,7 @@ mod tests {
         // window hidden set is the sole visibility mechanism after the
         // legacy ProjectData.show_in_overview field was removed.
         let data = make_data(
-            vec![
-                make_project("p1"),
-                make_project("p2"),
-                make_project("p3"),
-            ],
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["p1", "p2", "p3"],
             &[],
         );
@@ -445,11 +430,7 @@ mod tests {
         // WindowState.folder_filter instead of the prior loose argument —
         // verifies the new signature reads filter from the window.
         let mut data = make_data(
-            vec![
-                make_project("p1"),
-                make_project("p2"),
-                make_project("p3"),
-            ],
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["f1", "p3"],
             &[],
         );

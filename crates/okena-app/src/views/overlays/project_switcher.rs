@@ -10,8 +10,8 @@ use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_ms};
 use crate::views::components::list_overlay::FilterResult;
 use crate::views::components::{
-    badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
-    modal_header, search_input_area, ListOverlayAction, ListOverlayConfig, ListOverlayState,
+    ListOverlayAction, ListOverlayConfig, ListOverlayState, badge, handle_list_overlay_key,
+    keyboard_hints_footer, modal_backdrop, modal_content, modal_header, search_input_area,
 };
 use crate::views::project_hover::set_hovered_project;
 use crate::workspace::state::{ProjectData, WindowId, Workspace};
@@ -132,7 +132,11 @@ impl ProjectSwitcher {
     /// an "open"; closed projects keep the modal open so the choice is obvious.
     fn jump_into_selected(&self, cx: &mut Context<Self>) {
         if let Some(project) = self.state.selected_item() {
-            let open = self.open_states.get(&project.id).copied().unwrap_or_default();
+            let open = self
+                .open_states
+                .get(&project.id)
+                .copied()
+                .unwrap_or_default();
             if open.open_here || open.open_elsewhere > 0 {
                 cx.emit(ProjectSwitcherEvent::JumpToProject(project.id.clone()));
             }
@@ -156,7 +160,11 @@ impl ProjectSwitcher {
         let project_id = project.id.clone();
         let name = project.name.clone();
         let path = project.path.clone();
-        let open = self.open_states.get(&project.id).copied().unwrap_or_default();
+        let open = self
+            .open_states
+            .get(&project.id)
+            .copied()
+            .unwrap_or_default();
         let is_worktree = project.worktree_info.is_some();
         let folder_color = t.get_folder_color(project.folder_color);
         let branch = self
@@ -330,7 +338,11 @@ impl ProjectSwitcher {
                         .justify_center()
                         .child(
                             svg()
-                                .path(if on { "icons/eye.svg" } else { "icons/eye-off.svg" })
+                                .path(if on {
+                                    "icons/eye.svg"
+                                } else {
+                                    "icons/eye-off.svg"
+                                })
                                 .size(px(14.0))
                                 .text_color(if on {
                                     rgb(t.border_active)
@@ -498,11 +510,7 @@ impl Render for ProjectSwitcher {
                 this.jump_into_selected(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                match handle_list_overlay_key(
-                    &mut this.state,
-                    event,
-                    &[("space", "toggle")],
-                ) {
+                match handle_list_overlay_key(&mut this.state, event, &[("space", "toggle")]) {
                     ListOverlayAction::Close => this.close(cx),
                     ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
                         this.state.scroll_to_selected();
@@ -630,10 +638,12 @@ mod tests {
         let here = WindowId::Main;
         let other = WindowId::Extra(uuid::Uuid::new_v4());
         // main (here): p_other + p_closed hidden; other: p_here + p_closed hidden.
-        let main_hidden: HashSet<String> =
-            ["p_other".to_string(), "p_closed".to_string()].into_iter().collect();
-        let other_hidden: HashSet<String> =
-            ["p_here".to_string(), "p_closed".to_string()].into_iter().collect();
+        let main_hidden: HashSet<String> = ["p_other".to_string(), "p_closed".to_string()]
+            .into_iter()
+            .collect();
+        let other_hidden: HashSet<String> = ["p_here".to_string(), "p_closed".to_string()]
+            .into_iter()
+            .collect();
         let windows = vec![(here, &main_hidden), (other, &other_hidden)];
 
         let here_only = compute_open_state("p_here", here, &windows);

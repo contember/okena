@@ -95,7 +95,8 @@ pub fn resizable_sidebar(
                 move |_bounds, _state, window, _cx| {
                     let mut on_drag_end = Some(on_drag_end);
                     window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
-                        if phase == DispatchPhase::Bubble && event.button == MouseButton::Left
+                        if phase == DispatchPhase::Bubble
+                            && event.button == MouseButton::Left
                             && let Some(callback) = on_drag_end.take()
                         {
                             callback(cx);

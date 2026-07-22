@@ -1,16 +1,16 @@
 use crate::remote::GlobalRemoteInfo;
 use crate::settings::settings_entity;
 use crate::theme::theme;
-use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_md};
+use crate::ui::tokens::{ui_text, ui_text_md, ui_text_sm};
 use crate::views::components::simple_input::SimpleInput;
 use crate::workspace::settings::HeaderDensity;
-use gpui::*;
 use gpui::prelude::*;
+use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_transport::client::tls::format_fingerprint;
 
-use super::components::*;
 use super::SettingsPanel;
+use super::components::*;
 
 impl SettingsPanel {
     pub(super) fn render_general(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -126,39 +126,43 @@ impl SettingsPanel {
             .child(section)
             .child(section_header("File Opener", &t, cx))
             .child(
-                section_container(&t)
-                    .child(
-                        div()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.0))
-                            .child(
-                                v_flex()
-                                    .gap(px(2.0))
-                                    .child(
-                                        div()
-                                            .text_size(ui_text(13.0, cx))
-                                            .text_color(rgb(t.text_primary))
-                                            .child("Editor Command"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(ui_text_sm(cx))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Command to open file paths (empty = system default)"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .bg(rgb(t.bg_secondary))
-                                    .border_1()
-                                    .border_color(rgb(t.border))
-                                    .rounded(px(4.0))
-                                    .child(SimpleInput::new(&self.file_opener_input).text_size(ui_text_md(cx))),
-                            ),
-                    ),
+                section_container(&t).child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(
+                            v_flex()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .text_size(ui_text(13.0, cx))
+                                        .text_color(rgb(t.text_primary))
+                                        .child("Editor Command"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(ui_text_sm(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(
+                                            "Command to open file paths (empty = system default)",
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .bg(rgb(t.bg_secondary))
+                                .border_1()
+                                .border_color(rgb(t.border))
+                                .rounded(px(4.0))
+                                .child(
+                                    SimpleInput::new(&self.file_opener_input)
+                                        .text_size(ui_text_md(cx)),
+                                ),
+                        ),
+                ),
             )
             .child(section_header("Notifications", &t, cx))
             .child({
@@ -193,16 +197,14 @@ impl SettingsPanel {
                     })
             })
             .child(section_header("Clipboard", &t, cx))
-            .child(
-                section_container(&t).child(self.render_toggle(
-                    "clipboard-read",
-                    "Allow Clipboard Read (OSC 52)",
-                    s.allow_clipboard_read,
-                    false,
-                    |state, val, cx| state.set_allow_clipboard_read(val, cx),
-                    cx,
-                )),
-            )
+            .child(section_container(&t).child(self.render_toggle(
+                "clipboard-read",
+                "Allow Clipboard Read (OSC 52)",
+                s.allow_clipboard_read,
+                false,
+                |state, val, cx| state.set_allow_clipboard_read(val, cx),
+                cx,
+            )))
     }
 
     fn render_header_density_row(
@@ -225,33 +227,39 @@ impl SettingsPanel {
                 .rounded(px(4.0))
                 .bg(rgb(t.bg_secondary))
                 .p(px(2.0))
-                .children(HeaderDensity::all_variants().iter().map(|&density: &HeaderDensity| {
-                    let is_selected = density == current;
-                    let hover_bg = t.bg_hover;
-                    div()
-                        .id(ElementId::Name(
-                            format!("header-density-{:?}", density).into(),
-                        ))
-                        .cursor_pointer()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(3.0))
-                        .text_size(ui_text_md(cx))
-                        .when(is_selected, |el: Stateful<Div>| {
-                            el.bg(rgb(t.border_active))
-                                .text_color(rgb(t.text_primary))
-                        })
-                        .when(!is_selected, |el: Stateful<Div>| {
-                            el.text_color(rgb(t.text_muted))
-                                .hover(|s: StyleRefinement| s.bg(rgb(hover_bg)))
-                        })
-                        .child(density.display_name().to_string())
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
-                            settings_entity(cx).update(cx, |state, cx| {
-                                state.set_header_density(density, cx);
-                            });
-                        }))
-                })),
+                .children(
+                    HeaderDensity::all_variants()
+                        .iter()
+                        .map(|&density: &HeaderDensity| {
+                            let is_selected = density == current;
+                            let hover_bg = t.bg_hover;
+                            div()
+                                .id(ElementId::Name(
+                                    format!("header-density-{:?}", density).into(),
+                                ))
+                                .cursor_pointer()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(px(3.0))
+                                .text_size(ui_text_md(cx))
+                                .when(is_selected, |el: Stateful<Div>| {
+                                    el.bg(rgb(t.border_active)).text_color(rgb(t.text_primary))
+                                })
+                                .when(!is_selected, |el: Stateful<Div>| {
+                                    el.text_color(rgb(t.text_muted))
+                                        .hover(|s: StyleRefinement| s.bg(rgb(hover_bg)))
+                                })
+                                .child(density.display_name().to_string())
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |_, _, _, cx| {
+                                        settings_entity(cx).update(cx, |state, cx| {
+                                            state.set_header_density(density, cx);
+                                        });
+                                    }),
+                                )
+                        }),
+                ),
         )
     }
 }

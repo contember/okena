@@ -26,16 +26,13 @@ fn local_update_endpoint(path: &str) -> Result<LocalUpdateEndpoint> {
         .context("remote.json is missing port")?;
     let port = u16::try_from(port_value).context("remote.json port is out of range")?;
     #[cfg(unix)]
-    if let Some(socket_path) = value
-        .get("local_endpoint")
-        .and_then(|endpoint| {
-            if endpoint.get("kind").and_then(serde_json::Value::as_str) == Some("unix_socket") {
-                endpoint.get("path").and_then(serde_json::Value::as_str)
-            } else {
-                None
-            }
-        })
-    {
+    if let Some(socket_path) = value.get("local_endpoint").and_then(|endpoint| {
+        if endpoint.get("kind").and_then(serde_json::Value::as_str) == Some("unix_socket") {
+            endpoint.get("path").and_then(serde_json::Value::as_str)
+        } else {
+            None
+        }
+    }) {
         let client = reqwest::blocking::Client::builder()
             .unix_socket(socket_path)
             .build()
@@ -65,8 +62,8 @@ pub fn fetch_status() -> Result<UpdateStatusSnapshot> {
         .timeout(Duration::from_secs(5))
         .send()
         .context("failed to fetch update status")?
-    .error_for_status()
-    .context("update status request failed")?;
+        .error_for_status()
+        .context("update status request failed")?;
     response.json().context("failed to decode update status")
 }
 
@@ -91,7 +88,7 @@ fn post_snapshot(path: &str, label: &'static str) -> Result<UpdateStatusSnapshot
         .timeout(Duration::from_secs(10))
         .send()
         .with_context(|| format!("failed to POST {path}"))?
-    .error_for_status()
-    .with_context(|| format!("daemon rejected {path}"))?;
+        .error_for_status()
+        .with_context(|| format!("daemon rejected {path}"))?;
     response.json().context("failed to decode update status")
 }

@@ -477,7 +477,9 @@ impl HttpBus {
                 let status = resp.status().as_u16();
                 log::debug!(target: "okena::http", "stream {detail} -> {status} ({elapsed}ms)");
             }
-            Err(e) => log::warn!(target: "okena::http", "stream {detail} failed: {e} ({elapsed}ms)"),
+            Err(e) => {
+                log::warn!(target: "okena::http", "stream {detail} failed: {e} ({elapsed}ms)")
+            }
         }
         let resp = result?;
         Ok(HttpStream {
@@ -552,10 +554,11 @@ mod tests {
             .label("test.post");
         assert_eq!(req.method, Method::Post);
         assert_eq!(req.audit_detail(), "test.post: POST https://example.test/x");
-        assert!(req
-            .headers
-            .iter()
-            .any(|(k, v)| k == "Authorization" && v == "Bearer tok"));
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "Bearer tok")
+        );
     }
 
     #[test]
@@ -595,14 +598,8 @@ mod tests {
         // First call admitted, the next two (immediate) are short-circuited
         // before ever reaching the mock.
         assert!(send(make()).is_ok());
-        assert!(matches!(
-            send(make()),
-            Err(HttpError::Throttled { .. })
-        ));
-        assert!(matches!(
-            send(make()),
-            Err(HttpError::Throttled { .. })
-        ));
+        assert!(matches!(send(make()), Err(HttpError::Throttled { .. })));
+        assert!(matches!(send(make()), Err(HttpError::Throttled { .. })));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 

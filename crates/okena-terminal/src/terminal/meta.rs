@@ -38,7 +38,8 @@ impl Terminal {
         let responders = std::mem::take(&mut *self.pending_clipboard_reads.lock());
         for responder in responders {
             let reply = responder(content);
-            self.transport.send_input(&self.terminal_id, reply.as_bytes());
+            self.transport
+                .send_input(&self.terminal_id, reply.as_bytes());
         }
     }
 

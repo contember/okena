@@ -1,12 +1,12 @@
 //! GPUI-level integration tests for layout actions: exercise the full Workspace
 //! entity via TestAppContext.
 
-use gpui::AppContext as _;
 use crate::focus::FocusManager;
-use crate::state::{DropZone, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
 use crate::settings::HooksConfig;
-use okena_terminal::shell_config::ShellType;
+use crate::state::{DropZone, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
+use gpui::AppContext as _;
 use okena_core::theme::FolderColor;
+use okena_terminal::shell_config::ShellType;
 use std::collections::HashMap;
 
 fn make_project(id: &str) -> ProjectData {
@@ -70,7 +70,13 @@ fn test_split_terminal_gpui(cx: &mut gpui::TestAppContext) {
     let v0 = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.split_terminal(&mut FocusManager::new(), "p1", &[], SplitDirection::Vertical, cx);
+        ws.split_terminal(
+            &mut FocusManager::new(),
+            "p1",
+            &[],
+            SplitDirection::Vertical,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -102,7 +108,10 @@ fn test_add_tab_gpui(cx: &mut gpui::TestAppContext) {
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         match layout {
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 assert_eq!(children.len(), 2);
                 assert_eq!(*active_tab, 1);
             }
@@ -222,15 +231,24 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         match layout {
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 assert_eq!(children.len(), 2);
                 // active_tab was 2, after removing index 0 it should be 1
                 assert_eq!(*active_tab, 1);
                 // Remaining are t2 and t3
-                let ids: Vec<_> = children.iter().filter_map(|c| match c {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
-                    _ => None,
-                }).collect();
+                let ids: Vec<_> = children
+                    .iter()
+                    .filter_map(|c| match c {
+                        LayoutNode::Terminal {
+                            terminal_id: Some(id),
+                            ..
+                        } => Some(id.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 assert_eq!(ids, vec!["t2", "t3"]);
             }
             _ => panic!("Expected tabs"),
@@ -276,8 +294,14 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
     // Capture which terminal the active tab points at before the close.
     let active_id_before = workspace.read_with(cx, |ws: &Workspace, _cx| {
         match ws.project("p1").unwrap().layout.as_ref().unwrap() {
-            LayoutNode::Tabs { children, active_tab } => match &children[*active_tab] {
-                LayoutNode::Terminal { terminal_id: Some(id), .. } => id.clone(),
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => match &children[*active_tab] {
+                LayoutNode::Terminal {
+                    terminal_id: Some(id),
+                    ..
+                } => id.clone(),
                 _ => panic!("Expected terminal"),
             },
             _ => panic!("Expected tabs"),
@@ -293,20 +317,32 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         match layout {
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 assert_eq!(children.len(), 2);
                 // active_tab decremented from 1 -> 0 so it still points at t2.
                 assert_eq!(*active_tab, 0);
                 match &children[*active_tab] {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => {
+                    LayoutNode::Terminal {
+                        terminal_id: Some(id),
+                        ..
+                    } => {
                         assert_eq!(id, &active_id_before);
                     }
                     _ => panic!("Expected terminal"),
                 }
-                let ids: Vec<_> = children.iter().filter_map(|c| match c {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
-                    _ => None,
-                }).collect();
+                let ids: Vec<_> = children
+                    .iter()
+                    .filter_map(|c| match c {
+                        LayoutNode::Terminal {
+                            terminal_id: Some(id),
+                            ..
+                        } => Some(id.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 assert_eq!(ids, vec!["t2", "t3"]);
             }
             _ => panic!("Expected tabs"),
@@ -343,18 +379,30 @@ fn test_close_before_last_active_tab_preserves_focus_gpui(cx: &mut gpui::TestApp
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         match ws.project("p1").unwrap().layout.as_ref().unwrap() {
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 assert_eq!(children.len(), 2);
                 // active_tab shifts 2 -> 1 (single shift), still pointing at t3.
                 assert_eq!(*active_tab, 1);
                 match &children[*active_tab] {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => assert_eq!(id, "t3"),
+                    LayoutNode::Terminal {
+                        terminal_id: Some(id),
+                        ..
+                    } => assert_eq!(id, "t3"),
                     _ => panic!("Expected terminal"),
                 }
-                let ids: Vec<_> = children.iter().filter_map(|c| match c {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
-                    _ => None,
-                }).collect();
+                let ids: Vec<_> = children
+                    .iter()
+                    .filter_map(|c| match c {
+                        LayoutNode::Terminal {
+                            terminal_id: Some(id),
+                            ..
+                        } => Some(id.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 assert_eq!(ids, vec!["t2", "t3"]);
             }
             _ => panic!("Expected tabs"),
@@ -402,11 +450,20 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         match layout {
-            LayoutNode::Tabs { children, active_tab } => {
-                let ids: Vec<_> = children.iter().filter_map(|c| match c {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
-                    _ => None,
-                }).collect();
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
+                let ids: Vec<_> = children
+                    .iter()
+                    .filter_map(|c| match c {
+                        LayoutNode::Terminal {
+                            terminal_id: Some(id),
+                            ..
+                        } => Some(id.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 assert_eq!(ids, vec!["t2", "t3", "t1"]);
                 assert_eq!(*active_tab, 2); // active_tab was 0 (the moved tab), should follow
             }
@@ -463,7 +520,15 @@ fn test_move_pane_left_creates_vertical_split(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t2", DropZone::Left, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p1",
+            "t2",
+            DropZone::Left,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -493,14 +558,26 @@ fn test_move_pane_top_creates_horizontal_split(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t2", DropZone::Top, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p1",
+            "t2",
+            DropZone::Top,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         // t1 removed -> t2 becomes root. t1 dropped on top of t2 -> H[t1, t2]
         match layout {
-            LayoutNode::Split { direction, children, .. } => {
+            LayoutNode::Split {
+                direction,
+                children,
+                ..
+            } => {
                 assert_eq!(*direction, SplitDirection::Horizontal);
                 assert_eq!(children.len(), 2);
                 let ids = layout.collect_terminal_ids();
@@ -523,13 +600,25 @@ fn test_move_pane_bottom_creates_horizontal_split(cx: &mut gpui::TestAppContext)
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t2", DropZone::Bottom, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p1",
+            "t2",
+            DropZone::Bottom,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         match layout {
-            LayoutNode::Split { direction, children, .. } => {
+            LayoutNode::Split {
+                direction,
+                children,
+                ..
+            } => {
                 assert_eq!(*direction, SplitDirection::Horizontal);
                 assert_eq!(children.len(), 2);
                 let ids = layout.collect_terminal_ids();
@@ -553,13 +642,24 @@ fn test_move_pane_center_creates_tab_group(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t2", DropZone::Center, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p1",
+            "t2",
+            DropZone::Center,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         match layout {
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 assert_eq!(children.len(), 2);
                 assert_eq!(*active_tab, 1);
                 let ids = layout.collect_terminal_ids();
@@ -584,7 +684,15 @@ fn test_move_pane_self_drop_is_noop(cx: &mut gpui::TestAppContext) {
     let v0 = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t1", DropZone::Top, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p1",
+            "t1",
+            DropZone::Top,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -603,7 +711,15 @@ fn test_move_pane_only_terminal_is_noop(cx: &mut gpui::TestAppContext) {
     let v0 = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "term_p1", "p1", "term_p1", DropZone::Left, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "term_p1",
+            "p1",
+            "term_p1",
+            DropZone::Left,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -632,19 +748,36 @@ fn test_move_terminal_to_tab_group_inserts_at_position(cx: &mut gpui::TestAppCon
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_terminal_to_tab_group(&mut FocusManager::new(), "p1", "t3", "p1", &[0], Some(1), cx);
+        ws.move_terminal_to_tab_group(
+            &mut FocusManager::new(),
+            "p1",
+            "t3",
+            "p1",
+            &[0],
+            Some(1),
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         match layout {
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 assert_eq!(children.len(), 3);
                 assert_eq!(*active_tab, 1);
-                let ids: Vec<_> = children.iter().filter_map(|c| match c {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
-                    _ => None,
-                }).collect();
+                let ids: Vec<_> = children
+                    .iter()
+                    .filter_map(|c| match c {
+                        LayoutNode::Terminal {
+                            terminal_id: Some(id),
+                            ..
+                        } => Some(id.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 assert_eq!(ids, vec!["t1", "t3", "t2"]);
             }
             _ => panic!("Expected tabs, got {:?}", layout),
@@ -677,13 +810,22 @@ fn test_move_terminal_to_tab_group_appends(cx: &mut gpui::TestAppContext) {
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         match layout {
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 assert_eq!(children.len(), 3);
                 assert_eq!(*active_tab, 2);
-                let ids: Vec<_> = children.iter().filter_map(|c| match c {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
-                    _ => None,
-                }).collect();
+                let ids: Vec<_> = children
+                    .iter()
+                    .filter_map(|c| match c {
+                        LayoutNode::Terminal {
+                            terminal_id: Some(id),
+                            ..
+                        } => Some(id.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 assert_eq!(ids, vec!["t1", "t2", "t3"]);
             }
             _ => panic!("Expected tabs, got {:?}", layout),
@@ -695,7 +837,11 @@ fn test_move_terminal_to_tab_group_appends(cx: &mut gpui::TestAppContext) {
 fn test_move_terminal_to_tab_group_same_group_reorders(cx: &mut gpui::TestAppContext) {
     // Tabs[t1, t2, t3] → move t1 (already in group) to index 2 → reorder
     let layout = LayoutNode::Tabs {
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+        children: vec![
+            terminal_node_t("t1"),
+            terminal_node_t("t2"),
+            terminal_node_t("t3"),
+        ],
         active_tab: 0,
     };
     let project = make_project_with_layout("p1", layout);
@@ -710,10 +856,16 @@ fn test_move_terminal_to_tab_group_same_group_reorders(cx: &mut gpui::TestAppCon
         let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
         match layout {
             LayoutNode::Tabs { children, .. } => {
-                let ids: Vec<_> = children.iter().filter_map(|c| match c {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
-                    _ => None,
-                }).collect();
+                let ids: Vec<_> = children
+                    .iter()
+                    .filter_map(|c| match c {
+                        LayoutNode::Terminal {
+                            terminal_id: Some(id),
+                            ..
+                        } => Some(id.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 assert_eq!(ids, vec!["t2", "t3", "t1"]);
             }
             _ => panic!("Expected tabs, got {:?}", layout),
@@ -727,14 +879,26 @@ fn test_move_pane_3_children_with_flatten(cx: &mut gpui::TestAppContext) {
     let layout = LayoutNode::Split {
         direction: SplitDirection::Vertical,
         sizes: vec![33.0, 33.0, 34.0],
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+        children: vec![
+            terminal_node_t("t1"),
+            terminal_node_t("t2"),
+            terminal_node_t("t3"),
+        ],
     };
     let project = make_project_with_layout("p1", layout);
     let data = make_workspace_data(vec![project], vec!["p1"]);
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t3", DropZone::Top, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p1",
+            "t3",
+            DropZone::Top,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -800,18 +964,22 @@ fn test_close_terminal_cleans_metadata(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn test_close_tab_cleans_metadata(cx: &mut gpui::TestAppContext) {
     let layout = LayoutNode::Tabs {
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+        children: vec![
+            terminal_node_t("t1"),
+            terminal_node_t("t2"),
+            terminal_node_t("t3"),
+        ],
         active_tab: 0,
     };
-    let project = make_project_with_names("p1", layout, vec![
-        ("t1", "Term 1"), ("t2", "Term 2"), ("t3", "Term 3"),
-    ]);
+    let project = make_project_with_names(
+        "p1",
+        layout,
+        vec![("t1", "Term 1"), ("t2", "Term 2"), ("t3", "Term 3")],
+    );
     let data = make_workspace_data(vec![project], vec!["p1"]);
     let workspace = cx.new(|_cx| Workspace::new(data));
 
-    let removed = workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.close_tab("p1", &[], 1, cx)
-    });
+    let removed = workspace.update(cx, |ws: &mut Workspace, cx| ws.close_tab("p1", &[], 1, cx));
 
     assert_eq!(removed, vec!["t2"]);
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -825,12 +993,18 @@ fn test_close_tab_cleans_metadata(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn test_close_other_tabs_cleans_metadata(cx: &mut gpui::TestAppContext) {
     let layout = LayoutNode::Tabs {
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+        children: vec![
+            terminal_node_t("t1"),
+            terminal_node_t("t2"),
+            terminal_node_t("t3"),
+        ],
         active_tab: 0,
     };
-    let project = make_project_with_names("p1", layout, vec![
-        ("t1", "Term 1"), ("t2", "Term 2"), ("t3", "Term 3"),
-    ]);
+    let project = make_project_with_names(
+        "p1",
+        layout,
+        vec![("t1", "Term 1"), ("t2", "Term 2"), ("t3", "Term 3")],
+    );
     let data = make_workspace_data(vec![project], vec!["p1"]);
     let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -852,12 +1026,18 @@ fn test_close_other_tabs_cleans_metadata(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn test_close_tabs_to_right_cleans_metadata(cx: &mut gpui::TestAppContext) {
     let layout = LayoutNode::Tabs {
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+        children: vec![
+            terminal_node_t("t1"),
+            terminal_node_t("t2"),
+            terminal_node_t("t3"),
+        ],
         active_tab: 0,
     };
-    let project = make_project_with_names("p1", layout, vec![
-        ("t1", "Term 1"), ("t2", "Term 2"), ("t3", "Term 3"),
-    ]);
+    let project = make_project_with_names(
+        "p1",
+        layout,
+        vec![("t1", "Term 1"), ("t2", "Term 2"), ("t3", "Term 3")],
+    );
     let data = make_workspace_data(vec![project], vec!["p1"]);
     let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -881,28 +1061,45 @@ fn test_close_tabs_to_right_cleans_metadata(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn test_move_pane_cross_project(cx: &mut gpui::TestAppContext) {
     // p1: V[t1, t2], p2: t3 → move t1 to left of t3 → p1: t2, p2: V[t1, t3]
-    let p1 = make_project_with_layout("p1", LayoutNode::Split {
-        direction: SplitDirection::Vertical,
-        sizes: vec![50.0, 50.0],
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
-    });
+    let p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
     let p2 = make_project_with_layout("p2", terminal_node_t("t3"));
     let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p2", "t3", DropZone::Left, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p2",
+            "t3",
+            DropZone::Left,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         // p1 should have just t2
         let p1_layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-        assert!(matches!(p1_layout, LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "t2"));
+        assert!(
+            matches!(p1_layout, LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "t2")
+        );
 
         // p2 should have V[t1, t3]
         let p2_layout = ws.project("p2").unwrap().layout.as_ref().unwrap();
         match p2_layout {
-            LayoutNode::Split { direction, children, .. } => {
+            LayoutNode::Split {
+                direction,
+                children,
+                ..
+            } => {
                 assert_eq!(*direction, SplitDirection::Vertical);
                 assert_eq!(children.len(), 2);
                 let ids = p2_layout.collect_terminal_ids();
@@ -916,23 +1113,37 @@ fn test_move_pane_cross_project(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn test_move_pane_cross_project_center(cx: &mut gpui::TestAppContext) {
     // p1: V[t1, t2], p2: t3 → move t1 center onto t3 → p2: Tabs[t3, t1]
-    let p1 = make_project_with_layout("p1", LayoutNode::Split {
-        direction: SplitDirection::Vertical,
-        sizes: vec![50.0, 50.0],
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
-    });
+    let p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
     let p2 = make_project_with_layout("p2", terminal_node_t("t3"));
     let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p2", "t3", DropZone::Center, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p2",
+            "t3",
+            DropZone::Center,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let p2_layout = ws.project("p2").unwrap().layout.as_ref().unwrap();
         match p2_layout {
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 assert_eq!(children.len(), 2);
                 assert_eq!(*active_tab, 1);
                 let ids = p2_layout.collect_terminal_ids();
@@ -952,7 +1163,15 @@ fn test_move_pane_cross_project_last_terminal(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p2", "t2", DropZone::Left, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p2",
+            "t2",
+            DropZone::Left,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -969,13 +1188,18 @@ fn test_move_pane_cross_project_last_terminal(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn test_move_pane_cross_project_metadata_migration(cx: &mut gpui::TestAppContext) {
     // Move t1 from p1 to p2, verify terminal_names and hidden_terminals migrate
-    let mut p1 = make_project_with_layout("p1", LayoutNode::Split {
-        direction: SplitDirection::Vertical,
-        sizes: vec![50.0, 50.0],
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
-    });
-    p1.terminal_names.insert("t1".to_string(), "My Terminal".to_string());
-    p1.terminal_names.insert("t2".to_string(), "Other Terminal".to_string());
+    let mut p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
+    p1.terminal_names
+        .insert("t1".to_string(), "My Terminal".to_string());
+    p1.terminal_names
+        .insert("t2".to_string(), "Other Terminal".to_string());
     p1.hidden_terminals.insert("t1".to_string(), true);
 
     let p2 = make_project_with_layout("p2", terminal_node_t("t3"));
@@ -983,7 +1207,15 @@ fn test_move_pane_cross_project_metadata_migration(cx: &mut gpui::TestAppContext
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p2", "t3", DropZone::Right, cx);
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p2",
+            "t3",
+            DropZone::Right,
+            cx,
+        );
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1001,11 +1233,14 @@ fn test_move_pane_cross_project_metadata_migration(cx: &mut gpui::TestAppContext
 #[gpui::test]
 fn test_move_pane_cross_project_to_bookmark(cx: &mut gpui::TestAppContext) {
     // p2 has no layout (bookmark) → t1 becomes root of p2
-    let p1 = make_project_with_layout("p1", LayoutNode::Split {
-        direction: SplitDirection::Vertical,
-        sizes: vec![50.0, 50.0],
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
-    });
+    let p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
     let mut p2 = make_project("p2");
     p2.layout = None;
     let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
@@ -1025,15 +1260,21 @@ fn test_move_pane_cross_project_to_bookmark(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn test_move_to_tab_group_cross_project(cx: &mut gpui::TestAppContext) {
     // p1: V[t1, t2], p2: Tabs[t3, t4] → move t1 into p2's tabs at index 1
-    let p1 = make_project_with_layout("p1", LayoutNode::Split {
-        direction: SplitDirection::Vertical,
-        sizes: vec![50.0, 50.0],
-        children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
-    });
-    let p2 = make_project_with_layout("p2", LayoutNode::Tabs {
-        children: vec![terminal_node_t("t3"), terminal_node_t("t4")],
-        active_tab: 0,
-    });
+    let p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
+    let p2 = make_project_with_layout(
+        "p2",
+        LayoutNode::Tabs {
+            children: vec![terminal_node_t("t3"), terminal_node_t("t4")],
+            active_tab: 0,
+        },
+    );
     let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
     let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -1044,18 +1285,29 @@ fn test_move_to_tab_group_cross_project(cx: &mut gpui::TestAppContext) {
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         // p1 should have just t2
         let p1_layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-        assert!(matches!(p1_layout, LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "t2"));
+        assert!(
+            matches!(p1_layout, LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "t2")
+        );
 
         // p2 should have Tabs[t3, t1, t4]
         let p2_layout = ws.project("p2").unwrap().layout.as_ref().unwrap();
         match p2_layout {
-            LayoutNode::Tabs { children, active_tab } => {
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => {
                 assert_eq!(children.len(), 3);
                 assert_eq!(*active_tab, 1);
-                let ids: Vec<_> = children.iter().filter_map(|c| match c {
-                    LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
-                    _ => None,
-                }).collect();
+                let ids: Vec<_> = children
+                    .iter()
+                    .filter_map(|c| match c {
+                        LayoutNode::Terminal {
+                            terminal_id: Some(id),
+                            ..
+                        } => Some(id.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 assert_eq!(ids, vec!["t3", "t1", "t4"]);
             }
             _ => panic!("Expected tabs in p2, got {:?}", p2_layout),

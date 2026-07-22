@@ -39,7 +39,10 @@ impl BlameProvider for RemoteBlameProvider {
             project_id: self.project_id.clone(),
             relative_path: relative_path.to_string(),
         };
-        let value = self.client.post_action(action).map_err(BlameError::Backend)?;
+        let value = self
+            .client
+            .post_action(action)
+            .map_err(BlameError::Backend)?;
 
         let Some(value) = value else {
             return Ok(Vec::new());

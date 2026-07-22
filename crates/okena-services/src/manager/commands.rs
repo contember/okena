@@ -66,10 +66,15 @@ impl ServiceManager {
                         })
                         .await;
                     if let Ok(output) = result
-                        && !output.status.success() {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            log::error!("docker compose start failed for '{}': {}", log_name, stderr.trim());
-                        }
+                        && !output.status.success()
+                    {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        log::error!(
+                            "docker compose start failed for '{}': {}",
+                            log_name,
+                            stderr.trim()
+                        );
+                    }
                     // Trigger an immediate status poll
                     let _ = this.update(cx, |_this, cx| cx.notify());
                 });
@@ -125,7 +130,10 @@ impl ServiceManager {
                     clippy::expect_used,
                     reason = "instance set to Starting a few lines above, absence is a bug"
                 )]
-                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
+                let instance = self
+                    .instances
+                    .get_mut(&key)
+                    .expect("bug: service instance must exist");
                 instance.status = ServiceStatus::Running;
                 instance.terminal_id = Some(terminal_id.clone());
                 self.terminal_to_service.insert(
@@ -144,7 +152,10 @@ impl ServiceManager {
                     clippy::expect_used,
                     reason = "instance set to Starting a few lines above, absence is a bug"
                 )]
-                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
+                let instance = self
+                    .instances
+                    .get_mut(&key)
+                    .expect("bug: service instance must exist");
                 instance.status = ServiceStatus::Crashed { exit_code: None };
             }
         }
@@ -152,18 +163,17 @@ impl ServiceManager {
         cx.notify();
 
         // Start port detection if service is now running
-        if self.instances.get(&key).is_some_and(|i| i.status == ServiceStatus::Running) {
+        if self
+            .instances
+            .get(&key)
+            .is_some_and(|i| i.status == ServiceStatus::Running)
+        {
             self.start_port_detection(project_id, service_name, cx);
         }
     }
 
     /// Stop a running service.
-    pub fn stop_service(
-        &mut self,
-        project_id: &str,
-        service_name: &str,
-        cx: &mut impl ServiceCx,
-    ) {
+    pub fn stop_service(&mut self, project_id: &str, service_name: &str, cx: &mut impl ServiceCx) {
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
@@ -180,7 +190,11 @@ impl ServiceManager {
         match &instance.kind {
             ServiceKind::DockerCompose { compose_file } => {
                 let compose_file = compose_file.clone();
-                let path = self.project_paths.get(project_id).cloned().unwrap_or_default();
+                let path = self
+                    .project_paths
+                    .get(project_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let name = service_name.to_string();
                 instance.status = ServiceStatus::Stopped;
                 instance.detected_ports.clear();
@@ -199,9 +213,17 @@ impl ServiceManager {
                     match result {
                         Ok(output) if !output.status.success() => {
                             let stderr = String::from_utf8_lossy(&output.stderr);
-                            log::error!("docker compose stop failed for '{}': {}", log_name, stderr.trim());
+                            log::error!(
+                                "docker compose stop failed for '{}': {}",
+                                log_name,
+                                stderr.trim()
+                            );
                         }
-                        Err(e) => log::error!("docker compose stop failed to run for '{}': {}", log_name, e),
+                        Err(e) => log::error!(
+                            "docker compose stop failed to run for '{}': {}",
+                            log_name,
+                            e
+                        ),
                         _ => {}
                     }
                 });
@@ -259,9 +281,17 @@ impl ServiceManager {
                     match result {
                         Ok(output) if !output.status.success() => {
                             let stderr = String::from_utf8_lossy(&output.stderr);
-                            log::error!("docker compose restart failed for '{}': {}", log_name, stderr.trim());
+                            log::error!(
+                                "docker compose restart failed for '{}': {}",
+                                log_name,
+                                stderr.trim()
+                            );
                         }
-                        Err(e) => log::error!("docker compose restart failed to run for '{}': {}", log_name, e),
+                        Err(e) => log::error!(
+                            "docker compose restart failed to run for '{}': {}",
+                            log_name,
+                            e
+                        ),
                         _ => {}
                     }
                     let _ = this.update(cx, |_this, cx| cx.notify());
@@ -291,12 +321,13 @@ impl ServiceManager {
                         let tid = tid.clone();
                         let backend_ref = backend.clone();
                         cx.spawn_blocking(async move {
-                                backend_ref.get_service_pids(&tid)
-                                    .into_iter()
-                                    .flat_map(port_detect::get_descendant_pids)
-                                    .collect()
-                            })
-                            .await
+                            backend_ref
+                                .get_service_pids(&tid)
+                                .into_iter()
+                                .flat_map(port_detect::get_descendant_pids)
+                                .collect()
+                        })
+                        .await
                     } else {
                         Vec::new()
                     };
@@ -324,9 +355,10 @@ impl ServiceManager {
                     let _ = this.update(cx, |this, cx| {
                         let key = (pid.clone(), name.clone());
                         if let Some(instance) = this.instances.get(&key)
-                            && instance.status == ServiceStatus::Restarting {
-                                this.start_service(&pid, &name, &path, cx);
-                            }
+                            && instance.status == ServiceStatus::Restarting
+                        {
+                            this.start_service(&pid, &name, &path, cx);
+                        }
                     });
                 });
             }
@@ -334,12 +366,7 @@ impl ServiceManager {
     }
 
     /// Start all services for a project.
-    pub fn start_all(
-        &mut self,
-        project_id: &str,
-        project_path: &str,
-        cx: &mut impl ServiceCx,
-    ) {
+    pub fn start_all(&mut self, project_id: &str, project_path: &str, cx: &mut impl ServiceCx) {
         let names: Vec<String> = self
             .instances
             .keys()

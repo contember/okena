@@ -6,14 +6,14 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::{ActionResult, find_first_terminal_id, spawn_uninitialized_terminals};
-use crate::workspace::persistence::AppSettings;
-use okena_terminal::backend::TerminalBackend;
-use okena_terminal::terminal::{Terminal, TerminalSize};
 use crate::workspace::focus::FocusManager;
+use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{WindowId, Workspace};
-use okena_workspace::context::WorkspaceCx;
 use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::terminal::{Terminal, TerminalSize};
+use okena_workspace::context::WorkspaceCx;
 use std::sync::Arc;
 
 fn project_not_found(project_id: &str) -> ActionResult {
@@ -115,7 +115,9 @@ pub(super) fn rename_project(
     name: String,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    with_existing_project(ws, &project_id, |ws| ws.rename_project(&project_id, name, cx))
+    with_existing_project(ws, &project_id, |ws| {
+        ws.rename_project(&project_id, name, cx)
+    })
 }
 
 pub(super) fn update_project_hooks(
@@ -283,17 +285,30 @@ pub(super) fn close_worktree(
     })
 }
 
-pub(super) fn create_folder(ws: &mut Workspace, name: String, cx: &mut impl WorkspaceCx) -> ActionResult {
+pub(super) fn create_folder(
+    ws: &mut Workspace,
+    name: String,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
     let id = ws.create_folder(name, cx);
     ActionResult::Ok(Some(serde_json::json!({ "folder_id": id })))
 }
 
-pub(super) fn delete_folder(ws: &mut Workspace, folder_id: String, cx: &mut impl WorkspaceCx) -> ActionResult {
+pub(super) fn delete_folder(
+    ws: &mut Workspace,
+    folder_id: String,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
     ws.delete_folder(&folder_id, cx);
     ActionResult::Ok(None)
 }
 
-pub(super) fn rename_folder(ws: &mut Workspace, folder_id: String, name: String, cx: &mut impl WorkspaceCx) -> ActionResult {
+pub(super) fn rename_folder(
+    ws: &mut Workspace,
+    folder_id: String,
+    name: String,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
     ws.rename_folder(&folder_id, name, cx);
     ActionResult::Ok(None)
 }
@@ -395,13 +410,33 @@ pub(super) fn create_worktree(
     let project_path = std::path::PathBuf::from(&project.path);
     let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(&project_path);
     let path_template = settings.worktree.path_template.clone();
-    let (worktree_path, wt_project_path) = okena_git::compute_target_paths(&git_root, &subdir, &path_template, &branch);
+    let (worktree_path, wt_project_path) =
+        okena_git::compute_target_paths(&git_root, &subdir, &path_template, &branch);
     let global_hooks = settings.hooks.clone();
 
-    match ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &wt_project_path, create_branch, &global_hooks, window_id, cx) {
+    match ws.create_worktree_project(
+        &project_id,
+        &branch,
+        &git_root,
+        &worktree_path,
+        &wt_project_path,
+        create_branch,
+        &global_hooks,
+        window_id,
+        cx,
+    ) {
         Ok(new_project_id) => {
-            let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, settings, None, cx);
-            let terminal_id = ws.project(&new_project_id)
+            let result = spawn_uninitialized_terminals(
+                ws,
+                &new_project_id,
+                backend,
+                terminals,
+                settings,
+                None,
+                cx,
+            );
+            let terminal_id = ws
+                .project(&new_project_id)
                 .and_then(|p| p.layout.as_ref())
                 .and_then(find_first_terminal_id);
             match result {
@@ -437,15 +472,16 @@ pub(super) fn add_discovered_worktree(
     if ws.project(&parent_project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", parent_project_id));
     }
-    let new_id = match ws.add_discovered_worktree(&worktree_path, &branch, &parent_project_id, window_id) {
-        Some(id) => id,
-        None => {
-            return ActionResult::Err(format!(
-                "worktree already tracked or not addable: {}",
-                worktree_path
-            ));
-        }
-    };
+    let new_id =
+        match ws.add_discovered_worktree(&worktree_path, &branch, &parent_project_id, window_id) {
+            Some(id) => id,
+            None => {
+                return ActionResult::Err(format!(
+                    "worktree already tracked or not addable: {}",
+                    worktree_path
+                ));
+            }
+        };
     ws.add_to_worktree_ids(&parent_project_id, &new_id);
     // `add_discovered_worktree` deliberately doesn't notify (caller's job).
     ws.notify_data(cx);
@@ -534,9 +570,9 @@ pub(super) fn dismiss_hook(
 
 #[cfg(all(test, feature = "gpui"))]
 mod set_show_in_overview_tests {
-    use super::{apply_set_project_show_in_overview, ActionResult};
-    use crate::workspace::state::{ProjectData, Workspace, WindowId, WindowState, WorkspaceData};
+    use super::{ActionResult, apply_set_project_show_in_overview};
     use crate::workspace::settings::HooksConfig;
+    use crate::workspace::state::{ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
     use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
@@ -579,9 +615,7 @@ mod set_show_in_overview_tests {
     }
 
     #[gpui::test]
-    fn apply_set_project_show_in_overview_reads_hidden_set(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn apply_set_project_show_in_overview_reads_hidden_set(cx: &mut gpui::TestAppContext) {
         // The action's visibility decision must read from the targeted
         // window's hidden_project_ids. This fixture starts with p1 hidden in
         // main; the action says `show: true`, so the helper toggles,
@@ -608,14 +642,18 @@ mod set_show_in_overview_tests {
     }
 
     #[gpui::test]
-    fn apply_set_project_show_in_overview_unknown_project_errs(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn apply_set_project_show_in_overview_unknown_project_errs(cx: &mut gpui::TestAppContext) {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
         workspace.update(cx, |ws: &mut Workspace, cx| {
             let mut fm = crate::workspace::focus::FocusManager::new();
-            let result =
-                apply_set_project_show_in_overview(ws, &mut fm, WindowId::Main, "missing", true, cx);
+            let result = apply_set_project_show_in_overview(
+                ws,
+                &mut fm,
+                WindowId::Main,
+                "missing",
+                true,
+                cx,
+            );
             assert!(matches!(result, ActionResult::Err(_)));
         });
     }

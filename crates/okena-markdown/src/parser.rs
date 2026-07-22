@@ -2,8 +2,8 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use super::types::{FmValue, Frontmatter, Inline, Node};
 use super::MarkdownDocument;
+use super::types::{FmValue, Frontmatter, Inline, Node};
 
 impl MarkdownDocument {
     /// Parse markdown content into a document.
@@ -148,7 +148,11 @@ impl MarkdownDocument {
                     let headers = std::mem::take(&mut table_headers);
                     let rows = std::mem::take(&mut table_rows);
                     let col_widths = Self::table_col_widths(&headers, &rows);
-                    nodes.push(Node::Table { headers, rows, col_widths });
+                    nodes.push(Node::Table {
+                        headers,
+                        rows,
+                        col_widths,
+                    });
                     in_table = false;
                 }
                 Event::Start(Tag::TableHead) => {
@@ -202,13 +206,18 @@ impl MarkdownDocument {
                 Event::End(TagEnd::Link) => {
                     let mut children = inline_stack.pop().unwrap_or_default();
                     // Extract URL from marker
-                    let url = children.iter().find_map(|c| {
-                        if let Inline::Text(t) = c
-                            && t.starts_with("\x00LINK:") && t.ends_with("\x00") {
-                                return Some(t[6..t.len()-1].to_string());
+                    let url = children
+                        .iter()
+                        .find_map(|c| {
+                            if let Inline::Text(t) = c
+                                && t.starts_with("\x00LINK:")
+                                && t.ends_with("\x00")
+                            {
+                                return Some(t[6..t.len() - 1].to_string());
                             }
-                        None
-                    }).unwrap_or_default();
+                            None
+                        })
+                        .unwrap_or_default();
                     children.retain(|c| {
                         if let Inline::Text(t) = c {
                             !t.starts_with("\x00LINK:")
@@ -217,7 +226,10 @@ impl MarkdownDocument {
                         }
                     });
                     if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Link { _url: url, children });
+                        last.push(Inline::Link {
+                            _url: url,
+                            children,
+                        });
                     }
                 }
                 Event::Code(text) => {
@@ -271,9 +283,9 @@ impl MarkdownDocument {
     /// Convert a node to flat text (in characters, not bytes).
     pub(crate) fn node_to_flat_text(node: &Node, text: &mut String) {
         match node {
-            Node::Heading { children, .. } |
-            Node::Paragraph { children } |
-            Node::Blockquote { children } => {
+            Node::Heading { children, .. }
+            | Node::Paragraph { children }
+            | Node::Blockquote { children } => {
                 Self::inlines_to_flat_text(children, text);
                 text.push('\n');
             }
@@ -291,13 +303,17 @@ impl MarkdownDocument {
             }
             Node::Table { headers, rows, .. } => {
                 for (i, header) in headers.iter().enumerate() {
-                    if i > 0 { text.push('\t'); }
+                    if i > 0 {
+                        text.push('\t');
+                    }
                     Self::inlines_to_flat_text(header, text);
                 }
                 text.push('\n');
                 for row in rows {
                     for (i, cell) in row.iter().enumerate() {
-                        if i > 0 { text.push('\t'); }
+                        if i > 0 {
+                            text.push('\t');
+                        }
                         Self::inlines_to_flat_text(cell, text);
                     }
                     text.push('\n');
@@ -318,8 +334,10 @@ impl MarkdownDocument {
         headers: &[Vec<Inline>],
         rows: &[Vec<Vec<Inline>>],
     ) -> Vec<usize> {
-        let mut col_widths: Vec<usize> =
-            headers.iter().map(|h| Self::inlines_text_length(h)).collect();
+        let mut col_widths: Vec<usize> = headers
+            .iter()
+            .map(|h| Self::inlines_text_length(h))
+            .collect();
         for row in rows {
             for (i, cell) in row.iter().enumerate() {
                 let len = Self::inlines_text_length(cell);
@@ -389,9 +407,7 @@ fn parse_frontmatter(inner: &str) -> Option<Node> {
         Ok(serde_yaml_ng::Value::Mapping(map)) => {
             let entries: Vec<(String, FmValue)> = map
                 .into_iter()
-                .map(|(k, v)| {
-                    (super::types::yaml_key_to_string(&k), FmValue::from_yaml(v))
-                })
+                .map(|(k, v)| (super::types::yaml_key_to_string(&k), FmValue::from_yaml(v)))
                 .collect();
             if entries.is_empty() {
                 return None;
@@ -462,7 +478,11 @@ draft: true
         let doc = MarkdownDocument::parse(content);
 
         // First node is the frontmatter card, parsed in order.
-        let Node::Frontmatter { block: Frontmatter::Parsed(entries), .. } = &doc.nodes[0] else {
+        let Node::Frontmatter {
+            block: Frontmatter::Parsed(entries),
+            ..
+        } = &doc.nodes[0]
+        else {
             panic!("expected parsed frontmatter, got something else");
         };
         assert_eq!(entries.len(), 2);
@@ -472,9 +492,11 @@ draft: true
         assert!(matches!(&entries[1].1, FmValue::Scalar(s) if s == "true"));
 
         // The heading after the closing fence still parses as a heading.
-        assert!(doc.nodes[1..]
-            .iter()
-            .any(|n| matches!(n, Node::Heading { .. })));
+        assert!(
+            doc.nodes[1..]
+                .iter()
+                .any(|n| matches!(n, Node::Heading { .. }))
+        );
         // Offsets stay consistent with node lengths once frontmatter is included.
         let mut offset = 0usize;
         for (i, node) in doc.nodes.iter().enumerate() {
@@ -497,7 +519,11 @@ author:
 body
 ";
         let doc = MarkdownDocument::parse(content);
-        let Node::Frontmatter { block: Frontmatter::Parsed(entries), .. } = &doc.nodes[0] else {
+        let Node::Frontmatter {
+            block: Frontmatter::Parsed(entries),
+            ..
+        } = &doc.nodes[0]
+        else {
             panic!("expected parsed frontmatter");
         };
         assert!(matches!(&entries[0].1, FmValue::List(items) if items.len() == 2));
@@ -511,7 +537,10 @@ body
         let doc = MarkdownDocument::parse(content);
         assert!(matches!(
             &doc.nodes[0],
-            Node::Frontmatter { block: Frontmatter::Raw(_), .. }
+            Node::Frontmatter {
+                block: Frontmatter::Raw(_),
+                ..
+            }
         ));
     }
 
@@ -529,7 +558,10 @@ body
         let doc = MarkdownDocument::parse(content);
         assert!(matches!(
             &doc.nodes[0],
-            Node::Frontmatter { block: Frontmatter::Parsed(_), .. }
+            Node::Frontmatter {
+                block: Frontmatter::Parsed(_),
+                ..
+            }
         ));
     }
 

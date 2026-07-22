@@ -1,11 +1,11 @@
 //! Terminal pane action handlers.
 
 use crate::{ActionDispatch, RemotePasteFile};
+use gpui::*;
 use okena_core::api::ActionRequest;
 #[cfg(target_os = "windows")]
 use okena_terminal::shell_config::ShellType;
 use okena_workspace::state::SplitDirection;
-use gpui::*;
 
 use super::TerminalPane;
 
@@ -61,9 +61,10 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
 
     pub(super) fn handle_copy(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && let Some(text) = terminal.get_selected_text() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
+            && let Some(text) = terminal.get_selected_text()
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
     }
 
     pub(super) fn handle_paste(&mut self, cx: &mut Context<Self>) {
@@ -132,7 +133,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 log::warn!("WSL UNC write to {} failed; falling back to /mnt/c", unc);
             }
 
-            let Some(path) = write_paste_image_to_temp(&image, &filename) else { return };
+            let Some(path) = write_paste_image_to_temp(&image, &filename) else {
+                return;
+            };
             let path_str = if matches!(shell, ShellType::Wsl { .. }) {
                 okena_terminal::shell_config::windows_path_to_wsl(&path.to_string_lossy())
             } else {
@@ -143,37 +146,43 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let Some(path) = write_paste_image_to_temp(&image, &filename) else { return };
+            let Some(path) = write_paste_image_to_temp(&image, &filename) else {
+                return;
+            };
             terminal.send_paste(&path.to_string_lossy());
         }
     }
 
     pub(super) fn handle_jump_prev_prompt(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && terminal.jump_to_prompt_above() {
-                cx.notify();
-            }
+            && terminal.jump_to_prompt_above()
+        {
+            cx.notify();
+        }
     }
 
     pub(super) fn handle_jump_next_prompt(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && terminal.jump_to_prompt_below() {
-                cx.notify();
-            }
+            && terminal.jump_to_prompt_below()
+        {
+            cx.notify();
+        }
     }
 
     pub(super) fn handle_jump_prev_failed(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && terminal.jump_to_prev_failed_command() {
-                cx.notify();
-            }
+            && terminal.jump_to_prev_failed_command()
+        {
+            cx.notify();
+        }
     }
 
     pub(super) fn handle_jump_next_failed(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && terminal.jump_to_next_failed_command() {
-                cx.notify();
-            }
+            && terminal.jump_to_next_failed_command()
+        {
+            cx.notify();
+        }
     }
 
     pub(super) fn handle_file_drop(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
@@ -212,7 +221,10 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                 break;
                             }
                             Err(error) => {
-                                log::error!("Cannot upload dropped file {}: {error}", path.display());
+                                log::error!(
+                                    "Cannot upload dropped file {}: {error}",
+                                    path.display()
+                                );
                             }
                         }
                     }
@@ -275,7 +287,9 @@ fn read_remote_paste_file(path: &std::path::Path) -> Result<RemotePasteFile, Str
         .filter(|extension| {
             !extension.is_empty()
                 && extension.len() <= 16
-                && extension.chars().all(|character| character.is_ascii_alphanumeric())
+                && extension
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
         })
         .map(str::to_ascii_lowercase)
         .unwrap_or_else(|| "bin".to_string());
@@ -314,13 +328,19 @@ fn write_paste_image_to_temp(image: &Image, filename: &str) -> Option<std::path:
 #[cfg(target_os = "windows")]
 fn wsl_distro(shell: &ShellType) -> Option<String> {
     use std::sync::OnceLock;
-    let ShellType::Wsl { distro } = shell else { return None };
+    let ShellType::Wsl { distro } = shell else {
+        return None;
+    };
     if let Some(d) = distro {
         return Some(d.clone());
     }
     static DEFAULT: OnceLock<Option<String>> = OnceLock::new();
     DEFAULT
-        .get_or_init(|| okena_terminal::shell_config::detect_wsl_distros().into_iter().next())
+        .get_or_init(|| {
+            okena_terminal::shell_config::detect_wsl_distros()
+                .into_iter()
+                .next()
+        })
         .clone()
 }
 

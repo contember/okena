@@ -15,9 +15,7 @@
 use crate::auth::{self, PersistedToken};
 use base64::Engine as _;
 pub use okena_core::process::is_process_alive;
-use okena_transport::client::{
-    LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID,
-};
+use okena_transport::client::{LOCAL_DAEMON_CONNECTION_ID, LocalEndpoint, RemoteConnectionConfig};
 use okena_workspace::persistence::config_dir;
 use rand::Rng as _;
 use serde::Deserialize;
@@ -89,14 +87,23 @@ pub fn discover_in(dir: &Path) -> Option<LocalDaemon> {
     let local_endpoint = v
         .get("local_endpoint")
         .and_then(|value| serde_json::from_value::<LocalEndpoint>(value.clone()).ok());
-    Some(LocalDaemon { port, host, pid, tls, ui_owned, local_endpoint })
+    Some(LocalDaemon {
+        port,
+        host,
+        pid,
+        tls,
+        ui_owned,
+        local_endpoint,
+    })
 }
 
 pub fn default_local_endpoint() -> Option<LocalEndpoint> {
     #[cfg(unix)]
     {
         Some(LocalEndpoint::UnixSocket {
-            path: default_unix_socket_path(&config_dir()).to_string_lossy().into_owned(),
+            path: default_unix_socket_path(&config_dir())
+                .to_string_lossy()
+                .into_owned(),
         })
     }
     #[cfg(not(unix))]
@@ -358,10 +365,7 @@ pub fn notify_auth_reload(daemon: &LocalDaemon) {
         "/v1/auth/reload",
         daemon.local_endpoint.as_ref(),
     );
-    let _ = client
-        .post(&url)
-        .timeout(Duration::from_secs(5))
-        .send();
+    let _ = client.post(&url).timeout(Duration::from_secs(5)).send();
 }
 
 /// Outcome of asking the local daemon to shut down (`POST /v1/shutdown`).
@@ -464,11 +468,7 @@ pub fn restart_local_daemon(
     let old_pid = running_daemon().map(|d| d.pid).unwrap_or(0);
 
     let (client, url) = blocking_client_and_url(host, port, "/v1/restart", local_endpoint);
-    match client
-        .post(&url)
-        .timeout(Duration::from_secs(10))
-        .send()
-    {
+    match client.post(&url).timeout(Duration::from_secs(10)).send() {
         Ok(resp) if resp.status().is_success() => {}
         Ok(resp) => return Err(format!("restart endpoint returned {}", resp.status())),
         // Transport error: the daemon may already be tearing down. The discovery
@@ -600,7 +600,10 @@ fn strip_await_pid_args(args: &mut Vec<String>) {
 }
 
 fn daemon_needs_bearer_token(daemon: &LocalDaemon) -> bool {
-    !matches!(daemon.local_endpoint, Some(LocalEndpoint::UnixSocket { .. }))
+    !matches!(
+        daemon.local_endpoint,
+        Some(LocalEndpoint::UnixSocket { .. })
+    )
 }
 
 fn auth_token_for_daemon(dir: &Path, daemon: &LocalDaemon) -> Result<Option<String>, String> {
@@ -797,7 +800,11 @@ fn instance_lock_owner_alive() -> bool {
 /// Check the OS lock rather than trusting stale lockfile contents.
 fn instance_lock_is_held() -> bool {
     let path = okena_workspace::persistence::instance_lock_path();
-    let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) else {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    else {
         return false;
     };
     match fs2::FileExt::try_lock_exclusive(&file) {
@@ -857,8 +864,8 @@ fn read_process_identity(pid: u32) -> Option<ProcessIdentity> {
 /// Whether a process looks like a daemon this UI spawned and may therefore reap.
 fn is_ui_owned_okena(identity: &ProcessIdentity) -> bool {
     let is_okena = |name: &String| name.starts_with("okena");
-    let named_okena =
-        identity.name.as_ref().is_some_and(is_okena) || identity.exe_file_name.as_ref().is_some_and(is_okena);
+    let named_okena = identity.name.as_ref().is_some_and(is_okena)
+        || identity.exe_file_name.as_ref().is_some_and(is_okena);
     let ui_owned = identity.args.iter().any(|arg| arg == UI_OWNED_FLAG);
     named_okena && ui_owned
 }
@@ -976,7 +983,10 @@ fn blocking_client_and_url(
         return (client, format!("http://okena.local{path}"));
     }
 
-    (reqwest::blocking::Client::new(), format!("http://{host}:{port}{path}"))
+    (
+        reqwest::blocking::Client::new(),
+        format!("http://{host}:{port}{path}"),
+    )
 }
 
 #[cfg(test)]
@@ -1157,7 +1167,10 @@ mod tests {
         let bind_all = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         let settings = remote_settings(false, "127.0.0.1");
 
-        assert_eq!(resolve_daemon_listen_addrs(Some(bind_all), &settings), vec![bind_all]);
+        assert_eq!(
+            resolve_daemon_listen_addrs(Some(bind_all), &settings),
+            vec![bind_all]
+        );
     }
 
     #[test]
@@ -1184,7 +1197,10 @@ mod tests {
         // gives up and reports the refusal instead of ever accepting.
         let port = spawn_shutdown_server(false, 2);
         let outcome = request_local_shutdown(&tcp_daemon(port)).expect("request should succeed");
-        assert!(!outcome.accepted, "must not accept while a client is connected");
+        assert!(
+            !outcome.accepted,
+            "must not accept while a client is connected"
+        );
         assert_eq!(outcome.active_clients, 2);
     }
 
@@ -1193,7 +1209,10 @@ mod tests {
         // Port 9 (discard) refuses fast — the caller treats an unreachable daemon
         // as an error and falls back to its own kill path.
         let err = request_local_shutdown(&tcp_daemon(9)).expect_err("unreachable must error");
-        assert!(err.contains("shutdown request failed"), "unexpected error: {err}");
+        assert!(
+            err.contains("shutdown request failed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1329,14 +1348,20 @@ mod tests {
         // pid = this process so the liveness check treats the daemon as alive.
         std::fs::write(
             dir.join("remote.json"),
-            format!(r#"{{"port": {port}, "pid": {}, "tls": false}}"#, std::process::id()),
+            format!(
+                r#"{{"port": {port}, "pid": {}, "tls": false}}"#,
+                std::process::id()
+            ),
         )
         .unwrap();
 
         let ensured =
             ensure_local_daemon_in(&dir, Duration::from_millis(200), Duration::from_millis(200))
                 .expect("attach should succeed");
-        assert!(ensured.spawned.is_none(), "must not spawn when one is running");
+        assert!(
+            ensured.spawned.is_none(),
+            "must not spawn when one is running"
+        );
         assert_eq!(ensured.daemon.port, port);
 
         // The returned token must validate against the secret — its HMAC has to
@@ -1378,7 +1403,10 @@ mod tests {
         std::fs::write(dir.join("remote_secret"), vec![3u8; 32]).unwrap();
         std::fs::write(
             dir.join("remote.json"),
-            format!(r#"{{"port": 9, "pid": {}, "tls": false}}"#, std::process::id()),
+            format!(
+                r#"{{"port": 9, "pid": {}, "tls": false}}"#,
+                std::process::id()
+            ),
         )
         .unwrap();
 
@@ -1386,14 +1414,12 @@ mod tests {
         // arrive on the ATTACH deadline, proving the branches use their own
         // timeouts (a live-but-unreachable daemon never enters the spawn path).
         let start = Instant::now();
-        let err = match ensure_local_daemon_in(
-            &dir,
-            Duration::from_millis(120),
-            Duration::from_secs(30),
-        ) {
-            Ok(_) => panic!("live but unreachable daemon must not be accepted"),
-            Err(err) => err,
-        };
+        let err =
+            match ensure_local_daemon_in(&dir, Duration::from_millis(120), Duration::from_secs(30))
+            {
+                Ok(_) => panic!("live but unreachable daemon must not be accepted"),
+                Err(err) => err,
+            };
         assert!(
             err.contains("did not respond to /health"),
             "unexpected error: {err}"
@@ -1411,18 +1437,18 @@ mod tests {
         std::fs::write(dir.join("remote_secret"), vec![3u8; 32]).unwrap();
         std::fs::write(
             dir.join("remote.json"),
-            format!(r#"{{"port": {port}, "pid": {}, "tls": false}}"#, std::process::id()),
+            format!(
+                r#"{{"port": {port}, "pid": {}, "tls": false}}"#,
+                std::process::id()
+            ),
         )
         .unwrap();
 
         // A healthy advertised daemon attaches under attach_timeout regardless
         // of the spawn budget (which only applies to a child we spawn).
-        let ensured = ensure_local_daemon_in(
-            &dir,
-            Duration::from_millis(500),
-            Duration::from_millis(1),
-        )
-        .expect("attach should succeed");
+        let ensured =
+            ensure_local_daemon_in(&dir, Duration::from_millis(500), Duration::from_millis(1))
+                .expect("attach should succeed");
         assert!(ensured.spawned.is_none());
         assert_eq!(ensured.daemon.port, port);
     }
@@ -1519,7 +1545,11 @@ mod tests {
     #[test]
     fn parse_await_pid_none_when_absent_or_malformed() {
         assert_eq!(parse_await_pid(["--listen", "127.0.0.1"]), None);
-        assert_eq!(parse_await_pid([AWAIT_PID_FLAG]), None, "flag without value");
+        assert_eq!(
+            parse_await_pid([AWAIT_PID_FLAG]),
+            None,
+            "flag without value"
+        );
         assert_eq!(parse_await_pid([AWAIT_PID_FLAG, "notanum"]), None);
     }
 
@@ -1545,8 +1575,14 @@ mod tests {
     fn wait_for_pid_exit_times_out_on_live_pid() {
         let start = Instant::now();
         // This very process is alive, so the wait must run to the deadline.
-        assert!(!wait_for_pid_exit(std::process::id(), Duration::from_millis(120)));
-        assert!(start.elapsed() < Duration::from_secs(2), "should give up near the timeout");
+        assert!(!wait_for_pid_exit(
+            std::process::id(),
+            Duration::from_millis(120)
+        ));
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "should give up near the timeout"
+        );
     }
 
     #[test]
@@ -1561,7 +1597,10 @@ mod tests {
         let dir = temp_dir();
         std::fs::write(
             dir.join("remote.json"),
-            format!(r#"{{"port": 19100, "pid": {}, "tls": false}}"#, std::process::id()),
+            format!(
+                r#"{{"port": 19100, "pid": {}, "tls": false}}"#,
+                std::process::id()
+            ),
         )
         .unwrap();
         let found = wait_until_ready_in(&dir, Duration::from_secs(2));
@@ -1573,7 +1612,10 @@ mod tests {
         let dir = temp_dir();
         let start = Instant::now();
         assert_eq!(wait_until_ready_in(&dir, Duration::from_millis(120)), None);
-        assert!(start.elapsed() < Duration::from_secs(2), "should give up near the timeout");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "should give up near the timeout"
+        );
     }
 
     #[test]

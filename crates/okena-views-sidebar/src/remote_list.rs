@@ -1,8 +1,10 @@
-use okena_transport::client::{ConnectionStatus, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
-use okena_ui::theme::theme;
-use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_sm, ui_text_xl};
-use okena_workspace::requests::OverlayRequest;
 use gpui::*;
+use okena_transport::client::{
+    ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID, RemoteConnectionConfig,
+};
+use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
+use okena_workspace::requests::OverlayRequest;
 
 use crate::sidebar::Sidebar;
 
@@ -28,16 +30,19 @@ impl Sidebar {
         // user-managed remote — its projects already render as ordinary
         // workspace projects — so it is hidden from this REMOTE management
         // section. Real remote daemons still appear here.
-        let snapshots: Vec<ConnectionSnapshot> = if let Some(ref get_connections) = self.get_remote_connections {
-            (get_connections)(cx).into_iter()
-                .filter(|s| s.config.id != LOCAL_DAEMON_CONNECTION_ID)
-                .map(|s| ConnectionSnapshot {
-                    config: s.config,
-                    status: s.status,
-                }).collect()
-        } else {
-            Vec::new()
-        };
+        let snapshots: Vec<ConnectionSnapshot> =
+            if let Some(ref get_connections) = self.get_remote_connections {
+                (get_connections)(cx)
+                    .into_iter()
+                    .filter(|s| s.config.id != LOCAL_DAEMON_CONNECTION_ID)
+                    .map(|s| ConnectionSnapshot {
+                        config: s.config,
+                        status: s.status,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
         if snapshots.is_empty() {
             return div()
@@ -102,9 +107,7 @@ impl Sidebar {
         let status_text = match status {
             ConnectionStatus::Connecting => "Connecting...",
             ConnectionStatus::Pairing => "Pairing...",
-            ConnectionStatus::Reconnecting { .. } => {
-                "Reconnecting..."
-            }
+            ConnectionStatus::Reconnecting { .. } => "Reconnecting...",
             ConnectionStatus::Disconnected => "Disconnected",
             ConnectionStatus::Error(_) => "Error",
             ConnectionStatus::Connected => "Connected",
@@ -112,15 +115,16 @@ impl Sidebar {
 
         let conn_id_for_ctx = config.id.clone();
         let conn_name_for_ctx = config.name.clone();
-        let is_pairing = matches!(status, ConnectionStatus::Pairing | ConnectionStatus::Error(_) | ConnectionStatus::Disconnected);
+        let is_pairing = matches!(
+            status,
+            ConnectionStatus::Pairing | ConnectionStatus::Error(_) | ConnectionStatus::Disconnected
+        );
         // Flag plain-http connections so the user can spot (and upgrade) them.
         let insecure = !config.tls;
         let conn_tls = config.tls;
 
         div()
-            .id(ElementId::Name(
-                format!("remote-conn-{}", config.id).into(),
-            ))
+            .id(ElementId::Name(format!("remote-conn-{}", config.id).into()))
             .h(px(28.0))
             .px(px(12.0))
             .flex()
@@ -128,9 +132,11 @@ impl Sidebar {
             .gap(px(6.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                this.request_broker.update(cx, |broker, cx| {
-                    broker.push_overlay_request(
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
                         okena_workspace::requests::OverlayRequest::RemoteConnectionContextMenu {
                             connection_id: conn_id_for_ctx.clone(),
                             connection_name: conn_name_for_ctx.clone(),
@@ -140,9 +146,10 @@ impl Sidebar {
                         },
                         cx,
                     );
-                });
-                cx.stop_propagation();
-            }))
+                    });
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 // Status dot
                 div()

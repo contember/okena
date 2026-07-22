@@ -1,7 +1,9 @@
 //! Click-through file list rendered inside the diff summary popover.
 
 use okena_core::theme::ThemeColors;
-use okena_files::file_tree::{build_file_tree, expandable_file_row, expandable_folder_row, FileTreeNode};
+use okena_files::file_tree::{
+    FileTreeNode, build_file_tree, expandable_file_row, expandable_folder_row,
+};
 use okena_git::FileDiffSummary;
 use okena_ui::tokens::ui_text_ms;
 
@@ -39,11 +41,15 @@ fn render_diff_tree_node(
     let mut elements: Vec<AnyElement> = Vec::new();
 
     for (name, child) in &node.children {
-        elements.push(
-            expandable_folder_row(name, depth, true, t, cx)
-                .into_any_element(),
-        );
-        elements.extend(render_diff_tree_node(child, depth + 1, summaries, on_file_click, t, cx));
+        elements.push(expandable_folder_row(name, depth, true, t, cx).into_any_element());
+        elements.extend(render_diff_tree_node(
+            child,
+            depth + 1,
+            summaries,
+            on_file_click,
+            t,
+            cx,
+        ));
     }
 
     for &file_index in &node.files {

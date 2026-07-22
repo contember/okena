@@ -17,10 +17,9 @@ pub mod hooks;
 
 pub use hook_monitor::{HookExecution, HookMonitor, HookStatus};
 pub use hooks::{
-    HookRunner, HookTerminalResult,
-    apply_shell_wrapper, fire_before_worktree_remove, fire_before_worktree_remove_async,
-    fire_on_dirty_worktree_close, fire_on_dirty_worktree_close_headless,
-    fire_on_project_close, fire_on_project_open,
+    HookRunner, HookTerminalResult, apply_shell_wrapper, fire_before_worktree_remove,
+    fire_before_worktree_remove_async, fire_on_dirty_worktree_close,
+    fire_on_dirty_worktree_close_headless, fire_on_project_close, fire_on_project_open,
     fire_on_rebase_conflict, fire_on_worktree_close_with_services, fire_on_worktree_create,
     fire_post_merge, fire_pre_merge, fire_terminal_on_close_with_services, fire_worktree_removed,
     terminal_hook_env,

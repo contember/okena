@@ -86,10 +86,7 @@ async fn materialize_and_paste(
     } else {
         path_str.clone()
     };
-    let command = RemoteCommand::PastePath {
-        terminal_id,
-        text,
-    };
+    let command = RemoteCommand::PastePath { terminal_id, text };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let msg = BridgeMessage {
@@ -114,7 +111,11 @@ async fn materialize_and_paste(
         }
         Ok(CommandResult::Err(e)) => {
             let _ = tokio::fs::remove_file(&path).await;
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
         }
         Err(_) => {
             let _ = tokio::fs::remove_file(&path).await;

@@ -32,7 +32,11 @@ pub trait GitProvider: Send + Sync + 'static {
         let all = self.list_branches()?;
         let (remote, local): (Vec<String>, Vec<String>) =
             all.into_iter().partition(|n| n.contains('/'));
-        Ok(BranchList { local, remote, current: None })
+        Ok(BranchList {
+            local,
+            remote,
+            current: None,
+        })
     }
 
     // ── Mutations (Phase 1: per-file) ──────────────────────────────────────
@@ -75,10 +79,17 @@ impl RemoteGitProvider {
         project_id: String,
         root: String,
     ) -> Self {
-        Self { client, project_id, root }
+        Self {
+            client,
+            project_id,
+            root,
+        }
     }
 
-    fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
+    fn post_action(
+        &self,
+        action: okena_core::api::ActionRequest,
+    ) -> Result<Option<serde_json::Value>, String> {
         self.client.post_action(action)
     }
 
@@ -89,8 +100,7 @@ impl RemoteGitProvider {
         let value = self
             .post_action(action)?
             .ok_or_else(|| format!("Missing {label} response"))?;
-        serde_json::from_value(value)
-            .map_err(|error| format!("Invalid {label} response: {error}"))
+        serde_json::from_value(value).map_err(|error| format!("Invalid {label} response: {error}"))
     }
 
     fn post_unit(&self, action: okena_core::api::ActionRequest) -> Result<(), String> {
@@ -129,8 +139,14 @@ impl GitProvider for RemoteGitProvider {
         let value = self
             .post_action(action)?
             .ok_or_else(|| "Missing file contents response".to_string())?;
-        let old = value.get("old_content").and_then(|v| v.as_str()).map(String::from);
-        let new = value.get("new_content").and_then(|v| v.as_str()).map(String::from);
+        let old = value
+            .get("old_content")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let new = value
+            .get("new_content")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         Ok((old, new))
     }
 

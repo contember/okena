@@ -24,9 +24,7 @@ impl WindowView {
         let config = manager
             .connections()
             .into_iter()
-            .find(|(config, _, _)| {
-                config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID
-            })
+            .find(|(config, _, _)| config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID)
             .map(|(config, _, _)| config.clone())
             .ok_or_else(|| "Local daemon connection is unavailable".to_string())?;
         let token = config
@@ -39,7 +37,11 @@ impl WindowView {
 
     /// Build an ActionDispatcher for the given project. Returns `None` if the
     /// project is unknown or its daemon connection is unavailable.
-    pub(super) fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> Option<ActionDispatcher> {
+    pub(super) fn dispatcher_for_project(
+        &self,
+        project_id: &str,
+        cx: &Context<Self>,
+    ) -> Option<ActionDispatcher> {
         crate::action_dispatch::dispatcher_for_project(
             project_id,
             self.window_id,
@@ -56,7 +58,11 @@ impl WindowView {
     /// an unprefixed id) and target that connection directly. The dispatcher's
     /// `dispatch` strips the prefixed folder id automatically. Returns `None` if
     /// the remote manager is unavailable.
-    pub(super) fn dispatcher_for_folder(&self, folder_id: &str, _cx: &Context<Self>) -> Option<ActionDispatcher> {
+    pub(super) fn dispatcher_for_folder(
+        &self,
+        folder_id: &str,
+        _cx: &Context<Self>,
+    ) -> Option<ActionDispatcher> {
         let conn_id = folder_id
             .strip_prefix("remote:")
             .and_then(|r| r.split(':').next())
@@ -84,10 +90,7 @@ impl WindowView {
             .find(|(config, _, _)| config.id == connection_id)?;
         let token = config.effective_auth_token()?;
         let actual_id = okena_transport::client::strip_prefix(project_id, connection_id);
-        let client = okena_transport::remote_action::RemoteActionClient::new(
-            config.clone(),
-            token,
-        );
+        let client = okena_transport::remote_action::RemoteActionClient::new(config.clone(), token);
         Some((client, actual_id))
     }
 
@@ -96,7 +99,8 @@ impl WindowView {
         &self,
         project_id: &str,
         cx: &Context<Self>,
-    ) -> Option<std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::GitProvider>> {
+    ) -> Option<std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::GitProvider>>
+    {
         use crate::views::overlays::diff_viewer::provider::RemoteGitProvider;
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
@@ -118,7 +122,11 @@ impl WindowView {
         let project = ws.project(&state.project_id)?;
         let layout = project.layout.as_ref()?;
         let node = layout.get_at_path(&state.layout_path)?;
-        if let LayoutNode::Terminal { terminal_id: Some(id), .. } = node {
+        if let LayoutNode::Terminal {
+            terminal_id: Some(id),
+            ..
+        } = node
+        {
             Some((state.project_id, id.clone()))
         } else {
             None
@@ -166,12 +174,14 @@ impl WindowView {
         let project = ws.project(project_id)?;
         let conn_id = project.connection_id.as_ref()?;
         let (client, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-        Some(std::sync::Arc::new(okena_files::project_fs::RemoteProjectFs::new(
-            client,
-            actual_id,
-            project.name.clone(),
-            project.path.clone(),
-        )))
+        Some(std::sync::Arc::new(
+            okena_files::project_fs::RemoteProjectFs::new(
+                client,
+                actual_id,
+                project.name.clone(),
+                project.path.clone(),
+            ),
+        ))
     }
 
     /// Evict cached file viewers for projects that no longer exist.
@@ -210,10 +220,9 @@ impl WindowView {
         let project = ws.project(project_id)?;
         let conn_id = project.connection_id.as_ref()?;
         let (client, actual_id) = self.remote_params(project_id, conn_id, cx)?;
-        Some(std::sync::Arc::new(okena_views_git::blame::RemoteBlameProvider::new(
-            client,
-            actual_id,
-        )))
+        Some(std::sync::Arc::new(
+            okena_views_git::blame::RemoteBlameProvider::new(client, actual_id),
+        ))
     }
 }
 
@@ -227,8 +236,8 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) {
         use crate::soft_close::{
-            decode_action, KILL_PREFIX, RESTART_DAEMON_CANCEL_PREFIX,
-            RESTART_DAEMON_CONFIRM_PREFIX, UNDO_PREFIX,
+            KILL_PREFIX, RESTART_DAEMON_CANCEL_PREFIX, RESTART_DAEMON_CONFIRM_PREFIX, UNDO_PREFIX,
+            decode_action,
         };
         use crate::workspace::toast::ToastManager;
 
@@ -254,8 +263,7 @@ impl WindowView {
                 dispatcher.dispatch(ActionRequest::UndoSoftClose { terminal_id }, cx);
             }
             ToastManager::dismiss(&event.toast_id, cx);
-        } else if let Some((project_id, terminal_id)) =
-            decode_action(&event.action_id, KILL_PREFIX)
+        } else if let Some((project_id, terminal_id)) = decode_action(&event.action_id, KILL_PREFIX)
         {
             if let Some(dispatcher) = self.dispatcher_for_project(&project_id, cx) {
                 dispatcher.dispatch(ActionRequest::CloseTerminalNow { terminal_id }, cx);
@@ -282,35 +290,55 @@ impl WindowView {
                 // project's dispatcher so the remote id prefix is stripped before
                 // the daemon (the authoritative owner) applies them.
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::UpdateProjectHooks {
-                        project_id: project_id.clone(),
-                        hooks: Box::new(hooks.clone()),
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::UpdateProjectHooks {
+                            project_id: project_id.clone(),
+                            hooks: Box::new(hooks.clone()),
+                        },
+                        cx,
+                    );
                 }
             }
-            OverlayManagerEvent::WorktreeCreateRequested { project_id, branch, create_branch } => {
+            OverlayManagerEvent::WorktreeCreateRequested {
+                project_id,
+                branch,
+                create_branch,
+            } => {
                 // The daemon creates the worktree, its project and its terminals;
                 // they mirror back. No local mirror mutation or PTY spawn here.
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::CreateWorktree {
-                        project_id: project_id.clone(),
-                        branch: branch.clone(),
-                        create_branch: *create_branch,
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::CreateWorktree {
+                            project_id: project_id.clone(),
+                            branch: branch.clone(),
+                            create_branch: *create_branch,
+                        },
+                        cx,
+                    );
                 }
             }
-            OverlayManagerEvent::ShellSelected { shell_type, project_id, terminal_id } => {
+            OverlayManagerEvent::ShellSelected {
+                shell_type,
+                project_id,
+                terminal_id,
+            } => {
                 self.switch_terminal_shell(project_id, terminal_id, shell_type.clone(), cx);
             }
             OverlayManagerEvent::AddTerminal { project_id } => {
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::CreateTerminal {
-                        project_id: project_id.clone(),
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::CreateTerminal {
+                            project_id: project_id.clone(),
+                        },
+                        cx,
+                    );
                 }
             }
             OverlayManagerEvent::CreateWorktree { project_id } => {
-                let params = self.workspace.read(cx).project(project_id)
+                let params = self
+                    .workspace
+                    .read(cx)
+                    .project(project_id)
                     .and_then(|project| project.connection_id.clone())
                     .and_then(|connection_id| self.remote_params(project_id, &connection_id, cx));
                 if let Some(params) = params {
@@ -319,21 +347,33 @@ impl WindowView {
                     });
                 }
             }
-            OverlayManagerEvent::RenameProject { project_id, project_name } => {
+            OverlayManagerEvent::RenameProject {
+                project_id,
+                project_name,
+            } => {
                 self.request_broker.update(cx, |broker, cx| {
-                    broker.push_sidebar_request(SidebarRequest::RenameProject {
-                        project_id: project_id.clone(),
-                        project_name: project_name.clone(),
-                    }, cx);
+                    broker.push_sidebar_request(
+                        SidebarRequest::RenameProject {
+                            project_id: project_id.clone(),
+                            project_name: project_name.clone(),
+                        },
+                        cx,
+                    );
                 });
             }
-            OverlayManagerEvent::RenameDirectory { project_id, project_path } => {
+            OverlayManagerEvent::RenameDirectory {
+                project_id,
+                project_path,
+            } => {
                 self.overlay_manager.update(cx, |om, cx| {
                     om.show_rename_directory_dialog(project_id.clone(), project_path.clone(), cx);
                 });
             }
             OverlayManagerEvent::CloseWorktree { project_id } => {
-                let params = self.workspace.read(cx).project(project_id)
+                let params = self
+                    .workspace
+                    .read(cx)
+                    .project(project_id)
                     .and_then(|p| p.connection_id.clone())
                     .and_then(|cid| self.remote_params(project_id, &cid, cx));
                 if let Some(params) = params {
@@ -342,8 +382,14 @@ impl WindowView {
                     });
                 }
             }
-            OverlayManagerEvent::ManageWorktrees { project_id, position } => {
-                let params = self.workspace.read(cx).project(project_id)
+            OverlayManagerEvent::ManageWorktrees {
+                project_id,
+                position,
+            } => {
+                let params = self
+                    .workspace
+                    .read(cx)
+                    .project(project_id)
                     .and_then(|p| p.connection_id.clone())
                     .and_then(|cid| self.remote_params(project_id, &cid, cx));
                 if let Some(params) = params {
@@ -357,18 +403,24 @@ impl WindowView {
                 // removal (incl. hook terminals) mirror back. The GUI must not
                 // mutate its read-only mirror directly.
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::DeleteProject {
-                        project_id: project_id.clone(),
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::DeleteProject {
+                            project_id: project_id.clone(),
+                        },
+                        cx,
+                    );
                 }
             }
             OverlayManagerEvent::ToggleProjectPinned { project_id } => {
                 // The daemon owns the authoritative `pinned` flag: dispatch and
                 // let the new state mirror back.
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::ToggleProjectPinned {
-                        project_id: project_id.clone(),
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::ToggleProjectPinned {
+                            project_id: project_id.clone(),
+                        },
+                        cx,
+                    );
                 }
             }
             OverlayManagerEvent::DeleteFolder { folder_id } => {
@@ -376,29 +428,45 @@ impl WindowView {
                 // the folder id and dispatch DeleteFolder. The removal mirrors
                 // back.
                 if let Some(dispatcher) = self.dispatcher_for_folder(folder_id, cx) {
-                    dispatcher.dispatch(ActionRequest::DeleteFolder {
-                        folder_id: folder_id.clone(),
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::DeleteFolder {
+                            folder_id: folder_id.clone(),
+                        },
+                        cx,
+                    );
                 }
             }
-            OverlayManagerEvent::RenameDirectoryConfirmed { project_id, new_name } => {
+            OverlayManagerEvent::RenameDirectoryConfirmed {
+                project_id,
+                new_name,
+            } => {
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::RenameProjectDirectory {
-                        project_id: project_id.clone(),
-                        new_name: new_name.clone(),
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::RenameProjectDirectory {
+                            project_id: project_id.clone(),
+                            new_name: new_name.clone(),
+                        },
+                        cx,
+                    );
                 }
             }
-            OverlayManagerEvent::AddDiscoveredWorktree { parent_project_id, worktree_path, branch } => {
+            OverlayManagerEvent::AddDiscoveredWorktree {
+                parent_project_id,
+                worktree_path,
+                branch,
+            } => {
                 // The daemon owns the project list: dispatch
                 // AddDiscoveredWorktree (resolving the connection from the
                 // parent project) and let the new worktree project mirror back.
                 if let Some(dispatcher) = self.dispatcher_for_project(parent_project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::AddDiscoveredWorktree {
-                        parent_project_id: parent_project_id.clone(),
-                        worktree_path: worktree_path.clone(),
-                        branch: branch.clone(),
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::AddDiscoveredWorktree {
+                            parent_project_id: parent_project_id.clone(),
+                            worktree_path: worktree_path.clone(),
+                            branch: branch.clone(),
+                        },
+                        cx,
+                    );
                 }
             }
             OverlayManagerEvent::ConfigureHooks { project_id } => {
@@ -408,16 +476,22 @@ impl WindowView {
             }
             OverlayManagerEvent::ReloadServices { project_id } => {
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(okena_core::api::ActionRequest::ReloadServices {
-                        project_id: project_id.clone(),
-                    }, cx);
+                    dispatcher.dispatch(
+                        okena_core::api::ActionRequest::ReloadServices {
+                            project_id: project_id.clone(),
+                        },
+                        cx,
+                    );
                 }
             }
             OverlayManagerEvent::QuickCreateWorktree { project_id } => {
                 self.request_broker.update(cx, |broker, cx| {
-                    broker.push_sidebar_request(crate::workspace::requests::SidebarRequest::QuickCreateWorktree {
-                        project_id: project_id.clone(),
-                    }, cx);
+                    broker.push_sidebar_request(
+                        crate::workspace::requests::SidebarRequest::QuickCreateWorktree {
+                            project_id: project_id.clone(),
+                        },
+                        cx,
+                    );
                 });
             }
             OverlayManagerEvent::ProjectColorChanged { project_id, color } => {
@@ -429,24 +503,32 @@ impl WindowView {
                 // The daemon owns the worktree color override: dispatch a clear
                 // and let the reset mirror back.
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::SetWorktreeColorOverride {
-                        project_id: project_id.clone(),
-                        color: None,
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::SetWorktreeColorOverride {
+                            project_id: project_id.clone(),
+                            color: None,
+                        },
+                        cx,
+                    );
                 }
             }
             OverlayManagerEvent::FolderColorChanged { folder_id, color } => {
                 // The daemon owns the folder color: resolve the connection from
                 // the folder id and dispatch SetFolderColor.
                 if let Some(dispatcher) = self.dispatcher_for_folder(folder_id, cx) {
-                    dispatcher.dispatch(ActionRequest::SetFolderColor {
-                        folder_id: folder_id.clone(),
-                        color: *color,
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::SetFolderColor {
+                            folder_id: folder_id.clone(),
+                            color: *color,
+                        },
+                        cx,
+                    );
                 }
             }
             OverlayManagerEvent::FocusParent { project_id } => {
-                let parent_id = self.workspace.read(cx)
+                let parent_id = self
+                    .workspace
+                    .read(cx)
                     .project(project_id)
                     .and_then(|p| p.worktree_info.as_ref())
                     .map(|wt| wt.parent_project_id.clone());
@@ -497,12 +579,18 @@ impl WindowView {
                     });
                 }
             }
-            OverlayManagerEvent::RemotePair { connection_id, connection_name } => {
+            OverlayManagerEvent::RemotePair {
+                connection_id,
+                connection_name,
+            } => {
                 self.overlay_manager.update(cx, |om, cx| {
                     om.show_remote_pair_dialog(connection_id.clone(), connection_name.clone(), cx);
                 });
             }
-            OverlayManagerEvent::RemoteUpgradeToTls { connection_id, connection_name } => {
+            OverlayManagerEvent::RemoteUpgradeToTls {
+                connection_id,
+                connection_name,
+            } => {
                 // Flip the saved connection to TLS, then open the pair dialog: the
                 // re-pair runs over TLS and pins the server cert (TOFU).
                 if let Some(ref rm) = self.remote_manager {
@@ -514,7 +602,10 @@ impl WindowView {
                     om.show_remote_pair_dialog(connection_id.clone(), connection_name.clone(), cx);
                 });
             }
-            OverlayManagerEvent::RemotePaired { connection_id, code } => {
+            OverlayManagerEvent::RemotePaired {
+                connection_id,
+                code,
+            } => {
                 if let Some(ref rm) = self.remote_manager {
                     rm.update(cx, |rm, cx| {
                         rm.pair(connection_id, code, cx);
@@ -531,12 +622,14 @@ impl WindowView {
             OverlayManagerEvent::TerminalCopy { terminal_id } => {
                 let terminals = self.terminals.lock();
                 if let Some(terminal) = terminals.get(terminal_id)
-                    && let Some(text) = terminal.get_selected_text() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    }
+                    && let Some(text) = terminal.get_selected_text()
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
             }
             OverlayManagerEvent::TerminalPaste { terminal_id } => {
-                let text = cx.read_from_clipboard()
+                let text = cx
+                    .read_from_clipboard()
                     .and_then(|item| item.text().map(|t| t.to_string()));
                 if let Some(text) = text {
                     let terminals = self.terminals.lock();
@@ -558,56 +651,98 @@ impl WindowView {
                 }
                 cx.notify();
             }
-            OverlayManagerEvent::TerminalSplit { project_id, layout_path, direction } => {
+            OverlayManagerEvent::TerminalSplit {
+                project_id,
+                layout_path,
+                direction,
+            } => {
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::SplitTerminal {
-                        project_id: project_id.clone(),
-                        path: layout_path.clone(),
-                        direction: *direction,
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::SplitTerminal {
+                            project_id: project_id.clone(),
+                            path: layout_path.clone(),
+                            direction: *direction,
+                        },
+                        cx,
+                    );
                 }
             }
-            OverlayManagerEvent::TerminalClose { project_id, terminal_id } => {
+            OverlayManagerEvent::TerminalClose {
+                project_id,
+                terminal_id,
+            } => {
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::CloseTerminal {
-                        project_id: project_id.clone(),
-                        terminal_id: terminal_id.clone(),
-                    }, cx);
+                    dispatcher.dispatch(
+                        ActionRequest::CloseTerminal {
+                            project_id: project_id.clone(),
+                            terminal_id: terminal_id.clone(),
+                        },
+                        cx,
+                    );
                 }
             }
-            OverlayManagerEvent::TabClose { project_id, layout_path, tab_index } => {
-                let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
+            OverlayManagerEvent::TabClose {
+                project_id,
+                layout_path,
+                tab_index,
+            } => {
+                let terminal_ids =
+                    collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
                 if let Some(tid) = terminal_ids.get(*tab_index).cloned()
-                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::CloseTerminal {
-                        project_id: project_id.clone(),
-                        terminal_id: tid,
-                    }, cx);
+                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx)
+                {
+                    dispatcher.dispatch(
+                        ActionRequest::CloseTerminal {
+                            project_id: project_id.clone(),
+                            terminal_id: tid,
+                        },
+                        cx,
+                    );
                 }
             }
-            OverlayManagerEvent::TabCloseOthers { project_id, layout_path, tab_index } => {
-                let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
-                let to_close: Vec<String> = terminal_ids.into_iter().enumerate()
+            OverlayManagerEvent::TabCloseOthers {
+                project_id,
+                layout_path,
+                tab_index,
+            } => {
+                let terminal_ids =
+                    collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
+                let to_close: Vec<String> = terminal_ids
+                    .into_iter()
+                    .enumerate()
                     .filter(|(i, _)| *i != *tab_index)
                     .map(|(_, id)| id)
                     .collect();
                 if !to_close.is_empty()
-                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::CloseTerminals {
-                        project_id: project_id.clone(),
-                        terminal_ids: to_close,
-                    }, cx);
+                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx)
+                {
+                    dispatcher.dispatch(
+                        ActionRequest::CloseTerminals {
+                            project_id: project_id.clone(),
+                            terminal_ids: to_close,
+                        },
+                        cx,
+                    );
                 }
             }
-            OverlayManagerEvent::TabCloseToRight { project_id, layout_path, tab_index } => {
-                let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
+            OverlayManagerEvent::TabCloseToRight {
+                project_id,
+                layout_path,
+                tab_index,
+            } => {
+                let terminal_ids =
+                    collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
                 let to_close: Vec<String> = terminal_ids.into_iter().skip(tab_index + 1).collect();
                 if !to_close.is_empty()
-                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(ActionRequest::CloseTerminals {
-                        project_id: project_id.clone(),
-                        terminal_ids: to_close,
-                    }, cx);
+                    && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx)
+                {
+                    dispatcher.dispatch(
+                        ActionRequest::CloseTerminals {
+                            project_id: project_id.clone(),
+                            terminal_ids: to_close,
+                        },
+                        cx,
+                    );
                 }
             }
             OverlayManagerEvent::OpenCommitFromBlame { project_id, hash } => {
@@ -632,9 +767,7 @@ impl WindowView {
             OverlayManagerEvent::RemoteConnected { config } => {
                 if let Some(ref rm) = self.remote_manager {
                     let config_clone = config.clone();
-                    let result = rm.update(cx, |rm, cx| {
-                        rm.add_connection(config.clone(), cx)
-                    });
+                    let result = rm.update(cx, |rm, cx| rm.add_connection(config.clone(), cx));
                     if let Err(msg) = result {
                         crate::views::panels::toast::ToastManager::warning(msg, cx);
                         return;
@@ -658,7 +791,11 @@ impl WindowView {
     pub(super) fn dispatch_to_local_daemon(&self, action: ActionRequest, cx: &mut Context<Self>) {
         if let Some(ref rm) = self.remote_manager {
             rm.update(cx, |rm, cx| {
-                rm.send_action(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID, action, cx);
+                rm.send_action(
+                    okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                    action,
+                    cx,
+                );
             });
         }
     }
@@ -818,9 +955,9 @@ impl WindowView {
     /// Drains the overlay request queue and dispatches each request to the
     /// OverlayManager. Requests for already-open overlays are silently dropped.
     pub(super) fn process_pending_requests(&mut self, cx: &mut Context<Self>) {
-        let requests: Vec<_> = self.request_broker.update(cx, |broker, _cx| {
-            broker.drain_overlay_requests()
-        });
+        let requests: Vec<_> = self
+            .request_broker
+            .update(cx, |broker, _cx| broker.drain_overlay_requests());
 
         for request in requests {
             match request {
@@ -829,32 +966,78 @@ impl WindowView {
                         if !self.overlay_manager.read(cx).has_context_menu() {
                             self.overlay_manager.update(cx, |om, cx| {
                                 om.show_context_menu(
-                                    crate::workspace::requests::ContextMenuRequest { project_id, position },
+                                    crate::workspace::requests::ContextMenuRequest {
+                                        project_id,
+                                        position,
+                                    },
                                     cx,
                                 );
                             });
                         }
                     }
-                    ProjectOverlayKind::ShellSelector { terminal_id, current_shell } => {
+                    ProjectOverlayKind::ShellSelector {
+                        terminal_id,
+                        current_shell,
+                    } => {
                         self.overlay_manager.update(cx, |om, cx| {
                             om.show_shell_selector(current_shell, project_id, terminal_id, cx);
                         });
                     }
-                    ProjectOverlayKind::DiffViewer { file, mode, commit_message, commits, commit_index } => {
+                    ProjectOverlayKind::DiffViewer {
+                        file,
+                        mode,
+                        commit_message,
+                        commits,
+                        commit_index,
+                    } => {
                         if let Some(provider) = self.build_git_provider(&project_id, cx) {
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.show_diff_viewer(provider, file, mode, commit_message, commits, commit_index, cx);
+                                om.show_diff_viewer(
+                                    provider,
+                                    file,
+                                    mode,
+                                    commit_message,
+                                    commits,
+                                    commit_index,
+                                    cx,
+                                );
                             });
                         }
                     }
-                    ProjectOverlayKind::TerminalContextMenu { terminal_id, layout_path, position, has_selection, link_url } => {
+                    ProjectOverlayKind::TerminalContextMenu {
+                        terminal_id,
+                        layout_path,
+                        position,
+                        has_selection,
+                        link_url,
+                    } => {
                         self.overlay_manager.update(cx, |om, cx| {
-                            om.show_terminal_context_menu(terminal_id, project_id, layout_path, position, has_selection, link_url, cx);
+                            om.show_terminal_context_menu(
+                                terminal_id,
+                                project_id,
+                                layout_path,
+                                position,
+                                has_selection,
+                                link_url,
+                                cx,
+                            );
                         });
                     }
-                    ProjectOverlayKind::TabContextMenu { tab_index, num_tabs, layout_path, position } => {
+                    ProjectOverlayKind::TabContextMenu {
+                        tab_index,
+                        num_tabs,
+                        layout_path,
+                        position,
+                    } => {
                         self.overlay_manager.update(cx, |om, cx| {
-                            om.show_tab_context_menu(tab_index, num_tabs, project_id, layout_path, position, cx);
+                            om.show_tab_context_menu(
+                                tab_index,
+                                num_tabs,
+                                project_id,
+                                layout_path,
+                                position,
+                                cx,
+                            );
                         });
                     }
                     ProjectOverlayKind::ShowServiceLog { service_name } => {
@@ -910,7 +1093,10 @@ impl WindowView {
                         });
                     }
                     ProjectOverlayKind::WorktreeList { position } => {
-                        let params = self.workspace.read(cx).project(&project_id)
+                        let params = self
+                            .workspace
+                            .read(cx)
+                            .project(&project_id)
                             .and_then(|p| p.connection_id.clone())
                             .and_then(|cid| self.remote_params(&project_id, &cid, cx));
                         if let Some(params) = params {
@@ -921,11 +1107,18 @@ impl WindowView {
                     }
                 },
                 OverlayRequest::Folder(FolderOverlay { folder_id, kind }) => match kind {
-                    FolderOverlayKind::ContextMenu { folder_name, position } => {
+                    FolderOverlayKind::ContextMenu {
+                        folder_name,
+                        position,
+                    } => {
                         if !self.overlay_manager.read(cx).has_folder_context_menu() {
                             self.overlay_manager.update(cx, |om, cx| {
                                 om.show_folder_context_menu(
-                                    crate::workspace::requests::FolderContextMenuRequest { folder_id, folder_name, position },
+                                    crate::workspace::requests::FolderContextMenuRequest {
+                                        folder_id,
+                                        folder_name,
+                                        position,
+                                    },
                                     cx,
                                 );
                             });
@@ -955,10 +1148,23 @@ impl WindowView {
                         });
                     }
                 }
-                OverlayRequest::RemoteConnectionContextMenu { connection_id, connection_name, is_pairing, tls, position } => {
+                OverlayRequest::RemoteConnectionContextMenu {
+                    connection_id,
+                    connection_name,
+                    is_pairing,
+                    tls,
+                    position,
+                } => {
                     if !self.overlay_manager.read(cx).has_remote_context_menu() {
                         self.overlay_manager.update(cx, |om, cx| {
-                            om.show_remote_context_menu(connection_id, connection_name, is_pairing, tls, position, cx);
+                            om.show_remote_context_menu(
+                                connection_id,
+                                connection_name,
+                                is_pairing,
+                                tls,
+                                position,
+                                cx,
+                            );
                         });
                     }
                 }
@@ -970,9 +1176,9 @@ impl WindowView {
     /// the currently focused terminal. Resolves the terminal's CWD per call so
     /// queued payloads sent while the user navigates use the latest known cwd.
     pub(super) fn process_pending_send_to_terminal(&mut self, cx: &mut Context<Self>) {
-        let payloads = self.request_broker.update(cx, |broker, _cx| {
-            broker.drain_send_to_terminal()
-        });
+        let payloads = self
+            .request_broker
+            .update(cx, |broker, _cx| broker.drain_send_to_terminal());
         for payload in payloads {
             self.send_payload_to_active_terminal(payload, cx);
         }
@@ -1015,15 +1221,16 @@ fn collect_tab_terminal_ids(
     };
     match node {
         LayoutNode::Tabs { children, .. } => {
-            children.iter().filter_map(|child| {
-                // For simple Terminal children, get the ID directly.
-                // For nested structures, get the first terminal ID.
-                child.collect_terminal_ids().into_iter().next()
-            }).collect()
+            children
+                .iter()
+                .filter_map(|child| {
+                    // For simple Terminal children, get the ID directly.
+                    // For nested structures, get the first terminal ID.
+                    child.collect_terminal_ids().into_iter().next()
+                })
+                .collect()
         }
-        LayoutNode::Terminal { terminal_id, .. } => {
-            terminal_id.iter().cloned().collect()
-        }
+        LayoutNode::Terminal { terminal_id, .. } => terminal_id.iter().cloned().collect(),
         _ => Vec::new(),
     }
 }

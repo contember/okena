@@ -1,8 +1,8 @@
 //! File loading and syntax highlighting for the file viewer.
 
 use super::{
-    font_format_for_path, image_format_for_path, DecodedImage, FileViewerTab, FontData,
-    FontFormat, MAX_LINES,
+    DecodedImage, FileViewerTab, FontData, FontFormat, MAX_LINES, font_format_for_path,
+    image_format_for_path,
 };
 use crate::syntax::highlight_content;
 use gpui::{Image, ImageFormat, SvgRenderer};
@@ -102,7 +102,9 @@ pub(super) fn build_image_content(
             if pixels == 0 || pixels > MAX_SVG_PIXELS {
                 return Err(format!(
                     "SVG dimensions out of range ({}×{}). Max {} megapixels.",
-                    w, h, MAX_SVG_PIXELS / 1024 / 1024
+                    w,
+                    h,
+                    MAX_SVG_PIXELS / 1024 / 1024
                 ));
             }
             let initial_scale: f32 = 1.0;
@@ -170,44 +172,47 @@ pub(super) fn build_image_content(
 /// GPUI's text-system registration. Only raw OpenType (TTF/OTF) is decoded;
 /// WOFF/WOFF2 are rejected with a user-visible error (decompressing them
 /// would require a dependency we deliberately don't pull in).
-pub(super) fn build_font_content(
-    path: &Path,
-    bytes: Vec<u8>,
-) -> Result<LoadedContent, String> {
+pub(super) fn build_font_content(path: &Path, bytes: Vec<u8>) -> Result<LoadedContent, String> {
     let format = font_format_for_path(path).ok_or_else(|| {
         format!(
             "Unsupported font extension: {}",
-            path.extension().and_then(|e| e.to_str()).unwrap_or("(none)")
+            path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("(none)")
         )
     })?;
     let ttf_bytes: Vec<u8> = match format {
         FontFormat::OpenType => bytes,
         FontFormat::Woff => {
             return Err(
-                "WOFF/WOFF2 preview is not supported yet — only OTF and TTF are."
-                    .to_string(),
+                "WOFF/WOFF2 preview is not supported yet — only OTF and TTF are.".to_string(),
             );
         }
     };
-    let face = ttf_parser::Face::parse(&ttf_bytes, 0)
-        .map_err(|e| format!("Cannot parse font: {}", e))?;
+    let face =
+        ttf_parser::Face::parse(&ttf_bytes, 0).map_err(|e| format!("Cannot parse font: {}", e))?;
     let read_name = |name_id: u16| -> Option<String> {
         face.names()
             .into_iter()
             .find(|n| n.name_id == name_id && n.to_string().is_some())
             .and_then(|n| n.to_string())
     };
-    let family_name = read_name(ttf_parser::name_id::FAMILY)
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown")
-                .to_string()
-        });
-    let full_name = read_name(ttf_parser::name_id::FULL_NAME)
-        .unwrap_or_else(|| family_name.clone());
-    let style = read_name(ttf_parser::name_id::SUBFAMILY)
-        .unwrap_or_else(|| if face.is_italic() { "Italic" } else { "Regular" }.to_string());
+    let family_name = read_name(ttf_parser::name_id::FAMILY).unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string()
+    });
+    let full_name =
+        read_name(ttf_parser::name_id::FULL_NAME).unwrap_or_else(|| family_name.clone());
+    let style = read_name(ttf_parser::name_id::SUBFAMILY).unwrap_or_else(|| {
+        if face.is_italic() {
+            "Italic"
+        } else {
+            "Regular"
+        }
+        .to_string()
+    });
     let version = read_name(ttf_parser::name_id::VERSION).unwrap_or_default();
     let data = Arc::new(FontData {
         family_name,

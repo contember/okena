@@ -117,9 +117,18 @@ pub fn get_pr_info(path: &Path) -> Option<crate::PrInfo> {
     let output = safe_output_with_timeout(
         command("gh")
             .args([
-                "pr", "list", "--head", &branch, "--state", "all", "--limit", "1",
-                "--json", "url,state,isDraft,number,baseRefName,headRefOid",
-                "--jq", ".[0] | [.url, .state, .isDraft, .number, .baseRefName, .headRefOid] | @tsv",
+                "pr",
+                "list",
+                "--head",
+                &branch,
+                "--state",
+                "all",
+                "--limit",
+                "1",
+                "--json",
+                "url,state,isDraft,number,baseRefName,headRefOid",
+                "--jq",
+                ".[0] | [.url, .state, .isDraft, .number, .baseRefName, .headRefOid] | @tsv",
             ])
             .current_dir(path_str),
         GH_TIMEOUT,
@@ -175,7 +184,12 @@ fn parse_pr_list_tsv(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    Some(crate::PrInfo { url, state, number, base })
+    Some(crate::PrInfo {
+        url,
+        state,
+        number,
+        base,
+    })
 }
 
 fn closed_pr_head_matches(
@@ -431,33 +445,62 @@ pub(crate) fn parse_branch_ci(
         } else {
             // Concatenated pages — split on top-level `}{` boundaries.
             for chunk in json.split("}{").map(|s| s.to_string()).collect::<Vec<_>>() {
-                let normalized = if !chunk.starts_with('{') { format!("{{{chunk}") } else { chunk.clone() };
-                let normalized = if !normalized.ends_with('}') { format!("{normalized}}}") } else { normalized };
+                let normalized = if !chunk.starts_with('{') {
+                    format!("{{{chunk}")
+                } else {
+                    chunk.clone()
+                };
+                let normalized = if !normalized.ends_with('}') {
+                    format!("{normalized}}}")
+                } else {
+                    normalized
+                };
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&normalized)
-                    && let Some(arr) = v.get("check_runs").and_then(|x| x.as_array()) {
-                        runs.extend(arr.iter().cloned());
-                    }
+                    && let Some(arr) = v.get("check_runs").and_then(|x| x.as_array())
+                {
+                    runs.extend(arr.iter().cloned());
+                }
             }
         }
 
         for run in runs {
-            let name = run.get("name").and_then(|v| v.as_str()).unwrap_or("(unnamed)").to_string();
+            let name = run
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unnamed)")
+                .to_string();
             let status_str = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
             let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
             let (status, is_skipped) = match (status_str, conclusion) {
-                (_, "success") => { passed += 1; (crate::CiStatus::Success, false) }
-                (_, "failure") | (_, "timed_out") | (_, "action_required") | (_, "cancelled") | (_, "stale") | (_, "startup_failure") => {
+                (_, "success") => {
+                    passed += 1;
+                    (crate::CiStatus::Success, false)
+                }
+                (_, "failure")
+                | (_, "timed_out")
+                | (_, "action_required")
+                | (_, "cancelled")
+                | (_, "stale")
+                | (_, "startup_failure") => {
                     failed += 1;
                     (crate::CiStatus::Failure, false)
                 }
                 (_, "skipped") | (_, "neutral") => (crate::CiStatus::Pending, true),
-                ("queued", _) | ("in_progress", _) | ("waiting", _) | ("pending", _) | ("requested", _) => {
+                ("queued", _)
+                | ("in_progress", _)
+                | ("waiting", _)
+                | ("pending", _)
+                | ("requested", _) => {
                     pending += 1;
                     (crate::CiStatus::Pending, false)
                 }
                 _ => continue,
             };
-            let link = run.get("html_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+            let link = run
+                .get("html_url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             let description = run
                 .get("output")
                 .and_then(|o| o.get("summary"))
@@ -467,7 +510,11 @@ pub(crate) fn parse_branch_ci(
             let workflow = run
                 .get("check_suite")
                 .and_then(|s| s.get("workflow_id"))
-                .and_then(|_| run.get("app").and_then(|a| a.get("name")).and_then(|v| v.as_str()))
+                .and_then(|_| {
+                    run.get("app")
+                        .and_then(|a| a.get("name"))
+                        .and_then(|v| v.as_str())
+                })
                 .filter(|s| !s.is_empty())
                 .map(String::from);
             let elapsed_ms = compute_elapsed_ms(
@@ -489,33 +536,55 @@ pub(crate) fn parse_branch_ci(
 
     if let Some(json) = statuses_json
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(json)
-            && let Some(arr) = v.get("statuses").and_then(|x| x.as_array()) {
-                for st in arr {
-                    let name = st.get("context").and_then(|v| v.as_str()).unwrap_or("(unnamed)").to_string();
-                    let state = st.get("state").and_then(|v| v.as_str()).unwrap_or("");
-                    let (status, is_skipped) = match state {
-                        "success" => { passed += 1; (crate::CiStatus::Success, false) }
-                        "failure" | "error" => { failed += 1; (crate::CiStatus::Failure, false) }
-                        "pending" => { pending += 1; (crate::CiStatus::Pending, false) }
-                        _ => continue,
-                    };
-                    let link = st.get("target_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
-                    let description = st.get("description").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
-                    let elapsed_ms = compute_elapsed_ms(
-                        st.get("created_at").and_then(|v| v.as_str()),
-                        st.get("updated_at").and_then(|v| v.as_str()),
-                    );
-                    checks.push(crate::CiCheck {
-                        name,
-                        workflow: None,
-                        status,
-                        is_skipped,
-                        link,
-                        description,
-                        elapsed_ms,
-                    });
+        && let Some(arr) = v.get("statuses").and_then(|x| x.as_array())
+    {
+        for st in arr {
+            let name = st
+                .get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unnamed)")
+                .to_string();
+            let state = st.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            let (status, is_skipped) = match state {
+                "success" => {
+                    passed += 1;
+                    (crate::CiStatus::Success, false)
                 }
-            }
+                "failure" | "error" => {
+                    failed += 1;
+                    (crate::CiStatus::Failure, false)
+                }
+                "pending" => {
+                    pending += 1;
+                    (crate::CiStatus::Pending, false)
+                }
+                _ => continue,
+            };
+            let link = st
+                .get("target_url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let description = st
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let elapsed_ms = compute_elapsed_ms(
+                st.get("created_at").and_then(|v| v.as_str()),
+                st.get("updated_at").and_then(|v| v.as_str()),
+            );
+            checks.push(crate::CiCheck {
+                name,
+                workflow: None,
+                status,
+                is_skipped,
+                link,
+                description,
+                elapsed_ms,
+            });
+        }
+    }
 
     let total = passed + failed + pending;
     if total == 0 && checks.is_empty() {
@@ -766,7 +835,8 @@ mod tests {
 
     #[test]
     fn parse_branch_ci_combines_runs_and_statuses() {
-        let runs = r#"{"check_runs":[{"name":"Lint","status":"completed","conclusion":"success"}]}"#;
+        let runs =
+            r#"{"check_runs":[{"name":"Lint","status":"completed","conclusion":"success"}]}"#;
         let statuses = r#"{"statuses":[{"context":"vercel/deploy","state":"failure"}]}"#;
         let result = super::parse_branch_ci(Some(runs), Some(statuses)).unwrap();
         assert_eq!(result.status, crate::CiStatus::Failure);

@@ -1,6 +1,6 @@
-use crate::terminal::TerminalTransport;
 use crate::pty_manager::PtyManager;
 use crate::shell_config::ShellType;
+use crate::terminal::TerminalTransport;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,7 +11,12 @@ use std::sync::Arc;
 pub trait TerminalBackend: Send + Sync {
     fn transport(&self) -> Arc<dyn TerminalTransport>;
     fn create_terminal(&self, cwd: &str, shell: Option<&ShellType>) -> Result<String>;
-    fn reconnect_terminal(&self, terminal_id: &str, cwd: &str, shell: Option<&ShellType>) -> Result<String>;
+    fn reconnect_terminal(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        shell: Option<&ShellType>,
+    ) -> Result<String>;
     fn kill(&self, terminal_id: &str);
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf>;
     fn supports_buffer_capture(&self) -> bool;
@@ -57,8 +62,14 @@ impl TerminalBackend for LocalBackend {
         self.pty_manager.create_terminal_with_shell(cwd, shell)
     }
 
-    fn reconnect_terminal(&self, terminal_id: &str, cwd: &str, shell: Option<&ShellType>) -> Result<String> {
-        self.pty_manager.create_or_reconnect_terminal_with_shell(Some(terminal_id), cwd, shell)
+    fn reconnect_terminal(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        shell: Option<&ShellType>,
+    ) -> Result<String> {
+        self.pty_manager
+            .create_or_reconnect_terminal_with_shell(Some(terminal_id), cwd, shell)
     }
 
     fn kill(&self, terminal_id: &str) {

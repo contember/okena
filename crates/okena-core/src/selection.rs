@@ -77,10 +77,6 @@ impl Selectable for (usize, usize) {
 // Implementation for 1D offset (e.g., character offset in markdown)
 impl Selectable for usize {
     fn normalized_pair(a: Self, b: Self) -> (Self, Self) {
-        if a <= b {
-            (a, b)
-        } else {
-            (b, a)
-        }
+        if a <= b { (a, b) } else { (b, a) }
     }
 }

@@ -3,7 +3,7 @@
 //! Manages sidebar visibility, auto-hide behavior, and animation state.
 //! The actual animation spawning is handled by the parent view.
 
-use crate::settings::{AppSettings, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH};
+use crate::settings::{AppSettings, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
 /// Animation duration in milliseconds.
 pub const ANIMATION_DURATION_MS: u64 = 150;
@@ -62,7 +62,10 @@ impl SidebarController {
     /// Create a new sidebar controller from app settings.
     pub fn new(settings: &AppSettings) -> Self {
         let open = settings.sidebar.is_open;
-        let width = settings.sidebar.width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        let width = settings
+            .sidebar
+            .width
+            .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
         Self {
             open,
             animation: if open { 1.0 } else { 0.0 },
@@ -139,8 +142,6 @@ impl SidebarController {
     /// Returns the animation target. Caller is responsible for persisting via SettingsState.
     pub fn toggle_auto_hide(&mut self) -> AnimationTarget {
         self.auto_hide = !self.auto_hide;
-
-        
 
         if self.auto_hide && self.open {
             // Close sidebar when enabling auto-hide

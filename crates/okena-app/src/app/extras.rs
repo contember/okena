@@ -16,13 +16,13 @@
 //! caller spawns without bounds, or a slice 07 restore loads an entry with no
 //! recorded bounds), the OS picks a default position.
 
-use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WorkspaceData};
+#[cfg(target_os = "linux")]
+use crate::simple_root::SimpleRoot as Root;
 use crate::views::window::{WindowView, WindowViewEvent};
+use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WorkspaceData};
 use gpui::*;
 #[cfg(not(target_os = "linux"))]
 use gpui_component::Root;
-#[cfg(target_os = "linux")]
-use crate::simple_root::SimpleRoot as Root;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -88,10 +88,7 @@ fn window_sort_key(id: &WindowId) -> [u8; 16] {
 /// Pure function — separated from the observer body so the diff contract can
 /// be exercised without standing up the full `Okena` entity (whose
 /// construction pulls in PtyManager, settings, theme, remote, services, etc.).
-pub(super) fn extras_to_open(
-    data: &WorkspaceData,
-    opened: &HashSet<WindowId>,
-) -> Vec<WindowId> {
+pub(super) fn extras_to_open(data: &WorkspaceData, opened: &HashSet<WindowId>) -> Vec<WindowId> {
     data.extra_windows
         .iter()
         .map(|w| WindowId::Extra(w.id))
@@ -106,10 +103,7 @@ pub(super) fn extras_to_open(
 /// even though `opened` is a `HashSet`. Iteration order matters when two
 /// pending closes touch shared state (e.g. the same terminal rendered in both
 /// windows); a flaky order would surface as intermittent test failures.
-pub(super) fn extras_to_close(
-    data: &WorkspaceData,
-    opened: &HashSet<WindowId>,
-) -> Vec<WindowId> {
+pub(super) fn extras_to_close(data: &WorkspaceData, opened: &HashSet<WindowId>) -> Vec<WindowId> {
     let desired: HashSet<WindowId> = data
         .extra_windows
         .iter()
@@ -278,7 +272,10 @@ impl Okena {
         // Resolve the target window's view + OS handle.
         let (view, handle) = match target {
             WindowId::Main => (self.main_window.clone(), self.main_window_handle),
-            id => match (self.extra_windows.get(&id), self.extra_window_handles.get(&id)) {
+            id => match (
+                self.extra_windows.get(&id),
+                self.extra_window_handles.get(&id),
+            ) {
                 (Some(v), Some(h)) => (v.clone(), *h),
                 _ => return,
             },
@@ -360,14 +357,13 @@ impl Okena {
                 width: f32::from(b.size.width),
                 height: f32::from(b.size.height),
             });
-        let window_bounds = resolve_extra_window_bounds(persisted, main_bounds).map(
-            |b: PersistedWindowBounds| {
+        let window_bounds =
+            resolve_extra_window_bounds(persisted, main_bounds).map(|b: PersistedWindowBounds| {
                 WindowBounds::Windowed(Bounds {
                     origin: point(px(b.origin_x), px(b.origin_y)),
                     size: size(px(b.width), px(b.height)),
                 })
-            },
-        );
+            });
 
         let mut opened_view = None;
         let result = cx.open_window(
@@ -463,9 +459,11 @@ impl Okena {
 #[cfg(test)]
 mod tests {
     use super::{
-        extras_to_close, extras_to_open, resolve_extra_window_bounds, PendingExtraForgets,
+        PendingExtraForgets, extras_to_close, extras_to_open, resolve_extra_window_bounds,
     };
-    use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WindowState, WorkspaceData};
+    use crate::workspace::state::{
+        WindowBounds as PersistedWindowBounds, WindowId, WindowState, WorkspaceData,
+    };
     use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
 
@@ -676,9 +674,17 @@ mod tests {
         // direction fails this test.
         let mut data = empty_workspace();
         let ids: Vec<WindowId> = (0..25).map(|_| data.spawn_extra_window(None)).collect();
-        assert_eq!(data.extra_windows.len(), 25, "data layer must accept every spawn");
+        assert_eq!(
+            data.extra_windows.len(),
+            25,
+            "data layer must accept every spawn"
+        );
         let opened = HashSet::new();
-        assert_eq!(extras_not_opened(&data, &opened), ids, "helper must surface every pending entry");
+        assert_eq!(
+            extras_not_opened(&data, &opened),
+            ids,
+            "helper must surface every pending entry"
+        );
     }
 
     // ── Deferred OS-close forgets ────────────────────────────────────────
@@ -709,9 +715,16 @@ mod tests {
         let gen_a = forgets.note_close(a);
         let gen_b = forgets.note_close(b);
 
-        assert!(forgets.take_due(gen_a).is_empty(), "stale timer must not commit");
+        assert!(
+            forgets.take_due(gen_a).is_empty(),
+            "stale timer must not commit"
+        );
         let due: HashSet<WindowId> = forgets.take_due(gen_b).into_iter().collect();
-        assert_eq!(due, HashSet::from([a, b]), "last close owns every pending forget");
+        assert_eq!(
+            due,
+            HashSet::from([a, b]),
+            "last close owns every pending forget"
+        );
     }
 
     #[test]

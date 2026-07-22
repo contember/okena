@@ -2,10 +2,10 @@
 //!
 //! Provides a reusable dropdown button with overlay list.
 
-use crate::theme::{with_alpha, ThemeColors};
-use crate::tokens::{ui_text_sm, ui_text_md};
-use gpui::*;
+use crate::theme::{ThemeColors, with_alpha};
+use crate::tokens::{ui_text_md, ui_text_sm};
 use gpui::prelude::*;
+use gpui::*;
 
 /// Create a dropdown trigger button that tracks its own bounds for overlay positioning.
 ///
@@ -50,17 +50,17 @@ pub fn dropdown_button(
 pub fn dropdown_anchored_below(bounds: Bounds<Pixels>, child: impl IntoElement) -> Deferred {
     deferred(
         anchored()
-            .position(point(bounds.origin.x, bounds.origin.y + bounds.size.height + px(2.0)))
+            .position(point(
+                bounds.origin.x,
+                bounds.origin.y + bounds.size.height + px(2.0),
+            ))
             .snap_to_window()
-            .child(child)
+            .child(child),
     )
 }
 
 /// Create a dropdown overlay container.
-pub fn dropdown_overlay(
-    id: impl Into<SharedString>,
-    t: &ThemeColors,
-) -> Stateful<Div> {
+pub fn dropdown_overlay(id: impl Into<SharedString>, t: &ThemeColors) -> Stateful<Div> {
     div()
         .id(ElementId::Name(id.into()))
         .occlude()

@@ -8,7 +8,7 @@
 //! measured height stays at the natural multi-line text height.
 
 use gpui::prelude::*;
-use gpui::{div, px, AvailableSpace, Point, Size, TestAppContext};
+use gpui::{AvailableSpace, Point, Size, TestAppContext, div, px};
 use okena_core::theme::DARK_THEME;
 use okena_markdown::{MarkdownDocument, RenderedNode};
 

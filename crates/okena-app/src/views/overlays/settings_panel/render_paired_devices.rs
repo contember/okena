@@ -1,10 +1,10 @@
 use crate::theme::theme;
-use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_ms};
+use crate::ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
 use gpui::*;
 use okena_ui::empty_state::empty_state;
 
-use super::components::*;
 use super::SettingsPanel;
+use super::components::*;
 
 impl SettingsPanel {
     pub(super) fn render_paired_devices(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -15,13 +15,19 @@ impl SettingsPanel {
         if self.auth_store.is_none() {
             return content
                 .child(section_header("Paired Devices", &t, cx))
-                .child(section_container(&t).child(empty_state("Remote server is not running", &t, cx).py(px(16.0))));
+                .child(
+                    section_container(&t)
+                        .child(empty_state("Remote server is not running", &t, cx).py(px(16.0))),
+                );
         }
 
         if self.paired_devices.is_empty() {
             return content
                 .child(section_header("Paired Devices", &t, cx))
-                .child(section_container(&t).child(empty_state("No devices are currently paired", &t, cx).py(px(16.0))));
+                .child(
+                    section_container(&t)
+                        .child(empty_state("No devices are currently paired", &t, cx).py(px(16.0))),
+                );
         }
 
         let now_secs = std::time::SystemTime::now()

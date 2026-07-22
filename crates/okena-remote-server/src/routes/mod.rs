@@ -308,7 +308,8 @@ mod tests {
     #[test]
     fn tcp_loopback_requests_still_require_bearer_auth() {
         let mut req = Request::new(axum::body::Body::empty());
-        req.extensions_mut().insert(PeerInfo::Tcp(SocketAddr::from(([127, 0, 0, 1], 19100))));
+        req.extensions_mut()
+            .insert(PeerInfo::Tcp(SocketAddr::from(([127, 0, 0, 1], 19100))));
 
         assert!(!request_is_unix_socket(&req));
     }

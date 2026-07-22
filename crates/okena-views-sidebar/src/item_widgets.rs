@@ -3,14 +3,14 @@
 //! Each helper returns a partially-built element that the caller can chain
 //! additional handlers onto (e.g. `.on_click()`).
 
-use okena_core::theme::ThemeColors;
-use okena_ui::rename_state::{rename_input, RenameState};
-use okena_ui::simple_input::SimpleInput;
-use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_md};
-use gpui::*;
 use gpui::prelude::*;
+use gpui::*;
 use gpui_component::tooltip::Tooltip;
+use okena_core::theme::ThemeColors;
 use okena_ui::icon_button::icon_button;
+use okena_ui::rename_state::{RenameState, rename_input};
+use okena_ui::simple_input::SimpleInput;
+use okena_ui::tokens::{ui_text_md, ui_text_sm, ui_text_xs};
 
 /// Expand/collapse arrow (chevron-down/right, 16x16).
 ///
@@ -44,10 +44,7 @@ pub fn sidebar_expand_arrow(
 ///
 /// `child` is the inner element -- either a colored dot or a folder SVG.
 /// Caller chains `.on_click()` to show color picker.
-pub fn sidebar_color_indicator(
-    id: impl Into<ElementId>,
-    child: impl IntoElement,
-) -> Stateful<Div> {
+pub fn sidebar_color_indicator(id: impl Into<ElementId>, child: impl IntoElement) -> Stateful<Div> {
     div()
         .id(id)
         .flex_shrink_0()
@@ -135,7 +132,9 @@ pub fn sidebar_group_header(
         .gap(px(4.0))
         .cursor_pointer()
         .hover(|s| s.bg(rgb(t.bg_hover)))
-        .when(is_cursor, |d: Stateful<Div>| d.border_l_2().border_color(rgb(t.border_active)))
+        .when(is_cursor, |d: Stateful<Div>| {
+            d.border_l_2().border_color(rgb(t.border_active))
+        })
         .child(
             // Expand/collapse chevron (smaller than project arrow)
             svg()

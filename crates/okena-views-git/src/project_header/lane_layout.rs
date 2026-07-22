@@ -101,7 +101,10 @@ pub fn compute(commits: &[CommitLogEntry]) -> LaneLayout {
         let (dot_col, dot_lane) = if let Some(&first) = arriving.first() {
             // `arriving` indices come from a filter_map that only keeps Some lanes.
             #[allow(clippy::expect_used)]
-            (first, active[first].as_ref().expect("arriving lane is Some").id)
+            (
+                first,
+                active[first].as_ref().expect("arriving lane is Some").id,
+            )
         } else {
             (leftmost_free(&active), alloc(&mut next_id))
         };
@@ -193,7 +196,11 @@ pub fn compute(commits: &[CommitLogEntry]) -> LaneLayout {
         //    forked columns slant out of the dot column.
         for (i, lane) in next_active.iter().enumerate() {
             if let Some(lane) = lane {
-                let from = if new_fork_cols.contains(&i) { dot_col } else { i };
+                let from = if new_fork_cols.contains(&i) {
+                    dot_col
+                } else {
+                    i
+                };
                 rails.push(Rail {
                     lane_id: lane.id,
                     from_col: from,
@@ -204,14 +211,15 @@ pub fn compute(commits: &[CommitLogEntry]) -> LaneLayout {
         }
         // Dot lane merging into an existing lane: explicit slant.
         if let Some(cc) = cont_col
-            && cc != dot_col {
-                rails.push(Rail {
-                    lane_id: dot_lane,
-                    from_col: dot_col,
-                    to_col: cc,
-                    half: Half::Lower,
-                });
-            }
+            && cc != dot_col
+        {
+            rails.push(Rail {
+                lane_id: dot_lane,
+                from_col: dot_col,
+                to_col: cc,
+                half: Half::Lower,
+            });
+        }
         // Merges into already-existing lanes (extra parents sharing a target).
         for (id, ec) in extra_slants {
             rails.push(Rail {
@@ -239,7 +247,10 @@ pub fn compute(commits: &[CommitLogEntry]) -> LaneLayout {
 }
 
 fn leftmost_free(active: &[Option<Lane>]) -> usize {
-    active.iter().position(|s| s.is_none()).unwrap_or(active.len())
+    active
+        .iter()
+        .position(|s| s.is_none())
+        .unwrap_or(active.len())
 }
 
 fn ensure_slot(active: &mut Vec<Option<Lane>>, col: usize) {

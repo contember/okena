@@ -13,18 +13,23 @@ impl Workspace {
         path: &[usize],
         cx: &mut impl WorkspaceCx,
     ) {
-        log::info!("Workspace::add_tab called for project {} at path {:?}", project_id, path);
+        log::info!(
+            "Workspace::add_tab called for project {} at path {:?}",
+            project_id,
+            path
+        );
 
         // Check if parent is a Tabs container
         if !path.is_empty() {
             let parent_path = &path[..path.len() - 1];
             if let Some(project) = self.project(project_id)
                 && let Some(ref layout) = project.layout
-                    && let Some(LayoutNode::Tabs { .. }) = layout.get_at_path(parent_path) {
-                        // Parent is Tabs - add new tab to the group
-                        self.add_tab_to_group(focus_manager, project_id, parent_path, cx);
-                        return;
-                    }
+                && let Some(LayoutNode::Tabs { .. }) = layout.get_at_path(parent_path)
+            {
+                // Parent is Tabs - add new tab to the group
+                self.add_tab_to_group(focus_manager, project_id, parent_path, cx);
+                return;
+            }
         }
 
         // Parent is not Tabs - create new tab group
@@ -54,11 +59,18 @@ impl Workspace {
     ) {
         let mut new_tab_index = 0;
         self.with_layout_node(project_id, tabs_path, cx, |node| {
-            if let LayoutNode::Tabs { children, active_tab } = node {
+            if let LayoutNode::Tabs {
+                children,
+                active_tab,
+            } = node
+            {
                 children.push(LayoutNode::new_terminal());
                 *active_tab = children.len() - 1;
                 new_tab_index = *active_tab;
-                log::info!("Added new tab to existing group, now {} tabs", children.len());
+                log::info!(
+                    "Added new tab to existing group, now {} tabs",
+                    children.len()
+                );
                 true
             } else {
                 false
@@ -99,7 +111,11 @@ impl Workspace {
         cx: &mut impl WorkspaceCx,
     ) {
         self.with_layout_node(project_id, path, cx, |node| {
-            if let LayoutNode::Tabs { children, active_tab } = node {
+            if let LayoutNode::Tabs {
+                children,
+                active_tab,
+            } = node
+            {
                 if from_index >= children.len() || to_index >= children.len() {
                     return false;
                 }

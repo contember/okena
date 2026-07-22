@@ -1,15 +1,15 @@
 //! Hook terminal list rendering for the sidebar
 
+use gpui::prelude::*;
+use gpui::*;
 use okena_core::api::ActionRequest;
+use okena_ui::icon_button::icon_button;
 use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_md;
 use okena_workspace::state::HookTerminalStatus;
-use gpui::*;
-use gpui::prelude::*;
-use okena_ui::icon_button::icon_button;
 
-use crate::sidebar::{Sidebar, SidebarProjectInfo, SidebarHookInfo, GroupKind};
 use crate::item_widgets::sidebar_group_header;
+use crate::sidebar::{GroupKind, Sidebar, SidebarHookInfo, SidebarProjectInfo};
 
 impl Sidebar {
     /// Render the "Hooks" group header with collapse chevron.
@@ -177,7 +177,12 @@ impl Sidebar {
     }
 
     /// Ask the authoritative daemon to stop and remove a hook terminal.
-    pub fn dismiss_hook_terminal(&self, project_id: &str, terminal_id: &str, cx: &mut Context<Self>) {
+    pub fn dismiss_hook_terminal(
+        &self,
+        project_id: &str,
+        terminal_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         self.dispatch_action_for_project(
             project_id,
             ActionRequest::DismissHook {

@@ -30,16 +30,17 @@ pub fn kbd(key: impl Into<SharedString>, t: &ThemeColors) -> Div {
 }
 
 /// Keyboard key badge + description text (e.g., `[Enter] to select`).
-pub fn keyboard_hint(key: impl Into<SharedString>, description: impl Into<SharedString>, t: &ThemeColors) -> Div {
-    h_flex()
-        .gap(SPACE_XS)
-        .child(kbd(key, t))
-        .child(
-            div()
-                .text_size(TEXT_SM)
-                .text_color(rgb(t.text_muted))
-                .child(description.into()),
-        )
+pub fn keyboard_hint(
+    key: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    t: &ThemeColors,
+) -> Div {
+    h_flex().gap(SPACE_XS).child(kbd(key, t)).child(
+        div()
+            .text_size(TEXT_SM)
+            .text_color(rgb(t.text_muted))
+            .child(description.into()),
+    )
 }
 
 /// Footer bar with a row of keyboard hints.

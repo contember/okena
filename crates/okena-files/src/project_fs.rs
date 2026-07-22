@@ -75,10 +75,18 @@ impl RemoteProjectFs {
         project_name: String,
         root: String,
     ) -> Self {
-        Self { client, project_id, project_name, root }
+        Self {
+            client,
+            project_id,
+            project_name,
+            root,
+        }
     }
 
-    fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
+    fn post_action(
+        &self,
+        action: okena_core::api::ActionRequest,
+    ) -> Result<Option<serde_json::Value>, String> {
         self.client.post_action(action)
     }
 }
@@ -119,12 +127,11 @@ impl ProjectFs for RemoteProjectFs {
             relative_path: relative_path.to_string(),
         };
         match self.post_action(action)? {
-            Some(value) => {
-                value.get("content")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .ok_or_else(|| "Missing content in response".to_string())
-            }
+            Some(value) => value
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .ok_or_else(|| "Missing content in response".to_string()),
             None => Err("Empty response".to_string()),
         }
     }
@@ -160,9 +167,7 @@ impl ProjectFs for RemoteProjectFs {
                     .get("size")
                     .and_then(|v| v.as_u64())
                     .ok_or_else(|| "Missing size in response".to_string())?,
-                modified_at_millis: value
-                    .get("modified_at_millis")
-                    .and_then(|v| v.as_u64()),
+                modified_at_millis: value.get("modified_at_millis").and_then(|v| v.as_u64()),
             }),
             None => Err("Empty response".to_string()),
         }

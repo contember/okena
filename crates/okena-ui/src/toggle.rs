@@ -52,7 +52,11 @@ pub fn toggle_switch(id: impl Into<SharedString>, enabled: bool, t: &ThemeColors
         .w(px(40.0))
         .h(px(22.0))
         .rounded(px(11.0))
-        .bg(if enabled { rgb(t.border_active) } else { rgb(t.bg_secondary) })
+        .bg(if enabled {
+            rgb(t.border_active)
+        } else {
+            rgb(t.bg_secondary)
+        })
         .flex()
         .items_center()
         .child(

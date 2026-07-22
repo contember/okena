@@ -32,13 +32,18 @@ impl WindowView {
         let project_info = {
             let ws = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
-            let project_id = fm.focused_terminal_state()
+            let project_id = fm
+                .focused_terminal_state()
                 .map(|f| f.project_id.clone())
                 .or_else(|| {
                     // Fallback: use the first visible project
-                    ws.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual())
-                        .first()
-                        .map(|p| p.id.clone())
+                    ws.visible_projects(
+                        self.window_id,
+                        fm.focused_project_id(),
+                        fm.is_focus_individual(),
+                    )
+                    .first()
+                    .map(|p| p.id.clone())
                 });
 
             project_id.and_then(|id| {
@@ -64,7 +69,9 @@ impl WindowView {
                     });
                 }
             } else {
-                log::info!("Cannot create worktree: project is not a git repo or is already a worktree");
+                log::info!(
+                    "Cannot create worktree: project is not a git repo or is already a worktree"
+                );
             }
         }
     }

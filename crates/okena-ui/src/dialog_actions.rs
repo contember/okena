@@ -22,12 +22,6 @@ where
         .flex()
         .gap(px(8.0))
         .justify_end()
-        .child(
-            button("dialog-cancel-btn", cancel_label, t)
-                .on_click(on_cancel),
-        )
-        .child(
-            button_primary("dialog-confirm-btn", confirm_label, t)
-                .on_click(on_confirm),
-        )
+        .child(button("dialog-cancel-btn", cancel_label, t).on_click(on_cancel))
+        .child(button_primary("dialog-confirm-btn", confirm_label, t).on_click(on_confirm))
 }

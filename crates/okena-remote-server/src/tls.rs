@@ -105,11 +105,10 @@ fn atomic_write(path: &Path, bytes: &[u8], _mode: u32) -> std::io::Result<()> {
 /// Build a rustls `ServerConfig` from the persisted self-signed cert + key,
 /// using the ring provider (matches the client side).
 pub fn server_config(material: &TlsMaterial) -> Result<Arc<rustls::ServerConfig>> {
-    let certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_file_iter(&material.cert_path)
-            .with_context(|| format!("reading certificate {:?}", material.cert_path))?
-            .collect::<std::result::Result<_, _>>()
-            .context("parsing certificate chain")?;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&material.cert_path)
+        .with_context(|| format!("reading certificate {:?}", material.cert_path))?
+        .collect::<std::result::Result<_, _>>()
+        .context("parsing certificate chain")?;
     let key = PrivateKeyDer::from_pem_file(&material.key_path)
         .with_context(|| format!("reading private key {:?}", material.key_path))?;
 
@@ -142,7 +141,10 @@ mod tests {
     fn fingerprint_is_64_hex_chars() {
         let fp = fingerprint_hex(&[0u8; 4]);
         assert_eq!(fp.len(), 64);
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(
+            fp.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
     }
 
     #[test]
@@ -183,13 +185,9 @@ mod handshake_tests {
         let tls = super::server_config(material).unwrap();
         let app = Router::new().route("/health", get(|| async { "ok" }));
         tokio::spawn(async move {
-            let _ = crate::serve::serve_dual_stack(
-                listener,
-                app,
-                tls,
-                std::future::pending::<()>(),
-            )
-            .await;
+            let _ =
+                crate::serve::serve_dual_stack(listener, app, tls, std::future::pending::<()>())
+                    .await;
         });
         addr
     }
@@ -205,19 +203,16 @@ mod handshake_tests {
                 post(|| async { axum::Json(serde_json::json!({ "actions": [] })) }),
             );
         tokio::spawn(async move {
-            let _ = crate::serve::serve_tls(
-                listener,
-                app,
-                tls,
-                std::future::pending::<()>(),
-            )
-            .await;
+            let _ = crate::serve::serve_tls(listener, app, tls, std::future::pending::<()>()).await;
         });
         addr
     }
 
     /// GET with a short readiness retry while the server task spins up.
-    async fn get_with_retry(client: &reqwest::Client, url: &str) -> Result<reqwest::Response, reqwest::Error> {
+    async fn get_with_retry(
+        client: &reqwest::Client,
+        url: &str,
+    ) -> Result<reqwest::Response, reqwest::Error> {
         let mut last_err = None;
         for _ in 0..20 {
             match client.get(url).send().await {
@@ -257,13 +252,12 @@ mod handshake_tests {
         // 1) TOFU (no pin): handshake succeeds and the client captures exactly
         //    the server's cert fingerprint.
         let observed = okena_transport::client::tls::new_observed();
-        let client = okena_transport::client::tls::build_reqwest_client(
-            true,
-            None,
-            observed.clone(),
-        )
-        .unwrap();
-        let resp = get_with_retry(&client, &url).await.expect("TOFU connect should succeed");
+        let client =
+            okena_transport::client::tls::build_reqwest_client(true, None, observed.clone())
+                .unwrap();
+        let resp = get_with_retry(&client, &url)
+            .await
+            .expect("TOFU connect should succeed");
         assert!(resp.status().is_success());
         assert_eq!(
             observed.lock().unwrap().as_deref(),

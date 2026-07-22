@@ -65,22 +65,16 @@ fn handle_exit_caps_restarts() {
     simulate_exit(&mut instance, Some(1));
     assert_eq!(
         instance.status,
-        ServiceStatus::Crashed {
-            exit_code: Some(1)
-        }
+        ServiceStatus::Crashed { exit_code: Some(1) }
     );
     assert_eq!(instance.restart_count, MAX_RESTART_COUNT);
 }
 
 #[test]
 fn handle_exit_no_restart() {
-    let (_key, mut instance) =
-        make_instance("proj1", "svc1", false, 0, ServiceStatus::Running);
+    let (_key, mut instance) = make_instance("proj1", "svc1", false, 0, ServiceStatus::Running);
     simulate_exit(&mut instance, None);
-    assert_eq!(
-        instance.status,
-        ServiceStatus::Crashed { exit_code: None }
-    );
+    assert_eq!(instance.status, ServiceStatus::Crashed { exit_code: None });
     assert_eq!(instance.restart_count, 0);
     // Terminal should be preserved for viewing crash output
     assert!(instance.terminal_id.is_some());
@@ -145,7 +139,10 @@ fn service_terminal_ids_returns_running_services() {
         .iter()
         .filter(|((pid, _), _)| pid == "proj1")
         .filter_map(|((_, name), instance)| {
-            instance.terminal_id.as_ref().map(|tid| (name.clone(), tid.clone()))
+            instance
+                .terminal_id
+                .as_ref()
+                .map(|tid| (name.clone(), tid.clone()))
         })
         .collect();
 
@@ -156,13 +153,34 @@ fn service_terminal_ids_returns_running_services() {
 
 #[test]
 fn from_api_maps_known_statuses() {
-    assert_eq!(ServiceStatus::from_api("running", None), ServiceStatus::Running);
-    assert_eq!(ServiceStatus::from_api("starting", None), ServiceStatus::Starting);
-    assert_eq!(ServiceStatus::from_api("restarting", None), ServiceStatus::Restarting);
-    assert_eq!(ServiceStatus::from_api("crashed", None), ServiceStatus::Crashed { exit_code: None });
-    assert_eq!(ServiceStatus::from_api("crashed", Some(1)), ServiceStatus::Crashed { exit_code: Some(1) });
-    assert_eq!(ServiceStatus::from_api("stopped", None), ServiceStatus::Stopped);
-    assert_eq!(ServiceStatus::from_api("unknown", None), ServiceStatus::Stopped);
+    assert_eq!(
+        ServiceStatus::from_api("running", None),
+        ServiceStatus::Running
+    );
+    assert_eq!(
+        ServiceStatus::from_api("starting", None),
+        ServiceStatus::Starting
+    );
+    assert_eq!(
+        ServiceStatus::from_api("restarting", None),
+        ServiceStatus::Restarting
+    );
+    assert_eq!(
+        ServiceStatus::from_api("crashed", None),
+        ServiceStatus::Crashed { exit_code: None }
+    );
+    assert_eq!(
+        ServiceStatus::from_api("crashed", Some(1)),
+        ServiceStatus::Crashed { exit_code: Some(1) }
+    );
+    assert_eq!(
+        ServiceStatus::from_api("stopped", None),
+        ServiceStatus::Stopped
+    );
+    assert_eq!(
+        ServiceStatus::from_api("unknown", None),
+        ServiceStatus::Stopped
+    );
     assert_eq!(ServiceStatus::from_api("", None), ServiceStatus::Stopped);
 }
 
@@ -184,7 +202,9 @@ fn make_docker_instance(
         (project_id.to_string(), name.to_string()),
         ServiceInstance {
             definition: def,
-            kind: ServiceKind::DockerCompose { compose_file: "docker-compose.yml".to_string() },
+            kind: ServiceKind::DockerCompose {
+                compose_file: "docker-compose.yml".to_string(),
+            },
             status,
             terminal_id: Some(format!("term-{}", name)),
             restart_count: 0,
@@ -225,7 +245,10 @@ fn docker_service_terminal_ids_excluded() {
         .iter()
         .filter(|((pid, _), inst)| pid == "proj1" && inst.kind == ServiceKind::Okena)
         .filter_map(|((_, name), instance)| {
-            instance.terminal_id.as_ref().map(|tid| (name.clone(), tid.clone()))
+            instance
+                .terminal_id
+                .as_ref()
+                .map(|tid| (name.clone(), tid.clone()))
         })
         .collect();
 

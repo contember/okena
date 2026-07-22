@@ -5,11 +5,11 @@
 
 use std::collections::BTreeMap;
 
+use gpui::prelude::*;
+use gpui::*;
 use okena_core::theme::ThemeColors;
 use okena_ui::file_icon::file_icon;
 use okena_ui::tokens::ui_text;
-use gpui::prelude::*;
-use gpui::*;
 
 /// A node in the file tree.
 #[derive(Default, Clone)]
@@ -60,7 +60,11 @@ pub fn expandable_folder_row(
         // Chevron
         .child(
             svg()
-                .path(if is_expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
+                .path(if is_expanded {
+                    "icons/chevron-down.svg"
+                } else {
+                    "icons/chevron-right.svg"
+                })
                 .size(px(14.0))
                 .text_color(rgb(t.text_muted))
                 .mr(px(4.0))
@@ -171,10 +175,12 @@ mod tests {
 
     #[test]
     fn test_build_file_tree_multi_level() {
-        let files = ["src/views/mod.rs",
+        let files = [
+            "src/views/mod.rs",
             "src/views/render.rs",
             "src/main.rs",
-            "Cargo.toml"];
+            "Cargo.toml",
+        ];
         let tree = build_file_tree(files.iter().enumerate().map(|(i, f)| (i, *f)));
         assert_eq!(tree.files, vec![3]); // Cargo.toml
         let src = &tree.children["src"];

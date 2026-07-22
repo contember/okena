@@ -17,9 +17,10 @@ pub fn has_child_processes(pid: u32) -> bool {
         };
         let path = format!("/proc/{}/task/{}/children", pid, tid);
         if let Ok(s) = std::fs::read_to_string(&path)
-            && !s.trim().is_empty() {
-                return true;
-            }
+            && !s.trim().is_empty()
+        {
+            return true;
+        }
     }
     false
 }
@@ -31,11 +32,9 @@ pub fn has_child_processes(pid: u32) -> bool {
 
 #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
 pub fn has_child_processes(pid: u32) -> bool {
-    crate::process::safe_output(
-        crate::process::command("pgrep").args(["-P", &pid.to_string()]),
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false)
+    crate::process::safe_output(crate::process::command("pgrep").args(["-P", &pid.to_string()]))
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(not(unix))]
@@ -53,12 +52,16 @@ pub fn foreground_command(pid: u32) -> Option<String> {
     let task_dir = format!("/proc/{pid}/task");
     for entry in std::fs::read_dir(&task_dir).ok()?.flatten() {
         let file_name = entry.file_name();
-        let Some(tid) = file_name.to_str() else { continue };
+        let Some(tid) = file_name.to_str() else {
+            continue;
+        };
         let Ok(children) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children"))
         else {
             continue;
         };
-        let Some(child_pid) = children.split_whitespace().next() else { continue };
+        let Some(child_pid) = children.split_whitespace().next() else {
+            continue;
+        };
         let Ok(comm) = std::fs::read_to_string(format!("/proc/{child_pid}/comm")) else {
             continue;
         };

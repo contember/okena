@@ -22,8 +22,8 @@
 use std::collections::{HashMap, HashSet};
 
 use okena_core::api::{
-    ApiFolder, ApiFullscreen, ApiGitStatus, ApiHookExecution, ApiProject, ApiServiceInfo, ApiWindow,
-    ApiWorktreeMetadata, StateResponse,
+    ApiFolder, ApiFullscreen, ApiGitStatus, ApiHookExecution, ApiProject, ApiServiceInfo,
+    ApiWindow, ApiWorktreeMetadata, StateResponse,
 };
 use okena_workspace::state::{FolderData, ProjectData, WorkspaceData};
 
