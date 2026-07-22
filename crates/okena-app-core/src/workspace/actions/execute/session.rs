@@ -17,8 +17,8 @@ use super::{ActionResult, ensure_terminal, spawn_uninitialized_terminals};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::persistence::{
-    delete_session, export_workspace, import_workspace, list_sessions, load_session_with_cleanup,
-    rename_session, save_session, session_exists,
+    LoadedWorkspace, delete_session, export_workspace, import_workspace, list_sessions,
+    load_session_with_cleanup, rename_session, save_session, session_exists,
 };
 use crate::workspace::state::{Workspace, WorkspaceData};
 use okena_terminal::TerminalsRegistry;
@@ -53,6 +53,28 @@ fn project_owned_terminal_ids(data: &WorkspaceData) -> HashSet<String> {
         .collect()
 }
 
+fn workspace_replacement_conflict(ws: &Workspace) -> Option<String> {
+    if let Some(project) = ws
+        .projects()
+        .iter()
+        .find(|project| ws.is_creating_project(&project.id))
+    {
+        return Some(format!(
+            "cannot replace workspace while worktree '{}' is being created",
+            project.name
+        ));
+    }
+    ws.projects()
+        .iter()
+        .find(|project| ws.is_project_closing(&project.id))
+        .map(|project| {
+            format!(
+                "cannot replace workspace while worktree '{}' is closing",
+                project.name
+            )
+        })
+}
+
 /// Kill outgoing-only PTYs, swap the workspace, then restore incoming terminals.
 fn replace_workspace_with(
     ws: &mut Workspace,
@@ -64,25 +86,8 @@ fn replace_workspace_with(
     stale_terminal_ids: &[String],
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if let Some(project) = ws
-        .projects()
-        .iter()
-        .find(|project| ws.is_creating_project(&project.id))
-    {
-        return ActionResult::Err(format!(
-            "cannot replace workspace while worktree '{}' is being created",
-            project.name
-        ));
-    }
-    if let Some(project) = ws
-        .projects()
-        .iter()
-        .find(|project| ws.is_project_closing(&project.id))
-    {
-        return ActionResult::Err(format!(
-            "cannot replace workspace while worktree '{}' is closing",
-            project.name
-        ));
+    if let Some(error) = workspace_replacement_conflict(ws) {
+        return ActionResult::Err(error);
     }
 
     let incoming_ordinary_ids = ordinary_terminal_ids(&data);
@@ -168,7 +173,32 @@ pub(super) fn load_session_action(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let loaded = match load_session_with_cleanup(&name, settings.session_backend) {
+    load_session_action_with_loader(
+        ws,
+        focus_manager,
+        &name,
+        backend,
+        terminals,
+        settings,
+        cx,
+        || load_session_with_cleanup(&name, settings.session_backend).map_err(|e| e.to_string()),
+    )
+}
+
+fn load_session_action_with_loader(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    name: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+    loader: impl FnOnce() -> Result<LoadedWorkspace, String>,
+) -> ActionResult {
+    if let Some(error) = workspace_replacement_conflict(ws) {
+        return ActionResult::Err(error);
+    }
+    let loaded = match loader() {
         Ok(loaded) => loaded,
         Err(e) => return ActionResult::Err(format!("failed to load session '{name}': {e}")),
     };
@@ -228,7 +258,32 @@ pub(super) fn import_workspace_action(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let data = match import_workspace(std::path::Path::new(&path)) {
+    import_workspace_action_with_loader(
+        ws,
+        focus_manager,
+        &path,
+        backend,
+        terminals,
+        settings,
+        cx,
+        || import_workspace(std::path::Path::new(&path)).map_err(|e| e.to_string()),
+    )
+}
+
+fn import_workspace_action_with_loader(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    path: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+    loader: impl FnOnce() -> Result<WorkspaceData, String>,
+) -> ActionResult {
+    if let Some(error) = workspace_replacement_conflict(ws) {
+        return ActionResult::Err(error);
+    }
+    let data = match loader() {
         Ok(d) => d,
         Err(e) => return ActionResult::Err(format!("failed to import '{path}': {e}")),
     };
@@ -749,5 +804,86 @@ mod tests {
         assert_eq!(workspace.data_replacement_epoch(), original_epoch);
         assert!(backend.killed.lock().unwrap().is_empty());
         assert!(backend.reconnected.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_session_rejects_active_create_before_loading() {
+        let backend = Arc::new(RecordingBackend {
+            next_id: AtomicUsize::new(1),
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::new()),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let runner = HookRunner::new(backend.clone(), terminals.clone());
+        let monitor = HookMonitor::new();
+        let mut cx = TestCx { runner, monitor };
+        let mut workspace = Workspace::new(data(project("creating", "old-hook", None)));
+        workspace.mark_creating_project("creating");
+        let mut focus = FocusManager::default();
+        let loader_calls = AtomicUsize::new(0);
+
+        let result = load_session_action_with_loader(
+            &mut workspace,
+            &mut focus,
+            "replacement",
+            backend.as_ref(),
+            &terminals,
+            &AppSettings::default(),
+            &mut cx,
+            || {
+                loader_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(LoadedWorkspace {
+                    data: WorkspaceData::empty(),
+                    stale_terminal_ids: Vec::new(),
+                })
+            },
+        );
+
+        assert!(matches!(
+            result,
+            ActionResult::Err(ref error)
+                if error == "cannot replace workspace while worktree 'creating' is being created"
+        ));
+        assert_eq!(loader_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn import_workspace_rejects_active_close_before_loading() {
+        let backend = Arc::new(RecordingBackend {
+            next_id: AtomicUsize::new(1),
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::new()),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let runner = HookRunner::new(backend.clone(), terminals.clone());
+        let monitor = HookMonitor::new();
+        let mut cx = TestCx { runner, monitor };
+        let mut workspace = Workspace::new(data(project("closing", "old-hook", None)));
+        workspace.mark_closing_project_authoritative("closing");
+        let mut focus = FocusManager::default();
+        let loader_calls = AtomicUsize::new(0);
+
+        let result = import_workspace_action_with_loader(
+            &mut workspace,
+            &mut focus,
+            "/path/that/must/not/be/read.json",
+            backend.as_ref(),
+            &terminals,
+            &AppSettings::default(),
+            &mut cx,
+            || {
+                loader_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(WorkspaceData::empty())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            ActionResult::Err(ref error)
+                if error == "cannot replace workspace while worktree 'closing' is closing"
+        ));
+        assert_eq!(loader_calls.load(Ordering::Relaxed), 0);
     }
 }
