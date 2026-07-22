@@ -483,6 +483,8 @@ impl Workspace {
     ) -> Result<String, String> {
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
+        self.ensure_worktree_target_claim_allowed(&target)?;
+        self.ensure_project_path_claim_allowed(std::path::Path::new(project_path))?;
         okena_git::create_worktree(repo_path, branch, &target, create_branch).map_err(
             |e| match &e {
                 okena_git::GitError::WorktreeExists { path } => {
@@ -578,14 +580,17 @@ impl Workspace {
         &mut self,
         parent_project_id: &str,
         branch: &str,
-        _repo_path: &std::path::Path,
-        _worktree_path: &str,
+        repo_path: &std::path::Path,
+        worktree_path: &str,
         project_path: &str,
         fire_hooks: bool,
         global_hooks: &HooksConfig,
         window_id: WindowId,
         cx: &mut impl WorkspaceCx,
     ) -> Result<String, String> {
+        self.ensure_worktree_target_claim_allowed(std::path::Path::new(worktree_path))?;
+        self.ensure_project_path_claim_allowed(std::path::Path::new(project_path))?;
+
         // Dedupe: refuse to register a second worktree row at a path some
         // project already occupies. Two CreateWorktree requests for the same
         // branch (a double-click or an agent retry) compute the SAME
@@ -593,7 +598,18 @@ impl Workspace {
         // run `git worktree add` against that one path concurrently, and the
         // loser's failure cleanup can delete the winner's live checkout. Mirrors
         // add_discovered_worktree's path dedupe.
-        if self.data.projects.iter().any(|p| p.path == project_path) {
+        let project_identity = Self::physical_path_identity(std::path::Path::new(project_path));
+        let worktree_identity = Self::physical_path_identity(std::path::Path::new(worktree_path));
+        if self
+            .data
+            .projects
+            .iter()
+            .filter(|project| !project.is_remote)
+            .any(|project| {
+                let existing = Self::physical_path_identity(std::path::Path::new(&project.path));
+                existing == project_identity || existing == worktree_identity
+            })
+        {
             return Err(format!("A worktree for '{branch}' already exists"));
         }
 
@@ -632,9 +648,9 @@ impl Workspace {
             worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_project_id.to_string(),
                 color_override: None,
-                main_repo_path: String::new(),
-                worktree_path: String::new(),
-                branch_name: String::new(),
+                main_repo_path: repo_path.to_string_lossy().into_owned(),
+                worktree_path: worktree_path.to_string(),
+                branch_name: branch.to_string(),
             }),
             worktree_ids: Vec::new(),
             folder_color: parent_color,
@@ -753,7 +769,7 @@ impl Workspace {
 
     /// Add a worktree project discovered by the periodic sync watcher.
     /// Does NOT fire hooks (the worktree was created outside Okena).
-    /// Returns the new project ID, or None if already tracked.
+    /// Returns the new project ID, or an error if already tracked or reserved.
     ///
     /// `window_id` identifies the spawning window for the multi-window
     /// new-project visibility rule (PRD user story 14): the discovered
@@ -769,24 +785,33 @@ impl Workspace {
         branch: &str,
         parent_id: &str,
         window_id: WindowId,
-    ) -> Option<String> {
+    ) -> Result<String, String> {
         // For monorepo projects, resolve the subdirectory offset so the
         // project path points to the right place inside the worktree.
         let parent_path = self
             .project(parent_id)
             .map(|p| p.path.clone())
-            .unwrap_or_default();
-        let (_git_root, subdir) =
+            .ok_or_else(|| "Parent project not found".to_string())?;
+        let (git_root, subdir) =
             okena_git::resolve_git_root_and_subdir(std::path::Path::new(&parent_path));
         let project_path = okena_git::repository::project_path_in_worktree(wt_path, &subdir);
 
+        self.ensure_worktree_target_claim_allowed(std::path::Path::new(wt_path))?;
+        self.ensure_project_path_claim_allowed(std::path::Path::new(&project_path))?;
+
+        let project_identity = Self::physical_path_identity(std::path::Path::new(&project_path));
+        let worktree_identity = Self::physical_path_identity(std::path::Path::new(wt_path));
         if self
             .data
             .projects
             .iter()
-            .any(|p| p.path == project_path || p.path == wt_path)
+            .filter(|project| !project.is_remote)
+            .any(|project| {
+                let existing = Self::physical_path_identity(std::path::Path::new(&project.path));
+                existing == project_identity || existing == worktree_identity
+            })
         {
-            return None;
+            return Err(format!("A worktree for '{branch}' already exists"));
         }
 
         let dir_name = std::path::Path::new(wt_path)
@@ -806,9 +831,9 @@ impl Workspace {
             worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_id.to_string(),
                 color_override: None,
-                main_repo_path: String::new(),
-                worktree_path: String::new(),
-                branch_name: String::new(),
+                main_repo_path: git_root.to_string_lossy().into_owned(),
+                worktree_path: wt_path.to_string(),
+                branch_name: branch.to_string(),
             }),
             worktree_ids: Vec::new(),
             default_shell: None,
@@ -846,7 +871,7 @@ impl Workspace {
             self.data.project_order.push(id.clone());
         }
         // Note: caller is responsible for calling notify_data
-        Some(id)
+        Ok(id)
     }
 
     /// Add a worktree project ID to its parent's worktree_ids list (deduped).
@@ -961,6 +986,8 @@ impl Workspace {
             return Err("Not a worktree project".to_string());
         }
 
+        self.ensure_worktree_removal_claim_allowed(project_id)?;
+
         // Snapshot everything BEFORE removal, while the project is still in state
         // and its checkout exists on disk (git worktree remove deletes it).
         let folder = self.folder_for_project_or_parent(project_id);
@@ -972,8 +999,7 @@ impl Workspace {
         let main_repo_path = self.worktree_parent_path(project_id).unwrap_or_default();
         // For monorepos the project path is a subdirectory inside the checkout;
         // resolve the actual worktree root so `git worktree remove` gets it right.
-        let project_pathbuf = std::path::PathBuf::from(&project_path);
-        let worktree_path = okena_git::get_repo_root(&project_pathbuf).unwrap_or(project_pathbuf);
+        let worktree_path = self.worktree_root_path(project_id)?;
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
 
         Ok(WorktreeRemovalPlan {
@@ -987,6 +1013,31 @@ impl Workspace {
             folder_id,
             folder_name,
         })
+    }
+
+    fn worktree_root_path(&self, project_id: &str) -> Result<std::path::PathBuf, String> {
+        let project = self
+            .project(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+        let metadata = project
+            .worktree_info
+            .as_ref()
+            .ok_or_else(|| "Not a worktree project".to_string())?;
+        let project_path = std::path::PathBuf::from(&project.path);
+        Ok(okena_git::get_repo_root(&project_path).unwrap_or_else(|| {
+            if metadata.worktree_path.is_empty() {
+                project_path
+            } else {
+                std::path::PathBuf::from(&metadata.worktree_path)
+            }
+        }))
+    }
+
+    /// Validate that deleting this checkout cannot remove another project's
+    /// working directory. Used before hooks/merge as well as at deletion time.
+    pub fn ensure_worktree_removal_claim_allowed(&self, project_id: &str) -> Result<(), String> {
+        let root = self.worktree_root_path(project_id)?;
+        self.ensure_worktree_root_exclusively_owned(project_id, &root)
     }
 
     /// Keep the authoritative project row while a daemon removal runs, but stop
@@ -1114,6 +1165,7 @@ impl Workspace {
         if self.lifecycle.is_closing(project_id) {
             return Err("worktree is already closing".to_string());
         }
+        self.ensure_worktree_removal_claim_allowed(project_id)?;
         // Recompute the git-derived values authoritatively (don't trust the client).
         let project = self
             .project(project_id)

@@ -15,6 +15,7 @@ use crate::visibility::compute_visible_projects;
 use gpui::*;
 use okena_core::theme::FolderColor;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::{
@@ -146,6 +147,192 @@ impl Workspace {
     /// Current wholesale data replacement epoch.
     pub fn data_replacement_epoch(&self) -> u64 {
         self.data_replacement_epoch
+    }
+
+    /// Resolve a path for physical ownership checks, including symlinked existing
+    /// ancestors and relative/nonexistent descendants.
+    pub fn physical_path_identity(path: &Path) -> PathBuf {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+
+        fn resolve_symlink_components(path: &Path, depth: usize) -> PathBuf {
+            let mut resolved = PathBuf::new();
+            for component in path.components() {
+                match component {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        resolved.pop();
+                    }
+                    _ => {
+                        resolved.push(component.as_os_str());
+                        if depth >= 40
+                            || !std::fs::symlink_metadata(&resolved)
+                                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                        {
+                            continue;
+                        }
+                        let Ok(target) = std::fs::read_link(&resolved) else {
+                            continue;
+                        };
+                        resolved.pop();
+                        let target = if target.is_absolute() {
+                            target
+                        } else {
+                            resolved.join(target)
+                        };
+                        resolved = resolve_symlink_components(&target, depth + 1);
+                    }
+                }
+            }
+            okena_git::repository::normalize_path(&resolved)
+        }
+
+        // Walk components in filesystem order so `link/..` backs out of the
+        // symlink target, not the lexical directory containing the link.
+        let normalized = resolve_symlink_components(&absolute, 0);
+        let mut cursor = normalized.as_path();
+        let mut unresolved = Vec::new();
+
+        let resolved = loop {
+            if let Ok(mut existing) = std::fs::canonicalize(cursor) {
+                for component in unresolved.iter().rev() {
+                    existing.push(component);
+                }
+                break okena_git::repository::normalize_path(&existing);
+            }
+            let Some(name) = cursor.file_name() else {
+                break normalized;
+            };
+            unresolved.push(name.to_os_string());
+            let Some(parent) = cursor.parent() else {
+                break normalized;
+            };
+            cursor = parent;
+        };
+
+        #[cfg(windows)]
+        {
+            PathBuf::from(resolved.to_string_lossy().to_lowercase())
+        }
+        #[cfg(not(windows))]
+        {
+            resolved
+        }
+    }
+
+    fn worktree_root_identity(&self, project: &ProjectData) -> Option<PathBuf> {
+        let metadata = project.worktree_info.as_ref()?;
+        let project_path = Path::new(&project.path);
+        let root = okena_git::get_repo_root(project_path).unwrap_or_else(|| {
+            if metadata.worktree_path.is_empty() {
+                project_path.to_path_buf()
+            } else {
+                PathBuf::from(&metadata.worktree_path)
+            }
+        });
+        Some(Self::physical_path_identity(&root))
+    }
+
+    /// Reject a project path that would enter a worktree root currently being
+    /// created, closed, merged, or removed.
+    pub fn ensure_project_path_claim_allowed(&self, path: &Path) -> Result<(), String> {
+        let candidate = Self::physical_path_identity(path);
+        for project in self.projects().iter().filter(|project| !project.is_remote) {
+            if !(self.is_creating_project(&project.id) || self.is_project_closing(&project.id)) {
+                continue;
+            }
+            let Some(root) = self.worktree_root_identity(project) else {
+                continue;
+            };
+            if candidate.starts_with(&root) {
+                return Err(format!(
+                    "path is reserved by active worktree operation for '{}'",
+                    project.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a worktree target whose physical root overlaps an active root in
+    /// either direction.
+    pub fn ensure_worktree_target_claim_allowed(&self, root: &Path) -> Result<(), String> {
+        let candidate = Self::physical_path_identity(root);
+        for project in self.projects().iter().filter(|project| !project.is_remote) {
+            if !(self.is_creating_project(&project.id) || self.is_project_closing(&project.id)) {
+                continue;
+            }
+            let Some(active_root) = self.worktree_root_identity(project) else {
+                continue;
+            };
+            if candidate.starts_with(&active_root) || active_root.starts_with(&candidate) {
+                return Err(format!(
+                    "worktree target overlaps active operation for '{}'",
+                    project.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A worktree checkout may only be removed when no other local project owns
+    /// its root or a descendant path.
+    pub fn ensure_worktree_root_exclusively_owned(
+        &self,
+        owner_project_id: &str,
+        root: &Path,
+    ) -> Result<(), String> {
+        let root = Self::physical_path_identity(root);
+        if let Some(claimant) = self.projects().iter().find(|project| {
+            project.id != owner_project_id
+                && !project.is_remote
+                && Self::physical_path_identity(Path::new(&project.path)).starts_with(&root)
+        }) {
+            return Err(format!(
+                "worktree checkout is also used by project '{}'",
+                claimant.name
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn ensure_project_path_mutation_allowed(
+        &self,
+        project_id: &str,
+        new_path: &Path,
+    ) -> Result<(), String> {
+        if self.is_creating_project(project_id) {
+            return Err("worktree is still being created".to_string());
+        }
+        if self.is_project_closing(project_id) {
+            return Err("worktree is already closing".to_string());
+        }
+        let existing = self
+            .project(project_id)
+            .map(|project| Self::physical_path_identity(Path::new(&project.path)))
+            .ok_or_else(|| "Project not found".to_string())?;
+        let candidate = Self::physical_path_identity(new_path);
+        for project in self.projects().iter().filter(|project| !project.is_remote) {
+            if !(self.is_creating_project(&project.id) || self.is_project_closing(&project.id)) {
+                continue;
+            }
+            let Some(root) = self.worktree_root_identity(project) else {
+                continue;
+            };
+            let overlaps = |path: &Path| path.starts_with(&root) || root.starts_with(path);
+            if overlaps(&candidate) || overlaps(&existing) {
+                return Err(format!(
+                    "path overlaps active worktree operation for '{}'",
+                    project.name
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Read-only access to persistent workspace data.
