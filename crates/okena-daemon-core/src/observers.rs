@@ -45,6 +45,42 @@ use crate::workspace_cx::DaemonWorkspaceCx;
 /// 500ms timer in `app/mod.rs`.
 const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
+#[derive(Default)]
+pub(crate) struct AutosaveTracker {
+    pending: parking_lot::Mutex<usize>,
+    drained: parking_lot::Condvar,
+}
+
+impl AutosaveTracker {
+    pub(crate) fn start(self: &Arc<Self>) -> AutosaveJob {
+        *self.pending.lock() += 1;
+        AutosaveJob {
+            tracker: Arc::clone(self),
+        }
+    }
+
+    pub(crate) fn flush(&self) {
+        let mut pending = self.pending.lock();
+        while *pending != 0 {
+            self.drained.wait(&mut pending);
+        }
+    }
+}
+
+pub(crate) struct AutosaveJob {
+    tracker: Arc<AutosaveTracker>,
+}
+
+impl Drop for AutosaveJob {
+    fn drop(&mut self) {
+        let mut pending = self.tracker.pending.lock();
+        *pending = pending.saturating_sub(1);
+        if *pending == 0 {
+            self.tracker.drained.notify_all();
+        }
+    }
+}
+
 /// Per-project snapshot taken under the workspace lock so the services diff can
 /// run after the lock is dropped (the separate-lock-scope guard).
 struct ProjectSnapshot {
@@ -105,6 +141,7 @@ impl DaemonReactor {
             autosave_rx,
             self.workspace.clone(),
             self.runtime.clone(),
+            self.autosave_tracker.clone(),
         ));
         tokio::task::spawn_local(service_tick_task(
             service_rx,
@@ -229,6 +266,7 @@ async fn autosave_task(
     mut tick_rx: tokio::sync::watch::Receiver<u64>,
     workspace: SharedWorkspace,
     runtime: tokio::runtime::Handle,
+    tracker: Arc<AutosaveTracker>,
 ) {
     // Tracks the `data_version` last persisted, so UI-only changes skip the save.
     let last_saved_version = Arc::new(AtomicU64::new(0));
@@ -237,7 +275,7 @@ async fn autosave_task(
             // All senders dropped — the reactor is gone; stop the task.
             return;
         }
-        autosave(&workspace, &runtime, &last_saved_version).await;
+        autosave(&workspace, &runtime, &last_saved_version, &tracker).await;
     }
 }
 
@@ -250,6 +288,7 @@ async fn autosave(
     workspace: &SharedWorkspace,
     runtime: &tokio::runtime::Handle,
     last_saved_version: &Arc<AtomicU64>,
+    tracker: &Arc<AutosaveTracker>,
 ) {
     // Skip UI-only changes: the persistent `data_version` is unchanged.
     let current_version = workspace.lock().data_version();
@@ -269,8 +308,12 @@ async fn autosave(
 
     // Blocking fs I/O — offload onto the multi-thread runtime so it never stalls
     // the LocalSet thread (Windows AV / OneDrive can stall workspace.json saves).
+    let job = tracker.start();
     let save_result = runtime
-        .spawn_blocking(move || persistence::save_workspace(&data))
+        .spawn_blocking(move || {
+            let _job = job;
+            persistence::save_workspace(&data)
+        })
         .await;
 
     match save_result {

@@ -19,8 +19,8 @@ fn atomic_write_json(path: &Path, content: &str) -> std::io::Result<()> {
 }
 
 use super::persistence::{
-    WORKSPACE_VERSION, get_config_dir, migrate_legacy_json, migrate_workspace,
-    validate_workspace_data,
+    LoadedWorkspace, WORKSPACE_VERSION, get_config_dir, migrate_legacy_json, migrate_workspace,
+    sync_worktrees, validate_workspace_data,
 };
 
 /// Metadata about a saved session
@@ -139,8 +139,27 @@ pub fn save_session(name: &str, data: &WorkspaceData) -> Result<()> {
     Ok(())
 }
 
+fn prepare_loaded_session(mut data: WorkspaceData, backend: SessionBackend) -> LoadedWorkspace {
+    data = migrate_workspace(data);
+
+    let session_backend = backend.resolve();
+    let clear_ids = !session_backend.supports_persistence();
+    validate_workspace_data(&mut data, clear_ids, backend);
+    let stale_terminal_ids = sync_worktrees(&mut data);
+
+    LoadedWorkspace {
+        data,
+        stale_terminal_ids,
+    }
+}
+
 /// Load a named session
 pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData> {
+    load_session_with_cleanup(name, backend).map(|loaded| loaded.data)
+}
+
+/// Load a named session while retaining ids removed with stale worktree rows.
+pub fn load_session_with_cleanup(name: &str, backend: SessionBackend) -> Result<LoadedWorkspace> {
     let path = get_session_path(name);
 
     if !path.exists() {
@@ -151,16 +170,10 @@ pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData
         .with_context(|| format!("Failed to read session file: {}", path.display()))?;
     let content = migrate_legacy_json(&content)
         .with_context(|| format!("Failed to migrate legacy session file: {}", path.display()))?;
-    let mut data: WorkspaceData = serde_json::from_str(&content)
+    let data: WorkspaceData = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse session file: {}", path.display()))?;
 
-    data = migrate_workspace(data);
-
-    let session_backend = backend.resolve();
-    let clear_ids = !session_backend.supports_persistence();
-    validate_workspace_data(&mut data, clear_ids, backend);
-
-    Ok(data)
+    Ok(prepare_loaded_session(data, backend))
 }
 
 /// Delete a named session
@@ -422,5 +435,55 @@ mod tests {
             data.main_window.project_widths.get("p1").copied(),
             Some(60.0)
         );
+    }
+
+    #[test]
+    fn named_session_self_heals_completed_optimistic_worktree() {
+        let id = NEXT_TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let checkout = std::env::temp_dir().join(format!(
+            "okena-session-worktree-{}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir(&checkout).expect("create completed checkout");
+        let checkout_path = checkout.to_string_lossy().into_owned();
+        let data: WorkspaceData = serde_json::from_value(serde_json::json!({
+            "version": WORKSPACE_VERSION,
+            "projects": [
+                {
+                    "id": "parent",
+                    "name": "Parent",
+                    "path": checkout_path,
+                    "layout": null,
+                    "worktree_ids": ["worktree"]
+                },
+                {
+                    "id": "worktree",
+                    "name": "feature",
+                    "path": checkout_path,
+                    "layout": null,
+                    "worktree_info": {
+                        "parent_project_id": "parent",
+                        "main_repo_path": checkout_path,
+                        "worktree_path": checkout_path,
+                        "branch_name": "feature"
+                    },
+                    "is_creating": true
+                }
+            ],
+            "project_order": ["parent"]
+        }))
+        .expect("build session fixture");
+
+        let loaded = prepare_loaded_session(data, SessionBackend::None);
+        let worktree = loaded
+            .data
+            .projects
+            .iter()
+            .find(|project| project.id == "worktree")
+            .expect("completed worktree retained");
+
+        assert!(worktree.layout.is_some());
+        assert!(!worktree.is_creating);
+        fs::remove_dir(checkout).expect("remove completed checkout fixture");
     }
 }

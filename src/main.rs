@@ -295,20 +295,25 @@ fn run_headless(listen_addr: Option<IpAddr>) -> anyhow::Result<()> {
     println!("Starting Okena in headless mode...");
     let app_settings = okena_workspace::settings::load_settings();
     let session_backend = app_settings.session_backend;
-    let workspace_data = persistence::load_workspace(session_backend).unwrap_or_else(|error| {
+    let loaded_workspace =
+        persistence::load_workspace_with_cleanup(session_backend).unwrap_or_else(|error| {
         log::error!(
             "Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.",
             error,
             persistence::get_workspace_path().with_extension("json.bak")
         );
-        persistence::default_workspace()
+        persistence::LoadedWorkspace {
+            data: persistence::default_workspace(),
+            stale_terminal_ids: Vec::new(),
+        }
     });
     let listen_addrs =
         okena_remote_server::local::resolve_daemon_listen_addrs(listen_addr, &app_settings);
     let tls_enabled =
         listen_addrs.iter().any(|addr| !addr.is_loopback()) && app_settings.remote_tls_enabled;
     let params = okena_daemon_core::DaemonParams {
-        workspace_data,
+        workspace_data: loaded_workspace.data,
+        stale_terminal_ids: loaded_workspace.stale_terminal_ids,
         settings: app_settings,
         session_backend,
         listen_addrs,

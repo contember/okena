@@ -160,13 +160,16 @@ fn main() -> anyhow::Result<()> {
     //    default workspace on error, logging like the GUI's `run_headless`.
     let settings = load_settings();
     let session_backend = settings.session_backend; // `Copy`
-    let workspace_data = persistence::load_workspace(session_backend).unwrap_or_else(|e| {
+    let loaded_workspace = persistence::load_workspace_with_cleanup(session_backend).unwrap_or_else(|e| {
         log::error!(
             "Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.",
             e,
             persistence::get_workspace_path().with_extension("json.bak")
         );
-        persistence::default_workspace()
+        persistence::LoadedWorkspace {
+            data: persistence::default_workspace(),
+            stale_terminal_ids: Vec::new(),
+        }
     });
 
     // 4. Resolve TCP bind addresses. Same-host access is always available via
@@ -188,7 +191,8 @@ fn main() -> anyhow::Result<()> {
     let tls_enabled =
         listen_addrs.iter().any(|addr| !addr.is_loopback()) && settings.remote_tls_enabled;
     let params = DaemonParams {
-        workspace_data,
+        workspace_data: loaded_workspace.data,
+        stale_terminal_ids: loaded_workspace.stale_terminal_ids,
         settings,
         session_backend,
         listen_addrs,

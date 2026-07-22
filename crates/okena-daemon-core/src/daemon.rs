@@ -74,10 +74,18 @@ use tokio::sync::{mpsc, watch};
 use crate::daemon_config::DaemonConfig;
 use crate::reactor::DaemonReactor;
 
+fn kill_stale_terminal_sessions(backend: &dyn TerminalBackend, terminal_ids: &[String]) {
+    for terminal_id in terminal_ids {
+        backend.kill(terminal_id);
+    }
+}
+
 /// Inputs needed to construct a daemon.
 pub struct DaemonParams {
     /// The persisted workspace state to drive (projects, layouts, windows).
     pub workspace_data: WorkspaceData,
+    /// Persistent sessions whose stale worktree rows were discarded on load.
+    pub stale_terminal_ids: Vec<String>,
     /// The app settings (font / theme / shell / session backend), loaded once at
     /// startup and shared with [`DaemonConfig`] as the settings write path.
     pub settings: AppSettings,
@@ -197,6 +205,7 @@ impl DaemonCore {
         pty_manager.set_output_sink(broadcaster.clone());
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
         let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        kill_stale_terminal_sessions(backend.as_ref(), &params.stale_terminal_ids);
 
         // ── 3. Workspace + reactor ───────────────────────────────────────────
         let workspace = Workspace::new(params.workspace_data);
@@ -354,6 +363,7 @@ impl DaemonCore {
         let shutdown_backend = backend.clone();
         let shutdown_terminals = terminals.clone();
         let shutdown_pty_manager = pty_manager.clone();
+        let shutdown_autosaves = reactor.autosave_tracker.clone();
         local.block_on(&runtime, async move {
             // Observers MUST be spawned inside the LocalSet (they `spawn_local`).
             reactor.spawn_observers();
@@ -486,6 +496,7 @@ impl DaemonCore {
             &shutdown_workspace,
             &*shutdown_backend,
             &shutdown_terminals,
+            || shutdown_autosaves.flush(),
             || shutdown_pty_manager.flush_teardown(),
             persistence::save_workspace,
         )?;
@@ -498,9 +509,11 @@ fn flush_shutdown_state(
     workspace: &Arc<Mutex<Workspace>>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    flush_autosaves: impl FnOnce(),
     flush_teardown: impl FnOnce(),
     save: impl FnOnce(&WorkspaceData) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    flush_autosaves();
     let (data, terminal_ids) = {
         let mut ws = workspace.lock();
         let terminal_ids: HashSet<String> = ws
@@ -594,6 +607,32 @@ mod shutdown_tests {
     }
 
     #[test]
+    fn startup_kills_sessions_owned_by_discarded_worktrees() {
+        let killed = Arc::new(Mutex::new(Vec::new()));
+        let backend = RecordingBackend {
+            killed: killed.clone(),
+        };
+
+        kill_stale_terminal_sessions(
+            &backend,
+            &[
+                "layout".to_string(),
+                "service".to_string(),
+                "hook".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            *killed.lock(),
+            vec![
+                "layout".to_string(),
+                "service".to_string(),
+                "hook".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn shutdown_drains_terminal_kills_before_saving() {
         let mut data = WorkspaceData::empty();
         let mut project = okena_state::ProjectData {
@@ -647,6 +686,7 @@ mod shutdown_tests {
             &workspace,
             &backend,
             &terminals,
+            || {},
             || {
                 assert_eq!(killed.lock().len(), 3, "all kills precede teardown flush");
                 flushed.store(true, Ordering::Relaxed);
@@ -666,5 +706,60 @@ mod shutdown_tests {
         assert!(saved.load(Ordering::Relaxed));
         assert!(killed.lock().contains(&"persistent-hook".to_string()));
         assert!(workspace.lock().drain_pending_terminal_kills().is_empty());
+    }
+
+    #[test]
+    fn shutdown_waits_for_older_autosave_before_final_save() {
+        let tracker = Arc::new(crate::observers::AutosaveTracker::default());
+        let autosave_job = tracker.start();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (autosave_started_tx, autosave_started_rx) = std::sync::mpsc::channel();
+        let (release_autosave_tx, release_autosave_rx) = std::sync::mpsc::channel();
+        let (flush_started_tx, flush_started_rx) = std::sync::mpsc::channel();
+        let workspace = Arc::new(Mutex::new(Workspace::new(WorkspaceData::empty())));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let backend = RecordingBackend {
+            killed: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        std::thread::scope(|scope| {
+            let autosave_events = events.clone();
+            scope.spawn(move || {
+                autosave_started_tx.send(()).unwrap();
+                release_autosave_rx.recv().unwrap();
+                autosave_events.lock().push("autosave");
+                drop(autosave_job);
+            });
+            autosave_started_rx.recv().unwrap();
+
+            let shutdown_events = events.clone();
+            let shutdown = scope.spawn(move || {
+                flush_shutdown_state(
+                    &workspace,
+                    &backend,
+                    &terminals,
+                    || {
+                        flush_started_tx.send(()).unwrap();
+                        tracker.flush();
+                    },
+                    || {},
+                    |_| {
+                        assert_eq!(&*shutdown_events.lock(), &["autosave"]);
+                        shutdown_events.lock().push("final");
+                        Ok(())
+                    },
+                )
+            });
+
+            flush_started_rx.recv().unwrap();
+            assert!(
+                events.lock().is_empty(),
+                "final save must wait for autosave"
+            );
+            release_autosave_tx.send(()).unwrap();
+            shutdown.join().unwrap().unwrap();
+        });
+
+        assert_eq!(&*events.lock(), &["autosave", "final"]);
     }
 }
