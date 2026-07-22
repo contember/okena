@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use okena_services::config::{PreparedProjectConfig, prepare_project_config};
 use okena_services::manager::{
     ServiceCx, ServiceLoadStatus, ServiceManager, ServiceTerminalWriteback,
 };
@@ -47,6 +48,7 @@ use crate::workspace_cx::DaemonWorkspaceCx;
 /// 500ms timer in `app/mod.rs`.
 const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(500);
+const SERVICE_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub(crate) struct AutosaveTracker {
@@ -95,6 +97,11 @@ struct ProjectSnapshot {
     data_replacement_epoch: u64,
 }
 
+struct PreparedProjectSnapshot {
+    project: ProjectSnapshot,
+    config: PreparedProjectConfig,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct KnownProject {
     path: String,
@@ -114,6 +121,7 @@ struct ServiceSyncState {
     discarded_terminal_ids: HashMap<String, HashSet<String>>,
     retry_projects: HashSet<String>,
     retry_deadline: Option<tokio::time::Instant>,
+    retry_round: u32,
 }
 
 fn replace_pending_preserved_sessions(
@@ -146,7 +154,14 @@ impl ServiceSyncState {
     fn request_retry(&mut self, project_id: &str) {
         self.retry_projects.insert(project_id.to_string());
         if self.retry_deadline.is_none() {
-            self.retry_deadline = Some(tokio::time::Instant::now() + SERVICE_RETRY_DELAY);
+            let multiplier = 1u32
+                .checked_shl(self.retry_round.min(16))
+                .unwrap_or(u32::MAX);
+            let delay = SERVICE_RETRY_DELAY
+                .checked_mul(multiplier)
+                .unwrap_or(SERVICE_RETRY_MAX_DELAY)
+                .min(SERVICE_RETRY_MAX_DELAY);
+            self.retry_deadline = Some(tokio::time::Instant::now() + delay);
         }
     }
 
@@ -154,6 +169,7 @@ impl ServiceSyncState {
         self.retry_projects.remove(project_id);
         if self.retry_projects.is_empty() {
             self.retry_deadline = None;
+            self.retry_round = 0;
         }
     }
 }
@@ -241,7 +257,8 @@ async fn workspace_tick_task(
         &runtime,
         &service_tick,
         &mut sync_state,
-    );
+    )
+    .await;
 
     loop {
         let Some(workspace_changed) =
@@ -254,6 +271,8 @@ async fn workspace_tick_task(
             // Retry-only passes do not represent a workspace mutation. Successful
             // service loads notify through `service_tick` on their own.
             state_version.send_modify(|v| *v += 1);
+        } else {
+            sync_state.retry_round = sync_state.retry_round.saturating_add(1);
         }
 
         // ── project → services load/unload diff ─────────────────────────────
@@ -263,7 +282,8 @@ async fn workspace_tick_task(
             &runtime,
             &service_tick,
             &mut sync_state,
-        );
+        )
+        .await;
     }
 }
 
@@ -427,13 +447,34 @@ async fn autosave(
 /// it. Lock scope 2: lock the service manager, build a
 /// [`DaemonServiceCx`](crate::service_cx::DaemonServiceCx), and run
 /// [`sync_services`].
-fn run_services_sync(
+async fn run_services_sync(
     workspace: &SharedWorkspace,
     service_manager: &SharedServiceManager,
     runtime: &tokio::runtime::Handle,
     service_tick: &tokio::sync::watch::Sender<u64>,
     sync_state: &mut ServiceSyncState,
 ) {
+    run_services_sync_with_preparer(
+        workspace,
+        service_manager,
+        runtime,
+        service_tick,
+        sync_state,
+        prepare_project_snapshots,
+    )
+    .await;
+}
+
+async fn run_services_sync_with_preparer<Prepare>(
+    workspace: &SharedWorkspace,
+    service_manager: &SharedServiceManager,
+    runtime: &tokio::runtime::Handle,
+    service_tick: &tokio::sync::watch::Sender<u64>,
+    sync_state: &mut ServiceSyncState,
+    prepare: Prepare,
+) where
+    Prepare: FnOnce(Vec<ProjectSnapshot>) -> Vec<PreparedProjectSnapshot> + Send + 'static,
+{
     // Lock scope 1: snapshot the projects, then drop the workspace lock.
     let projects: Vec<ProjectSnapshot> = {
         let ws = workspace.lock();
@@ -451,6 +492,35 @@ fn run_services_sync(
             .collect()
     };
 
+    let expected_project_count = projects.iter().filter(|project| !project.is_remote).count();
+    let prepared_projects = match runtime.spawn_blocking(move || prepare(projects)).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            log::error!("service config preparation task failed: {error}");
+            return;
+        }
+    };
+
+    // Loading ran without locks. Reject results whose workspace owner changed
+    // while the filesystem was being probed.
+    let prepared_projects = {
+        let ws = workspace.lock();
+        let epoch = ws.data_replacement_epoch();
+        prepared_projects
+            .into_iter()
+            .filter(|prepared| {
+                prepared.project.data_replacement_epoch == epoch
+                    && ws.project(&prepared.project.id).is_some_and(|project| {
+                        project.path == prepared.project.path
+                            && project.is_remote == prepared.project.is_remote
+                    })
+            })
+            .collect::<Vec<_>>()
+    };
+    if prepared_projects.len() != expected_project_count {
+        return;
+    }
+
     // Lock scope 2: lock the service manager, mint a top-level cx, run the diff.
     // `spawn_main` from inside the loaded services lands on the active LocalSet
     // (the spawn_observers contract), so this must run on the LocalSet thread.
@@ -461,7 +531,18 @@ fn run_services_sync(
     );
     let mut sm = service_manager.lock();
     let mut cx = reactor_ref.cx();
-    sync_services(&projects, sync_state, &mut sm, &mut cx);
+    sync_prepared_services(prepared_projects, sync_state, &mut sm, &mut cx);
+}
+
+fn prepare_project_snapshots(projects: Vec<ProjectSnapshot>) -> Vec<PreparedProjectSnapshot> {
+    projects
+        .into_iter()
+        .filter(|project| !project.is_remote)
+        .map(|project| {
+            let config = prepare_project_config(&project.path);
+            PreparedProjectSnapshot { project, config }
+        })
+        .collect()
 }
 
 /// GPUI-free port of `okena-app`'s `app/mod.rs::sync_services`: diff the current
@@ -469,22 +550,19 @@ fn run_services_sync(
 /// configs accordingly. The convergence key includes the workspace replacement
 /// epoch and service-owning project data, so loading a session cannot preserve a
 /// stale manager merely because the new project reused the same id.
-fn sync_services(
-    projects: &[ProjectSnapshot],
+fn sync_prepared_services(
+    projects: Vec<PreparedProjectSnapshot>,
     sync_state: &mut ServiceSyncState,
     sm: &mut ServiceManager,
     cx: &mut impl ServiceCx,
 ) {
     let current_ids: HashSet<String> = projects
         .iter()
-        .filter(|p| !p.is_remote)
-        .map(|p| p.id.clone())
+        .map(|prepared| prepared.project.id.clone())
         .collect();
 
-    for p in projects {
-        if p.is_remote {
-            continue;
-        }
+    for prepared in projects {
+        let p = prepared.project;
         let identity = KnownProject {
             path: p.path.clone(),
             data_replacement_epoch: p.data_replacement_epoch,
@@ -508,7 +586,7 @@ fn sync_services(
             .map(|(service, terminal_id)| (service.clone(), terminal_id.clone()))
             .collect();
         let saved_ids_for_attempt: HashSet<String> = saved_for_attempt.values().cloned().collect();
-        let path_exists = std::path::Path::new(&p.path).exists();
+        let path_exists = !matches!(&prepared.config, PreparedProjectConfig::Missing);
 
         if sync_state
             .pending_preserved
@@ -562,15 +640,19 @@ fn sync_services(
                     saved_ids_for_attempt,
                     sm,
                 );
-                sync_state.request_retry(&p.id);
-            } else {
-                sync_state.resolve_retry(&p.id);
             }
+            sync_state.request_retry(&p.id);
             continue;
         }
 
         sm.set_project_writeback_owner(&p.id, &p.path, p.data_replacement_epoch);
-        let load_status = sm.load_project_services(&p.id, &p.path, &saved_for_attempt, cx);
+        let load_status = sm.load_project_services_prepared(
+            &p.id,
+            &p.path,
+            &saved_for_attempt,
+            prepared.config,
+            cx,
+        );
         let claimed: HashSet<String> = sm.service_terminal_ids(&p.id).into_values().collect();
         let unclaimed: HashSet<String> = saved_ids_for_attempt
             .difference(&claimed)
@@ -618,6 +700,21 @@ fn sync_services(
 }
 
 #[cfg(test)]
+fn sync_services(
+    projects: &[ProjectSnapshot],
+    sync_state: &mut ServiceSyncState,
+    sm: &mut ServiceManager,
+    cx: &mut impl ServiceCx,
+) {
+    sync_prepared_services(
+        prepare_project_snapshots(projects.to_vec()),
+        sync_state,
+        sm,
+        cx,
+    );
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{StubBackend, StubTransport, empty_workspace_data};
@@ -625,6 +722,7 @@ mod tests {
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct RecordingBackend {
@@ -695,6 +793,70 @@ mod tests {
         }
     }
 
+    struct BlockingReconnectBackend {
+        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        killed: Mutex<Vec<String>>,
+    }
+
+    impl TerminalBackend for BlockingReconnectBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("reserved-ID launches must reconnect")
+        }
+
+        fn reconnect_terminal(
+            &self,
+            terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            if let Some(started) = self.started.lock().expect("started lock").take() {
+                let _ = started.send(());
+            }
+            self.release
+                .lock()
+                .expect("release lock")
+                .recv()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(terminal_id.to_string())
+        }
+
+        fn kill(&self, terminal_id: &str) {
+            self.killed
+                .lock()
+                .expect("kill lock")
+                .push(terminal_id.to_string());
+        }
+
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+
+        fn is_remote(&self) -> bool {
+            false
+        }
+
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
     /// A `known`-set + project snapshot fixture for the diff logic.
     fn project(id: &str, path: &str, is_remote: bool) -> ProjectSnapshot {
         ProjectSnapshot {
@@ -711,6 +873,18 @@ mod tests {
         project_path: &str,
         service_name: &str,
         terminal_id: &str,
+    ) -> okena_workspace::state::Workspace {
+        workspace_with_project(
+            project_id,
+            project_path,
+            HashMap::from([(service_name.to_string(), terminal_id.to_string())]),
+        )
+    }
+
+    fn workspace_with_project(
+        project_id: &str,
+        project_path: &str,
+        service_terminals: HashMap<String, String>,
     ) -> okena_workspace::state::Workspace {
         use okena_workspace::state::ProjectData;
 
@@ -729,7 +903,7 @@ mod tests {
             hooks: Default::default(),
             is_remote: false,
             connection_id: None,
-            service_terminals: HashMap::from([(service_name.to_string(), terminal_id.to_string())]),
+            service_terminals,
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -763,6 +937,186 @@ mod tests {
     ) -> ServiceReactorRef {
         let (tick, _rx) = tokio::sync::watch::channel(0u64);
         ServiceReactorRef::new(manager.clone(), tokio::runtime::Handle::current(), tick)
+    }
+
+    async fn wait_for_test_condition(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("service task condition timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_service_preparation_keeps_localset_live_and_discards_stale_snapshot() {
+        let workspace = Arc::new(parking_lot::Mutex::new(workspace_with_project(
+            "project",
+            "/captured",
+            HashMap::new(),
+        )));
+        let sm = Arc::new(parking_lot::Mutex::new(manager()));
+        let (service_tick, _service_rx) = tokio::sync::watch::channel(0u64);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let progressed = Arc::new(AtomicBool::new(false));
+        let progress_manager = sm.clone();
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let task_workspace = workspace.clone();
+                let task_manager = sm.clone();
+                let task_tick = service_tick.clone();
+                let runtime = tokio::runtime::Handle::current();
+                let task = tokio::task::spawn_local(async move {
+                    let mut sync_state = ServiceSyncState::default();
+                    run_services_sync_with_preparer(
+                        &task_workspace,
+                        &task_manager,
+                        &runtime,
+                        &task_tick,
+                        &mut sync_state,
+                        move |projects| {
+                            let _ = started_tx.send(());
+                            release_rx.recv().expect("release preparation");
+                            projects
+                                .into_iter()
+                                .map(|project| PreparedProjectSnapshot {
+                                    project,
+                                    config: PreparedProjectConfig::Loaded {
+                                        config: None,
+                                        detected_compose_file: None,
+                                    },
+                                })
+                                .collect()
+                        },
+                    )
+                    .await;
+                });
+
+                started_rx.await.expect("preparation started");
+                let progressed_task = progressed.clone();
+                tokio::task::spawn_local(async move {
+                    let _guard = progress_manager.lock();
+                    progressed_task.store(true, Ordering::Release);
+                })
+                .await
+                .expect("local task completed");
+                *workspace.lock() =
+                    workspace_with_project("project", "/replacement", HashMap::new());
+                release_tx.send(()).expect("release preparation");
+                task.await.expect("sync task completed");
+            })
+            .await;
+
+        assert!(progressed.load(Ordering::Acquire));
+        assert!(sm.lock().project_path("project").is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn missing_empty_project_retries_when_mount_appears() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "okena-observer-empty-mount-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let project_path = project_dir.to_string_lossy().into_owned();
+        let workspace = Arc::new(parking_lot::Mutex::new(workspace_with_project(
+            "project",
+            &project_path,
+            HashMap::new(),
+        )));
+        let sm = Arc::new(parking_lot::Mutex::new(manager()));
+        let (service_tick, _service_rx) = tokio::sync::watch::channel(0u64);
+        let runtime = tokio::runtime::Handle::current();
+        let mut sync_state = ServiceSyncState::default();
+
+        run_services_sync(&workspace, &sm, &runtime, &service_tick, &mut sync_state).await;
+        assert!(sync_state.retry_projects.contains("project"));
+        assert!(sync_state.retry_deadline.is_some());
+
+        std::fs::create_dir_all(&project_dir).expect("create mounted project");
+        std::fs::write(project_dir.join("okena.yaml"), "services: []\n")
+            .expect("write service config");
+        tokio::time::advance(SERVICE_RETRY_DELAY).await;
+        let (_workspace_tick, mut workspace_rx) = tokio::sync::watch::channel(0u64);
+        assert_eq!(
+            wait_for_service_sync_trigger(&mut workspace_rx, &mut sync_state.retry_deadline,).await,
+            Some(false)
+        );
+        sync_state.retry_round += 1;
+        run_services_sync(&workspace, &sm, &runtime, &service_tick, &mut sync_state).await;
+
+        assert_eq!(sm.lock().project_path("project"), Some(&project_path));
+        assert!(!sync_state.retry_projects.contains("project"));
+        std::fs::remove_dir_all(project_dir).expect("remove mounted project");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_service_launch_releases_manager_and_discards_stale_result() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "okena-observer-blocking-launch-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(
+            project_dir.join("okena.yaml"),
+            "services:\n  - name: web\n    command: echo web\n",
+        )
+        .expect("write service config");
+        let project_path = project_dir.to_string_lossy().into_owned();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backend = Arc::new(BlockingReconnectBackend {
+            started: Mutex::new(Some(started_tx)),
+            release: Mutex::new(release_rx),
+            killed: Mutex::new(Vec::new()),
+        });
+        let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
+        let sm = Arc::new(parking_lot::Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals,
+        )));
+        let rr = reactor_ref(&sm);
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let mut snapshot = project("project", &project_path, false);
+                snapshot
+                    .service_terminals
+                    .insert("web".into(), "persistent-web".into());
+                let mut sync_state = ServiceSyncState::default();
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[snapshot], &mut sync_state, &mut manager, &mut cx);
+                }
+                started_rx.await.expect("backend launch started");
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    manager.unload_project_services("project", &mut cx);
+                }
+                release_tx.send(()).expect("release backend launch");
+                wait_for_test_condition(|| !backend.killed.lock().expect("kill lock").is_empty())
+                    .await;
+            })
+            .await;
+
+        assert!(sm.lock().service_terminal_ids("project").is_empty());
+        assert!(
+            backend
+                .killed
+                .lock()
+                .expect("kill lock")
+                .iter()
+                .any(|terminal_id| terminal_id == "persistent-web")
+        );
+        std::fs::remove_dir_all(project_dir).expect("remove project dir");
     }
 
     #[test]
@@ -997,6 +1351,10 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
+                wait_for_test_condition(|| {
+                    backend.reconnected.lock().expect("reconnect lock").len() >= 1
+                })
+                .await;
 
                 let mut replacement = project("project", &project_path, false);
                 replacement.data_replacement_epoch = 1;
@@ -1008,6 +1366,10 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[replacement], &mut sync_state, &mut manager, &mut cx);
                 }
+                wait_for_test_condition(|| {
+                    backend.reconnected.lock().expect("reconnect lock").len() >= 2
+                })
+                .await;
             })
             .await;
 
@@ -1064,6 +1426,10 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
+                wait_for_test_condition(|| {
+                    backend.reconnected.lock().expect("reconnect lock").len() >= 1
+                })
+                .await;
 
                 std::fs::write(
                     &config_path,
@@ -1080,6 +1446,8 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[replacement], &mut sync_state, &mut manager, &mut cx);
                 }
+                wait_for_test_condition(|| !backend.killed.lock().expect("kill lock").is_empty())
+                    .await;
             })
             .await;
 
@@ -1139,6 +1507,10 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
+                wait_for_test_condition(|| {
+                    backend.reconnected.lock().expect("reconnect lock").len() >= 1
+                })
+                .await;
 
                 let mut replacement = project("project", &project_path, false);
                 replacement.data_replacement_epoch = 1;
@@ -1150,6 +1522,12 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[replacement], &mut sync_state, &mut manager, &mut cx);
                 }
+                wait_for_test_condition(|| {
+                    backend.reconnected.lock().expect("reconnect lock").len() >= 2
+                })
+                .await;
+                wait_for_test_condition(|| !backend.killed.lock().expect("kill lock").is_empty())
+                    .await;
             })
             .await;
 
@@ -1291,6 +1669,10 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
+                wait_for_test_condition(|| {
+                    backend.reconnected.lock().expect("reconnect lock").len() >= 1
+                })
+                .await;
 
                 let mut replacement = project("project", &recovered_path, false);
                 replacement.data_replacement_epoch = 1;
@@ -1321,6 +1703,10 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[replacement], &mut sync_state, &mut manager, &mut cx);
                 }
+                wait_for_test_condition(|| {
+                    backend.reconnected.lock().expect("reconnect lock").len() >= 2
+                })
+                .await;
             })
             .await;
 

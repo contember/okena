@@ -12,6 +12,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Clone, Copy)]
+pub(super) enum OkenaLaunchFailure {
+    Crashed,
+    Reconnect { auto_start: bool },
+}
+
 impl ServiceManager {
     pub(super) fn schedule_okena_restart(
         &self,
@@ -127,6 +133,29 @@ impl ServiceManager {
         project_path: &str,
         cx: &mut impl ServiceCx,
     ) {
+        let terminal_id = uuid::Uuid::new_v4().to_string();
+        self.begin_okena_terminal_launch(
+            project_id,
+            service_name,
+            project_path,
+            terminal_id,
+            OkenaLaunchFailure::Crashed,
+            cx,
+        );
+    }
+
+    pub(super) fn begin_okena_terminal_launch(
+        &mut self,
+        project_id: &str,
+        service_name: &str,
+        project_path: &str,
+        terminal_id: String,
+        failure: OkenaLaunchFailure,
+        cx: &mut impl ServiceCx,
+    ) {
+        let Some(project_incarnation) = self.project_incarnation(project_id, project_path) else {
+            return;
+        };
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
@@ -149,61 +178,122 @@ impl ServiceManager {
         let shell = ShellType::for_command(command);
 
         instance.status = ServiceStatus::Starting;
-
-        match self.backend.create_terminal(&cwd, Some(&shell)) {
-            Ok(terminal_id) => {
-                let terminal = Arc::new(Terminal::new(
-                    terminal_id.clone(),
-                    TerminalSize::default(),
-                    self.backend.transport(),
-                    cwd,
-                ));
-                self.terminals.lock().insert(terminal_id.clone(), terminal);
-
-                #[allow(
-                    clippy::expect_used,
-                    reason = "instance set to Starting a few lines above, absence is a bug"
-                )]
-                let instance = self
-                    .instances
-                    .get_mut(&key)
-                    .expect("bug: service instance must exist");
-                instance.status = ServiceStatus::Running;
-                instance.terminal_id = Some(terminal_id.clone());
-                self.terminal_to_service.insert(
-                    terminal_id,
-                    (project_id.to_string(), service_name.to_string()),
-                );
-            }
-            Err(e) => {
-                log::error!(
-                    "Failed to start service '{}' for project {}: {}",
-                    service_name,
-                    project_id,
-                    e
-                );
-                #[allow(
-                    clippy::expect_used,
-                    reason = "instance set to Starting a few lines above, absence is a bug"
-                )]
-                let instance = self
-                    .instances
-                    .get_mut(&key)
-                    .expect("bug: service instance must exist");
-                instance.status = ServiceStatus::Crashed { exit_code: None };
-            }
-        }
-
+        instance.terminal_id = Some(terminal_id.clone());
+        self.terminal_to_service
+            .insert(terminal_id.clone(), key.clone());
         cx.notify();
 
-        // Start port detection if service is now running
-        if self
-            .instances
-            .get(&key)
-            .is_some_and(|i| i.status == ServiceStatus::Running)
-        {
-            self.start_port_detection(project_id, service_name, cx);
-        }
+        let backend = self.backend.clone();
+        let terminals = self.terminals.clone();
+        let project_id = project_id.to_string();
+        let service_name = service_name.to_string();
+        let project_path = project_path.to_string();
+        cx.spawn_main(async move |this, cx| {
+            let launch_backend = backend.clone();
+            let launch_id = terminal_id.clone();
+            let launch_cwd = cwd.clone();
+            let result = cx
+                .spawn_blocking(async move {
+                    smol::unblock(move || {
+                        launch_backend.reconnect_terminal(&launch_id, &launch_cwd, Some(&shell))
+                    })
+                    .await
+                })
+                .await;
+
+            let actual_id = result.as_ref().ok().cloned();
+            let (accepted, cleanup_requested) = this
+                .update(cx, |this, cx| {
+                    let key = (project_id.clone(), service_name.clone());
+                    let exited_without_restart =
+                        this.instances.get(&key).is_some_and(|instance| {
+                            matches!(&instance.status, ServiceStatus::Crashed { .. })
+                                && instance.terminal_id.as_deref() == Some(&terminal_id)
+                        }) && !this.terminal_to_service.contains_key(&terminal_id);
+                    if this.is_project_incarnation_current(&project_id, &project_incarnation)
+                        && exited_without_restart
+                        && result
+                            .as_ref()
+                            .is_ok_and(|returned_id| returned_id == &terminal_id)
+                    {
+                        let terminal = Arc::new(Terminal::new(
+                            terminal_id.clone(),
+                            TerminalSize::default(),
+                            backend.transport(),
+                            cwd.clone(),
+                        ));
+                        terminals.lock().insert(terminal_id.clone(), terminal);
+                        cx.notify();
+                        return (true, false);
+                    }
+                    let current_launch = this.instances.get(&key).is_some_and(|instance| {
+                        instance.status == ServiceStatus::Starting
+                            && instance.terminal_id.as_deref() == Some(&terminal_id)
+                    }) && this.terminal_to_service.get(&terminal_id)
+                        == Some(&key);
+                    if !this.is_project_incarnation_current(&project_id, &project_incarnation)
+                        || !current_launch
+                    {
+                        let cleanup_requested =
+                            this.terminal_to_service.get(&terminal_id) != Some(&key);
+                        return (false, cleanup_requested);
+                    }
+
+                    match &result {
+                        Ok(returned_id) if returned_id == &terminal_id => {
+                            let terminal = Arc::new(Terminal::new(
+                                terminal_id.clone(),
+                                TerminalSize::default(),
+                                backend.transport(),
+                                cwd.clone(),
+                            ));
+                            terminals.lock().insert(terminal_id.clone(), terminal);
+                            if let Some(instance) = this.instances.get_mut(&key) {
+                                instance.status = ServiceStatus::Running;
+                            }
+                            this.start_port_detection(&project_id, &service_name, cx);
+                            cx.notify();
+                            (true, false)
+                        }
+                        _ => {
+                            this.terminal_to_service.remove(&terminal_id);
+                            if let Some(instance) = this.instances.get_mut(&key) {
+                                instance.terminal_id = None;
+                                instance.status = match failure {
+                                    OkenaLaunchFailure::Crashed => {
+                                        ServiceStatus::Crashed { exit_code: None }
+                                    }
+                                    OkenaLaunchFailure::Reconnect { .. } => ServiceStatus::Stopped,
+                                };
+                            }
+                            cx.notify();
+                            if matches!(failure, OkenaLaunchFailure::Reconnect { auto_start: true })
+                            {
+                                this.start_service(&project_id, &service_name, &project_path, cx);
+                            }
+                            (false, true)
+                        }
+                    }
+                })
+                .unwrap_or((false, true));
+
+            if !accepted {
+                let mut cleanup_ids: std::collections::HashSet<String> = actual_id
+                    .into_iter()
+                    .filter(|actual_id| actual_id != &terminal_id || cleanup_requested)
+                    .collect();
+                if cleanup_requested {
+                    cleanup_ids.insert(terminal_id);
+                }
+                for cleanup_id in cleanup_ids {
+                    let cleanup_backend = backend.clone();
+                    cx.spawn_blocking(async move {
+                        smol::unblock(move || cleanup_backend.kill(&cleanup_id)).await
+                    })
+                    .await;
+                }
+            }
+        });
     }
 
     /// Stop a running service.
