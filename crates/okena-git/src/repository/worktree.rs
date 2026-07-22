@@ -8,6 +8,149 @@ use super::branch::get_default_branch;
 use super::{head_branch_short, path_str, require_success};
 use crate::error::{GitError, GitResult};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FilesystemObjectIdentity {
+    #[cfg(unix)]
+    Unix { device: u64, inode: u64 },
+    #[cfg(windows)]
+    Windows { volume: u32, file: u64 },
+    #[cfg(not(any(unix, windows)))]
+    Canonical(PathBuf),
+}
+
+fn filesystem_object_identity(path: &Path) -> Option<FilesystemObjectIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(FilesystemObjectIdentity::Unix {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+
+        let metadata = std::fs::metadata(path).ok()?;
+        match (metadata.volume_serial_number(), metadata.file_index()) {
+            (Some(volume), Some(file)) => Some(FilesystemObjectIdentity::Windows { volume, file }),
+            _ => None,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::canonicalize(path)
+            .ok()
+            .map(FilesystemObjectIdentity::Canonical)
+    }
+}
+
+/// Freshly verified ownership of one linked worktree checkout.
+///
+/// This token is intentionally produced without the status-path repository
+/// cache and carries the checkout directory's filesystem identity. Destructive
+/// operations revalidate both before touching the path.
+#[derive(Clone, Debug)]
+pub struct VerifiedWorktree {
+    parent_path: PathBuf,
+    checkout_path: PathBuf,
+    identity: FilesystemObjectIdentity,
+}
+
+impl VerifiedWorktree {
+    pub fn checkout_path(&self) -> &Path {
+        &self.checkout_path
+    }
+
+    pub fn parent_path(&self) -> &Path {
+        &self.parent_path
+    }
+}
+
+fn unsafe_worktree(path: &Path, reason: impl Into<String>) -> GitError {
+    GitError::UnsafeWorktree {
+        path: path.to_path_buf(),
+        reason: reason.into(),
+    }
+}
+
+fn fresh_repo(path: &Path) -> GitResult<gix::Repository> {
+    gix::ThreadSafeRepository::discover(path)
+        .map(|repository| repository.to_thread_local())
+        .map_err(|error| unsafe_worktree(path, format!("repository discovery failed: {error}")))
+}
+
+/// Verify from fresh filesystem and Git metadata that `checkout_path` is a
+/// linked worktree registered by `parent_path`.
+pub fn verify_linked_worktree_fresh(
+    parent_path: &Path,
+    checkout_path: &Path,
+) -> GitResult<VerifiedWorktree> {
+    let parent_repo = fresh_repo(parent_path)?;
+    let checkout_repo = fresh_repo(checkout_path)?;
+    let checkout_root = checkout_repo
+        .workdir()
+        .ok_or_else(|| unsafe_worktree(checkout_path, "checkout repository has no work directory"))?
+        .to_path_buf();
+    let identity = filesystem_object_identity(&checkout_root).ok_or_else(|| {
+        unsafe_worktree(
+            &checkout_root,
+            "checkout filesystem identity is unavailable",
+        )
+    })?;
+    let parent_common = filesystem_object_identity(parent_repo.common_dir()).ok_or_else(|| {
+        unsafe_worktree(parent_path, "parent Git directory identity is unavailable")
+    })?;
+    let checkout_common =
+        filesystem_object_identity(checkout_repo.common_dir()).ok_or_else(|| {
+            unsafe_worktree(
+                checkout_path,
+                "checkout Git directory identity is unavailable",
+            )
+        })?;
+    if parent_common != checkout_common {
+        return Err(unsafe_worktree(
+            checkout_path,
+            "checkout does not belong to the parent repository",
+        ));
+    }
+
+    let registered = parent_repo
+        .worktrees()
+        .map_err(|error| {
+            unsafe_worktree(parent_path, format!("linked worktree list failed: {error}"))
+        })?
+        .into_iter()
+        .filter_map(|proxy| proxy.base().ok())
+        .filter_map(|path| filesystem_object_identity(&path))
+        .any(|registered| registered == identity);
+    if !registered {
+        return Err(unsafe_worktree(
+            checkout_path,
+            "checkout is not registered as a linked worktree",
+        ));
+    }
+
+    Ok(VerifiedWorktree {
+        parent_path: parent_path.to_path_buf(),
+        checkout_path: checkout_root,
+        identity,
+    })
+}
+
+fn revalidate_verified_worktree(verified: &VerifiedWorktree) -> GitResult<()> {
+    let current = verify_linked_worktree_fresh(&verified.parent_path, &verified.checkout_path)?;
+    if current.identity != verified.identity {
+        return Err(unsafe_worktree(
+            &verified.checkout_path,
+            "checkout directory identity changed",
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse every existing target. An unregistered directory is not proof that
 /// Okena owns its contents, so create must never remove it speculatively.
 fn require_absent_worktree_target(target_path: &Path) -> GitResult<()> {
@@ -132,8 +275,9 @@ pub fn fetch_and_fast_forward(repo_path: &Path, worktree_path: &Path, default_br
 }
 
 /// Remove a worktree.
-pub fn remove_worktree(worktree_path: &Path, force: bool) -> GitResult<()> {
-    let wt_str = path_str(worktree_path)?;
+pub fn remove_worktree(verified: &VerifiedWorktree, force: bool) -> GitResult<()> {
+    revalidate_verified_worktree(verified)?;
+    let wt_str = path_str(&verified.checkout_path)?;
 
     let mut args = vec!["-C", wt_str, "worktree", "remove"];
 
@@ -147,28 +291,69 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> GitResult<()> {
     require_success(output)
 }
 
-/// Fast worktree removal: delete the directory and prune stale worktree metadata.
+/// Fast worktree removal: quarantine the verified directory, delete it, and
+/// prune stale worktree metadata.
 /// Much faster than `git worktree remove` which does expensive status checks.
 /// Only safe when the caller has already handled dirty state (stash/discard).
 ///
 /// Note: `git worktree prune` removes ALL stale entries (not just the one we deleted).
 /// This is safe because prune only acts on entries whose directories no longer exist,
 /// and we only delete the single target directory before pruning.
-pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> GitResult<()> {
-    // Remove the worktree directory (treat NotFound as success — already gone)
-    match std::fs::remove_dir_all(worktree_path) {
+pub fn remove_worktree_fast(verified: &VerifiedWorktree) -> GitResult<()> {
+    revalidate_verified_worktree(verified)?;
+    let worktree_path = &verified.checkout_path;
+    let parent = worktree_path
+        .parent()
+        .ok_or_else(|| unsafe_worktree(worktree_path, "checkout directory has no parent"))?;
+    let quarantine = parent.join(format!(".okena-removing-{}", uuid::Uuid::new_v4()));
+    std::fs::rename(worktree_path, &quarantine).map_err(|source| GitError::RemoveFailed {
+        path: worktree_path.clone(),
+        source,
+    })?;
+
+    let quarantined_identity = filesystem_object_identity(&quarantine);
+    if quarantined_identity.as_ref() != Some(&verified.identity) {
+        let restore = if !worktree_path.exists() {
+            std::fs::rename(&quarantine, worktree_path)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "original checkout path was claimed during quarantine",
+            ))
+        };
+        let reason = match restore {
+            Ok(()) => "quarantined directory identity changed; original path restored".to_string(),
+            Err(error) => format!(
+                "quarantined directory identity changed; data preserved at '{}': {error}",
+                quarantine.display()
+            ),
+        };
+        return Err(unsafe_worktree(worktree_path, reason));
+    }
+
+    match std::fs::remove_dir_all(&quarantine) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
+            let source = match std::fs::rename(&quarantine, worktree_path) {
+                Ok(()) => e,
+                Err(restore_error) => std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "{e}; remaining checkout preserved at '{}'; restore failed: {restore_error}",
+                        quarantine.display()
+                    ),
+                ),
+            };
             return Err(GitError::RemoveFailed {
                 path: worktree_path.to_path_buf(),
-                source: e,
+                source,
             });
         }
     }
 
     // Prune stale worktree entries from the main repo
-    let main_str = path_str(main_repo_path)?;
+    let main_str = path_str(&verified.parent_path)?;
     let output = safe_output(command("git").args(["-C", main_str, "worktree", "prune"]))?;
 
     if !output.status.success() {
@@ -177,6 +362,36 @@ pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> GitR
     }
 
     Ok(())
+}
+
+/// Move a verified linked worktree and return a fresh token for its new root.
+pub fn move_worktree(verified: &VerifiedWorktree, new_path: &Path) -> GitResult<VerifiedWorktree> {
+    revalidate_verified_worktree(verified)?;
+    require_absent_worktree_target(new_path)?;
+    let parent = path_str(&verified.parent_path)?;
+    let old = path_str(&verified.checkout_path)?;
+    let new = path_str(new_path)?;
+    let output = safe_output(command("git").args(["-C", parent, "worktree", "move", old, new]))?;
+    require_success(output)?;
+
+    match verify_linked_worktree_fresh(&verified.parent_path, new_path) {
+        Ok(moved) => Ok(moved),
+        Err(error) => {
+            let rollback =
+                safe_output(command("git").args(["-C", parent, "worktree", "move", new, old]))
+                    .map_err(GitError::from)
+                    .and_then(require_success);
+            match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(unsafe_worktree(
+                    new_path,
+                    format!(
+                        "post-move verification failed: {error}; rollback failed: {rollback_error}"
+                    ),
+                )),
+            }
+        }
+    }
 }
 
 /// List all worktrees in a repository (main + linked). Returns vec of
@@ -268,6 +483,74 @@ mod tests {
         );
 
         assert_eq!(list_linked_worktree_paths(&repo), vec![wt_path]);
+    }
+
+    #[test]
+    fn fresh_verification_rejects_a_path_replaced_after_cached_discovery() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        let moved_path = wt_tmp.path().join("moved-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+
+        assert!(crate::repository::get_repo_root(&wt_path).is_some());
+        assert!(crate::repository::get_repo_common_dir(&wt_path).is_some());
+        std::fs::rename(&wt_path, &moved_path).expect("move original checkout");
+        std::fs::create_dir(&wt_path).expect("create replacement directory");
+        let sentinel = wt_path.join("must-survive.txt");
+        std::fs::write(&sentinel, "independent data").expect("write sentinel");
+
+        assert!(verify_linked_worktree_fresh(&repo, &wt_path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(sentinel).expect("replacement survives"),
+            "independent data"
+        );
+    }
+
+    #[test]
+    fn guarded_fast_removal_rejects_a_replaced_checkout() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        let moved_path = wt_tmp.path().join("moved-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+        let verified = verify_linked_worktree_fresh(&repo, &wt_path).unwrap();
+        std::fs::rename(&wt_path, &moved_path).expect("move original checkout");
+        std::fs::create_dir(&wt_path).expect("create replacement directory");
+        let sentinel = wt_path.join("must-survive.txt");
+        std::fs::write(&sentinel, "independent data").expect("write sentinel");
+
+        assert!(remove_worktree_fast(&verified).is_err());
+        assert!(moved_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(sentinel).expect("replacement survives"),
+            "independent data"
+        );
+    }
+
+    #[test]
+    fn worktree_move_returns_fresh_ownership() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let old_path = wt_tmp.path().join("wt-feat");
+        let new_path = wt_tmp.path().join("renamed-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", old_path.to_str().unwrap(), "-b", "feat"],
+        );
+        let verified = verify_linked_worktree_fresh(&repo, &old_path).unwrap();
+
+        let moved = move_worktree(&verified, &new_path).expect("move linked worktree");
+
+        assert_eq!(moved.checkout_path(), new_path);
+        assert!(!old_path.exists());
+        assert!(verify_linked_worktree_fresh(&repo, &new_path).is_ok());
     }
 
     #[test]

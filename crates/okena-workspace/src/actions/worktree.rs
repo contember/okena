@@ -24,6 +24,7 @@ pub struct WorktreeRemovalPlan {
     pub worktree_path: std::path::PathBuf,
     /// The main repo path — used for `git worktree prune` in the fast removal.
     pub main_repo_path: String,
+    verified_worktree: okena_git::VerifiedWorktree,
     branch: String,
     project_hooks: HooksConfig,
     project_name: String,
@@ -35,6 +36,15 @@ pub struct WorktreeRemovalPlan {
 }
 
 impl WorktreeRemovalPlan {
+    pub fn remove(&self, force: bool) -> Result<(), String> {
+        okena_git::remove_worktree(&self.verified_worktree, force)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn remove_fast(&self) -> okena_git::GitResult<()> {
+        okena_git::remove_worktree_fast(&self.verified_worktree)
+    }
+
     /// Run the dirty-close safety hook before the checkout disappears.
     pub fn fire_on_dirty_close_headless(
         &self,
@@ -356,6 +366,37 @@ mod merge_pipeline_tests {
     #[test]
     fn removal_plan_finishes_close_hooks_while_checkout_exists() {
         let fixture = TestRepo::new();
+        let main_repo = fixture.root.join("main");
+        let worktree = fixture.root.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        let verified_worktree =
+            okena_git::verify_linked_worktree_fresh(&main_repo, &worktree).unwrap();
         let hooks = HooksConfig {
             project: ProjectHooks {
                 on_close: Some("echo project > project-close.txt".to_string()),
@@ -369,12 +410,13 @@ mod merge_pipeline_tests {
         };
         let plan = WorktreeRemovalPlan {
             project_id: "p1".to_string(),
-            worktree_path: fixture.root.clone(),
-            main_repo_path: fixture.root.to_string_lossy().into_owned(),
+            worktree_path: worktree.clone(),
+            main_repo_path: main_repo.to_string_lossy().into_owned(),
+            verified_worktree,
             branch: "feature".to_string(),
             project_hooks: hooks,
             project_name: "Project".to_string(),
-            project_path: fixture.root.to_string_lossy().into_owned(),
+            project_path: worktree.to_string_lossy().into_owned(),
             folder_id: None,
             folder_name: None,
         };
@@ -382,8 +424,8 @@ mod merge_pipeline_tests {
 
         plan.fire_close_hooks_headless(&HooksConfig::default(), Some(&monitor));
 
-        assert!(fixture.root.join("worktree-close.txt").exists());
-        assert!(fixture.root.join("project-close.txt").exists());
+        assert!(worktree.join("worktree-close.txt").exists());
+        assert!(worktree.join("project-close.txt").exists());
         let history = monitor.history();
         assert_eq!(history.len(), 2);
         assert!(
@@ -955,7 +997,7 @@ impl Workspace {
         let plan = self.begin_worktree_removal(project_id, global_hooks, cx)?;
         let monitor = cx.hook_monitor();
         plan.fire_close_hooks_headless(global_hooks, monitor.as_ref());
-        okena_git::remove_worktree(&plan.worktree_path, force).map_err(|e| e.to_string())?;
+        plan.remove(force)?;
         self.finish_worktree_removal(focus_manager, &plan, global_hooks, cx);
         Ok(())
     }
@@ -999,13 +1041,15 @@ impl Workspace {
         let main_repo_path = self.worktree_parent_path(project_id).unwrap_or_default();
         // For monorepos the project path is a subdirectory inside the checkout;
         // resolve the actual worktree root so `git worktree remove` gets it right.
-        let worktree_path = self.worktree_root_path(project_id)?;
+        let verified_worktree = self.verified_worktree(project_id)?;
+        let worktree_path = verified_worktree.checkout_path().to_path_buf();
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
 
         Ok(WorktreeRemovalPlan {
             project_id: project_id.to_string(),
             worktree_path,
             main_repo_path,
+            verified_worktree,
             branch,
             project_hooks,
             project_name,
@@ -1015,7 +1059,7 @@ impl Workspace {
         })
     }
 
-    fn worktree_root_path(&self, project_id: &str) -> Result<std::path::PathBuf, String> {
+    fn verified_worktree(&self, project_id: &str) -> Result<okena_git::VerifiedWorktree, String> {
         let project = self
             .project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
@@ -1024,47 +1068,43 @@ impl Workspace {
             .as_ref()
             .ok_or_else(|| "Not a worktree project".to_string())?;
         let project_path = std::path::PathBuf::from(&project.path);
-        let resolved_root = okena_git::get_repo_root(&project_path).unwrap_or_else(|| {
-            if metadata.worktree_path.is_empty() {
-                project_path
-            } else {
-                std::path::PathBuf::from(&metadata.worktree_path)
-            }
-        });
-
-        if !metadata.worktree_path.is_empty()
-            && Self::physical_path_identity(&resolved_root)
-                != Self::physical_path_identity(std::path::Path::new(&metadata.worktree_path))
-        {
-            return Err("worktree path does not match its recorded checkout root".to_string());
-        }
-
         let parent = self
             .project(&metadata.parent_project_id)
             .ok_or_else(|| "Worktree parent project not found".to_string())?;
         if parent.is_remote {
             return Err("Worktree parent project is not local".to_string());
         }
-        let parent_repo = okena_git::get_repo_root(std::path::Path::new(&parent.path))
-            .ok_or_else(|| "Worktree parent repository not found".to_string())?;
-        let parent_common_dir = okena_git::get_repo_common_dir(&parent_repo)
-            .ok_or_else(|| "Worktree parent Git directory not found".to_string())?;
-        let checkout_common_dir = okena_git::get_repo_common_dir(&resolved_root)
-            .ok_or_else(|| "Worktree checkout Git directory not found".to_string())?;
-        if Self::physical_path_identity(&parent_common_dir)
-            != Self::physical_path_identity(&checkout_common_dir)
+        let checkout_query = if metadata.worktree_path.is_empty() {
+            project_path.clone()
+        } else {
+            std::path::PathBuf::from(&metadata.worktree_path)
+        };
+        let verified = okena_git::verify_linked_worktree_fresh(
+            std::path::Path::new(&parent.path),
+            &checkout_query,
+        )
+        .map_err(|error| error.to_string())?;
+        if !metadata.worktree_path.is_empty()
+            && Self::physical_path_identity(verified.checkout_path())
+                != Self::physical_path_identity(std::path::Path::new(&metadata.worktree_path))
         {
-            return Err("checkout does not belong to its parent repository".to_string());
+            return Err("worktree path does not match its recorded checkout root".to_string());
         }
-        let resolved_identity = Self::physical_path_identity(&resolved_root);
-        let registered = okena_git::list_linked_worktree_paths(&parent_repo)
-            .into_iter()
-            .any(|path| Self::physical_path_identity(&path) == resolved_identity);
-        if !registered {
-            return Err("checkout is not a linked worktree of its parent repository".to_string());
+        if !Self::physical_path_identity(&project_path)
+            .starts_with(&Self::physical_path_identity(verified.checkout_path()))
+        {
+            return Err(if metadata.worktree_path.is_empty() {
+                "project path is outside its linked worktree root".to_string()
+            } else {
+                "worktree path does not match its recorded checkout root".to_string()
+            });
         }
+        Ok(verified)
+    }
 
-        Ok(resolved_root)
+    fn worktree_root_path(&self, project_id: &str) -> Result<std::path::PathBuf, String> {
+        self.verified_worktree(project_id)
+            .map(|verified| verified.checkout_path().to_path_buf())
     }
 
     /// Validate that deleting this checkout cannot remove another project's
