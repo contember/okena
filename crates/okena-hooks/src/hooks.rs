@@ -541,15 +541,22 @@ fn run_hook_sync(
         // Register exit waiter and block until the PTY process exits (5 min timeout)
         let rx = exit_reservation.bind(&terminal_id);
 
-        let exit_code = rx.recv_timeout(std::time::Duration::from_secs(300))
-            .map_err(|e| match e {
-                std::sync::mpsc::RecvTimeoutError::Timeout => {
-                    format!("Hook '{}' timed out after 5 minutes — dismiss it from the sidebar to unblock", hook_type)
-                }
-                std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                    "Hook terminal exit channel closed unexpectedly".to_string()
-                }
-            })?;
+        let exit_code = match rx.recv_timeout(std::time::Duration::from_secs(300)) {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                runner.backend.kill(&terminal_id);
+                runner.terminals.lock().remove(&terminal_id);
+                monitor.finish_by_terminal_id(&terminal_id, None);
+                return Err(match error {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => {
+                        format!("Hook '{}' timed out after 5 minutes", hook_type)
+                    }
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                        "Hook terminal exit channel closed unexpectedly".to_string()
+                    }
+                });
+            }
+        };
 
         // The PTY loop normally finishes this first. The idempotent fallback covers
         // a very fast exit that arrived before the execution and waiter were registered.
@@ -567,6 +574,8 @@ fn run_hook_sync(
             }));
         } else {
             let code = exit_code.map(|c| c as i32).unwrap_or(-1);
+            runner.backend.kill(&terminal_id);
+            runner.terminals.lock().remove(&terminal_id);
             return Err(format!("Hook failed (exit {})", code));
         }
     } else if runner.is_some() {
@@ -1569,6 +1578,54 @@ mod tests {
     fn run_hook_sync_returns_err_for_false() {
         let result = run_hook_sync_bare("false", HashMap::new());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn pty_sync_failure_releases_terminal_ownership() {
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::{PtyEvent, PtyManager};
+        use okena_terminal::session_backend::SessionBackend;
+
+        let monitor = HookMonitor::new();
+        let (pty_manager, events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let terminals: TerminalsRegistry = Default::default();
+        let runner = HookRunner::new(backend, terminals.clone());
+        let event_monitor = monitor.clone();
+        let event_thread = std::thread::spawn(move || {
+            loop {
+                if let PtyEvent::Exit {
+                    terminal_id,
+                    exit_code,
+                    ..
+                } = events.recv_blocking().expect("receive hook PTY event")
+                {
+                    event_monitor.notify_exit(&terminal_id, exit_code);
+                    return terminal_id;
+                }
+            }
+        });
+
+        let result = run_hook_sync(
+            "exit 7",
+            HashMap::new(),
+            Some(&monitor),
+            "pre_merge",
+            "Project",
+            Some(&runner),
+            "p1",
+        );
+        let terminal_id = event_thread.join().expect("event thread joins");
+
+        assert!(matches!(result, Err(message) if message == "Hook failed (exit 7)"));
+        assert!(!terminals.lock().contains_key(&terminal_id));
+        assert!(pty_manager.current_generation(&terminal_id).is_none());
+        assert!(matches!(
+            monitor.history()[0].status,
+            HookStatus::Failed { exit_code: 7, .. }
+        ));
+        pty_manager.flush_teardown();
     }
 
     #[test]

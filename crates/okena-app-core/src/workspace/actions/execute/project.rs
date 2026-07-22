@@ -8,7 +8,7 @@
 use super::{ActionResult, find_first_terminal_id, spawn_uninitialized_terminals};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
-use crate::workspace::state::{WindowId, Workspace};
+use crate::workspace::state::{HookTerminalStatus, WindowId, Workspace};
 use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
@@ -256,10 +256,17 @@ pub(super) fn remove_worktree_project(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return project_not_found(&project_id);
+    }
+    if ws.is_project_closing(&project_id) {
+        return ActionResult::Err("worktree is already closing".to_string());
+    }
     let global_hooks = settings.hooks.clone();
-    with_existing_project_result(ws, &project_id, |ws| {
-        ws.remove_worktree_project(focus_manager, &project_id, force, &global_hooks, cx)
-    })
+    match ws.remove_worktree_project(focus_manager, &project_id, force, &global_hooks, cx) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(error) => ActionResult::Err(error),
+    }
 }
 
 pub(super) fn close_worktree(
@@ -516,19 +523,24 @@ pub(super) fn rerun_hook(
     terminals: &TerminalsRegistry,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let (command, cwd, hook_type, project_name) = match ws.project(&project_id).and_then(|p| {
-        p.hook_terminals.get(&terminal_id).map(|entry| {
-            (
-                entry.command.clone(),
-                entry.cwd.clone(),
-                entry.hook_type.clone(),
-                p.name.clone(),
-            )
-        })
-    }) {
-        Some(details) => details,
-        None => return ActionResult::Err(format!("hook terminal not found: {}", terminal_id)),
-    };
+    let (command, cwd, hook_type, project_name, status) =
+        match ws.project(&project_id).and_then(|p| {
+            p.hook_terminals.get(&terminal_id).map(|entry| {
+                (
+                    entry.command.clone(),
+                    entry.cwd.clone(),
+                    entry.hook_type.clone(),
+                    p.name.clone(),
+                    entry.status.clone(),
+                )
+            })
+        }) {
+            Some(details) => details,
+            None => return ActionResult::Err(format!("hook terminal not found: {}", terminal_id)),
+        };
+    if status == HookTerminalStatus::Running {
+        return ActionResult::Err("hook is still running".to_string());
+    }
     let monitor = cx.hook_monitor();
     let shell = okena_workspace::hooks::keep_alive_hook_shell(&command);
     let new_id = match backend.create_terminal(&cwd, Some(&shell)) {
@@ -601,7 +613,7 @@ pub(super) fn dismiss_hook(
 
 #[cfg(test)]
 mod hook_action_tests {
-    use super::{ActionResult, delete_project, dismiss_hook, rerun_hook};
+    use super::{ActionResult, delete_project, dismiss_hook, remove_worktree_project, rerun_hook};
     use crate::workspace::focus::FocusManager;
     use crate::workspace::state::{
         HookTerminalEntry, HookTerminalStatus, ProjectData, WindowState, Workspace, WorkspaceData,
@@ -714,13 +726,13 @@ mod hook_action_tests {
         }
     }
 
-    fn workspace_with_hook(terminal_id: &str) -> Workspace {
+    fn workspace_with_hook_status(terminal_id: &str, status: HookTerminalStatus) -> Workspace {
         let mut hook_terminals = HashMap::new();
         hook_terminals.insert(
             terminal_id.to_string(),
             HookTerminalEntry {
                 label: "on_project_open (Project p1)".to_string(),
-                status: HookTerminalStatus::Running,
+                status,
                 hook_type: "on_project_open".to_string(),
                 command: "export OKENA_PROJECT_ID='p1'; echo test".to_string(),
                 cwd: "/tmp/test".to_string(),
@@ -757,6 +769,23 @@ mod hook_action_tests {
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
         })
+    }
+
+    fn workspace_with_hook(terminal_id: &str) -> Workspace {
+        workspace_with_hook_status(terminal_id, HookTerminalStatus::Succeeded)
+    }
+
+    fn workspace_with_worktree_hook(terminal_id: &str) -> Workspace {
+        let workspace = workspace_with_hook(terminal_id);
+        let mut data = workspace.data().clone();
+        data.projects[0].worktree_info = Some(crate::workspace::state::WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/main".to_string(),
+            worktree_path: "/tmp/test".to_string(),
+            branch_name: "topic".to_string(),
+        });
+        Workspace::new(data)
     }
 
     #[test]
@@ -813,6 +842,39 @@ mod hook_action_tests {
         assert!(matches!(history[0].status, HookStatus::Running));
         assert_eq!(history[1].terminal_id.as_deref(), Some("old-hook"));
         assert!(matches!(history[1].status, HookStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn rerun_hook_rejects_a_running_authoritative_execution() {
+        let mut workspace = workspace_with_hook_status("running-hook", HookTerminalStatus::Running);
+        let backend = RecordingBackend::default();
+        let terminals: TerminalsRegistry = Default::default();
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+
+        let result = rerun_hook(
+            &mut workspace,
+            "p1".to_string(),
+            "running-hook".to_string(),
+            &backend,
+            &terminals,
+            &mut cx,
+        );
+
+        assert!(matches!(
+            result,
+            ActionResult::Err(message) if message == "hook is still running"
+        ));
+        assert!(backend.shells.lock().unwrap().is_empty());
+        assert!(backend.killed.lock().unwrap().is_empty());
+        assert!(
+            workspace
+                .project("p1")
+                .unwrap()
+                .hook_terminals
+                .contains_key("running-hook")
+        );
     }
 
     #[test]
@@ -906,6 +968,31 @@ mod hook_action_tests {
         assert!(matches!(
             result,
             ActionResult::Err(message) if message == "project is already being closed"
+        ));
+        assert!(workspace.project("p1").is_some());
+    }
+
+    #[test]
+    fn remove_worktree_project_rejects_an_authoritative_close_in_progress() {
+        let mut workspace = workspace_with_worktree_hook("hook-1");
+        workspace.mark_closing_project_authoritative("p1");
+        let mut focus_manager = FocusManager::default();
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+
+        let result = remove_worktree_project(
+            &mut workspace,
+            &mut focus_manager,
+            "p1".to_string(),
+            true,
+            &AppSettings::default(),
+            &mut cx,
+        );
+
+        assert!(matches!(
+            result,
+            ActionResult::Err(message) if message == "worktree is already closing"
         ));
         assert!(workspace.project("p1").is_some());
     }

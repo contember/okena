@@ -18,6 +18,8 @@ pub trait TerminalBackend: Send + Sync {
         shell: Option<&ShellType>,
     ) -> Result<String>;
     fn kill(&self, terminal_id: &str);
+    /// Wait for teardown work queued before this call to finish.
+    fn flush_teardown(&self) {}
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf>;
     fn supports_buffer_capture(&self) -> bool;
     fn is_remote(&self) -> bool;
@@ -74,6 +76,10 @@ impl TerminalBackend for LocalBackend {
 
     fn kill(&self, terminal_id: &str) {
         self.pty_manager.kill(terminal_id)
+    }
+
+    fn flush_teardown(&self) {
+        self.pty_manager.flush_teardown()
     }
 
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf> {
