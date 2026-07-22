@@ -1100,7 +1100,7 @@ fn collect_layout_teardowns(
     }
 }
 
-fn teardown_route(
+pub(crate) fn teardown_route(
     shell: &ShellType,
     project_default_shell: Option<&ShellType>,
     global_default_shell: &ShellType,

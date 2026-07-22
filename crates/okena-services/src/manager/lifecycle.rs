@@ -186,7 +186,16 @@ impl ServiceManager {
 
     /// Stop all running services for a project and remove all instances/configs.
     pub fn unload_project_services(&mut self, project_id: &str, cx: &mut impl ServiceCx) {
-        self.unload_project_services_inner(project_id, &HashSet::new(), cx);
+        self.unload_project_services_inner(project_id, &HashSet::new(), true, cx);
+    }
+
+    /// Invalidate service lifecycles without killing PTYs on the reactor thread.
+    pub fn unload_project_services_for_backend_migration(
+        &mut self,
+        project_id: &str,
+        cx: &mut impl ServiceCx,
+    ) -> Vec<String> {
+        self.unload_project_services_inner(project_id, &HashSet::new(), false, cx)
     }
 
     /// Unload manager state while leaving selected persistent backend sessions alive.
@@ -198,7 +207,7 @@ impl ServiceManager {
         preserved_terminal_ids: &HashSet<String>,
         cx: &mut impl ServiceCx,
     ) {
-        self.unload_project_services_inner(project_id, preserved_terminal_ids, cx);
+        self.unload_project_services_inner(project_id, preserved_terminal_ids, true, cx);
     }
 
     /// Finish a replacement reconciliation by killing preserved sessions that
@@ -221,8 +230,9 @@ impl ServiceManager {
         &mut self,
         project_id: &str,
         preserved_terminal_ids: &HashSet<String>,
+        kill_unpreserved: bool,
         cx: &mut impl ServiceCx,
-    ) {
+    ) -> Vec<String> {
         self.invalidate_project_incarnation(project_id);
 
         // Stop Docker status poller
@@ -237,11 +247,13 @@ impl ServiceManager {
             .cloned()
             .collect();
 
+        let mut terminal_ids = Vec::new();
         for key in keys {
             if let Some(instance) = self.instances.get(&key)
                 && let Some(terminal_id) = &instance.terminal_id
             {
-                if !preserved_terminal_ids.contains(terminal_id) {
+                terminal_ids.push(terminal_id.clone());
+                if kill_unpreserved && !preserved_terminal_ids.contains(terminal_id) {
                     self.backend.kill(terminal_id);
                 }
                 self.terminals.lock().remove(terminal_id);
@@ -256,6 +268,7 @@ impl ServiceManager {
         self.port_detection_active
             .retain(|(pid, _), _| pid != project_id);
         cx.notify();
+        terminal_ids
     }
 
     /// Re-read `okena.yaml`. Stop removed services, add new ones,

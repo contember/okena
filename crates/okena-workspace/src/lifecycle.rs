@@ -30,6 +30,13 @@ impl ProjectLifecycleTracker {
         Self::default()
     }
 
+    pub fn has_active_operations(&self) -> bool {
+        !self.creating.is_empty()
+            || !self.closing.is_empty()
+            || !self.removing_worktree_paths.is_empty()
+            || !self.pending_worktree_closes.is_empty()
+    }
+
     // === creating ===
 
     pub fn mark_creating(&mut self, project_id: &str) {
