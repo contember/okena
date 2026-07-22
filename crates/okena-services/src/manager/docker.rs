@@ -13,6 +13,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+const DOCKER_DISCOVERY_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+    Duration::from_secs(40),
+    Duration::from_secs(60),
+];
+
 fn reconcile_docker_statuses(
     instances: &mut HashMap<(String, String), ServiceInstance>,
     project_id: &str,
@@ -106,10 +114,20 @@ impl ServiceManager {
 
         // Move docker subprocess calls to background executor
         cx.spawn_main(async move |this, cx| {
-            let service_names = {
+            let mut retry_delays = DOCKER_DISCOVERY_RETRY_DELAYS.into_iter();
+            let service_names = loop {
+                let is_current = this
+                    .update(cx, |this, _| {
+                        this.is_project_incarnation_current(&project_id, &incarnation)
+                    })
+                    .unwrap_or(false);
+                if !is_current {
+                    return;
+                }
+
                 let path = project_path.clone();
                 let file = compose_file.clone();
-                smol::unblock(move || {
+                let discovered = smol::unblock(move || {
                     if !docker_compose::is_docker_compose_available() {
                         return None;
                     }
@@ -121,11 +139,19 @@ impl ServiceManager {
                         }
                     }
                 })
-                .await
-            };
+                .await;
 
-            let Some(service_names) = service_names else {
-                return;
+                if let Some(service_names) = discovered {
+                    break service_names;
+                }
+                let Some(delay) = retry_delays.next() else {
+                    log::warn!(
+                        "Giving up Docker Compose discovery for project {} after bounded retries",
+                        project_id
+                    );
+                    return;
+                };
+                cx.timer(delay).await;
             };
 
             let _ = this.update(cx, |this, cx| {
@@ -530,5 +556,19 @@ mod tests {
         assert!(has_definitions);
         assert!(!changed);
         assert_eq!(instances[&key].status, ServiceStatus::Starting);
+    }
+
+    #[test]
+    fn discovery_retries_use_bounded_backoff() {
+        assert_eq!(
+            DOCKER_DISCOVERY_RETRY_DELAYS,
+            [
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+                Duration::from_secs(20),
+                Duration::from_secs(40),
+                Duration::from_secs(60),
+            ]
+        );
     }
 }
