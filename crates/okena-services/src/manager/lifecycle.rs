@@ -20,6 +20,7 @@ impl ServiceManager {
         saved_terminal_ids: &HashMap<String, String>,
         cx: &mut impl ServiceCx,
     ) {
+        self.begin_project_incarnation(project_id, project_path);
         log::info!(
             "[services] load_project_services project_id={} path={}",
             project_id,
@@ -183,6 +184,8 @@ impl ServiceManager {
 
     /// Stop all running services for a project and remove all instances/configs.
     pub fn unload_project_services(&mut self, project_id: &str, cx: &mut impl ServiceCx) {
+        self.invalidate_project_incarnation(project_id);
+
         // Stop Docker status poller
         if let Some(cancel) = self.docker_pollers.remove(project_id) {
             cancel.store(true, Ordering::Relaxed);
@@ -208,6 +211,8 @@ impl ServiceManager {
 
         self.configs.remove(project_id);
         self.project_paths.remove(project_id);
+        self.port_detection_active
+            .retain(|(pid, _), _| pid != project_id);
         cx.notify();
     }
 
@@ -219,6 +224,7 @@ impl ServiceManager {
         project_path: &str,
         cx: &mut impl ServiceCx,
     ) {
+        self.begin_project_incarnation(project_id, project_path);
         let new_config = match load_project_config(project_path) {
             Ok(Some(config)) => config,
             Ok(None) => {

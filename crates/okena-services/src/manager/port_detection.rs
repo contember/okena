@@ -26,9 +26,16 @@ impl ServiceManager {
         {
             return;
         }
+        let Some(project_path) = self.project_paths.get(project_id) else {
+            return;
+        };
+        let Some(project_incarnation) = self.project_incarnation(project_id, project_path) else {
+            return;
+        };
         self.port_detection_active.insert(
             key,
             PortDetectionState {
+                project_incarnation,
                 polls_remaining: 10,
                 found_any: false,
                 stable_count: 0,
@@ -53,17 +60,23 @@ impl ServiceManager {
 
             loop {
                 // Collect all services that need port detection + their terminal IDs
-                let services: Vec<((String, String), String)> = this
+                let services: Vec<((String, String), String, super::ProjectIncarnation)> = this
                     .update(cx, |this, _| {
                         this.port_detection_active
-                            .keys()
-                            .filter_map(|key| {
+                            .iter()
+                            .filter_map(|(key, state)| {
+                                if !this.is_project_incarnation_current(
+                                    &key.0,
+                                    &state.project_incarnation,
+                                ) {
+                                    return None;
+                                }
                                 let inst = this.instances.get(key)?;
                                 if inst.status != ServiceStatus::Running {
                                     return None;
                                 }
                                 let tid = inst.terminal_id.clone()?;
-                                Some((key.clone(), tid))
+                                Some((key.clone(), tid, state.project_incarnation.clone()))
                             })
                             .collect()
                     })
@@ -80,19 +93,23 @@ impl ServiceManager {
                 // Background: get PIDs per service, build process tree ONCE,
                 // scan ports ONCE, distribute results.
                 let backend_ref = backend.clone();
-                let results: Vec<((String, String), Vec<u16>)> = cx
+                let results: Vec<((String, String), super::ProjectIncarnation, Vec<u16>)> = cx
                     .spawn_blocking(async move {
                         // Get root PIDs for all services in one batch.
                         // On Linux+dtach this reads /proc once instead of spawning lsof per terminal.
                         let terminal_ids: Vec<&str> =
-                            services.iter().map(|(_, tid)| tid.as_str()).collect();
+                            services.iter().map(|(_, tid, _)| tid.as_str()).collect();
                         let batch_pids = backend_ref.get_batch_service_pids(&terminal_ids);
-                        let service_root_pids: Vec<((String, String), Vec<u32>)> = services
+                        let service_root_pids: Vec<(
+                            (String, String),
+                            super::ProjectIncarnation,
+                            Vec<u32>,
+                        )> = services
                             .iter()
-                            .map(|(key, tid)| {
+                            .map(|(key, tid, incarnation)| {
                                 let pids =
                                     batch_pids.get(tid.as_str()).cloned().unwrap_or_default();
-                                (key.clone(), pids)
+                                (key.clone(), incarnation.clone(), pids)
                             })
                             .collect();
 
@@ -104,23 +121,24 @@ impl ServiceManager {
                             std::collections::HashSet::new();
                         let service_pid_sets: Vec<(
                             (String, String),
+                            super::ProjectIncarnation,
                             std::collections::HashSet<u32>,
                         )> = service_root_pids
                             .into_iter()
-                            .map(|(key, roots)| {
+                            .map(|(key, incarnation, roots)| {
                                 let mut pids = std::collections::HashSet::new();
                                 for &pid in &roots {
                                     pids.extend(port_detect::descendants_from_tree(&tree, pid));
                                 }
                                 all_pids.extend(&pids);
-                                (key, pids)
+                                (key, incarnation, pids)
                             })
                             .collect();
 
                         if all_pids.is_empty() {
                             return service_pid_sets
                                 .into_iter()
-                                .map(|(k, _)| (k, Vec::new()))
+                                .map(|(key, incarnation, _)| (key, incarnation, Vec::new()))
                                 .collect();
                         }
 
@@ -130,9 +148,9 @@ impl ServiceManager {
                         // Distribute ports to each service
                         service_pid_sets
                             .into_iter()
-                            .map(|(key, pids)| {
+                            .map(|(key, incarnation, pids)| {
                                 let ports = port_detect::ports_for_pids(&all_port_pairs, &pids);
-                                (key, ports)
+                                (key, incarnation, ports)
                             })
                             .collect()
                     })
@@ -144,10 +162,16 @@ impl ServiceManager {
                         let mut changed = false;
                         let mut keys_to_remove = Vec::new();
 
-                        for (key, ports) in results {
+                        for (key, incarnation, ports) in results {
+                            if !this.is_project_incarnation_current(&key.0, &incarnation) {
+                                continue;
+                            }
                             let Some(state) = this.port_detection_active.get_mut(&key) else {
                                 continue;
                             };
+                            if state.project_incarnation != incarnation {
+                                continue;
+                            }
 
                             state.polls_remaining = state.polls_remaining.saturating_sub(1);
 

@@ -21,6 +21,7 @@ impl ServiceManager {
         project_path: &str,
         cx: &mut impl ServiceCx,
     ) {
+        let project_incarnation = self.project_incarnation(project_id, project_path);
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
@@ -49,6 +50,7 @@ impl ServiceManager {
 
                 // Fire-and-forget: status poller will pick up the change
                 let log_name = name.clone();
+                let pid = project_id.to_string();
                 cx.spawn_main(async move |this, cx| {
                     let result = cx
                         .spawn_blocking(async move {
@@ -76,7 +78,13 @@ impl ServiceManager {
                         );
                     }
                     // Trigger an immediate status poll
-                    let _ = this.update(cx, |_this, cx| cx.notify());
+                    let _ = this.update(cx, |this, cx| {
+                        if project_incarnation.as_ref().is_some_and(|incarnation| {
+                            this.is_project_incarnation_current(&pid, incarnation)
+                        }) {
+                            cx.notify();
+                        }
+                    });
                 });
             }
             ServiceKind::Okena => {
@@ -245,6 +253,7 @@ impl ServiceManager {
         project_path: &str,
         cx: &mut impl ServiceCx,
     ) {
+        let project_incarnation = self.project_incarnation(project_id, project_path);
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
@@ -269,6 +278,7 @@ impl ServiceManager {
                 cx.notify();
 
                 let log_name = name.clone();
+                let pid = project_id.to_string();
                 cx.spawn_main(async move |this, cx| {
                     let result = cx
                         .spawn_blocking(async move {
@@ -294,7 +304,13 @@ impl ServiceManager {
                         ),
                         _ => {}
                     }
-                    let _ = this.update(cx, |_this, cx| cx.notify());
+                    let _ = this.update(cx, |this, cx| {
+                        if project_incarnation.as_ref().is_some_and(|incarnation| {
+                            this.is_project_incarnation_current(&pid, incarnation)
+                        }) {
+                            cx.notify();
+                        }
+                    });
                 });
             }
             ServiceKind::Okena => {
@@ -332,6 +348,17 @@ impl ServiceManager {
                         Vec::new()
                     };
 
+                    let is_current = this
+                        .update(cx, |this, _| {
+                            project_incarnation.as_ref().is_some_and(|incarnation| {
+                                this.is_project_incarnation_current(&pid, incarnation)
+                            })
+                        })
+                        .unwrap_or(false);
+                    if !is_current {
+                        return;
+                    }
+
                     // Kill old terminal (backend.kill spawns a bg thread internally)
                     if let Some(ref tid) = terminal_id {
                         backend.kill(tid);
@@ -353,6 +380,11 @@ impl ServiceManager {
                     }
 
                     let _ = this.update(cx, |this, cx| {
+                        if !project_incarnation.as_ref().is_some_and(|incarnation| {
+                            this.is_project_incarnation_current(&pid, incarnation)
+                        }) {
+                            return;
+                        }
                         let key = (pid.clone(), name.clone());
                         if let Some(instance) = this.instances.get(&key)
                             && instance.status == ServiceStatus::Restarting
@@ -407,6 +439,10 @@ impl ServiceManager {
         };
 
         let (project_id, service_name) = key.clone();
+        let project_path = self.project_paths.get(&project_id).cloned();
+        let project_incarnation = project_path
+            .as_deref()
+            .and_then(|path| self.project_incarnation(&project_id, path));
 
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
@@ -437,7 +473,10 @@ impl ServiceManager {
             cx.spawn_main(async move |this, cx| {
                 cx.timer(delay).await;
                 let _ = this.update(cx, |this, cx| {
-                    if let Some(project_path) = this.project_paths.get(&project_id).cloned() {
+                    if let (Some(project_path), Some(incarnation)) =
+                        (project_path, project_incarnation)
+                        && this.is_project_incarnation_current(&project_id, &incarnation)
+                    {
                         this.start_service(&project_id, &service_name, &project_path, cx);
                     }
                 });
