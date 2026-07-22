@@ -353,6 +353,7 @@ impl DaemonCore {
         let shutdown_workspace = reactor.workspace.clone();
         let shutdown_backend = backend.clone();
         let shutdown_terminals = terminals.clone();
+        let shutdown_pty_manager = pty_manager.clone();
         local.block_on(&runtime, async move {
             // Observers MUST be spawned inside the LocalSet (they `spawn_local`).
             reactor.spawn_observers();
@@ -485,6 +486,7 @@ impl DaemonCore {
             &shutdown_workspace,
             &*shutdown_backend,
             &shutdown_terminals,
+            || shutdown_pty_manager.flush_teardown(),
             persistence::save_workspace,
         )?;
         remote_server.stop();
@@ -496,6 +498,7 @@ fn flush_shutdown_state(
     workspace: &Arc<Mutex<Workspace>>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    flush_teardown: impl FnOnce(),
     save: impl FnOnce(&WorkspaceData) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let (data, terminal_ids) = {
@@ -517,6 +520,7 @@ fn flush_shutdown_state(
         backend.kill(&terminal_id);
         terminals.lock().remove(&terminal_id);
     }
+    flush_teardown();
 
     save(&data)
 }
@@ -637,12 +641,26 @@ mod shutdown_tests {
             killed: killed.clone(),
         };
         let saved = AtomicBool::new(false);
+        let flushed = AtomicBool::new(false);
 
-        flush_shutdown_state(&workspace, &backend, &terminals, |_| {
-            assert_eq!(killed.lock().len(), 3, "cleanup precedes final save");
-            saved.store(true, Ordering::Relaxed);
-            Ok(())
-        })
+        flush_shutdown_state(
+            &workspace,
+            &backend,
+            &terminals,
+            || {
+                assert_eq!(killed.lock().len(), 3, "all kills precede teardown flush");
+                flushed.store(true, Ordering::Relaxed);
+            },
+            |_| {
+                assert_eq!(killed.lock().len(), 3, "cleanup precedes final save");
+                assert!(
+                    flushed.load(Ordering::Relaxed),
+                    "teardown flush precedes save"
+                );
+                saved.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
         .unwrap();
 
         assert!(saved.load(Ordering::Relaxed));

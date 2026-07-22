@@ -1,16 +1,18 @@
+#[cfg(windows)]
+use crate::session_backend::SessionCommand;
 #[cfg(not(windows))]
 use crate::session_backend::get_extended_path;
 use crate::session_backend::{ResolvedBackend, SessionBackend};
 use crate::shell_config::{ShellCommandExt, ShellType};
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
@@ -38,27 +40,63 @@ pub enum PtyEvent {
     /// Data received from PTY
     Data {
         terminal_id: String,
+        generation: PtyGeneration,
         data: Vec<u8>,
         sequence: u64,
     },
     /// PTY process exited
     Exit {
         terminal_id: String,
+        generation: PtyGeneration,
         exit_code: Option<u32>,
     },
+}
+
+/// Identity of one concrete PTY process attached to a logical terminal ID.
+///
+/// Logical IDs are reused when reconnecting persistent sessions. The generation
+/// prevents delayed events from an older reader/writer pair from affecting the
+/// newly attached process with the same terminal ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PtyGeneration(u64);
+
+#[derive(Default)]
+struct PtyInstances {
+    current: HashMap<String, PtyGeneration>,
+}
+
+impl PtyInstances {
+    fn register(&mut self, terminal_id: &str, generation: PtyGeneration) {
+        self.current.insert(terminal_id.to_string(), generation);
+    }
+
+    fn is_current(&self, terminal_id: &str, generation: PtyGeneration) -> bool {
+        self.current.get(terminal_id).copied() == Some(generation)
+    }
+
+    /// Claim lifecycle handling for this generation exactly once.
+    fn claim_exit(&mut self, terminal_id: &str, generation: PtyGeneration) -> bool {
+        if !self.is_current(terminal_id, generation) {
+            return false;
+        }
+        self.current.remove(terminal_id);
+        true
+    }
 }
 
 /// Shared shutdown coordination between reader/writer threads
 struct PtyShutdownState {
     broken: AtomicBool,
     terminal_id: String,
+    generation: PtyGeneration,
 }
 
 impl PtyShutdownState {
-    fn new(terminal_id: String) -> Self {
+    fn new(terminal_id: String, generation: PtyGeneration) -> Self {
         Self {
             broken: AtomicBool::new(false),
             terminal_id,
+            generation,
         }
     }
 
@@ -121,8 +159,36 @@ struct TeardownJob {
     kind: TeardownKind,
 }
 
+#[derive(Default)]
+struct TeardownTracker {
+    pending: Mutex<usize>,
+    drained: Condvar,
+}
+
+impl TeardownTracker {
+    fn queued(&self) {
+        *self.pending.lock() += 1;
+    }
+
+    fn completed(&self) {
+        let mut pending = self.pending.lock();
+        *pending = pending.saturating_sub(1);
+        if *pending == 0 {
+            self.drained.notify_all();
+        }
+    }
+
+    fn flush(&self) {
+        let mut pending = self.pending.lock();
+        while *pending != 0 {
+            self.drained.wait(&mut pending);
+        }
+    }
+}
+
 /// Handle to a single PTY process
 struct PtyHandle {
+    generation: PtyGeneration,
     /// `Option` so teardown (`shutdown_handle`) and the `Drop` backstop can both
     /// `take()` it idempotently to close the PTY and unblock the reader thread.
     master: Option<Box<dyn MasterPty + Send>>,
@@ -176,6 +242,8 @@ impl Drop for PtyHandle {
 /// Manages all PTY processes
 pub struct PtyManager {
     terminals: Arc<Mutex<HashMap<String, PtyHandle>>>,
+    instances: Mutex<PtyInstances>,
+    next_generation: AtomicU64,
     event_tx: Sender<PtyEvent>,
     /// Session backend for persistence (tmux/screen/none)
     session_backend: ResolvedBackend,
@@ -195,6 +263,7 @@ pub struct PtyManager {
     /// only so `Drop` can `take()` it and close the channel, signaling workers to
     /// drain remaining jobs and exit.
     teardown_tx: Option<Sender<TeardownJob>>,
+    teardown_tracker: Arc<TeardownTracker>,
 }
 
 impl PtyManager {
@@ -223,15 +292,22 @@ impl PtyManager {
         // one `Receiver` and pull jobs via `recv_blocking`. Unbounded so enqueuing
         // never blocks the GPUI thread; concurrency is bounded by the worker count.
         let (teardown_tx, teardown_rx) = async_channel::unbounded::<TeardownJob>();
+        let teardown_tracker = Arc::new(TeardownTracker::default());
         for i in 0..TEARDOWN_WORKERS {
             let rx = teardown_rx.clone();
+            let tracker = Arc::clone(&teardown_tracker);
             if let Err(e) = std::thread::Builder::new()
                 .name(format!("pty-teardown-{i}"))
                 .spawn(move || {
                     // Exits when the channel is closed AND drained (Drop closes the
                     // sender, then `recv_blocking` returns Err once buffered jobs run).
                     while let Ok(job) = rx.recv_blocking() {
-                        Self::run_teardown_job(job);
+                        if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            Self::run_teardown_job(job);
+                        })) {
+                            log::error!("PTY teardown worker panicked: {}", format_panic(&*panic));
+                        }
+                        tracker.completed();
                     }
                 })
             {
@@ -244,6 +320,8 @@ impl PtyManager {
         (
             Self {
                 terminals: Arc::new(Mutex::new(HashMap::new())),
+                instances: Mutex::new(PtyInstances::default()),
+                next_generation: AtomicU64::new(1),
                 event_tx: tx,
                 session_backend,
                 #[cfg(windows)]
@@ -251,6 +329,7 @@ impl PtyManager {
                 output_sink: Arc::new(Mutex::new(None)),
                 extra_env: Mutex::new(Vec::new()),
                 teardown_tx: Some(teardown_tx),
+                teardown_tracker,
             },
             rx,
         )
@@ -303,6 +382,16 @@ impl PtyManager {
     /// environment. Replaces any previously configured overrides.
     pub fn set_extra_env(&self, env: Vec<(String, Option<String>)>) {
         *self.extra_env.lock() = env;
+    }
+
+    /// Return whether an event belongs to the currently attached PTY instance.
+    pub fn is_current_generation(&self, terminal_id: &str, generation: PtyGeneration) -> bool {
+        self.instances.lock().is_current(terminal_id, generation)
+    }
+
+    /// Return the current generation for diagnostics and event-routing tests.
+    pub fn current_generation(&self, terminal_id: &str) -> Option<PtyGeneration> {
+        self.instances.lock().current.get(terminal_id).copied()
     }
 
     /// Create a new terminal with a PTY process (uses system default shell)
@@ -398,7 +487,8 @@ impl PtyManager {
         let writer: Arc<Mutex<Box<dyn Write + Send>>> =
             Arc::new(Mutex::new(pair.master.take_writer()?));
 
-        let shutdown = Arc::new(PtyShutdownState::new(terminal_id.to_string()));
+        let generation = PtyGeneration(self.next_generation.fetch_add(1, Ordering::Relaxed));
+        let shutdown = Arc::new(PtyShutdownState::new(terminal_id.to_string(), generation));
         let child_pid = child.process_id();
 
         // Spawn reader thread with panic guard
@@ -422,6 +512,7 @@ impl PtyManager {
                     shutdown_panic.mark_broken();
                     let _ = tx_panic.send_blocking(PtyEvent::Exit {
                         terminal_id: id_panic,
+                        generation: shutdown_panic.generation,
                         exit_code: None,
                     });
                 }
@@ -456,15 +547,18 @@ impl PtyManager {
                     shutdown_panic.mark_broken();
                     let _ = tx_panic.send_blocking(PtyEvent::Exit {
                         terminal_id: id_panic,
+                        generation: shutdown_panic.generation,
                         exit_code: None,
                     });
                 }
             })?;
 
         // Store the handle
+        self.instances.lock().register(terminal_id, generation);
         self.terminals.lock().insert(
             terminal_id.to_string(),
             PtyHandle {
+                generation,
                 master: Some(pair.master),
                 child,
                 input_tx: Some(input_tx),
@@ -547,13 +641,13 @@ impl PtyManager {
         use crate::session_backend::resolve_for_wsl;
         use crate::shell_config::windows_path_to_wsl;
 
-        // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
+        // Preserve the exact executable and argv for psmux. In particular,
+        // keep-alive hooks require cmd.exe delayed expansion via `/V:ON`.
         let custom_command = match shell {
-            Some(ShellType::Custom { args, .. })
-                if args.len() == 2 && (args[0] == "-c" || args[0] == "-ic") =>
-            {
-                Some(args[1].as_str())
-            }
+            Some(ShellType::Custom { path, args }) => Some(SessionCommand::Program {
+                program: path,
+                args,
+            }),
             _ => None,
         };
 
@@ -566,10 +660,12 @@ impl PtyManager {
             }
             let session_name = self.session_backend.session_name(terminal_id);
             let extra_env = self.extra_env.lock().clone();
-            match self
-                .session_backend
-                .build_command(&session_name, cwd, custom_command, &extra_env)
-            {
+            match self.session_backend.build_command_with_custom(
+                &session_name,
+                cwd,
+                custom_command,
+                &extra_env,
+            ) {
                 Some((program, args)) => {
                     let mut cmd = CommandBuilder::new(program);
                     for arg in args {
@@ -673,6 +769,7 @@ impl PtyManager {
                     let exit_code = child_pid.and_then(wait_for_exit_code);
                     let _ = tx.send_blocking(PtyEvent::Exit {
                         terminal_id,
+                        generation: shutdown.generation,
                         exit_code,
                     });
                     break;
@@ -696,6 +793,7 @@ impl PtyManager {
                     if tx
                         .send_blocking(PtyEvent::Data {
                             terminal_id: terminal_id.clone(),
+                            generation: shutdown.generation,
                             data,
                             sequence,
                         })
@@ -712,6 +810,7 @@ impl PtyManager {
                     let exit_code = child_pid.and_then(wait_for_exit_code);
                     let _ = tx.send_blocking(PtyEvent::Exit {
                         terminal_id,
+                        generation: shutdown.generation,
                         exit_code,
                     });
                     break;
@@ -744,6 +843,7 @@ impl PtyManager {
                 shutdown.mark_broken();
                 let _ = event_tx.send_blocking(PtyEvent::Exit {
                     terminal_id,
+                    generation: shutdown.generation,
                     exit_code: None,
                 });
                 break;
@@ -852,16 +952,36 @@ impl PtyManager {
     /// inline so a handle is never silently leaked — better to block briefly on the
     /// calling thread than to drop reader/writer threads on the floor.
     fn enqueue_teardown(&self, job: TeardownJob) {
+        self.teardown_tracker.queued();
         match self.teardown_tx.as_ref() {
             Some(tx) => {
                 if let Err(e) = tx.send_blocking(job) {
                     log::warn!("teardown channel closed; running teardown inline");
-                    Self::run_teardown_job(e.into_inner());
+                    self.run_tracked_teardown(e.into_inner());
                 }
             }
             // Sender already taken by Drop — fall back to inline teardown.
-            None => Self::run_teardown_job(job),
+            None => {
+                self.run_tracked_teardown(job);
+            }
         }
+    }
+
+    fn run_tracked_teardown(&self, job: TeardownJob) {
+        if let Err(panic) =
+            std::panic::catch_unwind(AssertUnwindSafe(|| Self::run_teardown_job(job)))
+        {
+            log::error!("PTY teardown panicked: {}", format_panic(&*panic));
+        }
+        self.teardown_tracker.completed();
+    }
+
+    /// Block until every teardown job queued before this call has completed.
+    ///
+    /// Normal kill paths remain asynchronous; graceful shutdown calls this once
+    /// after enqueueing the persistent-session kills it must not abandon.
+    pub fn flush_teardown(&self) {
+        self.teardown_tracker.flush();
     }
 
     /// Perform coordinated shutdown of a single PTY handle
@@ -1232,8 +1352,21 @@ impl PtyManager {
 
     /// Clean up a PtyHandle after the process exited naturally (reader got EOF).
     /// Removes the handle from the internal map and joins threads in the background.
-    pub fn cleanup_exited(&self, terminal_id: &str) {
-        let handle = self.terminals.lock().remove(terminal_id);
+    pub fn cleanup_exited(&self, terminal_id: &str, generation: PtyGeneration) -> bool {
+        if !self.instances.lock().claim_exit(terminal_id, generation) {
+            return false;
+        }
+        let handle = {
+            let mut terminals = self.terminals.lock();
+            if terminals
+                .get(terminal_id)
+                .is_some_and(|handle| handle.generation == generation)
+            {
+                terminals.remove(terminal_id)
+            } else {
+                None
+            }
+        };
         if let Some(handle) = handle {
             // Process already EOF'd — only reap the reader/writer threads. The later
             // `kill()` in the exit-events loop does the session kill (and finds the
@@ -1243,6 +1376,7 @@ impl PtyManager {
                 kind: TeardownKind::ReapOnly,
             });
         }
+        true
     }
 }
 
@@ -1527,4 +1661,48 @@ fn first_proc_child(pid: u32) -> Option<u32> {
 #[cfg(not(unix))]
 fn first_proc_child(_pid: u32) -> Option<u32> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn generation_rejects_delayed_and_duplicate_exits() {
+        let mut instances = PtyInstances::default();
+        let old = PtyGeneration(1);
+        let current = PtyGeneration(2);
+
+        instances.register("t1", old);
+        instances.register("t1", current);
+
+        assert!(!instances.claim_exit("t1", old));
+        assert!(instances.is_current("t1", current));
+        assert!(instances.claim_exit("t1", current));
+        assert!(!instances.claim_exit("t1", current));
+    }
+
+    #[test]
+    fn teardown_flush_waits_for_pending_work() {
+        let tracker = Arc::new(TeardownTracker::default());
+        tracker.queued();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiter_tracker = Arc::clone(&tracker);
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            waiter_tracker.flush();
+            done_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        tracker.completed();
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("flush returns after completion");
+        waiter.join().unwrap();
+    }
 }

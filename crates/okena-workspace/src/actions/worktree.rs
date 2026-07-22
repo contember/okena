@@ -53,6 +53,39 @@ impl WorktreeRemovalPlan {
             monitor,
         )
     }
+
+    /// Complete close hooks while their checkout-backed working directory is valid.
+    pub fn fire_close_hooks_headless(
+        &self,
+        global_hooks: &HooksConfig,
+        monitor: Option<&okena_hooks::HookMonitor>,
+    ) {
+        if let Err(error) = hooks::fire_on_worktree_close_headless_sync(
+            &self.project_hooks,
+            &self.project_id,
+            &self.project_name,
+            &self.project_path,
+            &self.branch,
+            self.folder_id.as_deref(),
+            self.folder_name.as_deref(),
+            global_hooks,
+            monitor,
+        ) {
+            log::warn!("on_worktree_close hook failed: {error}");
+        }
+        if let Err(error) = hooks::fire_on_project_close_headless_sync(
+            &self.project_hooks,
+            &self.project_id,
+            &self.project_name,
+            &self.project_path,
+            self.folder_id.as_deref(),
+            self.folder_name.as_deref(),
+            global_hooks,
+            monitor,
+        ) {
+            log::warn!("on_project_close hook failed: {error}");
+        }
+    }
 }
 
 /// Result of the worktree-close merge pipeline ([`close_worktree_merge_git`]).
@@ -61,13 +94,11 @@ impl WorktreeRemovalPlan {
 pub enum CloseWorktreeGitOutcome {
     /// Merge (or a no-op merge) succeeded. `did_stash` gates `force_remove`.
     Ok { did_stash: bool },
-    /// Rebase hit a conflict. The `on_rebase_conflict` hook produced these
-    /// terminal commands + hook results for the caller to apply under the lock,
-    /// then abort the close with `error`.
+    /// Rebase hit a conflict. The caller executes the deferred hook plan and
+    /// registers its results before aborting the close with `error`.
     RebaseConflict {
         error: String,
-        terminal_actions: Vec<(String, HashMap<String, String>)>,
-        hook_results: Vec<crate::hooks::HookTerminalResult>,
+        hook_plan: Option<hooks::HookActionPlan>,
     },
     /// A git step (or the `pre_merge` hook) failed; stash-pop recovery already ran.
     Err(String),
@@ -90,9 +121,8 @@ fn stash_pop_recover(did_stash: bool, project_path: &str, branch: &str, step: &s
 /// merge → post_merge hook → push → delete-branch, with stash-pop recovery on any
 /// failing step. PURE: only git subprocesses + headless hooks (monitor, no PTY
 /// runner), no `&mut Workspace` — so the daemon runs it on a blocking thread with
-/// no lock held. `on_rebase_conflict` is fired headless (no runner) and its
-/// terminal/hook results are RETURNED for the caller to apply, not spawned here.
-/// Call only when the merge is actually enabled.
+/// no lock held. `on_rebase_conflict` is resolved into a deferred plan for the
+/// caller to execute and register on its reactor. Call only when merge is enabled.
 #[allow(clippy::too_many_arguments)] // cohesive close-pipeline inputs
 pub fn close_worktree_merge_git(
     stash_enabled: bool,
@@ -110,7 +140,6 @@ pub fn close_worktree_merge_git(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
     monitor: Option<&okena_hooks::HookMonitor>,
-    runner: Option<&okena_hooks::HookRunner>,
 ) -> CloseWorktreeGitOutcome {
     use std::path::Path;
     let mut did_stash = false;
@@ -146,10 +175,11 @@ pub fn close_worktree_merge_git(
         return CloseWorktreeGitOutcome::Err(format!("pre_merge hook failed: {}", e));
     }
 
-    // Rebase; on conflict, fire on_rebase_conflict headless and return its data.
+    // Rebase; on conflict, defer the hook until the caller can register any PTY
+    // results before yielding back to its event loop.
     if let Err(e) = okena_git::rebase_onto(Path::new(project_path), default_branch) {
         let error_msg = e.to_string();
-        let (terminal_actions, hook_results) = hooks::fire_on_rebase_conflict(
+        let hook_plan = hooks::plan_on_rebase_conflict(
             project_hooks,
             global_hooks,
             project_id,
@@ -161,14 +191,11 @@ pub fn close_worktree_merge_git(
             &error_msg,
             folder_id,
             folder_name,
-            monitor,
-            runner,
         );
         stash_pop_recover(did_stash, project_path, branch, "rebase");
         return CloseWorktreeGitOutcome::RebaseConflict {
             error: format!("Rebase failed: {}", e),
-            terminal_actions,
-            hook_results,
+            hook_plan,
         };
     }
 
@@ -214,9 +241,9 @@ pub fn close_worktree_merge_git(
 
 #[cfg(test)]
 mod merge_pipeline_tests {
-    use super::{CloseWorktreeGitOutcome, close_worktree_merge_git};
+    use super::{CloseWorktreeGitOutcome, WorktreeRemovalPlan, close_worktree_merge_git};
     use crate::hook_monitor::{HookMonitor, HookStatus};
-    use crate::settings::{HooksConfig, WorktreeHooks};
+    use crate::settings::{HooksConfig, ProjectHooks, WorktreeHooks};
     use std::path::Path;
     use std::process::Command;
 
@@ -313,7 +340,6 @@ mod merge_pipeline_tests {
             None,
             None,
             Some(&monitor),
-            None,
         );
 
         assert!(matches!(
@@ -325,6 +351,46 @@ mod merge_pipeline_tests {
         assert_eq!(history[0].hook_type, "post_merge");
         assert!(matches!(history[0].status, HookStatus::Succeeded { .. }));
         assert!(history[0].terminal_id.is_none());
+    }
+
+    #[test]
+    fn removal_plan_finishes_close_hooks_while_checkout_exists() {
+        let fixture = TestRepo::new();
+        let hooks = HooksConfig {
+            project: ProjectHooks {
+                on_close: Some("echo project > project-close.txt".to_string()),
+                ..Default::default()
+            },
+            worktree: WorktreeHooks {
+                on_close: Some("echo worktree > worktree-close.txt".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = WorktreeRemovalPlan {
+            project_id: "p1".to_string(),
+            worktree_path: fixture.root.clone(),
+            main_repo_path: fixture.root.to_string_lossy().into_owned(),
+            branch: "feature".to_string(),
+            project_hooks: hooks,
+            project_name: "Project".to_string(),
+            project_path: fixture.root.to_string_lossy().into_owned(),
+            folder_id: None,
+            folder_name: None,
+        };
+        let monitor = HookMonitor::new();
+
+        plan.fire_close_hooks_headless(&HooksConfig::default(), Some(&monitor));
+
+        assert!(fixture.root.join("worktree-close.txt").exists());
+        assert!(fixture.root.join("project-close.txt").exists());
+        let history = monitor.history();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .all(|entry| matches!(entry.status, HookStatus::Succeeded { .. }))
+        );
     }
 }
 
@@ -862,21 +928,22 @@ impl Workspace {
         cx: &mut impl WorkspaceCx,
     ) -> Result<(), String> {
         let plan = self.begin_worktree_removal(project_id, global_hooks, cx)?;
+        let monitor = cx.hook_monitor();
+        plan.fire_close_hooks_headless(global_hooks, monitor.as_ref());
         okena_git::remove_worktree(&plan.worktree_path, force).map_err(|e| e.to_string())?;
         self.finish_worktree_removal(focus_manager, &plan, global_hooks, cx);
         Ok(())
     }
 
-    /// Phase 1 of worktree removal: validate, snapshot the inputs the finalize
-    /// step needs, and fire `on_worktree_close` (which needs the worktree to
-    /// still exist for a valid CWD). Returns the plan; the caller then runs
-    /// `git worktree remove` (off-reactor on the daemon) and calls
+    /// Phase 1 of worktree removal: validate and snapshot the inputs the
+    /// off-reactor close hooks and finalize step need. Returns the plan; the
+    /// caller completes its close hooks, runs `git worktree remove`, and calls
     /// [`finish_worktree_removal`](Self::finish_worktree_removal).
     pub fn begin_worktree_removal(
         &mut self,
         project_id: &str,
-        global_hooks: &HooksConfig,
-        cx: &mut impl WorkspaceCx,
+        _global_hooks: &HooksConfig,
+        _cx: &mut impl WorkspaceCx,
     ) -> Result<WorktreeRemovalPlan, String> {
         // Reject removal while the worktree is still being created: the optimistic
         // create registers the row (worktree_info set) and returns before its
@@ -908,20 +975,6 @@ impl Workspace {
         let project_pathbuf = std::path::PathBuf::from(&project_path);
         let worktree_path = okena_git::get_repo_root(&project_pathbuf).unwrap_or(project_pathbuf);
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
-
-        // Fire on_worktree_close BEFORE removal so the hook has a valid CWD.
-        let monitor = cx.hook_monitor();
-        hooks::fire_on_worktree_close_with_services(
-            &project_hooks,
-            project_id,
-            &project_name,
-            &project_path,
-            &branch,
-            folder_id.as_deref(),
-            folder_name.as_deref(),
-            global_hooks,
-            monitor.as_ref(),
-        );
 
         Ok(WorktreeRemovalPlan {
             project_id: project_id.to_string(),
@@ -971,8 +1024,8 @@ impl Workspace {
         Ok(terminal_ids)
     }
 
-    /// Phase 2 of worktree removal (after `git worktree remove` has run): delete
-    /// the project from workspace state (which fires `on_project_close`) and fire
+    /// Phase 2 of worktree removal (after its close hooks and `git worktree
+    /// remove` have run): delete the project from workspace state and fire
     /// the `worktree_removed` hook from the `plan` snapshot. This is the single
     /// convergence point for every removal route, so the hook fires exactly once;
     /// the checkout is gone, so it runs from `main_repo_path` (OKENA_BRANCH still
@@ -985,7 +1038,7 @@ impl Workspace {
         global_hooks: &HooksConfig,
         cx: &mut impl WorkspaceCx,
     ) {
-        self.delete_project(focus_manager, &plan.project_id, global_hooks, cx);
+        self.delete_project_without_project_close(focus_manager, &plan.project_id, cx);
         self.fire_worktree_removed_hook(plan, global_hooks, cx);
     }
 
@@ -1002,9 +1055,7 @@ impl Workspace {
     /// its monitor entry would stay Running forever (only registered hook
     /// terminals are ever finished, by `handle_hook_terminal_exits`). The
     /// headless path runs the command on a background thread and records the
-    /// monitor entry's completion — and any failure — itself. Same shape as
-    /// `on_worktree_close` / `on_project_close`, which also fire headless once
-    /// the row is gone.
+    /// monitor entry's completion — and any failure — itself.
     pub fn fire_worktree_removed_hook(
         &self,
         plan: &WorktreeRemovalPlan,
@@ -1108,14 +1159,15 @@ impl Workspace {
                 folder_id.as_deref(),
                 folder_name.as_deref(),
                 monitor.as_ref(),
-                runner.as_ref(),
             ) {
                 CloseWorktreeGitOutcome::Ok { did_stash } => did_stash,
-                CloseWorktreeGitOutcome::RebaseConflict {
-                    error,
-                    terminal_actions,
-                    hook_results,
-                } => {
+                CloseWorktreeGitOutcome::RebaseConflict { error, hook_plan } => {
+                    let (terminal_actions, hook_results) = hook_plan.map_or_else(
+                        || (Vec::new(), Vec::new()),
+                        |plan| {
+                            hooks::execute_hook_action_plan(plan, monitor.as_ref(), runner.as_ref())
+                        },
+                    );
                     for (cmd, env) in terminal_actions {
                         self.add_terminal_with_command(project_id, &cmd, &env, cx);
                     }
@@ -1210,8 +1262,8 @@ impl Workspace {
                 self.register_hook_results(hook_results, cx);
             }
 
-            // remove_worktree_project fires on_worktree_close + removes the git
-            // worktree + deletes the project (which fires on_project_close).
+            // remove_worktree_project completes close hooks, removes the git
+            // worktree, and deletes the project.
             self.remove_worktree_project(focus_manager, project_id, force_remove, global_hooks, cx)
         }
     }

@@ -24,6 +24,7 @@ use crate::workspace::state::{Workspace, WorkspaceData};
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_workspace::context::WorkspaceCx;
+use std::collections::HashSet;
 
 /// Kill every live PTY, swap the workspace to `data`, then respawn terminals for
 /// every project in the new workspace. Shared by `load_session` + `import`.
@@ -38,6 +39,11 @@ fn replace_workspace_with(
 ) -> ActionResult {
     // Include persisted hook ids from both workspaces: a persistent backend can
     // own them even when this process has no matching registry entry.
+    let outgoing_hook_ids: HashSet<String> = ws
+        .projects()
+        .iter()
+        .flat_map(|project| project.hook_terminals.keys().cloned())
+        .collect();
     let mut ids: Vec<String> = terminals.lock().keys().cloned().collect();
     ids.extend(
         ws.projects()
@@ -51,6 +57,12 @@ fn replace_workspace_with(
     );
     ids.sort();
     ids.dedup();
+    if let Some(monitor) = cx.hook_monitor() {
+        for id in &outgoing_hook_ids {
+            monitor.finish_by_terminal_id(id, None);
+            monitor.notify_exit(id, None);
+        }
+    }
     for id in &ids {
         backend.kill(id);
     }
@@ -65,17 +77,25 @@ fn replace_workspace_with(
 
     // Non-persistent loads have uninitialized layout slots; persistent sessions
     // retain ordinary ids and reconnect through the existing spawn path.
+    let mut materialization_errors = Vec::new();
     for pid in &project_ids {
         if let ActionResult::Err(e) =
             spawn_uninitialized_terminals(ws, pid, backend, terminals, settings, None, cx)
         {
-            return ActionResult::Err(e);
+            materialization_errors.push(format!("{pid}: {e}"));
         }
     }
     for pid in &project_ids {
         ws.fire_project_open_hooks(pid, &settings.hooks, cx);
     }
-    ActionResult::Ok(None)
+    if materialization_errors.is_empty() {
+        ActionResult::Ok(None)
+    } else {
+        ActionResult::Err(format!(
+            "workspace loaded with terminal materialization errors: {}",
+            materialization_errors.join("; ")
+        ))
+    }
 }
 
 pub(super) fn load_session_action(
@@ -162,7 +182,7 @@ mod tests {
     use crate::workspace::hooks::HookRunner;
     use crate::workspace::settings::{HooksConfig, ProjectHooks};
     use crate::workspace::state::{
-        HookTerminalEntry, HookTerminalStatus, ProjectData, WindowState,
+        HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, WindowState,
     };
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
@@ -183,6 +203,7 @@ mod tests {
     struct RecordingBackend {
         next_id: AtomicUsize,
         killed: Mutex<Vec<String>>,
+        fail_next_cwds: Mutex<HashSet<String>>,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -190,11 +211,10 @@ mod tests {
             Arc::new(StubTransport)
         }
 
-        fn create_terminal(
-            &self,
-            _cwd: &str,
-            _shell: Option<&ShellType>,
-        ) -> anyhow::Result<String> {
+        fn create_terminal(&self, cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
+            if self.fail_next_cwds.lock().unwrap().remove(cwd) {
+                anyhow::bail!("requested failure for {cwd}");
+            }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             Ok(format!("created-{id}"))
         }
@@ -291,11 +311,15 @@ mod tests {
     }
 
     fn data(project: ProjectData) -> WorkspaceData {
-        let id = project.id.clone();
+        data_many(vec![project])
+    }
+
+    fn data_many(projects: Vec<ProjectData>) -> WorkspaceData {
+        let project_order = projects.iter().map(|project| project.id.clone()).collect();
         WorkspaceData {
             version: 1,
-            projects: vec![project],
-            project_order: vec![id],
+            projects,
+            project_order,
             service_panel_heights: HashMap::new(),
             hook_panel_heights: HashMap::new(),
             folders: Vec::new(),
@@ -309,6 +333,7 @@ mod tests {
         let backend = Arc::new(RecordingBackend {
             next_id: AtomicUsize::new(1),
             killed: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::new()),
         });
         let terminals: TerminalsRegistry = Arc::new(Default::default());
         let runner = HookRunner::new(backend.clone(), terminals.clone());
@@ -342,5 +367,124 @@ mod tests {
         let history = monitor.history();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].hook_type, "on_project_open");
+    }
+
+    #[test]
+    fn replacement_attempts_every_project_and_reports_aggregated_materialization_errors() {
+        let failed_cwd = std::env::temp_dir().join("okena-session-failed");
+        let successful_cwd = std::env::temp_dir().join("okena-session-successful");
+        let backend = Arc::new(RecordingBackend {
+            next_id: AtomicUsize::new(1),
+            killed: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::from([failed_cwd.to_string_lossy().into_owned()])),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let runner = HookRunner::new(backend.clone(), terminals.clone());
+        let monitor = HookMonitor::new();
+        let mut cx = TestCx {
+            runner,
+            monitor: monitor.clone(),
+        };
+        let mut workspace = Workspace::new(WorkspaceData::empty());
+        let mut focus = FocusManager::default();
+
+        let mut failed = project("failed", "failed-old-hook", Some("echo failed-open"));
+        failed.path = failed_cwd.to_string_lossy().into_owned();
+        failed.layout = Some(LayoutNode::Terminal {
+            terminal_id: None,
+            shell_type: ShellType::Default,
+            minimized: false,
+            detached: false,
+            zoom_level: 1.0,
+        });
+        let mut successful = project(
+            "successful",
+            "successful-old-hook",
+            Some("echo successful-open"),
+        );
+        successful.path = successful_cwd.to_string_lossy().into_owned();
+        successful.layout = Some(LayoutNode::Terminal {
+            terminal_id: None,
+            shell_type: ShellType::Default,
+            minimized: false,
+            detached: false,
+            zoom_level: 1.0,
+        });
+
+        let result = replace_workspace_with(
+            &mut workspace,
+            &mut focus,
+            data_many(vec![failed, successful]),
+            backend.as_ref(),
+            &terminals,
+            &AppSettings::default(),
+            &mut cx,
+        );
+
+        let ActionResult::Err(error) = result else {
+            panic!("one project materialization should fail");
+        };
+        assert!(error.contains("failed: failed to spawn terminal"));
+        assert!(workspace.project("successful").is_some());
+        assert!(
+            workspace
+                .project("successful")
+                .and_then(|project| project.layout.as_ref())
+                .is_some_and(|layout| matches!(
+                    layout,
+                    LayoutNode::Terminal {
+                        terminal_id: Some(_),
+                        ..
+                    }
+                ))
+        );
+        let history = monitor.history();
+        assert_eq!(history.len(), 2, "every project-open lifecycle must run");
+        assert!(history.iter().any(|entry| entry.project_name == "failed"));
+        assert!(
+            history
+                .iter()
+                .any(|entry| entry.project_name == "successful")
+        );
+    }
+
+    #[test]
+    fn replacement_finishes_outgoing_hook_monitor_before_dropping_ownership() {
+        let backend = Arc::new(RecordingBackend {
+            next_id: AtomicUsize::new(1),
+            killed: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::new()),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let runner = HookRunner::new(backend.clone(), terminals.clone());
+        let monitor = HookMonitor::new();
+        monitor.record_start_named(
+            "on_project_open",
+            "sleep 10",
+            "old",
+            Some("outgoing-hook".to_string()),
+        );
+        let mut cx = TestCx {
+            runner,
+            monitor: monitor.clone(),
+        };
+        let mut workspace = Workspace::new(data(project("old", "outgoing-hook", None)));
+        let mut focus = FocusManager::default();
+
+        let result = replace_workspace_with(
+            &mut workspace,
+            &mut focus,
+            WorkspaceData::empty(),
+            backend.as_ref(),
+            &terminals,
+            &AppSettings::default(),
+            &mut cx,
+        );
+
+        assert!(matches!(result, ActionResult::Ok(_)));
+        assert!(monitor.history().iter().all(|execution| !matches!(
+            execution.status,
+            crate::workspace::hook_monitor::HookStatus::Running
+        )));
     }
 }

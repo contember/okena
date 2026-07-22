@@ -34,10 +34,40 @@ impl gpui::Global for HookRunner {}
 
 /// Pending terminal-backed hook actions paired with their env vars, returned
 /// alongside the `HookTerminalResult`s produced by background PTY commands.
-type HookActionOutcome = (
+pub type HookActionOutcome = (
     Vec<(String, HashMap<String, String>)>,
     Vec<HookTerminalResult>,
 );
+
+/// Hook actions resolved off-reactor and deferred until their owner can
+/// register any spawned PTYs before yielding back to the event loop.
+#[derive(Clone)]
+pub struct HookActionPlan {
+    command: String,
+    env_vars: HashMap<String, String>,
+    hook_type: &'static str,
+    project_name: String,
+    project_id: String,
+    keep_alive: bool,
+}
+
+/// Execute a previously resolved hook plan with the caller's PTY services.
+pub fn execute_hook_action_plan(
+    plan: HookActionPlan,
+    monitor: Option<&HookMonitor>,
+    runner: Option<&HookRunner>,
+) -> HookActionOutcome {
+    run_hook_actions(
+        &plan.command,
+        plan.env_vars,
+        monitor,
+        plan.hook_type,
+        &plan.project_name,
+        runner,
+        &plan.project_id,
+        plan.keep_alive,
+    )
+}
 
 /// Result of a hook execution via PTY.
 #[derive(Clone)]
@@ -501,6 +531,7 @@ fn run_hook_sync(
             project_path.clone()
         };
 
+        let exit_reservation = monitor.reserve_exit_waiter();
         let (terminal_id, full_cmd) =
             runner.create_hook_terminal(command, &env_vars, &project_path, false)?;
 
@@ -508,7 +539,7 @@ fn run_hook_sync(
         let _ = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
 
         // Register exit waiter and block until the PTY process exits (5 min timeout)
-        let rx = monitor.register_exit_waiter(&terminal_id);
+        let rx = exit_reservation.bind(&terminal_id);
 
         let exit_code = rx.recv_timeout(std::time::Duration::from_secs(300))
             .map_err(|e| match e {
@@ -695,6 +726,43 @@ pub fn fire_on_project_close(
     }
 }
 
+/// Run `on_project_close` to completion without creating a project-owned PTY.
+pub fn fire_on_project_close_headless_sync(
+    project_hooks: &HooksConfig,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    global_hooks: &HooksConfig,
+    monitor: Option<&HookMonitor>,
+) -> Result<(), String> {
+    let Some(command) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_close) else {
+        return Ok(());
+    };
+    let env = project_env(
+        project_id,
+        project_name,
+        project_path,
+        folder_id,
+        folder_name,
+    );
+    log::info!(
+        "Running on_project_close hook for project '{}'",
+        project_name
+    );
+    run_hook_sync(
+        &command,
+        env,
+        monitor,
+        "on_project_close",
+        project_name,
+        None,
+        project_id,
+    )?;
+    Ok(())
+}
+
 /// Fire the `on_worktree_create` hook after a worktree is successfully created.
 ///
 /// GPUI-free: takes the `HookRunner`/`HookMonitor` services explicitly.
@@ -777,6 +845,47 @@ pub fn fire_on_worktree_close_with_services(
             true,
         );
     }
+}
+
+/// Run `on_worktree_close` to completion while its checkout still exists.
+#[allow(clippy::too_many_arguments)]
+pub fn fire_on_worktree_close_headless_sync(
+    project_hooks: &HooksConfig,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    branch: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    global_hooks: &HooksConfig,
+    monitor: Option<&HookMonitor>,
+) -> Result<(), String> {
+    let Some(command) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_close) else {
+        return Ok(());
+    };
+    let mut env = project_env(
+        project_id,
+        project_name,
+        project_path,
+        folder_id,
+        folder_name,
+    );
+    env.insert("OKENA_BRANCH".into(), branch.into());
+    log::info!(
+        "Running on_worktree_close hook for project '{}' (branch: {})",
+        project_name,
+        branch
+    );
+    run_hook_sync(
+        &command,
+        env,
+        monitor,
+        "on_worktree_close",
+        project_name,
+        None,
+        project_id,
+    )?;
+    Ok(())
 }
 
 /// GPUI wrapper around [`fire_on_worktree_close_with_services`]: reads the
@@ -1052,10 +1161,9 @@ pub fn fire_before_worktree_remove_async(
     Vec::new()
 }
 
-/// Fire the `on_rebase_conflict` hook.
-/// Background actions fire immediately. Returns terminal actions for the caller to spawn,
-/// and any HookTerminalResult values from PTY-backed background commands.
-pub fn fire_on_rebase_conflict(
+/// Resolve `on_rebase_conflict` without spawning any PTYs.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_on_rebase_conflict(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
     project_id: &str,
@@ -1067,9 +1175,7 @@ pub fn fire_on_rebase_conflict(
     rebase_error: &str,
     folder_id: Option<&str>,
     folder_name: Option<&str>,
-    monitor: Option<&HookMonitor>,
-    runner: Option<&HookRunner>,
-) -> HookActionOutcome {
+) -> Option<HookActionPlan> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| {
         &h.worktree.on_rebase_conflict
     }) {
@@ -1088,18 +1194,51 @@ pub fn fire_on_rebase_conflict(
             "Running on_rebase_conflict hook for project '{}'",
             project_name
         );
-        return run_hook_actions(
-            &cmd,
-            env,
-            monitor,
-            "on_rebase_conflict",
-            project_name,
-            runner,
-            project_id,
-            true,
-        );
+        return Some(HookActionPlan {
+            command: cmd,
+            env_vars: env,
+            hook_type: "on_rebase_conflict",
+            project_name: project_name.to_string(),
+            project_id: project_id.to_string(),
+            keep_alive: true,
+        });
     }
-    (Vec::new(), Vec::new())
+    None
+}
+
+/// Fire the `on_rebase_conflict` hook immediately.
+#[allow(clippy::too_many_arguments)]
+pub fn fire_on_rebase_conflict(
+    project_hooks: &HooksConfig,
+    global_hooks: &HooksConfig,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    branch: &str,
+    target_branch: &str,
+    main_repo_path: &str,
+    rebase_error: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    monitor: Option<&HookMonitor>,
+    runner: Option<&HookRunner>,
+) -> HookActionOutcome {
+    let Some(plan) = plan_on_rebase_conflict(
+        project_hooks,
+        global_hooks,
+        project_id,
+        project_name,
+        project_path,
+        branch,
+        target_branch,
+        main_repo_path,
+        rebase_error,
+        folder_id,
+        folder_name,
+    ) else {
+        return (Vec::new(), Vec::new());
+    };
+    execute_hook_action_plan(plan, monitor, runner)
 }
 
 /// Fire the `on_dirty_worktree_close` hook.
@@ -1529,6 +1668,37 @@ mod tests {
         assert_eq!(terminal_actions.len(), 1);
         assert_eq!(terminal_actions[0].0, "my-cmd");
         assert_eq!(terminal_actions[0].1.get("KEY").unwrap(), "val");
+    }
+
+    #[test]
+    fn rebase_conflict_plan_defers_actions_until_execution() {
+        let hooks = HooksConfig {
+            worktree: WorktreeHooks {
+                on_rebase_conflict: Some("terminal: fix-conflict".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = plan_on_rebase_conflict(
+            &hooks,
+            &HooksConfig::default(),
+            "p1",
+            "Project",
+            ".",
+            "feature",
+            "main",
+            ".",
+            "conflict",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let (terminal_actions, hook_results) = execute_hook_action_plan(plan, None, None);
+
+        assert_eq!(terminal_actions.len(), 1);
+        assert_eq!(terminal_actions[0].0, "fix-conflict");
+        assert!(hook_results.is_empty());
     }
 
     #[test]

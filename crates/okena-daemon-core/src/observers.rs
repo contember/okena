@@ -29,7 +29,7 @@
 //!   service-manager mutex at the same time: lock → snapshot → drop → lock the
 //!   other.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -52,6 +52,13 @@ struct ProjectSnapshot {
     path: String,
     is_remote: bool,
     service_terminals: std::collections::HashMap<String, String>,
+    data_replacement_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KnownProject {
+    path: String,
+    data_replacement_epoch: u64,
 }
 
 impl DaemonReactor {
@@ -128,7 +135,7 @@ async fn workspace_tick_task(
 ) {
     // Projects already loaded into the service manager — the GUI's `known` set,
     // kept across passes to make the diff idempotent.
-    let mut known: HashSet<String> = HashSet::new();
+    let mut known: HashMap<String, KnownProject> = HashMap::new();
 
     // Mirror the GUI's initial load: run one diff pass before awaiting ticks so
     // persisted projects get their services loaded at startup.
@@ -291,11 +298,12 @@ fn run_services_sync(
     service_manager: &SharedServiceManager,
     runtime: &tokio::runtime::Handle,
     service_tick: &tokio::sync::watch::Sender<u64>,
-    known: &mut HashSet<String>,
+    known: &mut HashMap<String, KnownProject>,
 ) {
     // Lock scope 1: snapshot the projects, then drop the workspace lock.
     let projects: Vec<ProjectSnapshot> = {
         let ws = workspace.lock();
+        let data_replacement_epoch = ws.data_replacement_epoch();
         ws.data()
             .projects
             .iter()
@@ -304,6 +312,7 @@ fn run_services_sync(
                 path: p.path.clone(),
                 is_remote: p.is_remote,
                 service_terminals: p.service_terminals.clone(),
+                data_replacement_epoch,
             })
             .collect()
     };
@@ -323,11 +332,12 @@ fn run_services_sync(
 
 /// GPUI-free port of `okena-app`'s `app/mod.rs::sync_services`: diff the current
 /// non-remote, on-disk project set against `known` and load/unload service
-/// configs accordingly. Idempotent — a project already in `known` is skipped, so
-/// repeated passes converge to no-ops (the re-entrancy guard).
+/// configs accordingly. The convergence key includes the workspace replacement
+/// epoch and service-owning project data, so loading a session cannot preserve a
+/// stale manager merely because the new project reused the same id.
 fn sync_services(
     projects: &[ProjectSnapshot],
-    known: &mut HashSet<String>,
+    known: &mut HashMap<String, KnownProject>,
     sm: &mut ServiceManager,
     cx: &mut impl ServiceCx,
 ) {
@@ -338,18 +348,32 @@ fn sync_services(
         .collect();
 
     for p in projects {
-        if p.is_remote || known.contains(&p.id) {
+        if p.is_remote {
             continue;
+        }
+        let identity = KnownProject {
+            path: p.path.clone(),
+            data_replacement_epoch: p.data_replacement_epoch,
+        };
+        if known.get(&p.id) == Some(&identity) && sm.project_path(&p.id) == Some(&p.path) {
+            continue;
+        }
+        if known.remove(&p.id).is_some() || sm.project_path(&p.id).is_some() {
+            sm.unload_project_services(&p.id, cx);
         }
         // Skip projects whose directory doesn't exist yet (deferred worktrees).
         if !std::path::Path::new(&p.path).exists() {
             continue;
         }
         sm.load_project_services(&p.id, &p.path, &p.service_terminals, cx);
-        known.insert(p.id.clone());
+        known.insert(p.id.clone(), identity);
     }
 
-    let removed: Vec<String> = known.difference(&current_ids).cloned().collect();
+    let removed: Vec<String> = known
+        .keys()
+        .filter(|id| !current_ids.contains(*id))
+        .cloned()
+        .collect();
     for id in &removed {
         sm.unload_project_services(id, cx);
         known.remove(id);
@@ -368,6 +392,7 @@ mod tests {
             path: path.to_string(),
             is_remote,
             service_terminals: Default::default(),
+            data_replacement_epoch: 0,
         }
     }
 
@@ -405,7 +430,7 @@ mod tests {
             project("local", &existing_path(), false),
             project("remote", &existing_path(), true),
         ];
-        let mut known = HashSet::new();
+        let mut known = HashMap::new();
 
         {
             let mut guard = sm.lock();
@@ -414,8 +439,8 @@ mod tests {
         }
 
         // Non-remote, on-disk project is tracked; remote project is skipped.
-        assert!(known.contains("local"));
-        assert!(!known.contains("remote"));
+        assert!(known.contains_key("local"));
+        assert!(!known.contains_key("remote"));
     }
 
     #[tokio::test]
@@ -424,7 +449,7 @@ mod tests {
         let rr = reactor_ref(&sm);
 
         let projects = vec![project("ghost", "/path/that/does/not/exist/okena", false)];
-        let mut known = HashSet::new();
+        let mut known = HashMap::new();
 
         {
             let mut guard = sm.lock();
@@ -433,7 +458,7 @@ mod tests {
         }
 
         // Deferred worktree (missing dir) is NOT tracked, so a later pass retries.
-        assert!(!known.contains("ghost"));
+        assert!(!known.contains_key("ghost"));
     }
 
     #[tokio::test]
@@ -442,14 +467,14 @@ mod tests {
         let rr = reactor_ref(&sm);
 
         // Pass 1: load a local project.
-        let mut known = HashSet::new();
+        let mut known = HashMap::new();
         {
             let projects = vec![project("local", &existing_path(), false)];
             let mut guard = sm.lock();
             let mut cx = rr.cx();
             sync_services(&projects, &mut known, &mut guard, &mut cx);
         }
-        assert!(known.contains("local"));
+        assert!(known.contains_key("local"));
 
         // Pass 2: the project is gone from the workspace → it is unloaded.
         {
@@ -458,7 +483,7 @@ mod tests {
             let mut cx = rr.cx();
             sync_services(&projects, &mut known, &mut guard, &mut cx);
         }
-        assert!(!known.contains("local"));
+        assert!(!known.contains_key("local"));
     }
 
     #[tokio::test]
@@ -467,7 +492,7 @@ mod tests {
         let rr = reactor_ref(&sm);
 
         let projects = vec![project("local", &existing_path(), false)];
-        let mut known = HashSet::new();
+        let mut known = HashMap::new();
 
         // First pass loads and tracks.
         {
@@ -475,7 +500,7 @@ mod tests {
             let mut cx = rr.cx();
             sync_services(&projects, &mut known, &mut guard, &mut cx);
         }
-        let known_after_first: HashSet<String> = known.clone();
+        let known_after_first = known.clone();
 
         // Second pass with the same project set is a no-op (already in `known`).
         {
@@ -484,6 +509,77 @@ mod tests {
             sync_services(&projects, &mut known, &mut guard, &mut cx);
         }
         assert_eq!(known, known_after_first);
+    }
+
+    #[tokio::test]
+    async fn sync_services_reconciles_reused_id_after_data_replacement() {
+        let sm = std::sync::Arc::new(parking_lot::Mutex::new(manager()));
+        let rr = reactor_ref(&sm);
+        let first_path = existing_path();
+        let second_path = std::path::Path::new(&first_path)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut known = HashMap::new();
+
+        {
+            let projects = vec![project("reused", &first_path, false)];
+            let mut guard = sm.lock();
+            let mut cx = rr.cx();
+            sync_services(&projects, &mut known, &mut guard, &mut cx);
+        }
+
+        {
+            let mut replacement = project("reused", &second_path, false);
+            replacement.data_replacement_epoch = 1;
+            let mut guard = sm.lock();
+            let mut cx = rr.cx();
+            sync_services(&[replacement], &mut known, &mut guard, &mut cx);
+        }
+
+        assert_eq!(sm.lock().project_path("reused"), Some(&second_path));
+        assert_eq!(
+            known
+                .get("reused")
+                .map(|entry| entry.data_replacement_epoch),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_services_unloads_changed_missing_path_and_reloads_after_recovery() {
+        let sm = std::sync::Arc::new(parking_lot::Mutex::new(manager()));
+        let rr = reactor_ref(&sm);
+        let mut known = HashMap::new();
+
+        {
+            let projects = vec![project("local", &existing_path(), false)];
+            let mut guard = sm.lock();
+            let mut cx = rr.cx();
+            sync_services(&projects, &mut known, &mut guard, &mut cx);
+        }
+
+        {
+            let mut missing = project("local", "/path/that/does/not/exist/okena", false);
+            missing.data_replacement_epoch = 1;
+            let mut guard = sm.lock();
+            let mut cx = rr.cx();
+            sync_services(&[missing], &mut known, &mut guard, &mut cx);
+        }
+        assert!(!known.contains_key("local"));
+        assert!(sm.lock().project_path("local").is_none());
+
+        {
+            let mut recovered = project("local", &existing_path(), false);
+            recovered.data_replacement_epoch = 1;
+            let mut guard = sm.lock();
+            let mut cx = rr.cx();
+            sync_services(&[recovered], &mut known, &mut guard, &mut cx);
+        }
+        assert!(known.contains_key("local"));
+        let recovered_path = existing_path();
+        assert_eq!(sm.lock().project_path("local"), Some(&recovered_path));
     }
 
     /// End-to-end-ish: spawn the observer tasks on a LocalSet, bump
