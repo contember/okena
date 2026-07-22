@@ -50,7 +50,9 @@
 //! status into `StateResponse` for a client-side hooks panel is a follow-up.)
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -80,6 +82,30 @@ fn kill_stale_terminal_sessions(
 ) {
     for session in sessions {
         backend.kill_session(session);
+    }
+}
+
+/// Keep polling the command loop until its provisional backend migration ends.
+async fn finish_backend_migration_before_shutdown<F>(
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &mut watch::Receiver<u64>,
+    mut command_loop: Pin<&mut F>,
+) where
+    F: Future<Output = ()>,
+{
+    while workspace
+        .lock()
+        .terminal_backend_migration_epoch()
+        .is_some()
+    {
+        tokio::select! {
+            _ = command_loop.as_mut() => return,
+            changed = workspace_tick.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -468,19 +494,34 @@ impl DaemonCore {
                 soft_close_deadlines,
                 git_poll_trigger_tx,
             );
-            tokio::select! {
-                _ = cmd => log::info!("daemon command loop ended (remote server gone)"),
+            tokio::pin!(cmd);
+            let interrupted = tokio::select! {
+                _ = &mut cmd => {
+                    log::info!("daemon command loop ended (remote server gone)");
+                    false
+                },
                 r = tokio::signal::ctrl_c() => {
                     if let Err(e) = r {
                         log::warn!("ctrl-c handler error: {e}");
                     }
                     log::info!("daemon received ctrl-c, shutting down");
+                    true
                 }
                 // A client-aware `POST /v1/shutdown` accepted: return so the
                 // teardown below runs cleanly (no successor to hand off to).
                 _ = shutdown_requested.notified() => {
                     log::info!("daemon received shutdown request, shutting down");
+                    true
                 }
+            };
+            if interrupted {
+                let mut migration_tick = reactor.workspace_tick.subscribe();
+                finish_backend_migration_before_shutdown(
+                    &reactor.workspace,
+                    &mut migration_tick,
+                    cmd.as_mut(),
+                )
+                .await;
             }
         });
         // Cancel every LocalSet task first, then stop accepting new requests.
@@ -741,6 +782,91 @@ mod shutdown_tests {
         assert!(saved.load(Ordering::Relaxed));
         assert!(killed.lock().contains(&"persistent-hook".to_string()));
         assert!(workspace.lock().drain_pending_terminal_kills().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_backend_migration_before_final_save() {
+        let mut data = WorkspaceData::empty();
+        data.projects.push(okena_state::ProjectData {
+            id: "p1".to_string(),
+            name: "Project".to_string(),
+            path: "/tmp".to_string(),
+            layout: Some(okena_state::LayoutNode::Terminal {
+                terminal_id: Some("ordinary".to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            }),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        });
+        data.project_order.push("p1".to_string());
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let migration = workspace
+            .lock()
+            .begin_terminal_backend_migration(SessionBackend::None, &ShellType::Default)
+            .expect("begin migration");
+        let (workspace_tick, mut migration_tick) = watch::channel(0u64);
+        let completion_workspace = workspace.clone();
+        let completion_tick = workspace_tick.clone();
+        let completion_migration = migration.clone();
+        let command = async move {
+            tokio::task::yield_now().await;
+            let no_hook_runner = None;
+            let no_hook_monitor = None;
+            let mut cx = crate::workspace_cx::DaemonWorkspaceCx::new(
+                &completion_tick,
+                &no_hook_runner,
+                &no_hook_monitor,
+            );
+            let mut workspace = completion_workspace.lock();
+            workspace
+                .restore_terminal_backend_migration_slots(&completion_migration)
+                .expect("restore ownership");
+            workspace.finish_terminal_backend_migration(completion_migration.epoch, &mut cx);
+        };
+        tokio::pin!(command);
+
+        finish_backend_migration_before_shutdown(&workspace, &mut migration_tick, command.as_mut())
+            .await;
+
+        let backend = RecordingBackend {
+            killed: Arc::new(Mutex::new(Vec::new())),
+            routed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        flush_shutdown_state(
+            &workspace,
+            &backend,
+            &terminals,
+            || {},
+            || {},
+            |saved| {
+                assert!(matches!(
+                    saved.projects[0].layout.as_ref(),
+                    Some(okena_state::LayoutNode::Terminal {
+                        terminal_id: Some(terminal_id),
+                        ..
+                    }) if terminal_id == "ordinary"
+                ));
+                Ok(())
+            },
+        )
+        .expect("save restored workspace");
     }
 
     #[test]
