@@ -1,4 +1,6 @@
 use crate::pty_manager::PtyManager;
+#[cfg(windows)]
+use crate::session_backend::ResolvedBackend;
 use crate::shell_config::ShellType;
 use crate::terminal::TerminalTransport;
 use anyhow::Result;
@@ -6,18 +8,99 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Exact startup command carried separately from the shell used to route it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalLaunchCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// Transient launch data; only `route` comes from persisted workspace state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalLaunchPlan {
+    pub route: ShellType,
+    pub initial_command: Option<TerminalLaunchCommand>,
+}
+
+impl TerminalLaunchPlan {
+    pub fn for_shell(route: ShellType) -> Self {
+        Self {
+            route,
+            initial_command: None,
+        }
+    }
+
+    fn legacy_shell(&self) -> ShellType {
+        self.initial_command.as_ref().map_or_else(
+            || self.route.clone(),
+            |command| ShellType::Custom {
+                path: command.program.clone(),
+                args: command.args.clone(),
+            },
+        )
+    }
+}
+
+/// Route needed to remove a persistent session when no live PTY handle exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalTeardownRoute {
+    Host,
+    #[cfg(windows)]
+    Wsl {
+        distro: Option<String>,
+        backend: ResolvedBackend,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalSessionTeardown {
+    pub terminal_id: String,
+    pub route: TerminalTeardownRoute,
+}
+
+impl TerminalSessionTeardown {
+    pub fn host(terminal_id: String) -> Self {
+        Self {
+            terminal_id,
+            route: TerminalTeardownRoute::Host,
+        }
+    }
+}
+
+impl PartialEq<String> for TerminalSessionTeardown {
+    fn eq(&self, other: &String) -> bool {
+        self.terminal_id == *other
+    }
+}
+
 /// Terminal lifecycle management trait.
 /// Used by TerminalPane and LayoutContainer.
 pub trait TerminalBackend: Send + Sync {
     fn transport(&self) -> Arc<dyn TerminalTransport>;
     fn create_terminal(&self, cwd: &str, shell: Option<&ShellType>) -> Result<String>;
+    fn create_terminal_with_plan(&self, cwd: &str, plan: &TerminalLaunchPlan) -> Result<String> {
+        let shell = plan.legacy_shell();
+        self.create_terminal(cwd, Some(&shell))
+    }
     fn reconnect_terminal(
         &self,
         terminal_id: &str,
         cwd: &str,
         shell: Option<&ShellType>,
     ) -> Result<String>;
+    fn reconnect_terminal_with_plan(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        plan: &TerminalLaunchPlan,
+    ) -> Result<String> {
+        let shell = plan.legacy_shell();
+        self.reconnect_terminal(terminal_id, cwd, Some(&shell))
+    }
     fn kill(&self, terminal_id: &str);
+    fn kill_session(&self, teardown: &TerminalSessionTeardown) {
+        self.kill(&teardown.terminal_id);
+    }
     /// Wait for teardown work queued before this call to finish.
     fn flush_teardown(&self) {}
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf>;
@@ -64,6 +147,10 @@ impl TerminalBackend for LocalBackend {
         self.pty_manager.create_terminal_with_shell(cwd, shell)
     }
 
+    fn create_terminal_with_plan(&self, cwd: &str, plan: &TerminalLaunchPlan) -> Result<String> {
+        self.pty_manager.create_terminal_with_plan(cwd, plan)
+    }
+
     fn reconnect_terminal(
         &self,
         terminal_id: &str,
@@ -74,8 +161,22 @@ impl TerminalBackend for LocalBackend {
             .create_or_reconnect_terminal_with_shell(Some(terminal_id), cwd, shell)
     }
 
+    fn reconnect_terminal_with_plan(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        plan: &TerminalLaunchPlan,
+    ) -> Result<String> {
+        self.pty_manager
+            .create_or_reconnect_terminal_with_plan(Some(terminal_id), cwd, plan)
+    }
+
     fn kill(&self, terminal_id: &str) {
         self.pty_manager.kill(terminal_id)
+    }
+
+    fn kill_session(&self, teardown: &TerminalSessionTeardown) {
+        self.pty_manager.kill_session(teardown)
     }
 
     fn flush_teardown(&self) {

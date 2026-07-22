@@ -22,7 +22,7 @@ use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{LayoutNode, WindowId, Workspace};
 use okena_core::api::{ActionRequest, CommandResult};
 use okena_terminal::TerminalsRegistry;
-use okena_terminal::backend::TerminalBackend;
+use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_workspace::context::WorkspaceCx;
@@ -580,43 +580,17 @@ pub fn ensure_terminal(
             && let Some(path) = layout.find_terminal_path(terminal_id)
             && let Some(LayoutNode::Terminal { shell_type, .. }) = layout.get_at_path(&path)
         {
-            let parent_hooks = project
-                .worktree_info
-                .as_ref()
-                .and_then(|worktree| ws.project(&worktree.parent_project_id))
-                .map(|parent| &parent.hooks);
-            let shell_wrapper =
-                hooks::resolve_shell_wrapper(&project.hooks, parent_hooks, &settings.hooks);
-            let on_create = hooks::resolve_terminal_on_create_simple(
-                &project.hooks,
-                parent_hooks,
-                &settings.hooks,
-            );
-            let folder = ws.folder_for_project_or_parent(&project.id);
-            let env = hooks::terminal_hook_env(
-                &project.id,
-                &project.name,
-                &project.path,
-                project.worktree_info.is_some(),
-                folder.map(|folder| folder.id.as_str()),
-                folder.map(|folder| folder.name.as_str()),
-            );
-            let shell = effective_terminal_shell(
-                shell_type.clone(),
-                project.default_shell.as_ref(),
-                &settings.default_shell,
-                shell_wrapper.as_deref(),
-                on_create.as_deref(),
-                &env,
-            );
-            reconnect = Some((project.path.clone(), shell));
+            let shell = shell_type
+                .clone()
+                .resolve_default(project.default_shell.as_ref(), &settings.default_shell);
+            reconnect = Some((project.path.clone(), TerminalLaunchPlan::for_shell(shell)));
             break;
         }
     }
-    let (cwd, shell) = reconnect?;
+    let (cwd, plan) = reconnect?;
 
     // Spawn PTY via backend
-    match backend.reconnect_terminal(terminal_id, &cwd, Some(&shell)) {
+    match backend.reconnect_terminal_with_plan(terminal_id, &cwd, &plan) {
         Ok(_id) => {
             let terminal = Arc::new(Terminal::new(
                 terminal_id.to_string(),
@@ -637,22 +611,16 @@ pub fn ensure_terminal(
     }
 }
 
-fn effective_terminal_shell(
+fn effective_terminal_launch(
     shell_type: ShellType,
     project_default_shell: Option<&ShellType>,
     global_default_shell: &ShellType,
     shell_wrapper: Option<&str>,
     on_create: Option<&str>,
     env: &HashMap<String, String>,
-) -> ShellType {
-    let mut shell = shell_type.resolve_default(project_default_shell, global_default_shell);
-    if let Some(wrapper) = shell_wrapper {
-        shell = hooks::apply_shell_wrapper(&shell, wrapper, env);
-    }
-    if let Some(command) = on_create {
-        shell = hooks::apply_on_create(&shell, command, env);
-    }
-    shell
+) -> TerminalLaunchPlan {
+    let shell = shell_type.resolve_default(project_default_shell, global_default_shell);
+    hooks::terminal_launch_plan(shell, shell_wrapper, on_create, env)
 }
 
 /// Spawn PTYs for any uninitialized terminals (`terminal_id: None`) in a project's layout.
@@ -756,7 +724,7 @@ pub fn spawn_uninitialized_terminals(
 
     let mut spawned_ids = Vec::new();
     for (path, shell_type) in uninitialized {
-        let shell = effective_terminal_shell(
+        let plan = effective_terminal_launch(
             shell_type,
             project_default_shell.as_ref(),
             &global_default,
@@ -765,7 +733,7 @@ pub fn spawn_uninitialized_terminals(
             &env,
         );
 
-        match backend.create_terminal(&spawn_cwd, Some(&shell)) {
+        match backend.create_terminal_with_plan(&spawn_cwd, &plan) {
             Ok(terminal_id) => {
                 ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
                 let terminal = Arc::new(Terminal::new(
@@ -978,7 +946,7 @@ mod reconnect_shell_tests {
     use crate::workspace::settings::HooksConfig;
     use crate::workspace::state::{LayoutNode, ProjectData, WindowState, Workspace, WorkspaceData};
     use okena_terminal::TerminalsRegistry;
-    use okena_terminal::backend::TerminalBackend;
+    use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
     #[cfg(windows)]
@@ -1000,6 +968,7 @@ mod reconnect_shell_tests {
     struct RecordingBackend {
         created_shells: Mutex<Vec<Option<ShellType>>>,
         reconnected_shells: Mutex<Vec<Option<ShellType>>>,
+        plans: Mutex<Vec<TerminalLaunchPlan>>,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -1015,6 +984,26 @@ mod reconnect_shell_tests {
             Ok("terminal".to_string())
         }
 
+        fn create_terminal_with_plan(
+            &self,
+            _cwd: &str,
+            plan: &TerminalLaunchPlan,
+        ) -> anyhow::Result<String> {
+            self.plans.lock().expect("plan lock").push(plan.clone());
+            let shell = plan.initial_command.as_ref().map_or_else(
+                || plan.route.clone(),
+                |command| ShellType::Custom {
+                    path: command.program.clone(),
+                    args: command.args.clone(),
+                },
+            );
+            self.created_shells
+                .lock()
+                .expect("created shell lock")
+                .push(Some(shell));
+            Ok("terminal".to_string())
+        }
+
         fn reconnect_terminal(
             &self,
             terminal_id: &str,
@@ -1025,6 +1014,20 @@ mod reconnect_shell_tests {
                 .lock()
                 .expect("reconnected shell lock")
                 .push(shell.cloned());
+            Ok(terminal_id.to_string())
+        }
+
+        fn reconnect_terminal_with_plan(
+            &self,
+            terminal_id: &str,
+            _cwd: &str,
+            plan: &TerminalLaunchPlan,
+        ) -> anyhow::Result<String> {
+            self.plans.lock().expect("plan lock").push(plan.clone());
+            self.reconnected_shells
+                .lock()
+                .expect("reconnected shell lock")
+                .push(Some(plan.route.clone()));
             Ok(terminal_id.to_string())
         }
 
@@ -1173,7 +1176,7 @@ mod reconnect_shell_tests {
 
     #[cfg(windows)]
     #[test]
-    fn create_and_reconnect_use_same_wrapped_wsl_route() {
+    fn reconnect_keeps_base_wsl_route_and_does_not_replay_create_hook() {
         let wsl = ShellType::Wsl {
             distro: Some("Ubuntu".into()),
         };
@@ -1208,15 +1211,11 @@ mod reconnect_shell_tests {
             .is_some()
         );
 
-        let created = backend.created_shells.lock().expect("created shell lock");
-        let reconnected = backend
-            .reconnected_shells
-            .lock()
-            .expect("reconnected shell lock");
-        assert_eq!(created.as_slice(), reconnected.as_slice());
-        assert!(matches!(
-            created.as_slice(),
-            [Some(ShellType::Custom { .. })]
-        ));
+        let plans = backend.plans.lock().expect("plan lock");
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].route, wsl);
+        assert!(plans[0].initial_command.is_some());
+        assert_eq!(plans[1].route, wsl);
+        assert!(plans[1].initial_command.is_none());
     }
 }

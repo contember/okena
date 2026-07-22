@@ -63,7 +63,7 @@ use okena_remote_server::bridge::{self, BridgeReceiver};
 use okena_remote_server::pty_broadcaster::PtyBroadcaster;
 use okena_remote_server::server::RemoteServer;
 use okena_terminal::TerminalsRegistry;
-use okena_terminal::backend::{LocalBackend, TerminalBackend};
+use okena_terminal::backend::{LocalBackend, TerminalBackend, TerminalSessionTeardown};
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_terminal::session_backend::SessionBackend;
 use okena_workspace::persistence::{self, AppSettings, LockGuard, acquire_instance_lock};
@@ -74,9 +74,12 @@ use tokio::sync::{mpsc, watch};
 use crate::daemon_config::DaemonConfig;
 use crate::reactor::DaemonReactor;
 
-fn kill_stale_terminal_sessions(backend: &dyn TerminalBackend, terminal_ids: &[String]) {
-    for terminal_id in terminal_ids {
-        backend.kill(terminal_id);
+fn kill_stale_terminal_sessions(
+    backend: &dyn TerminalBackend,
+    sessions: &[TerminalSessionTeardown],
+) {
+    for session in sessions {
+        backend.kill_session(session);
     }
 }
 
@@ -85,7 +88,7 @@ pub struct DaemonParams {
     /// The persisted workspace state to drive (projects, layouts, windows).
     pub workspace_data: WorkspaceData,
     /// Persistent sessions whose stale worktree rows were discarded on load.
-    pub stale_terminal_ids: Vec<String>,
+    pub stale_terminal_ids: Vec<TerminalSessionTeardown>,
     /// The app settings (font / theme / shell / session backend), loaded once at
     /// startup and shared with [`DaemonConfig`] as the settings write path.
     pub settings: AppSettings,
@@ -557,6 +560,7 @@ mod shutdown_tests {
 
     struct RecordingBackend {
         killed: Arc<Mutex<Vec<String>>>,
+        routed: Arc<Mutex<Vec<TerminalSessionTeardown>>>,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -585,6 +589,11 @@ mod shutdown_tests {
             self.killed.lock().push(terminal_id.to_string());
         }
 
+        fn kill_session(&self, teardown: &TerminalSessionTeardown) {
+            self.killed.lock().push(teardown.terminal_id.clone());
+            self.routed.lock().push(teardown.clone());
+        }
+
         fn supports_buffer_capture(&self) -> bool {
             false
         }
@@ -611,14 +620,15 @@ mod shutdown_tests {
         let killed = Arc::new(Mutex::new(Vec::new()));
         let backend = RecordingBackend {
             killed: killed.clone(),
+            routed: Arc::new(Mutex::new(Vec::new())),
         };
 
         kill_stale_terminal_sessions(
             &backend,
             &[
-                "layout".to_string(),
-                "service".to_string(),
-                "hook".to_string(),
+                TerminalSessionTeardown::host("layout".to_string()),
+                TerminalSessionTeardown::host("service".to_string()),
+                TerminalSessionTeardown::host("hook".to_string()),
             ],
         );
 
@@ -630,6 +640,30 @@ mod shutdown_tests {
                 "hook".to_string(),
             ]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_preserves_wsl_route_for_stale_session_cleanup() {
+        use okena_terminal::backend::TerminalTeardownRoute;
+        use okena_terminal::session_backend::ResolvedBackend;
+
+        let routed = Arc::new(Mutex::new(Vec::new()));
+        let backend = RecordingBackend {
+            killed: Arc::new(Mutex::new(Vec::new())),
+            routed: routed.clone(),
+        };
+        let stale = TerminalSessionTeardown {
+            terminal_id: "wsl-terminal".to_string(),
+            route: TerminalTeardownRoute::Wsl {
+                distro: Some("Ubuntu".to_string()),
+                backend: ResolvedBackend::Dtach,
+            },
+        };
+
+        kill_stale_terminal_sessions(&backend, std::slice::from_ref(&stale));
+
+        assert_eq!(routed.lock().as_slice(), &[stale]);
     }
 
     #[test]
@@ -678,6 +712,7 @@ mod shutdown_tests {
         let killed = Arc::new(Mutex::new(Vec::new()));
         let backend = RecordingBackend {
             killed: killed.clone(),
+            routed: Arc::new(Mutex::new(Vec::new())),
         };
         let saved = AtomicBool::new(false);
         let flushed = AtomicBool::new(false);
@@ -720,6 +755,7 @@ mod shutdown_tests {
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
         let backend = RecordingBackend {
             killed: Arc::new(Mutex::new(Vec::new())),
+            routed: Arc::new(Mutex::new(Vec::new())),
         };
 
         std::thread::scope(|scope| {
