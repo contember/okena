@@ -429,6 +429,7 @@ fn handle_exits(
         exit_events,
         &service_tids,
         terminals,
+        pty_manager,
         service_manager,
         service_tick,
         runtime,
@@ -527,6 +528,7 @@ fn handle_hook_terminal_exits(
     exit_events: &[(String, PtyGeneration, Option<u32>)],
     service_tids: &HashSet<String>,
     terminals: &TerminalsRegistry,
+    pty_manager: &PtyManager,
     service_manager: &Arc<Mutex<ServiceManager>>,
     service_tick: &watch::Sender<u64>,
     runtime: &Handle,
@@ -544,7 +546,7 @@ fn handle_hook_terminal_exits(
 
     let global_hooks = reactor.settings.lock().hooks.clone();
 
-    for (terminal_id, _, exit_code) in exit_events {
+    for (terminal_id, generation, exit_code) in exit_events {
         if !hook_tids.contains(terminal_id) {
             continue;
         }
@@ -592,6 +594,7 @@ fn handle_hook_terminal_exits(
                     Ok(plan) => {
                         let operation_epoch = ws.data_replacement_epoch();
                         drop(ws);
+                        teardown_completed_pending_hook(&tid, *generation, terminals, pty_manager);
                         let _ = crate::command_loop::spawn_background_worktree_removal(
                             plan,
                             operation_epoch,
@@ -631,6 +634,8 @@ fn handle_hook_terminal_exits(
                                 "\"{project_name}\" was not closed: {e}"
                             )));
                         }
+                        drop(ws);
+                        teardown_completed_pending_hook(&tid, *generation, terminals, pty_manager);
                     }
                 }
             } else {
@@ -656,6 +661,20 @@ fn handle_hook_terminal_exits(
     }
 
     hook_tids
+}
+
+fn teardown_completed_pending_hook(
+    terminal_id: &str,
+    generation: PtyGeneration,
+    terminals: &TerminalsRegistry,
+    pty_manager: &PtyManager,
+) {
+    if !pty_manager.kill_exited(terminal_id, generation) {
+        log::warn!(
+            "worktree-close: exited before-remove hook {terminal_id} no longer owns its PTY generation"
+        );
+    }
+    terminals.lock().remove(terminal_id);
 }
 
 /// Args for a single `terminal.on_close` hook firing, collected under the
@@ -765,9 +784,17 @@ mod tests {
     }
 
     fn test_reactor(workspace: Workspace, settings: AppSettings) -> PtyLoopReactor {
-        let (workspace_tick, _wrx) = watch::channel(0u64);
         let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
-        let backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
+        test_reactor_with_manager(workspace, settings, Arc::new(pty_manager))
+    }
+
+    fn test_reactor_with_manager(
+        workspace: Workspace,
+        settings: AppSettings,
+        pty_manager: Arc<PtyManager>,
+    ) -> PtyLoopReactor {
+        let (workspace_tick, _wrx) = watch::channel(0u64);
+        let backend = Arc::new(LocalBackend::new(pty_manager));
         PtyLoopReactor {
             workspace: Arc::new(Mutex::new(workspace)),
             backend,
@@ -1089,17 +1116,83 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn successful_hook_pty_exit_removes_real_worktree() {
         let (repo, worktree) = real_git_worktree();
-        let reactor = test_reactor(
-            workspace_with_pending_close(&repo, &worktree, "hook-1"),
+        let (pty_manager, pty_events) = PtyManager::new(SessionBackend::None);
+        let hook_terminal_id = pty_manager
+            .create_terminal_with_shell(
+                worktree.to_str().expect("utf-8 worktree path"),
+                Some(&ShellType::for_command("exit 0".to_string())),
+            )
+            .expect("create before-remove hook PTY");
+        let pty_manager = Arc::new(pty_manager);
+        let reactor = test_reactor_with_manager(
+            workspace_with_pending_close(&repo, &worktree, &hook_terminal_id),
             AppSettings::default(),
+            pty_manager.clone(),
         );
         let workspace = reactor.workspace.clone();
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        terminals.lock().insert(
+            hook_terminal_id.clone(),
+            Arc::new(Terminal::new(
+                hook_terminal_id.clone(),
+                terminal_size(),
+                pty_manager.clone(),
+                worktree.to_string_lossy().into_owned(),
+            )),
+        );
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            reactor.backend.clone(),
+            terminals.clone(),
+        )));
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let runtime = Handle::current();
+        let reactor_ref = ServiceReactorRef::new(
+            service_manager.clone(),
+            runtime.clone(),
+            service_tick.clone(),
+        );
 
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                drive_hook_exit_through_pty_loop(reactor, terminals, "hook-1", Some(0)).await;
+                let mut exit_events = Vec::new();
+                let mut dirty_terminal_ids = Vec::new();
+                let mut bytes_this_turn = 0;
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while exit_events.is_empty() {
+                        let event = pty_events.recv().await.expect("receive hook PTY event");
+                        process_event(
+                            &event,
+                            &terminals,
+                            &pty_manager,
+                            &mut exit_events,
+                            &mut dirty_terminal_ids,
+                            &mut bytes_this_turn,
+                        );
+                    }
+                })
+                .await
+                .expect("before-remove hook exits");
+
+                handle_exits(
+                    &exit_events,
+                    &terminals,
+                    &pty_manager,
+                    &service_manager,
+                    &reactor_ref,
+                    &service_tick,
+                    &runtime,
+                    &reactor,
+                );
+
+                assert!(
+                    !terminals.lock().contains_key(&hook_terminal_id),
+                    "successful pending hook releases registry ownership"
+                );
+                assert!(
+                    pty_manager.current_generation(&hook_terminal_id).is_none(),
+                    "successful pending hook releases PTY generation ownership"
+                );
 
                 tokio::time::timeout(Duration::from_secs(3), async {
                     loop {
