@@ -15,6 +15,7 @@ use crate::visibility::compute_visible_projects;
 use gpui::*;
 use okena_core::theme::FolderColor;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub use okena_layout::{LayoutNode, SplitDirection};
@@ -23,6 +24,177 @@ pub use okena_state::{
     PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds, WindowId, WindowState,
     WorkspaceData, WorktreeMetadata,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FilesystemObjectIdentity {
+    #[cfg(unix)]
+    Unix { device: u64, inode: u64 },
+    #[cfg(windows)]
+    Windows { volume: u32, file: u64 },
+    #[cfg(not(unix))]
+    CanonicalPath(PathBuf),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PathComponentIdentity {
+    Exact(OsString),
+    CaseFolded(String),
+}
+
+/// Filesystem-aware path identity used for destructive ownership checks.
+///
+/// Existing ancestors are identified by their filesystem object IDs, so bind
+/// mounts, drive mappings, and UNC aliases converge. Components below the
+/// deepest existing ancestor remain an ordered suffix.
+#[derive(Clone, Debug)]
+pub struct PhysicalPathIdentity {
+    ancestors: Vec<FilesystemObjectIdentity>,
+    unresolved: Vec<PathComponentIdentity>,
+    fallback: PathBuf,
+}
+
+impl PhysicalPathIdentity {
+    pub fn starts_with(&self, root: &Self) -> bool {
+        let Some(root_anchor) = root.ancestors.first() else {
+            return self.fallback.starts_with(&root.fallback);
+        };
+
+        if root.unresolved.is_empty() {
+            return self.ancestors.contains(root_anchor);
+        }
+
+        self.ancestors.first() == Some(root_anchor) && self.unresolved.starts_with(&root.unresolved)
+    }
+}
+
+impl PartialEq for PhysicalPathIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.starts_with(other) && other.starts_with(self)
+    }
+}
+
+impl Eq for PhysicalPathIdentity {}
+
+#[cfg(unix)]
+fn filesystem_object_identity(path: &Path) -> Option<FilesystemObjectIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FilesystemObjectIdentity::Unix {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn filesystem_object_identity(path: &Path) -> Option<FilesystemObjectIdentity> {
+    use std::os::windows::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    match (metadata.volume_serial_number(), metadata.file_index()) {
+        (Some(volume), Some(file)) => Some(FilesystemObjectIdentity::Windows { volume, file }),
+        _ => std::fs::canonicalize(path)
+            .ok()
+            .map(normalize_fallback_path)
+            .map(FilesystemObjectIdentity::CanonicalPath),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn filesystem_object_identity(path: &Path) -> Option<FilesystemObjectIdentity> {
+    std::fs::canonicalize(path)
+        .ok()
+        .map(normalize_fallback_path)
+        .map(FilesystemObjectIdentity::CanonicalPath)
+}
+
+fn normalize_fallback_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
+}
+
+fn normalize_unresolved_component(
+    component: &OsString,
+    case_sensitive: bool,
+) -> PathComponentIdentity {
+    if case_sensitive {
+        PathComponentIdentity::Exact(component.clone())
+    } else {
+        PathComponentIdentity::CaseFolded(component.to_string_lossy().to_lowercase())
+    }
+}
+
+#[cfg(windows)]
+fn filesystem_is_case_sensitive(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn filesystem_is_case_sensitive(path: &Path) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        return true;
+    };
+    // `pathconf` reads the volume's case-sensitivity flag for this directory.
+    let result = unsafe { libc::pathconf(c_path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+    match result {
+        0 => false,
+        1 => true,
+        _ => probe_case_sensitivity(path).unwrap_or(true),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn filesystem_is_case_sensitive(path: &Path) -> bool {
+    probe_case_sensitivity(path).unwrap_or(true)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn filesystem_is_case_sensitive(_path: &Path) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn probe_case_sensitivity(path: &Path) -> Option<bool> {
+    if let Some(result) = probe_case_alias(path) {
+        return Some(result);
+    }
+    let entries = std::fs::read_dir(path).ok()?;
+    entries
+        .filter_map(Result::ok)
+        .take(64)
+        .find_map(|entry| probe_case_alias(&entry.path()))
+}
+
+#[cfg(unix)]
+fn probe_case_alias(path: &Path) -> Option<bool> {
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+    let name = path.file_name()?;
+    let mut alternate = name.as_bytes().to_vec();
+    let byte = alternate
+        .iter_mut()
+        .find(|byte| byte.is_ascii_alphabetic())?;
+    if byte.is_ascii_lowercase() {
+        byte.make_ascii_uppercase();
+    } else {
+        byte.make_ascii_lowercase();
+    }
+    let alias = path.parent()?.join(OsString::from_vec(alternate));
+    let original = filesystem_object_identity(path)?;
+    match filesystem_object_identity(&alias) {
+        Some(alias) => Some(alias != original),
+        None => Some(true),
+    }
+}
 
 /// Global workspace wrapper for app-wide access (used by quit handler)
 #[cfg(feature = "gpui")]
@@ -149,9 +321,9 @@ impl Workspace {
         self.data_replacement_epoch
     }
 
-    /// Resolve a path for physical ownership checks, including symlinked existing
-    /// ancestors and relative/nonexistent descendants.
-    pub fn physical_path_identity(path: &Path) -> PathBuf {
+    /// Resolve a path for physical ownership checks, including mount/drive
+    /// aliases, symlinked ancestors, and relative/nonexistent descendants.
+    pub fn physical_path_identity(path: &Path) -> PhysicalPathIdentity {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -198,34 +370,60 @@ impl Workspace {
         let mut cursor = normalized.as_path();
         let mut unresolved = Vec::new();
 
-        let resolved = loop {
+        let (existing_path, resolved) = loop {
             if let Ok(mut existing) = std::fs::canonicalize(cursor) {
                 for component in unresolved.iter().rev() {
                     existing.push(component);
                 }
-                break okena_git::repository::normalize_path(&existing);
+                break (
+                    Some(cursor.to_path_buf()),
+                    okena_git::repository::normalize_path(&existing),
+                );
             }
             let Some(name) = cursor.file_name() else {
-                break normalized;
+                break (None, normalized);
             };
             unresolved.push(name.to_os_string());
             let Some(parent) = cursor.parent() else {
-                break normalized;
+                break (None, normalized);
             };
             cursor = parent;
         };
 
-        #[cfg(windows)]
-        {
-            PathBuf::from(resolved.to_string_lossy().to_lowercase())
+        let fallback = normalize_fallback_path(resolved);
+        let Some(existing_path) = existing_path else {
+            return PhysicalPathIdentity {
+                ancestors: Vec::new(),
+                unresolved: Vec::new(),
+                fallback,
+            };
+        };
+
+        let case_sensitive = filesystem_is_case_sensitive(&existing_path);
+        let unresolved = unresolved
+            .iter()
+            .rev()
+            .map(|component| normalize_unresolved_component(component, case_sensitive))
+            .collect();
+        let mut ancestors = Vec::new();
+        let mut ancestor = Some(existing_path.as_path());
+        while let Some(path) = ancestor {
+            if let Some(identity) = filesystem_object_identity(path)
+                && ancestors.last() != Some(&identity)
+            {
+                ancestors.push(identity);
+            }
+            ancestor = path.parent();
         }
-        #[cfg(not(windows))]
-        {
-            resolved
+
+        PhysicalPathIdentity {
+            ancestors,
+            unresolved,
+            fallback,
         }
     }
 
-    fn worktree_root_identity(&self, project: &ProjectData) -> Option<PathBuf> {
+    fn worktree_root_identity(&self, project: &ProjectData) -> Option<PhysicalPathIdentity> {
         let metadata = project.worktree_info.as_ref()?;
         let project_path = Path::new(&project.path);
         let root = okena_git::get_repo_root(project_path).unwrap_or_else(|| {
@@ -324,7 +522,8 @@ impl Workspace {
             let Some(root) = self.worktree_root_identity(project) else {
                 continue;
             };
-            let overlaps = |path: &Path| path.starts_with(&root) || root.starts_with(path);
+            let overlaps =
+                |path: &PhysicalPathIdentity| path.starts_with(&root) || root.starts_with(path);
             if overlaps(&candidate) || overlaps(&existing) {
                 return Err(format!(
                     "path overlaps active worktree operation for '{}'",
@@ -1271,6 +1470,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod workspace_tests {
+    use super::normalize_unresolved_component;
     use crate::settings::HooksConfig;
     use crate::state::{
         FolderData, LayoutNode, ProjectData, SplitDirection, WindowId, WindowState, Workspace,
@@ -1279,6 +1479,74 @@ mod workspace_tests {
     use okena_core::theme::FolderColor;
     use okena_terminal::shell_config::ShellType;
     use std::collections::HashMap;
+
+    #[test]
+    fn case_insensitive_unresolved_components_share_identity() {
+        assert_eq!(
+            normalize_unresolved_component(&"NewWorktree".into(), false),
+            normalize_unresolved_component(&"newworktree".into(), false)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nonexistent_suffix_follows_volume_case_semantics() {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-case-volume-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&fixture).unwrap();
+        if !super::filesystem_is_case_sensitive(&fixture) {
+            assert_eq!(
+                Workspace::physical_path_identity(&fixture.join("NewWorktree/project")),
+                Workspace::physical_path_identity(&fixture.join("newworktree/PROJECT"))
+            );
+        }
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn subst_aliases_share_filesystem_identity() {
+        struct SubstGuard(String);
+
+        impl Drop for SubstGuard {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("subst")
+                    .args([&self.0, "/D"])
+                    .status();
+            }
+        }
+
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-subst-identity-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let root = fixture.join("worktree");
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture_text = fixture.to_string_lossy().into_owned();
+        let Some(drive) = (b'D'..=b'Z').rev().find_map(|letter| {
+            let drive = format!("{}:", char::from(letter));
+            std::process::Command::new("subst")
+                .args([&drive, &fixture_text])
+                .status()
+                .ok()
+                .filter(|status| status.success())
+                .map(|_| drive)
+        }) else {
+            let _ = std::fs::remove_dir_all(fixture);
+            return;
+        };
+        let guard = SubstGuard(drive.clone());
+        let mapped_root = std::path::PathBuf::from(format!("{drive}\\worktree"));
+
+        let real = Workspace::physical_path_identity(&root);
+        let mapped = Workspace::physical_path_identity(&mapped_root);
+        let mapped_child = Workspace::physical_path_identity(&mapped_root.join("packages/app"));
+        assert_eq!(real, mapped);
+        assert!(mapped_child.starts_with(&real));
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(fixture);
+    }
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {

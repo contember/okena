@@ -1024,13 +1024,47 @@ impl Workspace {
             .as_ref()
             .ok_or_else(|| "Not a worktree project".to_string())?;
         let project_path = std::path::PathBuf::from(&project.path);
-        Ok(okena_git::get_repo_root(&project_path).unwrap_or_else(|| {
+        let resolved_root = okena_git::get_repo_root(&project_path).unwrap_or_else(|| {
             if metadata.worktree_path.is_empty() {
                 project_path
             } else {
                 std::path::PathBuf::from(&metadata.worktree_path)
             }
-        }))
+        });
+
+        if !metadata.worktree_path.is_empty()
+            && Self::physical_path_identity(&resolved_root)
+                != Self::physical_path_identity(std::path::Path::new(&metadata.worktree_path))
+        {
+            return Err("worktree path does not match its recorded checkout root".to_string());
+        }
+
+        let parent = self
+            .project(&metadata.parent_project_id)
+            .ok_or_else(|| "Worktree parent project not found".to_string())?;
+        if parent.is_remote {
+            return Err("Worktree parent project is not local".to_string());
+        }
+        let parent_repo = okena_git::get_repo_root(std::path::Path::new(&parent.path))
+            .ok_or_else(|| "Worktree parent repository not found".to_string())?;
+        let parent_common_dir = okena_git::get_repo_common_dir(&parent_repo)
+            .ok_or_else(|| "Worktree parent Git directory not found".to_string())?;
+        let checkout_common_dir = okena_git::get_repo_common_dir(&resolved_root)
+            .ok_or_else(|| "Worktree checkout Git directory not found".to_string())?;
+        if Self::physical_path_identity(&parent_common_dir)
+            != Self::physical_path_identity(&checkout_common_dir)
+        {
+            return Err("checkout does not belong to its parent repository".to_string());
+        }
+        let resolved_identity = Self::physical_path_identity(&resolved_root);
+        let registered = okena_git::list_linked_worktree_paths(&parent_repo)
+            .into_iter()
+            .any(|path| Self::physical_path_identity(&path) == resolved_identity);
+        if !registered {
+            return Err("checkout is not a linked worktree of its parent repository".to_string());
+        }
+
+        Ok(resolved_root)
     }
 
     /// Validate that deleting this checkout cannot remove another project's

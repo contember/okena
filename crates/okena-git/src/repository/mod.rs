@@ -30,8 +30,8 @@ pub use branch::{
 };
 pub use ci::{get_ci_checks, get_pr_info, has_github_remote, list_pull_requests};
 pub use paths::{
-    compute_target_paths, get_repo_root, normalize_path, project_path_in_worktree,
-    resolve_git_root_and_subdir,
+    compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path,
+    project_path_in_worktree, resolve_git_root_and_subdir,
 };
 pub(crate) use status::worktree_diff;
 pub use status::{
@@ -41,7 +41,7 @@ pub use status::{
 };
 pub use worktree::{
     create_worktree, create_worktree_with_start_point, fetch_and_fast_forward, list_git_worktrees,
-    remove_worktree, remove_worktree_fast,
+    list_linked_worktree_paths, remove_worktree, remove_worktree_fast,
 };
 
 /// Run a git command and return `Ok(())` if it exits successfully,
