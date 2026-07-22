@@ -15,6 +15,7 @@ mod project;
 mod session;
 mod tab;
 mod terminal;
+mod terminal_batch;
 
 use crate::workspace::focus::FocusManager;
 use crate::workspace::hooks;
@@ -39,6 +40,11 @@ pub use session::{
     fail_workspace_replacement, finish_workspace_replacement, import_workspace_data,
     load_session_data, load_session_data_for_shell, materialize_workspace_replacement,
     prepare_workspace_replacement,
+};
+pub use terminal_batch::{
+    PreparedTerminalLaunch, PreparedTerminalLaunchOutcome, PublishedTerminalOwners,
+    cleanup_stale_prepared_terminal_launches, materialize_prepared_terminal_launches,
+    publish_prepared_terminal_launches,
 };
 
 /// Result of executing an action.
@@ -630,6 +636,112 @@ fn effective_terminal_launch(
     hooks::terminal_launch_plan(shell, shell_wrapper, on_create, env)
 }
 
+/// Reserve IDs and launch plans for runtime-recovery slots without touching the backend.
+pub fn reserve_uninitialized_terminal_launches(
+    ws: &mut Workspace,
+    project_ids: &[String],
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> Result<Vec<PreparedTerminalLaunch>, String> {
+    let mut launches = Vec::new();
+    for project_id in project_ids {
+        let project = ws
+            .project(project_id)
+            .ok_or_else(|| format!("project not found: {project_id}"))?;
+        if project.is_remote {
+            return Err(format!(
+                "remote project terminals cannot be materialized locally: {project_id}"
+            ));
+        }
+        let project_path = project.path.clone();
+        let project_name = project.name.clone();
+        let project_hooks = project.hooks.clone();
+        let is_worktree = project.worktree_info.is_some();
+        let parent_hooks = project
+            .worktree_info
+            .as_ref()
+            .and_then(|worktree| ws.project(&worktree.parent_project_id))
+            .map(|parent| parent.hooks.clone());
+        let project_default_shell = project.default_shell.clone();
+        let mut uninitialized = Vec::new();
+        if let Some(layout) = &project.layout {
+            collect_uninitialized_terminals_with_shell(layout, Vec::new(), &mut uninitialized);
+        }
+        let shell_wrapper =
+            hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &settings.hooks);
+        let on_create = hooks::resolve_terminal_on_create_simple(
+            &project_hooks,
+            parent_hooks.as_ref(),
+            &settings.hooks,
+        );
+        let folder = ws.folder_for_project_or_parent(project_id);
+        let env = hooks::terminal_hook_env(
+            project_id,
+            &project_name,
+            &project_path,
+            is_worktree,
+            folder.map(|folder| folder.id.as_str()),
+            folder.map(|folder| folder.name.as_str()),
+        );
+        for (path, shell_type) in uninitialized {
+            launches.push(PreparedTerminalLaunch::new(
+                project_id.clone(),
+                path,
+                uuid::Uuid::new_v4().to_string(),
+                project_path.clone(),
+                effective_terminal_launch(
+                    shell_type,
+                    project_default_shell.as_ref(),
+                    &settings.default_shell,
+                    shell_wrapper.as_deref(),
+                    on_create.as_deref(),
+                    &env,
+                ),
+            ));
+        }
+    }
+
+    for launch in &launches {
+        ws.set_terminal_id(
+            launch.project_id(),
+            launch.layout_path(),
+            launch.terminal_id().to_string(),
+            cx,
+        );
+    }
+    Ok(launches)
+}
+
+/// Clear failed reservations without disturbing a terminal that replaced their ID.
+pub fn clear_failed_terminal_launch_reservations(
+    ws: &mut Workspace,
+    launches: &[PreparedTerminalLaunch],
+    failed_terminal_ids: &[String],
+    cx: &mut impl WorkspaceCx,
+) {
+    let failed: std::collections::HashSet<&str> =
+        failed_terminal_ids.iter().map(String::as_str).collect();
+    for launch in launches {
+        if !failed.contains(launch.terminal_id()) {
+            continue;
+        }
+        ws.with_layout_node(
+            launch.project_id(),
+            launch.layout_path(),
+            cx,
+            |node| match node {
+                LayoutNode::Terminal { terminal_id, .. }
+                    if terminal_id.as_deref() == Some(launch.terminal_id()) =>
+                {
+                    *terminal_id = None;
+                    true
+                }
+                _ => false,
+            },
+        );
+    }
+}
+
 /// Spawn PTYs for any uninitialized terminals (`terminal_id: None`) in a project's layout.
 ///
 /// Used after `CreateTerminal` / `SplitTerminal` to eagerly create PTYs for
@@ -949,14 +1061,16 @@ mod path_guard_tests {
 mod reconnect_shell_tests {
     #[cfg(windows)]
     use super::spawn_uninitialized_terminals;
-    use super::{AppSettings, ensure_terminal};
+    use super::{
+        AppSettings, clear_failed_terminal_launch_reservations, ensure_terminal,
+        reserve_uninitialized_terminal_launches,
+    };
     use crate::workspace::settings::HooksConfig;
     use crate::workspace::state::{LayoutNode, ProjectData, WindowState, Workspace, WorkspaceData};
     use okena_terminal::TerminalsRegistry;
     use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
-    #[cfg(windows)]
     use okena_workspace::context::WorkspaceCx;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -1056,10 +1170,8 @@ mod reconnect_shell_tests {
         }
     }
 
-    #[cfg(windows)]
     struct TestCx;
 
-    #[cfg(windows)]
     impl WorkspaceCx for TestCx {
         fn notify(&mut self) {}
         fn refresh_views(&mut self) {}
@@ -1179,6 +1291,33 @@ mod reconnect_shell_tests {
                 .as_slice(),
             &[Some(ShellType::Default)]
         );
+    }
+
+    #[test]
+    fn failed_reservation_does_not_clear_a_replacement_terminal_id() {
+        let mut ws = workspace_with_terminal(ShellType::Default, None, None);
+        let mut cx = TestCx;
+        let launches = reserve_uninitialized_terminal_launches(
+            &mut ws,
+            &["project".to_string()],
+            &AppSettings::default(),
+            &mut cx,
+        )
+        .expect("reserve terminal launch");
+        assert_eq!(launches.len(), 1);
+        let reserved_id = launches[0].terminal_id().to_string();
+
+        ws.set_terminal_id("project", &[], "replacement".to_string(), &mut cx);
+        clear_failed_terminal_launch_reservations(&mut ws, &launches, &[reserved_id], &mut cx);
+
+        let LayoutNode::Terminal { terminal_id, .. } = ws
+            .project("project")
+            .and_then(|project| project.layout.as_ref())
+            .expect("project terminal layout")
+        else {
+            panic!("expected terminal layout");
+        };
+        assert_eq!(terminal_id.as_deref(), Some("replacement"));
     }
 
     #[cfg(windows)]
