@@ -131,9 +131,10 @@ impl RemoteActionClient {
         }
 
         let runtime = cancellable_runtime()?;
-        let client_and_url = self.inner.async_search.get_or_init(|| {
-            crate::remote_http::async_client_and_url(&self.inner.config, "/v1/actions")
-        });
+        let client_and_url = self
+            .inner
+            .async_search
+            .get_or_init(|| crate::remote_http::async_client_and_url(&self.inner.config, ""));
         let (client, url) = match client_and_url {
             Ok((client, url)) => (client.clone(), url.clone()),
             Err(error) => return Err(error.clone()),
@@ -511,6 +512,12 @@ mod tests {
                     }
                 }
             }
+            let request_line = std::str::from_utf8(&request)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap();
+            assert_eq!(request_line, "POST /v1/actions HTTP/1.1");
             request_started_tx.send(()).unwrap();
             stream.read(&mut buffer).unwrap_or_default() == 0
         });
