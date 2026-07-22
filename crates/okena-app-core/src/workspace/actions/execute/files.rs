@@ -4,6 +4,12 @@ use super::{
     ActionResult, Workspace, resolve_new_project_file, resolve_project_file, validate_leaf_name,
 };
 
+pub struct PreparedContentSearch {
+    project_path: std::path::PathBuf,
+    query: String,
+    config: okena_files::content_search::ContentSearchConfig,
+}
+
 pub(super) fn list_files(ws: &Workspace, project_id: String, show_ignored: bool) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {
@@ -138,7 +144,7 @@ pub(super) fn file_size(ws: &Workspace, project_id: String, relative_path: Strin
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn search_content(
+pub fn prepare_content_search(
     ws: &Workspace,
     project_id: String,
     query: String,
@@ -148,18 +154,17 @@ pub(super) fn search_content(
     file_glob: Option<String>,
     context_lines: usize,
     show_ignored: bool,
-) -> ActionResult {
+) -> Result<PreparedContentSearch, String> {
     if let Some(ref glob) = file_glob
         && (glob.contains("..") || glob.starts_with('/'))
     {
-        return ActionResult::Err("file_glob must not contain '..' or start with '/'".to_string());
+        return Err("file_glob must not contain '..' or start with '/'".to_string());
     }
     match ws.project(&project_id) {
         Some(p) => {
-            let path = match std::path::Path::new(&p.path).canonicalize() {
-                Ok(c) => c,
-                Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
-            };
+            let project_path = std::path::Path::new(&p.path)
+                .canonicalize()
+                .map_err(|error| format!("Cannot resolve project path: {error}"))?;
             let search_mode = match mode.as_str() {
                 "regex" => okena_files::content_search::SearchMode::Regex,
                 "fuzzy" => okena_files::content_search::SearchMode::Fuzzy,
@@ -173,20 +178,63 @@ pub(super) fn search_content(
                 context_lines,
                 show_ignored,
             };
-            let cancelled = std::sync::atomic::AtomicBool::new(false);
-            let mut results = Vec::new();
-            okena_files::content_search::search_content(
-                &path,
-                &query,
-                &config,
-                &cancelled,
-                &mut |result| results.push(result),
-            );
-            ActionResult::Ok(Some(
-                serde_json::to_value(results).expect("BUG: FileSearchResult must serialize"),
-            ))
+            Ok(PreparedContentSearch {
+                project_path,
+                query,
+                config,
+            })
         }
-        None => ActionResult::Err(format!("project not found: {}", project_id)),
+        None => Err(format!("project not found: {project_id}")),
+    }
+}
+
+pub fn execute_prepared_content_search(search: PreparedContentSearch) -> ActionResult {
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    execute_prepared_content_search_with_cancellation(search, &cancelled)
+}
+
+pub fn execute_prepared_content_search_with_cancellation(
+    search: PreparedContentSearch,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> ActionResult {
+    let mut results = Vec::new();
+    okena_files::content_search::search_content(
+        &search.project_path,
+        &search.query,
+        &search.config,
+        cancelled,
+        &mut |result| results.push(result),
+    );
+    ActionResult::Ok(Some(
+        serde_json::to_value(results).expect("BUG: FileSearchResult must serialize"),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn search_content(
+    ws: &Workspace,
+    project_id: String,
+    query: String,
+    case_sensitive: bool,
+    mode: String,
+    max_results: usize,
+    file_glob: Option<String>,
+    context_lines: usize,
+    show_ignored: bool,
+) -> ActionResult {
+    match prepare_content_search(
+        ws,
+        project_id,
+        query,
+        case_sensitive,
+        mode,
+        max_results,
+        file_glob,
+        context_lines,
+        show_ignored,
+    ) {
+        Ok(search) => execute_prepared_content_search(search),
+        Err(error) => ActionResult::Err(error),
     }
 }
 
