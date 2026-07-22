@@ -302,6 +302,27 @@ impl ServiceManager {
             .collect()
     }
 
+    /// Okena services whose active intent must survive a backend migration.
+    pub fn active_okena_service_names(&self, project_id: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .instances
+            .iter()
+            .filter(|((pid, _), instance)| {
+                pid == project_id
+                    && instance.kind == ServiceKind::Okena
+                    && matches!(
+                        instance.status,
+                        ServiceStatus::Starting
+                            | ServiceStatus::Running
+                            | ServiceStatus::Restarting
+                    )
+            })
+            .map(|((_, name), _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Associate future terminal ownership write-back with one workspace snapshot.
     pub fn set_project_writeback_owner(
         &mut self,

@@ -14,6 +14,9 @@ use crate::visibility::compute_visible_projects;
 #[cfg(feature = "gpui")]
 use gpui::*;
 use okena_core::theme::FolderColor;
+use okena_terminal::backend::TerminalSessionTeardown;
+use okena_terminal::session_backend::SessionBackend;
+use okena_terminal::shell_config::ShellType;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -272,11 +275,81 @@ pub struct RestoredClose {
     pub project_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalMigrationSlot {
+    pub project_id: String,
+    pub path: Vec<usize>,
+    pub terminal_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalBackendMigration {
+    pub epoch: u64,
+    pub project_ids: Vec<String>,
+    pub ordinary_slots: Vec<TerminalMigrationSlot>,
+    pub teardown_sessions: Vec<TerminalSessionTeardown>,
+    pub hook_terminal_ids: Vec<String>,
+}
+
 /// Transient ownership metadata for a terminal awaiting its PTY exit event.
 #[derive(Clone, Debug)]
 pub(crate) struct ClosingTerminalOwner {
     pub project_id: String,
     pub terminal_name: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn take_layout_terminal_ownership(
+    layout: &mut LayoutNode,
+    project_id: &str,
+    project_default_shell: Option<&ShellType>,
+    global_default_shell: &ShellType,
+    backend_preference: SessionBackend,
+    path: &mut Vec<usize>,
+    ordinary_slots: &mut Vec<TerminalMigrationSlot>,
+    teardown_sessions: &mut Vec<TerminalSessionTeardown>,
+) {
+    match layout {
+        LayoutNode::Terminal {
+            terminal_id,
+            shell_type,
+            ..
+        } => {
+            let Some(terminal_id) = terminal_id.take() else {
+                return;
+            };
+            teardown_sessions.push(TerminalSessionTeardown {
+                terminal_id: terminal_id.clone(),
+                route: crate::persistence::teardown_route(
+                    shell_type,
+                    project_default_shell,
+                    global_default_shell,
+                    backend_preference,
+                ),
+            });
+            ordinary_slots.push(TerminalMigrationSlot {
+                project_id: project_id.to_string(),
+                path: path.clone(),
+                terminal_id,
+            });
+        }
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for (index, child) in children.iter_mut().enumerate() {
+                path.push(index);
+                take_layout_terminal_ownership(
+                    child,
+                    project_id,
+                    project_default_shell,
+                    global_default_shell,
+                    backend_preference,
+                    path,
+                    ordinary_slots,
+                    teardown_sessions,
+                );
+                path.pop();
+            }
+        }
+    }
 }
 
 impl Workspace {
@@ -324,10 +397,24 @@ impl Workspace {
         self.data_replacement_epoch
     }
 
-    /// Start an exclusive live session-backend migration.
-    pub fn begin_terminal_backend_migration(&mut self) -> Result<u64, String> {
+    /// Snapshot and atomically clear all local terminal ownership for migration.
+    pub fn begin_terminal_backend_migration(
+        &mut self,
+        backend_preference: SessionBackend,
+        global_default_shell: &ShellType,
+    ) -> Result<TerminalBackendMigration, String> {
         if self.terminal_backend_migration_epoch.is_some() {
             return Err("terminal backend migration already in progress".to_string());
+        }
+        if self.lifecycle.has_active_operations()
+            || !self.pending_closes.is_empty()
+            || !self.restored_closes.is_empty()
+            || !self.closing_terminal_owners.is_empty()
+            || !self.pending_terminal_kills.is_empty()
+        {
+            return Err(
+                "cannot switch terminal backend while a workspace operation is active".to_string(),
+            );
         }
         self.data_replacement_epoch = self
             .data_replacement_epoch
@@ -335,7 +422,63 @@ impl Workspace {
             .ok_or_else(|| "workspace replacement epoch exhausted".to_string())?;
         let epoch = self.data_replacement_epoch;
         self.terminal_backend_migration_epoch = Some(epoch);
-        Ok(epoch)
+
+        let mut project_ids = Vec::new();
+        let mut ordinary_slots = Vec::new();
+        let mut teardown_sessions = Vec::new();
+        let mut hook_terminal_ids = Vec::new();
+        for project in self
+            .data
+            .projects
+            .iter_mut()
+            .filter(|project| !project.is_remote)
+        {
+            project_ids.push(project.id.clone());
+            if let Some(layout) = &mut project.layout {
+                take_layout_terminal_ownership(
+                    layout,
+                    &project.id,
+                    project.default_shell.as_ref(),
+                    global_default_shell,
+                    backend_preference,
+                    &mut Vec::new(),
+                    &mut ordinary_slots,
+                    &mut teardown_sessions,
+                );
+            }
+            teardown_sessions.extend(
+                project
+                    .service_terminals
+                    .drain()
+                    .map(|(_, terminal_id)| TerminalSessionTeardown::host(terminal_id)),
+            );
+            let project_hook_ids: Vec<String> =
+                project.hook_terminals.drain().map(|(id, _)| id).collect();
+            for terminal_id in &project_hook_ids {
+                project.terminal_names.remove(terminal_id);
+                project.hidden_terminals.remove(terminal_id);
+            }
+            teardown_sessions.extend(
+                project_hook_ids
+                    .iter()
+                    .cloned()
+                    .map(TerminalSessionTeardown::host),
+            );
+            hook_terminal_ids.extend(project_hook_ids);
+        }
+        teardown_sessions.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+        teardown_sessions.dedup_by(|a, b| a.terminal_id == b.terminal_id);
+        project_ids.sort();
+        ordinary_slots.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+        hook_terminal_ids.sort();
+
+        Ok(TerminalBackendMigration {
+            epoch,
+            project_ids,
+            ordinary_slots,
+            teardown_sessions,
+            hook_terminal_ids,
+        })
     }
 
     /// Return the active migration epoch, if terminal ownership is provisional.
@@ -353,8 +496,51 @@ impl Workspace {
             return false;
         }
         self.terminal_backend_migration_epoch = None;
-        cx.notify();
+        self.notify_data(cx);
         true
+    }
+
+    /// Restore ordinary logical IDs before reconnecting them on the selected backend.
+    pub fn restore_terminal_backend_migration_slots(
+        &mut self,
+        migration: &TerminalBackendMigration,
+    ) -> Result<(), String> {
+        if self.terminal_backend_migration_epoch != Some(migration.epoch) {
+            return Err("stale terminal backend migration completion".to_string());
+        }
+        for slot in &migration.ordinary_slots {
+            let project = self.project_mut(&slot.project_id).ok_or_else(|| {
+                format!("project disappeared during migration: {}", slot.project_id)
+            })?;
+            let node = project
+                .layout
+                .as_mut()
+                .and_then(|layout| layout.get_at_path_mut(&slot.path))
+                .ok_or_else(|| {
+                    format!(
+                        "terminal slot disappeared during migration: {}",
+                        slot.terminal_id
+                    )
+                })?;
+            match node {
+                LayoutNode::Terminal { terminal_id, .. } if terminal_id.is_none() => {
+                    *terminal_id = Some(slot.terminal_id.clone());
+                }
+                LayoutNode::Terminal { .. } => {
+                    return Err(format!(
+                        "terminal slot was claimed during migration: {}",
+                        slot.terminal_id
+                    ));
+                }
+                LayoutNode::Split { .. } | LayoutNode::Tabs { .. } => {
+                    return Err(format!(
+                        "terminal slot changed during migration: {}",
+                        slot.terminal_id
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Resolve a path for physical ownership checks, including mount/drive
@@ -1510,10 +1696,11 @@ mod workspace_tests {
     use crate::context::WorkspaceCx;
     use crate::settings::HooksConfig;
     use crate::state::{
-        FolderData, LayoutNode, ProjectData, SplitDirection, WindowId, WindowState, Workspace,
-        WorkspaceData, WorktreeMetadata,
+        FolderData, HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, SplitDirection,
+        WindowId, WindowState, Workspace, WorkspaceData, WorktreeMetadata,
     };
     use okena_core::theme::FolderColor;
+    use okena_terminal::session_backend::SessionBackend;
     use okena_terminal::shell_config::ShellType;
     use std::collections::HashMap;
 
@@ -1542,16 +1729,21 @@ mod workspace_tests {
     fn terminal_backend_migration_gate_is_exclusive_and_epoch_fenced() {
         let mut workspace = Workspace::new(WorkspaceData::empty());
         let initial_epoch = workspace.data_replacement_epoch();
-        let migration_epoch = workspace
-            .begin_terminal_backend_migration()
+        let migration = workspace
+            .begin_terminal_backend_migration(SessionBackend::None, &ShellType::Default)
             .expect("begin migration");
+        let migration_epoch = migration.epoch;
 
         assert_eq!(migration_epoch, initial_epoch + 1);
         assert_eq!(
             workspace.terminal_backend_migration_epoch(),
             Some(migration_epoch)
         );
-        assert!(workspace.begin_terminal_backend_migration().is_err());
+        assert!(
+            workspace
+                .begin_terminal_backend_migration(SessionBackend::None, &ShellType::Default)
+                .is_err()
+        );
 
         let mut cx = RecordingCx::default();
         assert!(!workspace.finish_terminal_backend_migration(migration_epoch + 1, &mut cx));
@@ -1559,6 +1751,84 @@ mod workspace_tests {
         assert!(workspace.finish_terminal_backend_migration(migration_epoch, &mut cx));
         assert_eq!(workspace.terminal_backend_migration_epoch(), None);
         assert_eq!(cx.notifications, 1);
+    }
+
+    #[test]
+    fn backend_migration_clears_and_restores_only_ordinary_terminal_ownership() {
+        let mut project = make_project("p1");
+        project
+            .service_terminals
+            .insert("web".to_string(), "service-1".to_string());
+        project.hook_terminals.insert(
+            "hook-1".to_string(),
+            HookTerminalEntry {
+                label: "hook".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "project.on_open".to_string(),
+                command: "echo hook".to_string(),
+                cwd: "/tmp/test".to_string(),
+            },
+        );
+        project
+            .terminal_names
+            .insert("term_p1".to_string(), "ordinary".to_string());
+        project
+            .terminal_names
+            .insert("hook-1".to_string(), "hook".to_string());
+        if let Some(LayoutNode::Terminal {
+            minimized,
+            detached,
+            ..
+        }) = &mut project.layout
+        {
+            *minimized = true;
+            *detached = true;
+        }
+        let mut workspace = Workspace::new(make_workspace_data(vec![project], vec!["p1"]));
+
+        let migration = workspace
+            .begin_terminal_backend_migration(SessionBackend::None, &ShellType::Default)
+            .expect("begin migration");
+
+        let project = workspace.project("p1").expect("project");
+        assert!(matches!(
+            project.layout.as_ref(),
+            Some(LayoutNode::Terminal {
+                terminal_id: None,
+                minimized: true,
+                detached: true,
+                ..
+            })
+        ));
+        assert!(project.service_terminals.is_empty());
+        assert!(project.hook_terminals.is_empty());
+        assert_eq!(
+            project.terminal_names.get("term_p1").map(String::as_str),
+            Some("ordinary")
+        );
+        assert!(!project.terminal_names.contains_key("hook-1"));
+        assert_eq!(migration.hook_terminal_ids, vec!["hook-1"]);
+        assert_eq!(
+            migration
+                .teardown_sessions
+                .iter()
+                .map(|session| session.terminal_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hook-1", "service-1", "term_p1"]
+        );
+
+        workspace
+            .restore_terminal_backend_migration_slots(&migration)
+            .expect("restore slots");
+        assert!(matches!(
+            workspace.project("p1").and_then(|project| project.layout.as_ref()),
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal_id),
+                minimized: true,
+                detached: true,
+                ..
+            }) if terminal_id == "term_p1"
+        ));
     }
 
     #[test]

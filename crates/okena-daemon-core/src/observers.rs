@@ -1046,7 +1046,10 @@ mod tests {
         let mut workspace_value =
             workspace_with_project("project", &existing_path(), HashMap::new());
         workspace_value
-            .begin_terminal_backend_migration()
+            .begin_terminal_backend_migration(
+                okena_terminal::session_backend::SessionBackend::None,
+                &ShellType::Default,
+            )
             .expect("begin migration");
         let workspace = Arc::new(parking_lot::Mutex::new(workspace_value));
         let sm = Arc::new(parking_lot::Mutex::new(manager()));
@@ -1082,7 +1085,10 @@ mod tests {
         let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &no_hook_runner, &no_hook_monitor);
         workspace_value.notify_data(&mut cx);
         workspace_value
-            .begin_terminal_backend_migration()
+            .begin_terminal_backend_migration(
+                okena_terminal::session_backend::SessionBackend::None,
+                &ShellType::Default,
+            )
             .expect("begin migration");
         let workspace = Arc::new(parking_lot::Mutex::new(workspace_value));
         let last_saved_version = Arc::new(AtomicU64::new(0));
@@ -1262,8 +1268,12 @@ mod tests {
         let mut workspace_value =
             workspace_with_service_terminal("project", "/project", "web", "owned-terminal");
         let migration_epoch = workspace_value
-            .begin_terminal_backend_migration()
+            .begin_terminal_backend_migration(
+                okena_terminal::session_backend::SessionBackend::None,
+                &ShellType::Default,
+            )
             .expect("begin migration");
+        let migration_epoch = migration_epoch.epoch;
         let workspace = Arc::new(parking_lot::Mutex::new(workspace_value));
         let (workspace_tick, _rx) = tokio::sync::watch::channel(0u64);
 
