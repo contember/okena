@@ -2060,10 +2060,12 @@ fn spawn_merge_worktree_close(
 
         let result = {
             let app_settings = settings.lock().clone();
-            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-            let mut ws = workspace.lock();
-            ws.finish_closing_project(&project_id);
-            cx.notify();
+            {
+                let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                let mut ws = workspace.lock();
+                ws.finish_closing_project(&project_id);
+                cx.notify();
+            }
             let mut focus_manager = FocusManager::new();
             run_main_workspace_action(
                 ActionRequest::CloseWorktree {
@@ -2074,7 +2076,7 @@ fn spawn_merge_worktree_close(
                     push: false,
                     delete_branch: false,
                 },
-                &mut ws,
+                &workspace,
                 &mut focus_manager,
                 &backend,
                 &terminals,
@@ -2368,20 +2370,16 @@ pub async fn daemon_command_loop(
                     }
 
                     // ── Soft-close: finalize now ("Close now") ───────────────────
-                    ActionRequest::CloseTerminalNow { terminal_id } => {
-                        let mut cx =
-                            DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                        let mut ws = workspace.lock();
-                        close_now_flow(
-                            &deadlines,
-                            &mut ws,
-                            &*backend,
-                            &terminals,
-                            &terminal_id,
-                            &mut cx,
-                        );
-                        CommandResult::Ok(None)
-                    }
+                    ActionRequest::CloseTerminalNow { terminal_id } => finalize_soft_close_now(
+                        &workspace,
+                        &backend,
+                        &terminals,
+                        &workspace_tick,
+                        &hook_runner,
+                        &hook_monitor,
+                        &deadlines,
+                        &terminal_id,
+                    ),
 
                     // ── Close terminal: grace-aware soft close ───────────────────
                     // Faithful daemon-side port of the GUI's optimistic close. A
@@ -2401,13 +2399,12 @@ pub async fn daemon_command_loop(
                             // Feature off → immediate close (unchanged behavior).
                             // Snapshot settings BEFORE locking the workspace.
                             let app_settings = settings.lock().clone();
-                            let mut ws = workspace.lock();
                             run_main_workspace_action(
                                 ActionRequest::CloseTerminal {
                                     project_id,
                                     terminal_id,
                                 },
-                                &mut ws,
+                                &workspace,
                                 &mut focus_manager,
                                 &backend,
                                 &terminals,
@@ -2430,13 +2427,12 @@ pub async fn daemon_command_loop(
                             if !busy {
                                 // Idle → immediate close.
                                 let app_settings = settings.lock().clone();
-                                let mut ws = workspace.lock();
                                 run_main_workspace_action(
                                     ActionRequest::CloseTerminal {
                                         project_id,
                                         terminal_id,
                                     },
-                                    &mut ws,
+                                    &workspace,
                                     &mut focus_manager,
                                     &backend,
                                     &terminals,
@@ -2480,13 +2476,12 @@ pub async fn daemon_command_loop(
                                     None => {
                                         // Not in the layout — immediate close.
                                         let app_settings = settings.lock().clone();
-                                        let mut ws = workspace.lock();
                                         run_main_workspace_action(
                                             ActionRequest::CloseTerminal {
                                                 project_id,
                                                 terminal_id,
                                             },
-                                            &mut ws,
+                                            &workspace,
                                             &mut focus_manager,
                                             &backend,
                                             &terminals,
@@ -2809,7 +2804,6 @@ pub async fn daemon_command_loop(
                             match plan {
                                 None => {
                                     let app_settings = settings.lock().clone();
-                                    let mut ws = workspace.lock();
                                     run_main_workspace_action(
                                         ActionRequest::CloseWorktree {
                                             project_id,
@@ -2819,7 +2813,7 @@ pub async fn daemon_command_loop(
                                             push,
                                             delete_branch,
                                         },
-                                        &mut ws,
+                                        &workspace,
                                         &mut focus_manager,
                                         &backend,
                                         &terminals,
@@ -2947,10 +2941,9 @@ pub async fn daemon_command_loop(
                                 // mutators notify via `cx` themselves, so there is no
                                 // separate `cx.notify()` like the GUI's view-refresh.
                                 let app_settings = settings.lock().clone();
-                                let mut ws = workspace.lock();
                                 let result = run_main_workspace_action(
                                     action,
-                                    &mut ws,
+                                    &workspace,
                                     &mut focus_manager,
                                     &backend,
                                     &terminals,
@@ -2999,14 +2992,13 @@ pub async fn daemon_command_loop(
                     }
                 } else {
                     let app_settings = settings.lock().clone();
-                    let mut ws = workspace.lock();
                     run_main_workspace_action(
                         ActionRequest::Resize {
                             terminal_id,
                             cols,
                             rows,
                         },
-                        &mut ws,
+                        &workspace,
                         &mut focus_manager,
                         &backend,
                         &terminals,
@@ -3408,17 +3400,156 @@ pub fn materialize_uninitialized_terminals(
     }
 }
 
+/// Backend teardown requested while a workspace action is mutating state.
+enum DeferredTerminalKill {
+    Terminal(String),
+    Session(TerminalSessionTeardown),
+}
+
+impl DeferredTerminalKill {
+    fn terminal_id(&self) -> &str {
+        match self {
+            Self::Terminal(terminal_id) => terminal_id,
+            Self::Session(teardown) => &teardown.terminal_id,
+        }
+    }
+}
+
+struct DeferredKillBackend<'a> {
+    backend: &'a dyn TerminalBackend,
+    pending: Mutex<Vec<DeferredTerminalKill>>,
+}
+
+impl<'a> DeferredKillBackend<'a> {
+    fn new(backend: &'a dyn TerminalBackend) -> Self {
+        Self {
+            backend,
+            pending: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take_pending(&self) -> Vec<DeferredTerminalKill> {
+        std::mem::take(&mut *self.pending.lock())
+    }
+}
+
+impl TerminalBackend for DeferredKillBackend<'_> {
+    fn transport(&self) -> Arc<dyn okena_terminal::terminal::TerminalTransport> {
+        self.backend.transport()
+    }
+
+    fn create_terminal(
+        &self,
+        cwd: &str,
+        shell: Option<&okena_terminal::shell_config::ShellType>,
+    ) -> anyhow::Result<String> {
+        self.backend.create_terminal(cwd, shell)
+    }
+
+    fn create_terminal_with_plan(
+        &self,
+        cwd: &str,
+        plan: &okena_terminal::backend::TerminalLaunchPlan,
+    ) -> anyhow::Result<String> {
+        self.backend.create_terminal_with_plan(cwd, plan)
+    }
+
+    fn reconnect_terminal(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        shell: Option<&okena_terminal::shell_config::ShellType>,
+    ) -> anyhow::Result<String> {
+        self.backend.reconnect_terminal(terminal_id, cwd, shell)
+    }
+
+    fn reconnect_terminal_with_plan(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        plan: &okena_terminal::backend::TerminalLaunchPlan,
+    ) -> anyhow::Result<String> {
+        self.backend
+            .reconnect_terminal_with_plan(terminal_id, cwd, plan)
+    }
+
+    fn kill(&self, terminal_id: &str) {
+        self.pending
+            .lock()
+            .push(DeferredTerminalKill::Terminal(terminal_id.to_string()));
+    }
+
+    fn kill_session(&self, teardown: &TerminalSessionTeardown) {
+        self.pending
+            .lock()
+            .push(DeferredTerminalKill::Session(teardown.clone()));
+    }
+
+    fn flush_teardown(&self) {
+        self.backend.flush_teardown();
+    }
+
+    fn supports_session_backend_reconfiguration(&self) -> bool {
+        self.backend.supports_session_backend_reconfiguration()
+    }
+
+    fn begin_session_backend_reconfiguration(&self) -> anyhow::Result<()> {
+        self.backend.begin_session_backend_reconfiguration()
+    }
+
+    fn ensure_session_backend_reconfigurable(&self) -> anyhow::Result<()> {
+        self.backend.ensure_session_backend_reconfigurable()
+    }
+
+    fn apply_session_backend(
+        &self,
+        backend: okena_terminal::session_backend::SessionBackend,
+    ) -> anyhow::Result<()> {
+        self.backend.apply_session_backend(backend)
+    }
+
+    fn cancel_session_backend_reconfiguration(&self) {
+        self.backend.cancel_session_backend_reconfiguration();
+    }
+
+    fn capture_buffer(&self, terminal_id: &str) -> Option<std::path::PathBuf> {
+        self.backend.capture_buffer(terminal_id)
+    }
+
+    fn supports_buffer_capture(&self) -> bool {
+        self.backend.supports_buffer_capture()
+    }
+
+    fn is_remote(&self) -> bool {
+        self.backend.is_remote()
+    }
+
+    fn get_shell_pid(&self, terminal_id: &str) -> Option<u32> {
+        self.backend.get_shell_pid(terminal_id)
+    }
+
+    fn get_foreground_shell_pid(&self, terminal_id: &str) -> Option<u32> {
+        self.backend.get_foreground_shell_pid(terminal_id)
+    }
+
+    fn get_service_pids(&self, terminal_id: &str) -> Vec<u32> {
+        self.backend.get_service_pids(terminal_id)
+    }
+
+    fn get_batch_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
+        self.backend.get_batch_service_pids(terminal_ids)
+    }
+}
+
 /// Run a workspace-scoped action against the synthetic main window.
 ///
 /// Shared by the generic default arm and the `CloseTerminal` immediate-close
-/// fallbacks. The caller snapshots `app_settings` and locks the workspace
-/// (passed as `&mut Workspace`) BEFORE invoking this, so no lock is held across
-/// an `.await`. Mirrors the inline body the default arm uses for
-/// `WindowId::Main`.
+/// fallbacks. The state mutation and kill-queue drain happen under the workspace
+/// lock; PTY teardown happens only after that lock is released.
 #[allow(clippy::too_many_arguments)]
 fn run_main_workspace_action(
     action: ActionRequest,
-    ws: &mut Workspace,
+    workspace: &Arc<Mutex<Workspace>>,
     focus_manager: &mut FocusManager,
     backend: &Arc<dyn TerminalBackend>,
     terminals: &TerminalsRegistry,
@@ -3427,32 +3558,69 @@ fn run_main_workspace_action(
     hook_runner: &Option<okena_hooks::HookRunner>,
     hook_monitor: &Option<okena_hooks::HookMonitor>,
 ) -> CommandResult {
-    let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
-    let result = execute_action(
-        action,
-        ws,
-        WindowId::Main,
-        focus_manager,
-        &**backend,
-        terminals,
-        app_settings,
-        &mut cx,
-    )
-    .into_command_result();
+    let deferred_backend = DeferredKillBackend::new(&**backend);
+    let (result, queued_terminal_ids) = {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut ws = workspace.lock();
+        let result = execute_action(
+            action,
+            &mut ws,
+            WindowId::Main,
+            focus_manager,
+            &deferred_backend,
+            terminals,
+            app_settings,
+            &mut cx,
+        )
+        .into_command_result();
+        (result, ws.drain_pending_terminal_kills())
+    };
 
-    // Drain any terminal kills the action queued (delete_project,
-    // remove_worktree_project, the grace==0 immediate close, …) and tear down
-    // their PTYs + persistent session backends. The GUI client does this via a
-    // `Workspace` observer; the daemon has no equivalent observer, so without
-    // this a delete removes the project's state but leaks its PTY / dtach / tmux
-    // processes. Mirrors the soft-close finalize paths (`CloseTerminalNow`, the
-    // grace-expiry poll), which drain + kill the same way.
-    for id in ws.drain_pending_terminal_kills() {
-        backend.kill(&id);
-        terminals.lock().remove(&id);
+    // The GUI client tears these down from a workspace observer. The daemon has
+    // no equivalent observer, so it owns the drain while keeping backend waits
+    // outside the authoritative state lock.
+    let mut pending = deferred_backend.take_pending();
+    for terminal_id in queued_terminal_ids {
+        if !pending
+            .iter()
+            .any(|teardown| teardown.terminal_id() == terminal_id)
+        {
+            pending.push(DeferredTerminalKill::Terminal(terminal_id));
+        }
+    }
+    for teardown in pending {
+        let terminal_id = teardown.terminal_id().to_string();
+        match teardown {
+            DeferredTerminalKill::Terminal(terminal_id) => backend.kill(&terminal_id),
+            DeferredTerminalKill::Session(teardown) => backend.kill_session(&teardown),
+        }
+        terminals.lock().remove(&terminal_id);
     }
 
     result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_soft_close_now(
+    workspace: &Arc<Mutex<Workspace>>,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    deadlines: &SoftCloseDeadlines,
+    terminal_id: &str,
+) -> CommandResult {
+    let terminal_ids = {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut ws = workspace.lock();
+        close_now_flow(deadlines, &mut ws, terminal_id, &mut cx)
+    };
+    for terminal_id in terminal_ids {
+        backend.kill(&terminal_id);
+        terminals.lock().remove(&terminal_id);
+    }
+    CommandResult::Ok(None)
 }
 
 #[cfg(test)]
@@ -5238,7 +5406,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 name: "Renamed while searching".to_string(),
             },
-            &mut workspace.lock(),
+            &workspace,
             &mut focus_manager,
             &backend,
             &terminals,
@@ -5794,6 +5962,12 @@ mod tests {
         killed: Arc<Mutex<Vec<String>>>,
     }
 
+    struct KillBarrierBackend {
+        killed: Arc<Mutex<Vec<String>>>,
+        started: std::sync::mpsc::Sender<String>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
     impl TerminalBackend for RecordingBackend {
         fn transport(&self) -> Arc<dyn TerminalTransport> {
             Arc::new(StubTransport)
@@ -5815,6 +5989,52 @@ mod tests {
         }
         fn kill(&self, terminal_id: &str) {
             self.killed.lock().push(terminal_id.to_string());
+        }
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    impl TerminalBackend for KillBarrierBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("kill barrier backend: create_terminal not supported")
+        }
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("kill barrier backend: reconnect_terminal not supported")
+        }
+        fn kill(&self, terminal_id: &str) {
+            self.killed.lock().push(terminal_id.to_string());
+            self.started
+                .send(terminal_id.to_string())
+                .expect("kill waiter remains alive");
+            self.release
+                .lock()
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("test releases kill barrier");
         }
         fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
             None
@@ -6051,7 +6271,9 @@ mod tests {
             killed: killed.clone(),
         });
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
-        let mut workspace = Workspace::new(workspace_with_initialized_terminal("t1"));
+        let workspace = Arc::new(Mutex::new(Workspace::new(
+            workspace_with_initialized_terminal("t1"),
+        )));
         let mut focus_manager = FocusManager::new();
         let settings = default_settings();
         let (workspace_tick, _wtrx) = watch::channel(0u64);
@@ -6060,7 +6282,7 @@ mod tests {
             ActionRequest::DeleteProject {
                 project_id: "p1".to_string(),
             },
-            &mut workspace,
+            &workspace,
             &mut focus_manager,
             &backend,
             &terminals,
@@ -6075,7 +6297,7 @@ mod tests {
             "delete should succeed: {result:?}"
         );
         assert!(
-            workspace.project("p1").is_none(),
+            workspace.lock().project("p1").is_none(),
             "project removed from state"
         );
         assert_eq!(
@@ -6083,6 +6305,155 @@ mod tests {
             &vec!["t1".to_string()],
             "the deleted project's terminal PTY was killed, not leaked"
         );
+    }
+
+    #[test]
+    fn generic_terminal_teardown_releases_workspace_before_kill() {
+        let cases = [
+            (
+                ActionRequest::DeleteProject {
+                    project_id: "p1".to_string(),
+                },
+                true,
+            ),
+            (
+                ActionRequest::CloseTerminal {
+                    project_id: "p1".to_string(),
+                    terminal_id: "t1".to_string(),
+                },
+                false,
+            ),
+        ];
+
+        for (action, project_deleted) in cases {
+            let workspace = Arc::new(Mutex::new(Workspace::new(
+                workspace_with_initialized_terminal("t1"),
+            )));
+            let killed = Arc::new(Mutex::new(Vec::new()));
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let backend: Arc<dyn TerminalBackend> = Arc::new(KillBarrierBackend {
+                killed: killed.clone(),
+                started: started_tx,
+                release: Mutex::new(release_rx),
+            });
+            let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+            let settings = default_settings();
+            let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+
+            let action_workspace = workspace.clone();
+            let action_backend = backend.clone();
+            let action_terminals = terminals.clone();
+            let action_thread = std::thread::spawn(move || {
+                let mut focus_manager = FocusManager::new();
+                run_main_workspace_action(
+                    action,
+                    &action_workspace,
+                    &mut focus_manager,
+                    &action_backend,
+                    &action_terminals,
+                    &settings,
+                    &workspace_tick,
+                    &None,
+                    &None,
+                )
+            });
+
+            assert_eq!(
+                started_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("backend kill started"),
+                "t1"
+            );
+            let ws = workspace
+                .try_lock()
+                .expect("workspace remains available while backend kill waits");
+            assert_eq!(ws.project("p1").is_none(), project_deleted);
+            if !project_deleted {
+                assert!(
+                    ws.project("p1")
+                        .is_some_and(|project| project.layout.is_none()),
+                    "terminal close state is visible before PTY teardown completes"
+                );
+            }
+            drop(ws);
+            release_tx.send(()).expect("release backend kill");
+
+            let result = action_thread.join().expect("action thread completes");
+            assert!(matches!(result, CommandResult::Ok(_)), "{result:?}");
+            assert_eq!(&*killed.lock(), &["t1".to_string()]);
+        }
+    }
+
+    #[test]
+    fn close_now_releases_workspace_before_kill() {
+        let workspace = Arc::new(Mutex::new(Workspace::new(
+            workspace_with_initialized_terminal("t1"),
+        )));
+        let deadlines: SoftCloseDeadlines = Arc::new(Mutex::new(HashMap::new()));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let killed = Arc::new(Mutex::new(Vec::new()));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(KillBarrierBackend {
+            killed: killed.clone(),
+            started: started_tx,
+            release: Mutex::new(release_rx),
+        });
+        let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+
+        {
+            let mut focus_manager = FocusManager::new();
+            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &None, &None);
+            workspace.lock().begin_soft_close(
+                &mut focus_manager,
+                "p1",
+                &[],
+                "t1",
+                "soft-close:t1",
+                &mut cx,
+            );
+            deadlines.lock().insert(
+                "t1".to_string(),
+                std::time::Instant::now() + std::time::Duration::from_secs(60),
+            );
+        }
+
+        let action_workspace = workspace.clone();
+        let action_backend = backend.clone();
+        let action_terminals = terminals.clone();
+        let action_deadlines = deadlines.clone();
+        let action_thread = std::thread::spawn(move || {
+            finalize_soft_close_now(
+                &action_workspace,
+                &action_backend,
+                &action_terminals,
+                &workspace_tick,
+                &None,
+                &None,
+                &action_deadlines,
+                "t1",
+            )
+        });
+
+        assert_eq!(
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("backend kill started"),
+            "t1"
+        );
+        assert!(
+            !workspace
+                .try_lock()
+                .expect("workspace remains available while backend kill waits")
+                .has_pending_close("t1")
+        );
+        assert!(deadlines.lock().is_empty());
+        release_tx.send(()).expect("release backend kill");
+
+        let result = action_thread.join().expect("action thread completes");
+        assert!(matches!(result, CommandResult::Ok(_)), "{result:?}");
+        assert_eq!(&*killed.lock(), &["t1".to_string()]);
     }
 
     /// A parent project plus a worktree child whose row is present but whose
@@ -6742,11 +7113,11 @@ mod tests {
     fn delete_project_rejected_while_worktree_creating() {
         let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
-        let mut workspace = Workspace::new(workspace_with_worktree_child());
+        let workspace = Arc::new(Mutex::new(Workspace::new(workspace_with_worktree_child())));
         // Seed the transient creating state the way the daemon does — a freshly
         // constructed `Workspace` starts with an empty lifecycle tracker, so the
         // persisted `is_creating` mirror alone would not trip the guard.
-        workspace.mark_creating_project("wt1");
+        workspace.lock().mark_creating_project("wt1");
         let mut focus_manager = FocusManager::new();
         let settings = default_settings();
         let (workspace_tick, _wtrx) = watch::channel(0u64);
@@ -6755,7 +7126,7 @@ mod tests {
             ActionRequest::DeleteProject {
                 project_id: "wt1".to_string(),
             },
-            &mut workspace,
+            &workspace,
             &mut focus_manager,
             &backend,
             &terminals,
@@ -6770,11 +7141,11 @@ mod tests {
             "mid-create delete must be rejected: {result:?}"
         );
         assert!(
-            workspace.project("wt1").is_some(),
+            workspace.lock().project("wt1").is_some(),
             "the worktree row survives the rejected delete"
         );
         assert!(
-            workspace.is_creating_project("wt1"),
+            workspace.lock().is_creating_project("wt1"),
             "creating flag untouched by the rejected delete"
         );
     }

@@ -214,36 +214,30 @@ pub fn undo_soft_close_flow(
 }
 
 /// Finalize a soft close now ("Close now"): drop the deadline, finalize the
-/// pending record, then kill the PTY + drop it from the registry.
+/// pending record, then return the PTYs the caller must tear down after
+/// releasing its workspace lock.
 pub fn close_now_flow(
     deadlines: &SoftCloseDeadlines,
     ws: &mut Workspace,
-    backend: &dyn TerminalBackend,
-    terminals: &TerminalsRegistry,
     terminal_id: &str,
     cx: &mut impl WorkspaceCx,
-) {
+) -> Vec<String> {
     deadlines.lock().remove(terminal_id);
     ws.finalize_soft_close(terminal_id, cx);
-    for id in ws.drain_pending_terminal_kills() {
-        backend.kill(&id);
-        terminals.lock().remove(&id);
-    }
+    ws.drain_pending_terminal_kills()
 }
 
 /// One finalizer tick: reap every soft-close whose grace period elapsed.
 ///
 /// Collects + removes the expired ids under the deadline lock, finalizes each on
-/// the workspace (queues the kills), then drains the kill queue and tears the
-/// PTYs down. The client toast TTLs out on its own. Callers drive this on a
-/// timer (~200ms).
+/// the workspace (queues the kills), then drains and returns the kill queue.
+/// Callers tear down those PTYs after releasing their workspace lock. The client
+/// toast TTLs out on its own. Callers drive this on a timer (~200ms).
 pub fn finalize_expired(
     deadlines: &SoftCloseDeadlines,
     ws: &mut Workspace,
-    backend: &dyn TerminalBackend,
-    terminals: &TerminalsRegistry,
     cx: &mut impl WorkspaceCx,
-) {
+) -> Vec<String> {
     // Collect + remove expired ids under the deadline lock only.
     let expired: Vec<String> = {
         let now = Instant::now();
@@ -259,17 +253,14 @@ pub fn finalize_expired(
         exp
     };
     if expired.is_empty() {
-        return;
+        return Vec::new();
     }
 
     // Finalize on the workspace (queues kills), then drain the kill queue.
     for tid in &expired {
         ws.finalize_soft_close(tid, cx);
     }
-    for id in ws.drain_pending_terminal_kills() {
-        backend.kill(&id);
-        terminals.lock().remove(&id);
-    }
+    ws.drain_pending_terminal_kills()
 }
 
 /// Outcome of resolving an optimistic close once the (off-thread) busy check
@@ -587,7 +578,6 @@ mod tests {
     use crate::state::{LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
     use okena_core::theme::FolderColor;
     use okena_terminal::TerminalsRegistry;
-    use okena_terminal::backend::TerminalBackend;
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
     use parking_lot::Mutex;
@@ -934,51 +924,6 @@ mod tests {
         }
     }
 
-    /// `TerminalBackend` that records every `kill`ed id. The soft-close flow
-    /// tests never spawn PTYs, so the create/reconnect paths are unreachable.
-    struct RecordingBackend {
-        killed: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl TerminalBackend for RecordingBackend {
-        fn transport(&self) -> Arc<dyn TerminalTransport> {
-            Arc::new(StubTransport)
-        }
-        fn create_terminal(
-            &self,
-            _cwd: &str,
-            _shell: Option<&ShellType>,
-        ) -> anyhow::Result<String> {
-            anyhow::bail!("stub backend: create_terminal not supported")
-        }
-        fn reconnect_terminal(
-            &self,
-            _terminal_id: &str,
-            _cwd: &str,
-            _shell: Option<&ShellType>,
-        ) -> anyhow::Result<String> {
-            anyhow::bail!("stub backend: reconnect_terminal not supported")
-        }
-        fn kill(&self, terminal_id: &str) {
-            self.killed.lock().push(terminal_id.to_string());
-        }
-        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
-            None
-        }
-        fn supports_buffer_capture(&self) -> bool {
-            false
-        }
-        fn is_remote(&self) -> bool {
-            false
-        }
-        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
-            None
-        }
-        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
-            Vec::new()
-        }
-    }
-
     fn empty_deadlines() -> SoftCloseDeadlines {
         Arc::new(Mutex::new(HashMap::new()))
     }
@@ -1076,11 +1021,6 @@ mod tests {
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
             let mut fm = FocusManager::new();
-            let killed = Arc::new(Mutex::new(Vec::new()));
-            let backend = RecordingBackend {
-                killed: killed.clone(),
-            };
-            let terminals = empty_registry();
             let deadlines = empty_deadlines();
 
             // "a" is mid soft-close with an already-expired deadline; "b" is
@@ -1094,12 +1034,12 @@ mod tests {
                 .lock()
                 .insert("b".to_string(), Instant::now() + Duration::from_secs(60));
 
-            finalize_expired(&deadlines, ws, &backend, &terminals, cx);
+            let kill_ids = finalize_expired(&deadlines, ws, cx);
 
             assert_eq!(
-                &*killed.lock(),
-                &vec!["a".to_string()],
-                "only past-deadline killed"
+                kill_ids,
+                vec!["a".to_string()],
+                "only past-deadline returned for teardown"
             );
             assert!(
                 !deadlines.lock().contains_key("a"),
@@ -1121,11 +1061,6 @@ mod tests {
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
             let mut fm = FocusManager::new();
-            let killed = Arc::new(Mutex::new(Vec::new()));
-            let backend = RecordingBackend {
-                killed: killed.clone(),
-            };
-            let terminals = empty_registry();
             let deadlines = empty_deadlines();
 
             ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
@@ -1133,11 +1068,11 @@ mod tests {
                 .lock()
                 .insert("a".to_string(), Instant::now() + Duration::from_secs(60));
 
-            close_now_flow(&deadlines, ws, &backend, &terminals, "a", cx);
+            let kill_ids = close_now_flow(&deadlines, ws, "a", cx);
 
             assert!(!deadlines.lock().contains_key("a"), "deadline cleared");
             assert!(!ws.has_pending_close("a"), "pending finalized");
-            assert_eq!(&*killed.lock(), &vec!["a".to_string()], "PTY killed");
+            assert_eq!(kill_ids, vec!["a".to_string()], "PTY queued for teardown");
         });
     }
 
