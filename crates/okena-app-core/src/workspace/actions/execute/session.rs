@@ -22,7 +22,7 @@ use crate::workspace::persistence::{
 };
 use crate::workspace::state::{Workspace, WorkspaceData};
 use okena_terminal::TerminalsRegistry;
-use okena_terminal::backend::TerminalBackend;
+use okena_terminal::backend::{TerminalBackend, TerminalSessionTeardown};
 use okena_workspace::context::WorkspaceCx;
 use std::collections::HashSet;
 
@@ -106,7 +106,7 @@ fn replace_workspace_with(
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
-    stale_terminal_ids: &[String],
+    stale_terminal_ids: &[TerminalSessionTeardown],
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     if let Some(error) = workspace_replacement_conflict(ws) {
@@ -128,7 +128,6 @@ fn replace_workspace_with(
         .collect();
     let mut ids_to_kill: HashSet<String> = terminals.lock().keys().cloned().collect();
     ids_to_kill.extend(project_owned_terminal_ids(ws.data()));
-    ids_to_kill.extend(stale_terminal_ids.iter().cloned());
     // Incoming hooks are never reconnected; load clears them and fires fresh
     // project-open lifecycle hooks instead.
     ids_to_kill.extend(
@@ -137,6 +136,11 @@ fn replace_workspace_with(
             .flat_map(|project| project.hook_terminals.keys().cloned()),
     );
     ids_to_kill.retain(|id| !incoming_persistent_ids.contains(id));
+    ids_to_kill.retain(|id| {
+        !stale_terminal_ids
+            .iter()
+            .any(|session| session.terminal_id == *id)
+    });
     let mut ids: Vec<String> = ids_to_kill.into_iter().collect();
     ids.sort();
     if let Some(monitor) = cx.hook_monitor() {
@@ -147,6 +151,11 @@ fn replace_workspace_with(
     }
     for id in &ids {
         backend.kill(id);
+    }
+    for session in stale_terminal_ids {
+        if !incoming_persistent_ids.contains(&session.terminal_id) {
+            backend.kill_session(session);
+        }
     }
     terminals.lock().clear();
 
@@ -600,7 +609,7 @@ mod tests {
             backend.as_ref(),
             &terminals,
             &AppSettings::default(),
-            &["discarded-stale".to_string()],
+            &[TerminalSessionTeardown::host("discarded-stale".to_string())],
             &mut cx,
         );
 

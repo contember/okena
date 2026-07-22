@@ -1,4 +1,4 @@
-#[cfg(windows)]
+use crate::backend::{TerminalLaunchPlan, TerminalSessionTeardown, TerminalTeardownRoute};
 use crate::session_backend::SessionCommand;
 #[cfg(not(windows))]
 use crate::session_backend::get_extended_path;
@@ -541,8 +541,17 @@ impl PtyManager {
         cwd: &str,
         shell: Option<&ShellType>,
     ) -> Result<String> {
+        let plan = TerminalLaunchPlan::for_shell(shell.cloned().unwrap_or_default());
+        self.create_terminal_with_plan(cwd, &plan)
+    }
+
+    pub fn create_terminal_with_plan(
+        &self,
+        cwd: &str,
+        plan: &TerminalLaunchPlan,
+    ) -> Result<String> {
         let terminal_id = uuid::Uuid::new_v4().to_string();
-        self.create_terminal_with_id(&terminal_id, cwd, shell)?;
+        self.create_terminal_with_id(&terminal_id, cwd, plan)?;
         Ok(terminal_id)
     }
 
@@ -565,6 +574,16 @@ impl PtyManager {
         cwd: &str,
         shell: Option<&ShellType>,
     ) -> Result<String> {
+        let plan = TerminalLaunchPlan::for_shell(shell.cloned().unwrap_or_default());
+        self.create_or_reconnect_terminal_with_plan(terminal_id, cwd, &plan)
+    }
+
+    pub fn create_or_reconnect_terminal_with_plan(
+        &self,
+        terminal_id: Option<&str>,
+        cwd: &str,
+        plan: &TerminalLaunchPlan,
+    ) -> Result<String> {
         match terminal_id {
             Some(id) => {
                 // Check if we already have this terminal running
@@ -572,10 +591,10 @@ impl PtyManager {
                     return Ok(id.to_string());
                 }
                 // Try to reconnect or create with this ID
-                self.create_terminal_with_id(id, cwd, shell)?;
+                self.create_terminal_with_id(id, cwd, plan)?;
                 Ok(id.to_string())
             }
-            None => self.create_terminal_with_shell(cwd, shell),
+            None => self.create_terminal_with_plan(cwd, plan),
         }
     }
 
@@ -584,7 +603,7 @@ impl PtyManager {
         &self,
         terminal_id: &str,
         cwd: &str,
-        shell: Option<&ShellType>,
+        plan: &TerminalLaunchPlan,
     ) -> Result<()> {
         let generation = PtyGeneration(self.next_generation.fetch_add(1, Ordering::Relaxed));
         let mut instances = self.instances.lock();
@@ -619,10 +638,10 @@ impl PtyManager {
 
         // Build command based on session backend and shell config
         #[cfg(unix)]
-        let mut cmd = self.build_terminal_command(terminal_id, cwd, shell);
+        let mut cmd = self.build_terminal_command(terminal_id, cwd, plan);
         #[cfg(windows)]
         let (mut cmd, wsl_distro, wsl_backend) =
-            self.build_terminal_command(terminal_id, cwd, shell);
+            self.build_terminal_command(terminal_id, cwd, plan);
 
         // Apply caller-configured env overrides to the PTY unconditionally.
         // These are profile-scoped values (e.g. CLAUDE_CONFIG_DIR) that must
@@ -770,21 +789,29 @@ impl PtyManager {
         &self,
         terminal_id: &str,
         cwd: &str,
-        shell: Option<&ShellType>,
+        plan: &TerminalLaunchPlan,
     ) -> CommandBuilder {
         // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
         // so it can be passed to the session backend
-        let custom_command = match shell {
-            Some(ShellType::Custom { args, .. })
-                if args.len() == 2 && (args[0] == "-c" || args[0] == "-ic") =>
-            {
-                Some(args[1].as_str())
-            }
-            _ => None,
-        };
+        let custom_command = plan.initial_command.as_ref().map_or_else(
+            || match &plan.route {
+                ShellType::Custom { args, .. }
+                    if args.len() == 2 && (args[0] == "-c" || args[0] == "-ic") =>
+                {
+                    Some(SessionCommand::ShellScript(args[1].as_str()))
+                }
+                _ => None,
+            },
+            |command| {
+                Some(SessionCommand::Program {
+                    program: command.program.as_str(),
+                    args: &command.args,
+                })
+            },
+        );
 
         let extra_env = self.extra_env.lock().clone();
-        let mut cmd = if let Some((program, args)) = self.session_backend.build_command(
+        let mut cmd = if let Some((program, args)) = self.session_backend.build_command_with_custom(
             &self.session_backend.session_name(terminal_id),
             cwd,
             custom_command,
@@ -801,13 +828,16 @@ impl PtyManager {
             cmd
         } else {
             // No session backend - use shell config or default
-            match shell {
-                Some(shell_type) => shell_type.build_command(cwd),
-                None => {
-                    let mut cmd = CommandBuilder::new_default_prog();
+            match &plan.initial_command {
+                Some(command) => {
+                    let mut cmd = CommandBuilder::new(&command.program);
+                    for arg in &command.args {
+                        cmd.arg(arg);
+                    }
                     cmd.cwd(cwd);
                     cmd
                 }
+                None => plan.route.build_command(cwd),
             }
         };
 
@@ -822,20 +852,28 @@ impl PtyManager {
         &self,
         terminal_id: &str,
         cwd: &str,
-        shell: Option<&ShellType>,
+        plan: &TerminalLaunchPlan,
     ) -> (CommandBuilder, Option<String>, Option<ResolvedBackend>) {
         use crate::session_backend::resolve_for_wsl;
         use crate::shell_config::windows_path_to_wsl;
 
         // Preserve the exact executable and argv for psmux. In particular,
         // keep-alive hooks require cmd.exe delayed expansion via `/V:ON`.
-        let custom_command = match shell {
-            Some(ShellType::Custom { path, args }) => Some(SessionCommand::Program {
-                program: path,
-                args,
-            }),
-            _ => None,
-        };
+        let custom_command = plan.initial_command.as_ref().map_or_else(
+            || match &plan.route {
+                ShellType::Custom { path, args } => Some(SessionCommand::Program {
+                    program: path.as_str(),
+                    args,
+                }),
+                _ => None,
+            },
+            |command| {
+                Some(SessionCommand::Program {
+                    program: command.program.as_str(),
+                    args: &command.args,
+                })
+            },
+        );
 
         // Wrap a non-WSL shell through the host session backend (psmux) when one
         // is available. WSL terminals get their own per-distro backend below
@@ -863,8 +901,8 @@ impl PtyManager {
             }
         };
 
-        let (mut cmd, wsl_distro, wsl_backend) = match shell {
-            Some(ShellType::Wsl { distro }) => {
+        let (mut cmd, wsl_distro, wsl_backend) = match &plan.route {
+            ShellType::Wsl { distro } => {
                 let wsl_backend =
                     resolve_for_wsl(distro.as_deref(), self.session_backend_preference);
                 let session_name = wsl_backend.session_name(terminal_id);
@@ -882,25 +920,33 @@ impl PtyManager {
                     }
                     (cmd, distro.clone(), Some(wsl_backend))
                 } else {
-                    (
-                        ShellType::Wsl {
-                            distro: distro.clone(),
+                    let mut cmd = ShellType::Wsl {
+                        distro: distro.clone(),
+                    }
+                    .build_command(cwd);
+                    if let Some(command) = &plan.initial_command {
+                        cmd.arg("--");
+                        cmd.arg(&command.program);
+                        for arg in &command.args {
+                            cmd.arg(arg);
                         }
-                        .build_command(cwd),
-                        distro.clone(),
-                        None,
-                    )
+                    }
+                    (cmd, distro.clone(), None)
                 }
             }
-            Some(shell_type) => (
-                wrap_with_host_backend(shell_type.build_command(cwd)),
-                None,
-                None,
-            ),
-            None => {
-                let mut default_cmd = CommandBuilder::new_default_prog();
-                default_cmd.cwd(cwd);
-                (wrap_with_host_backend(default_cmd), None, None)
+            shell_type => {
+                let fallback = match &plan.initial_command {
+                    Some(command) => {
+                        let mut cmd = CommandBuilder::new(&command.program);
+                        for arg in &command.args {
+                            cmd.arg(arg);
+                        }
+                        cmd.cwd(cwd);
+                        cmd
+                    }
+                    None => shell_type.build_command(cwd),
+                };
+                (wrap_with_host_backend(fallback), None, None)
             }
         };
 
@@ -1129,6 +1175,37 @@ impl PtyManager {
         self.enqueue_session_kill(terminal_id, handle, exited);
     }
 
+    /// Kill a persisted session using its load-time route when no PTY exists.
+    pub fn kill_session(&self, teardown: &TerminalSessionTeardown) {
+        match &teardown.route {
+            TerminalTeardownRoute::Host => self.kill(&teardown.terminal_id),
+            #[cfg(windows)]
+            TerminalTeardownRoute::Wsl { distro, backend } => {
+                let (handle, exited) = {
+                    let mut instances = self.instances.lock();
+                    while instances.creating.contains_key(&teardown.terminal_id) {
+                        self.instance_changed.wait(&mut instances);
+                    }
+                    let mut terminals = self.terminals.lock();
+                    let handle = terminals.remove(&teardown.terminal_id);
+                    if let Some(handle) = handle.as_ref() {
+                        instances.remove_current(&teardown.terminal_id, handle.generation);
+                    }
+                    let exited = instances.exited.remove(&teardown.terminal_id);
+                    instances.queue_session_kill(&teardown.terminal_id);
+                    (handle, exited)
+                };
+                self.enqueue_session_kill_with_route(
+                    &teardown.terminal_id,
+                    handle,
+                    exited,
+                    distro.clone(),
+                    *backend,
+                );
+            }
+        }
+    }
+
     /// Kill the persistent session only if this exact exited generation still
     /// owns the logical terminal ID. A reconnect either replaces the exit claim
     /// or waits for the queued backend kill to finish.
@@ -1182,6 +1259,32 @@ impl PtyManager {
             }),
         };
         self.enqueue_teardown(job);
+    }
+
+    #[cfg(windows)]
+    fn enqueue_session_kill_with_route(
+        &self,
+        terminal_id: &str,
+        handle: Option<PtyHandle>,
+        _exited: Option<ExitedPty>,
+        wsl_distro: Option<String>,
+        wsl_backend: ResolvedBackend,
+    ) {
+        let session_name = wsl_backend.session_name(terminal_id);
+        self.enqueue_teardown(TeardownJob {
+            handle,
+            kind: TeardownKind::KillSession {
+                session_backend: self.session_backend,
+                session_name,
+                wsl_distro,
+                wsl_backend: Some(wsl_backend),
+            },
+            pending_session_kill: Some(PendingSessionKill {
+                terminal_id: terminal_id.to_string(),
+                instances: Arc::clone(&self.instances),
+                changed: Arc::clone(&self.instance_changed),
+            }),
+        });
     }
 
     #[cfg(windows)]

@@ -8,7 +8,7 @@ use crate::hook_monitor::{HookMonitor, HookStatus};
 use gpui::App;
 use okena_state::HooksConfig;
 use okena_terminal::TerminalsRegistry;
-use okena_terminal::backend::TerminalBackend;
+use okena_terminal::backend::{TerminalBackend, TerminalLaunchCommand, TerminalLaunchPlan};
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::collections::HashMap;
@@ -1425,6 +1425,146 @@ pub fn apply_on_create(
     ShellType::for_command(script)
 }
 
+/// Compose create-only hooks without losing the shell used for backend routing.
+pub fn terminal_launch_plan(
+    shell: ShellType,
+    shell_wrapper: Option<&str>,
+    on_create: Option<&str>,
+    env_vars: &HashMap<String, String>,
+) -> TerminalLaunchPlan {
+    if shell_wrapper.is_none() && on_create.is_none() {
+        return TerminalLaunchPlan::for_shell(shell);
+    }
+
+    let (program, args, handoff, prefix, separator, needs_handoff) =
+        terminal_launch_parts(&shell, env_vars);
+    let wrapped = shell_wrapper
+        .map(|wrapper| wrapper.replace("{shell}", &handoff))
+        .unwrap_or_else(|| handoff.clone());
+    let body = match (on_create, shell_wrapper, needs_handoff) {
+        (Some(command), _, true) => format!("{prefix}{command}{separator}{wrapped}"),
+        (Some(command), None, false) => format!("{prefix}{command}"),
+        (Some(command), Some(_), false) => format!("{prefix}{command}{separator}{wrapped}"),
+        (None, Some(_), _) => format!("{prefix}{wrapped}"),
+        (None, None, _) => unreachable!("empty hooks returned above"),
+    };
+    let mut command_args = args;
+    command_args.push(body);
+    TerminalLaunchPlan {
+        route: shell,
+        initial_command: Some(TerminalLaunchCommand {
+            program,
+            args: command_args,
+        }),
+    }
+}
+
+fn terminal_launch_parts(
+    shell: &ShellType,
+    env_vars: &HashMap<String, String>,
+) -> (String, Vec<String>, String, String, &'static str, bool) {
+    #[cfg(windows)]
+    match shell {
+        ShellType::Cmd | ShellType::Default => {
+            return (
+                "cmd.exe".to_string(),
+                vec!["/D".to_string(), "/S".to_string(), "/C".to_string()],
+                "cmd.exe /K".to_string(),
+                build_cmd_env_prefix(env_vars),
+                " & ",
+                true,
+            );
+        }
+        ShellType::PowerShell { core } => {
+            let program = if *core { "pwsh.exe" } else { "powershell.exe" };
+            return (
+                program.to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoExit".to_string(),
+                    "-Command".to_string(),
+                ],
+                format!("{program} -NoLogo -NoExit"),
+                build_powershell_env_prefix(env_vars),
+                "; ",
+                false,
+            );
+        }
+        ShellType::Wsl { .. } => {
+            return (
+                "sh".to_string(),
+                vec!["-lc".to_string()],
+                "exec \"${SHELL:-sh}\"".to_string(),
+                build_posix_env_prefix(env_vars),
+                "; ",
+                true,
+            );
+        }
+        ShellType::Custom { path, args } => {
+            let mut command_args = args.clone();
+            command_args.push("-ic".to_string());
+            return (
+                path.clone(),
+                command_args,
+                format!("exec {}", shell.to_command_string()),
+                build_posix_env_prefix(env_vars),
+                "; ",
+                true,
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let (program, mut args) = match shell {
+            ShellType::Custom { path, args } => (path.clone(), args.clone()),
+            ShellType::Default => (
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
+                Vec::new(),
+            ),
+        };
+        args.push("-ic".to_string());
+        (
+            program,
+            args,
+            format!("exec {}", shell.to_command_string()),
+            build_posix_env_prefix(env_vars),
+            "; ",
+            true,
+        )
+    }
+}
+
+fn safe_hook_env(env_vars: &HashMap<String, String>) -> Vec<(&String, &String)> {
+    env_vars
+        .iter()
+        .filter(|(key, _)| is_valid_env_key(key))
+        .collect()
+}
+
+fn build_posix_env_prefix(env_vars: &HashMap<String, String>) -> String {
+    safe_hook_env(env_vars)
+        .into_iter()
+        .map(|(key, value)| format!("export {key}='{}'; ", value.replace('\'', "'\\''")))
+        .collect()
+}
+
+#[cfg(windows)]
+fn build_cmd_env_prefix(env_vars: &HashMap<String, String>) -> String {
+    safe_hook_env(env_vars)
+        .into_iter()
+        .map(|(key, value)| format!("set \"{key}={}\" & ", value.replace('%', "%%")))
+        .collect()
+}
+
+#[cfg(windows)]
+fn build_powershell_env_prefix(env_vars: &HashMap<String, String>) -> String {
+    safe_hook_env(env_vars)
+        .into_iter()
+        .map(|(key, value)| format!("$env:{key}='{}'; ", value.replace('\'', "''")))
+        .collect()
+}
+
 /// Fire the `terminal.on_close` hook after a terminal PTY exits, taking the
 /// `HookMonitor` explicitly (GPUI-free). Runs headlessly (no PTY runner) since
 /// the terminal just exited.
@@ -2049,6 +2189,57 @@ mod tests {
             }
             other => panic!("Expected ShellType::Custom, got: {:?}", other),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_on_create_uses_cmd_handoff_without_posix_exec() {
+        let plan = terminal_launch_plan(ShellType::Cmd, None, Some("echo ready"), &HashMap::new());
+        let command = plan.initial_command.expect("create command");
+
+        assert_eq!(plan.route, ShellType::Cmd);
+        assert_eq!(command.program, "cmd.exe");
+        assert_eq!(&command.args[..3], ["/D", "/S", "/C"]);
+        assert!(command.args[3].contains("echo ready & cmd.exe /K"));
+        assert!(!command.args[3].contains("; exec"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_on_create_uses_no_exit_command_argv() {
+        let plan = terminal_launch_plan(
+            ShellType::PowerShell { core: true },
+            None,
+            Some("Write-Host ready"),
+            &HashMap::new(),
+        );
+        let command = plan.initial_command.expect("create command");
+
+        assert_eq!(command.program, "pwsh.exe");
+        assert_eq!(&command.args[..3], ["-NoLogo", "-NoExit", "-Command"]);
+        assert_eq!(command.args[3], "Write-Host ready");
+        assert!(!command.args[3].contains("exec"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_wrapper_and_on_create_preserve_wsl_route() {
+        let route = ShellType::Wsl {
+            distro: Some("Ubuntu".to_string()),
+        };
+        let plan = terminal_launch_plan(
+            route.clone(),
+            Some("envbox -- {shell}"),
+            Some("echo ready"),
+            &HashMap::new(),
+        );
+        let command = plan.initial_command.expect("create command");
+
+        assert_eq!(plan.route, route);
+        assert_eq!(command.program, "sh");
+        assert_eq!(&command.args[..1], ["-lc"]);
+        assert!(command.args[1].contains("echo ready; envbox -- exec \"${SHELL:-sh}\""));
+        assert!(!command.args[1].contains("cmd.exe"));
     }
 
     #[test]

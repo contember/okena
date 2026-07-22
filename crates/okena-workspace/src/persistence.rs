@@ -2,7 +2,9 @@
 use crate::state::WorktreeMetadata;
 use crate::state::{HookTerminalStatus, LayoutNode, ProjectData, WindowState, WorkspaceData};
 use okena_core::theme::FolderColor;
+use okena_terminal::backend::{TerminalSessionTeardown, TerminalTeardownRoute};
 use okena_terminal::session_backend::SessionBackend;
+use okena_terminal::shell_config::ShellType;
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -48,7 +50,7 @@ pub const WORKSPACE_VERSION: u32 = 2;
 /// cleanup. Startup kills these ids after constructing its terminal backend.
 pub struct LoadedWorkspace {
     pub data: WorkspaceData,
-    pub stale_terminal_ids: Vec<String>,
+    pub stale_terminal_ids: Vec<TerminalSessionTeardown>,
 }
 
 /// Get the config directory for the active profile.
@@ -408,7 +410,7 @@ pub fn load_workspace_with_cleanup(backend: SessionBackend) -> Result<LoadedWork
         let session_backend = backend.resolve();
         let clear_ids = !session_backend.supports_persistence();
         validate_workspace_data(&mut data, clear_ids, backend);
-        let stale_terminal_ids = sync_worktrees(&mut data);
+        let stale_terminal_ids = sync_worktrees_with_backend(&mut data, backend);
 
         // Successful load — allow saving
         LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
@@ -950,7 +952,15 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
 /// Worktrees are only added as projects explicitly by the user (via the worktree
 /// list popover or the create worktree dialog). This function only cleans up
 /// worktree projects that have become stale.
-pub(crate) fn sync_worktrees(data: &mut WorkspaceData) -> Vec<String> {
+#[cfg(test)]
+pub(crate) fn sync_worktrees(data: &mut WorkspaceData) -> Vec<TerminalSessionTeardown> {
+    sync_worktrees_with_backend(data, SessionBackend::None)
+}
+
+pub(crate) fn sync_worktrees_with_backend(
+    data: &mut WorkspaceData,
+    backend_preference: SessionBackend,
+) -> Vec<TerminalSessionTeardown> {
     let stale_ids: Vec<String> = data
         .projects
         .iter()
@@ -959,22 +969,44 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) -> Vec<String> {
         .map(|p| p.id.clone())
         .collect();
 
-    let mut stale_terminal_ids: Vec<String> = data
+    let mut stale_terminal_ids: Vec<TerminalSessionTeardown> = data
         .projects
         .iter()
         .filter(|project| stale_ids.contains(&project.id))
         .flat_map(|project| {
-            let mut ids = project
-                .layout
-                .as_ref()
-                .map_or_else(Vec::new, LayoutNode::collect_terminal_ids);
-            ids.extend(project.service_terminals.values().cloned());
-            ids.extend(project.hook_terminals.keys().cloned());
-            ids
+            let mut sessions = Vec::new();
+            if let Some(layout) = &project.layout {
+                collect_layout_teardowns(
+                    layout,
+                    project.default_shell.as_ref(),
+                    backend_preference,
+                    &mut sessions,
+                );
+            }
+            let project_route = teardown_route(
+                project
+                    .default_shell
+                    .as_ref()
+                    .unwrap_or(&ShellType::Default),
+                project.default_shell.as_ref(),
+                backend_preference,
+            );
+            sessions.extend(
+                project
+                    .service_terminals
+                    .values()
+                    .chain(project.hook_terminals.keys())
+                    .cloned()
+                    .map(|terminal_id| TerminalSessionTeardown {
+                        terminal_id,
+                        route: project_route.clone(),
+                    }),
+            );
+            sessions
         })
         .collect();
-    stale_terminal_ids.sort();
-    stale_terminal_ids.dedup();
+    stale_terminal_ids.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+    stale_terminal_ids.dedup_by(|a, b| a.terminal_id == b.terminal_id);
 
     for id in &stale_ids {
         data.projects.retain(|p| p.id != *id);
@@ -1001,7 +1033,7 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) -> Vec<String> {
             ids
         })
         .collect();
-    stale_terminal_ids.retain(|id| !retained_terminal_ids.contains(id));
+    stale_terminal_ids.retain(|session| !retained_terminal_ids.contains(&session.terminal_id));
 
     // Self-heal a worktree left mid-create by a daemon kill: optimistic create
     // registers the row with layout:None before the git checkout, and the
@@ -1030,6 +1062,58 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) -> Vec<String> {
     }
 
     stale_terminal_ids
+}
+
+fn collect_layout_teardowns(
+    layout: &LayoutNode,
+    project_default_shell: Option<&ShellType>,
+    backend_preference: SessionBackend,
+    sessions: &mut Vec<TerminalSessionTeardown>,
+) {
+    match layout {
+        LayoutNode::Terminal {
+            terminal_id: Some(terminal_id),
+            shell_type,
+            ..
+        } => sessions.push(TerminalSessionTeardown {
+            terminal_id: terminal_id.clone(),
+            route: teardown_route(shell_type, project_default_shell, backend_preference),
+        }),
+        LayoutNode::Terminal { .. } => {}
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for child in children {
+                collect_layout_teardowns(
+                    child,
+                    project_default_shell,
+                    backend_preference,
+                    sessions,
+                );
+            }
+        }
+    }
+}
+
+fn teardown_route(
+    shell: &ShellType,
+    project_default_shell: Option<&ShellType>,
+    backend_preference: SessionBackend,
+) -> TerminalTeardownRoute {
+    #[cfg(windows)]
+    if let ShellType::Wsl { distro } = shell
+        .clone()
+        .resolve_default(project_default_shell, &ShellType::Default)
+    {
+        return TerminalTeardownRoute::Wsl {
+            backend: okena_terminal::session_backend::resolve_for_wsl(
+                distro.as_deref(),
+                backend_preference,
+            ),
+            distro,
+        };
+    }
+    #[cfg(not(windows))]
+    let _ = (shell, project_default_shell, backend_preference);
+    TerminalTeardownRoute::Host
 }
 
 /// Create a default workspace with one project
@@ -2430,6 +2514,26 @@ mod tests {
                 "stale-service".to_string(),
             ],
             "discarded ownership survives long enough for startup cleanup"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_session_descriptor_keeps_wsl_distro_and_resolved_backend() {
+        let route = teardown_route(
+            &ShellType::Wsl {
+                distro: Some("Ubuntu".to_string()),
+            },
+            None,
+            SessionBackend::None,
+        );
+
+        assert_eq!(
+            route,
+            TerminalTeardownRoute::Wsl {
+                distro: Some("Ubuntu".to_string()),
+                backend: okena_terminal::session_backend::ResolvedBackend::None,
+            }
         );
     }
 

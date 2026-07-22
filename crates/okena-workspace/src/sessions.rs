@@ -20,7 +20,7 @@ fn atomic_write_json(path: &Path, content: &str) -> std::io::Result<()> {
 
 use super::persistence::{
     LoadedWorkspace, WORKSPACE_VERSION, get_config_dir, migrate_legacy_json, migrate_workspace,
-    sync_worktrees, validate_workspace_data,
+    validate_workspace_data,
 };
 
 /// Metadata about a saved session
@@ -145,7 +145,7 @@ fn prepare_loaded_session(mut data: WorkspaceData, backend: SessionBackend) -> L
     let session_backend = backend.resolve();
     let clear_ids = !session_backend.supports_persistence();
     validate_workspace_data(&mut data, clear_ids, backend);
-    let stale_terminal_ids = sync_worktrees(&mut data);
+    let stale_terminal_ids = super::persistence::sync_worktrees_with_backend(&mut data, backend);
 
     LoadedWorkspace {
         data,
