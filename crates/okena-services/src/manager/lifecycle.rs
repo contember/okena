@@ -1,6 +1,8 @@
 //! Project service set lifecycle: load, unload, reload `okena.yaml`.
 
-use super::{ServiceCx, ServiceInstance, ServiceKind, ServiceManager, ServiceStatus};
+use super::{
+    ServiceCx, ServiceInstance, ServiceKind, ServiceLoadStatus, ServiceManager, ServiceStatus,
+};
 use crate::config::load_project_config;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
@@ -19,8 +21,7 @@ impl ServiceManager {
         project_path: &str,
         saved_terminal_ids: &HashMap<String, String>,
         cx: &mut impl ServiceCx,
-    ) {
-        self.begin_project_incarnation(project_id, project_path);
+    ) -> ServiceLoadStatus {
         log::info!(
             "[services] load_project_services project_id={} path={}",
             project_id,
@@ -37,10 +38,12 @@ impl ServiceManager {
             Ok(None) => {
                 log::info!("[services] No okena.yaml found at {}", project_path);
                 // No okena.yaml — still try Docker Compose auto-detection
+                self.begin_project_incarnation(project_id, project_path);
                 self.project_paths
                     .insert(project_id.to_string(), project_path.to_string());
                 self.load_docker_compose_services(project_id, project_path, None, cx);
-                return;
+                cx.notify();
+                return ServiceLoadStatus::Loaded;
             }
             Err(e) => {
                 log::error!(
@@ -48,10 +51,12 @@ impl ServiceManager {
                     project_id,
                     e
                 );
-                return;
+                cx.notify();
+                return ServiceLoadStatus::Failed;
             }
         };
 
+        self.begin_project_incarnation(project_id, project_path);
         self.project_paths
             .insert(project_id.to_string(), project_path.to_string());
 
@@ -106,6 +111,7 @@ impl ServiceManager {
         );
 
         cx.notify();
+        ServiceLoadStatus::Loaded
     }
 
     /// Try to reconnect a service to an existing session backend session.
@@ -250,6 +256,7 @@ impl ServiceManager {
 
         self.configs.remove(project_id);
         self.project_paths.remove(project_id);
+        self.project_writeback_owners.remove(project_id);
         self.port_detection_active
             .retain(|(pid, _), _| pid != project_id);
         cx.notify();
