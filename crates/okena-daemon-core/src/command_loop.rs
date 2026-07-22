@@ -36,25 +36,31 @@
 //! lock first, then the service-manager lock (consistent order), and both drop
 //! before looping.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use okena_app_core::remote_snapshot::build_state_response;
 #[cfg(test)]
 use okena_app_core::workspace::actions::execute::apply_loaded_session;
 use okena_app_core::workspace::actions::execute::{
-    PreparedContentSearch, begin_workspace_replacement, cleanup_stale_workspace_replacement,
+    PreparedContentSearch, begin_workspace_replacement, cleanup_stale_prepared_terminal_launches,
+    cleanup_stale_workspace_replacement, clear_failed_terminal_launch_reservations,
     ensure_terminal, ensure_workspace_replacement_allowed, execute_action,
     execute_prepared_content_search_with_cancellation, fail_workspace_replacement,
     finish_workspace_replacement, import_workspace_data, load_session_data_for_shell,
-    materialize_workspace_replacement, prepare_content_search, prepare_workspace_replacement,
-    spawn_uninitialized_terminals,
+    materialize_prepared_terminal_launches, materialize_workspace_replacement,
+    prepare_content_search, prepare_workspace_replacement, publish_prepared_terminal_launches,
+    reserve_uninitialized_terminal_launches, spawn_uninitialized_terminals,
 };
 use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
 use okena_services::config::{PreparedProjectConfig, prepare_project_config};
-use okena_services::manager::{ServiceLoadStatus, ServiceManager, ServiceProjectStateToken};
+use okena_services::manager::{
+    ComposeProjectIdentity, ServiceKind, ServiceLoadStatus, ServiceManager,
+    ServiceProjectStateToken,
+};
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalSessionTeardown};
 use okena_workspace::actions::project::ProjectDirectoryRenamePlan;
@@ -285,11 +291,11 @@ fn unload_project_services_for_background_removal(
 }
 
 fn detach_project_services_for_runtime_quiesce(
-    project_id: &str,
+    project_ids: &[String],
     service_manager: &Arc<Mutex<ServiceManager>>,
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
-) -> (Vec<String>, Vec<String>) {
+) -> HashMap<String, (Vec<String>, Vec<String>)> {
     let reactor_ref = ServiceReactorRef::new(
         service_manager.clone(),
         runtime.clone(),
@@ -297,20 +303,126 @@ fn detach_project_services_for_runtime_quiesce(
     );
     let mut manager = service_manager.lock();
     let mut cx = reactor_ref.cx();
-    let active_service_names = manager.active_okena_service_names(project_id);
-    let terminal_ids = manager.unload_project_services_for_backend_migration(project_id, &mut cx);
-    (active_service_names, terminal_ids)
+    project_ids
+        .iter()
+        .map(|project_id| {
+            let active_service_names = manager.active_okena_service_names(project_id);
+            let terminal_ids =
+                manager.unload_project_services_for_backend_migration(project_id, &mut cx);
+            (project_id.clone(), (active_service_names, terminal_ids))
+        })
+        .collect()
 }
 
-struct QuiescedProjectRuntime {
-    workspace: ProjectRuntimeQuiesce,
-    active_service_names: Vec<String>,
+struct QuiescedProjectRuntimes {
+    workspace: Vec<ProjectRuntimeQuiesce>,
+    active_service_names: HashMap<String, Vec<String>>,
+}
+
+#[derive(Clone)]
+struct PhysicalProjectSafetyTargets {
+    project_ids: HashSet<String>,
+    roots: Vec<PathBuf>,
+    compose_identities: HashSet<ComposeProjectIdentity>,
+}
+
+fn physical_project_safety_targets(
+    project_paths: &[(String, String)],
+    roots: Vec<PathBuf>,
+    service_manager: &ServiceManager,
+) -> PhysicalProjectSafetyTargets {
+    let project_ids: HashSet<String> = project_paths
+        .iter()
+        .map(|(project_id, _)| project_id.clone())
+        .collect();
+    let paths: HashMap<&str, &str> = project_paths
+        .iter()
+        .map(|(project_id, path)| (project_id.as_str(), path.as_str()))
+        .collect();
+    let root_identities = roots
+        .iter()
+        .map(|root| Workspace::physical_path_identity(root))
+        .collect::<Vec<_>>();
+    let compose_identities = service_manager
+        .instances()
+        .iter()
+        .filter_map(|((project_id, _), instance)| {
+            let ServiceKind::DockerCompose { compose_file } = &instance.kind else {
+                return None;
+            };
+            let project_path = service_manager
+                .project_path(project_id)
+                .map(String::as_str)
+                .or_else(|| paths.get(project_id.as_str()).copied())?;
+            let path_identity =
+                Workspace::physical_path_identity(PathBuf::from(project_path).as_path());
+            if !project_ids.contains(project_id)
+                && !root_identities
+                    .iter()
+                    .any(|root| path_identity.starts_with(root))
+            {
+                return None;
+            }
+            Some(ComposeProjectIdentity::new(project_path, compose_file))
+        })
+        .collect();
+    PhysicalProjectSafetyTargets {
+        project_ids,
+        roots,
+        compose_identities,
+    }
+}
+
+fn ensure_no_compose_mutations(
+    service_manager: &ServiceManager,
+    targets: &PhysicalProjectSafetyTargets,
+) -> Result<(), String> {
+    let activities =
+        service_manager.compose_mutations_for(&targets.project_ids, &targets.compose_identities);
+    if activities.is_empty() {
+        return Ok(());
+    }
+    let blockers = activities
+        .iter()
+        .map(|activity| {
+            format!(
+                "{} {:?} for {} ({})",
+                if activity.queued { "queued" } else { "active" },
+                activity.kind,
+                activity.service_name,
+                activity.project_path
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "cannot change project directories while Docker Compose mutations are pending: {blockers}"
+    ))
+}
+
+async fn preflight_physical_project_change<Inspect>(
+    targets: &PhysicalProjectSafetyTargets,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    runtime: &tokio::runtime::Handle,
+    inspect: Inspect,
+) -> Result<(), String>
+where
+    Inspect: FnOnce(Vec<PathBuf>) -> Result<(), String> + Send + 'static,
+{
+    ensure_no_compose_mutations(&service_manager.lock(), targets)?;
+    let roots = targets.roots.clone();
+    runtime
+        .spawn_blocking(move || inspect(roots))
+        .await
+        .map_err(|error| format!("Docker Compose safety inspection failed: {error}"))??;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn begin_project_runtime_quiesce(
-    project_id: &str,
+fn begin_project_runtimes_quiesce(
+    project_ids: &[String],
     reject_running_hooks: bool,
+    safety_targets: &PhysicalProjectSafetyTargets,
     workspace: &Arc<Mutex<Workspace>>,
     workspace_tick: &watch::Sender<u64>,
     hook_runner: &Option<okena_hooks::HookRunner>,
@@ -321,11 +433,14 @@ fn begin_project_runtime_quiesce(
     runtime: &tokio::runtime::Handle,
     terminals: &TerminalsRegistry,
     deadlines: &SoftCloseDeadlines,
-) -> Result<QuiescedProjectRuntime, String> {
-    let mut snapshot = {
+) -> Result<QuiescedProjectRuntimes, String> {
+    let mut snapshots = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
-        workspace.lock().begin_project_runtime_quiesce(
-            project_id,
+        let mut workspace = workspace.lock();
+        let service_manager = service_manager.lock();
+        ensure_no_compose_mutations(&service_manager, safety_targets)?;
+        workspace.begin_project_runtimes_quiesce(
+            project_ids,
             &settings.default_shell,
             settings.session_backend,
             reject_running_hooks,
@@ -334,51 +449,72 @@ fn begin_project_runtime_quiesce(
     };
     {
         let mut deadlines = deadlines.lock();
-        for terminal_id in &snapshot.pending_close_terminal_ids {
-            deadlines.remove(terminal_id);
+        for snapshot in &snapshots {
+            for terminal_id in &snapshot.pending_close_terminal_ids {
+                deadlines.remove(terminal_id);
+            }
         }
     }
-    let (active_service_names, service_terminal_ids) = detach_project_services_for_runtime_quiesce(
-        project_id,
+    let mut detached_services = detach_project_services_for_runtime_quiesce(
+        project_ids,
         service_manager,
         service_tick,
         runtime,
     );
-    snapshot.teardown_sessions.extend(
-        service_terminal_ids
-            .into_iter()
-            .map(TerminalSessionTeardown::host),
-    );
-    snapshot
-        .teardown_sessions
-        .sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
-    snapshot
-        .teardown_sessions
-        .dedup_by(|a, b| a.terminal_id == b.terminal_id);
+    let mut active_service_names = HashMap::new();
+    for snapshot in &mut snapshots {
+        let (active_names, service_terminal_ids) = detached_services
+            .remove(&snapshot.project_id)
+            .unwrap_or_default();
+        active_service_names.insert(snapshot.project_id.clone(), active_names);
+        snapshot.teardown_sessions.extend(
+            service_terminal_ids
+                .into_iter()
+                .map(TerminalSessionTeardown::host),
+        );
+        snapshot
+            .teardown_sessions
+            .sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+        snapshot
+            .teardown_sessions
+            .dedup_by(|a, b| a.terminal_id == b.terminal_id);
+    }
     {
         let mut registry = terminals.lock();
-        for teardown in &snapshot.teardown_sessions {
-            registry.remove(&teardown.terminal_id);
+        for snapshot in &snapshots {
+            for teardown in &snapshot.teardown_sessions {
+                if !snapshot
+                    .preserved_registry_terminal_ids
+                    .contains(&teardown.terminal_id)
+                {
+                    registry.remove(&teardown.terminal_id);
+                }
+            }
         }
     }
     if let Some(monitor) = hook_monitor {
-        for terminal_id in &snapshot.hook_terminal_ids {
-            monitor.cancel_by_terminal_id(terminal_id);
+        for snapshot in &snapshots {
+            for terminal_id in &snapshot.hook_terminal_ids {
+                monitor.cancel_by_terminal_id(terminal_id);
+            }
         }
     }
-    Ok(QuiescedProjectRuntime {
-        workspace: snapshot,
+    Ok(QuiescedProjectRuntimes {
+        workspace: snapshots,
         active_service_names,
     })
 }
 
 async fn flush_project_runtime_teardown(
-    snapshot: &ProjectRuntimeQuiesce,
+    snapshots: &[ProjectRuntimeQuiesce],
     backend: &Arc<dyn TerminalBackend>,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(), String> {
     let backend = backend.clone();
-    let teardown_sessions = snapshot.teardown_sessions.clone();
+    let teardown_sessions = snapshots
+        .iter()
+        .flat_map(|snapshot| snapshot.teardown_sessions.iter().cloned())
+        .collect::<Vec<_>>();
     runtime
         .spawn_blocking(move || {
             for teardown in &teardown_sessions {
@@ -390,26 +526,10 @@ async fn flush_project_runtime_teardown(
         .map_err(|error| format!("terminal teardown task failed: {error}"))
 }
 
-async fn flush_terminal_session_teardown(
-    teardown_sessions: Vec<TerminalSessionTeardown>,
-    backend: &Arc<dyn TerminalBackend>,
-    runtime: &tokio::runtime::Handle,
-) -> Result<(), String> {
-    let backend = backend.clone();
-    runtime
-        .spawn_blocking(move || {
-            for teardown in &teardown_sessions {
-                backend.kill_session(teardown);
-            }
-            backend.flush_teardown();
-        })
-        .await
-        .map_err(|error| format!("terminal cleanup task failed: {error}"))
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn recover_quiesced_project_runtime(
-    quiesced: &QuiescedProjectRuntime,
+    quiesced: &QuiescedProjectRuntimes,
+    expected_paths: &HashMap<String, String>,
     workspace: &Arc<Mutex<Workspace>>,
     workspace_tick: &watch::Sender<u64>,
     hook_runner: &Option<okena_hooks::HookRunner>,
@@ -421,80 +541,172 @@ async fn recover_quiesced_project_runtime(
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(), String> {
-    let terminal_error = {
+    let project_ids = quiesced
+        .workspace
+        .iter()
+        .map(|snapshot| snapshot.project_id.clone())
+        .collect::<Vec<_>>();
+    let launches = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
-        if !workspace.project_runtime_quiesce_is_current(&quiesced.workspace) {
-            return Err(format!(
-                "project changed while runtimes were quiesced: {}",
-                quiesced.workspace.project_id
-            ));
-        }
-        match spawn_uninitialized_terminals(
-            &mut workspace,
-            &quiesced.workspace.project_id,
-            backend.as_ref(),
-            terminals,
-            settings,
-            None,
-            &mut cx,
-        ) {
-            okena_app_core::workspace::actions::execute::ActionResult::Ok(_) => None,
-            okena_app_core::workspace::actions::execute::ActionResult::Err(error) => Some(error),
-        }
-    };
-    let partial_cleanup_error = if terminal_error.is_some() {
-        let partial_teardowns = {
-            let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
-            let mut workspace = workspace.lock();
-            let teardowns = workspace.drain_partial_project_runtime_recovery(
-                &quiesced.workspace,
-                &settings.default_shell,
-                settings.session_backend,
-                &mut cx,
-            );
-            let mut registry = terminals.lock();
-            for teardown in &teardowns {
-                registry.remove(&teardown.terminal_id);
+        for snapshot in &quiesced.workspace {
+            let expected_path = expected_paths
+                .get(&snapshot.project_id)
+                .ok_or_else(|| format!("missing recovery path: {}", snapshot.project_id))?;
+            if !workspace.project_runtime_quiesce_is_current_at(snapshot, expected_path) {
+                return Err(format!(
+                    "project changed while runtimes were quiesced: {}",
+                    snapshot.project_id
+                ));
             }
-            teardowns
-        };
-        flush_terminal_session_teardown(partial_teardowns, backend, runtime)
-            .await
-            .err()
-    } else {
-        None
+        }
+        reserve_uninitialized_terminal_launches(&mut workspace, &project_ids, settings, &mut cx)?
     };
-    let service_error = recover_project_services(
-        &quiesced.workspace.project_id,
-        &quiesced.active_service_names,
-        workspace,
-        service_manager,
-        service_tick,
-        runtime,
-    )
-    .await
-    .err();
+
+    let (owners, publication_error) =
+        match publish_prepared_terminal_launches(&launches, terminals, backend.as_ref()) {
+            Ok(owners) => (Some(owners), None),
+            Err(error) => {
+                let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+                let mut workspace = workspace.lock();
+                let failed_ids = launches
+                    .iter()
+                    .map(|launch| launch.terminal_id().to_string())
+                    .collect::<Vec<_>>();
+                clear_failed_terminal_launch_reservations(
+                    &mut workspace,
+                    &launches,
+                    &failed_ids,
+                    &mut cx,
+                );
+                drop(workspace);
+                (None, Some(error))
+            }
+        };
+
+    let (failed_terminal_ids, terminal_errors) = if owners.is_some() {
+        let worker_launches = launches.clone();
+        let worker_backend = backend.clone();
+        match runtime
+            .spawn_blocking(move || {
+                materialize_prepared_terminal_launches(&worker_launches, worker_backend.as_ref())
+            })
+            .await
+        {
+            Ok(outcome) => (outcome.failed_terminal_ids, outcome.errors),
+            Err(error) => (
+                launches
+                    .iter()
+                    .map(|launch| launch.terminal_id().to_string())
+                    .collect(),
+                vec![format!("terminal recovery task failed: {error}")],
+            ),
+        }
+    } else {
+        (
+            Vec::new(),
+            vec![format!(
+                "terminal reservation publication failed: {}",
+                publication_error.unwrap_or_else(|| "unknown error".to_string())
+            )],
+        )
+    };
+
     {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
-        if !workspace.project_runtime_quiesce_is_current(&quiesced.workspace) {
-            return Err(format!(
-                "project changed while runtimes were recovering: {}",
-                quiesced.workspace.project_id
+        for snapshot in &quiesced.workspace {
+            let expected_path = expected_paths
+                .get(&snapshot.project_id)
+                .ok_or_else(|| format!("missing recovery path: {}", snapshot.project_id))?;
+            if !workspace.project_runtime_quiesce_is_current_at(snapshot, expected_path) {
+                drop(workspace);
+                if let Some(owners) = owners {
+                    let cleanup_backend = backend.clone();
+                    runtime
+                        .spawn_blocking(move || {
+                            cleanup_stale_prepared_terminal_launches(
+                                &owners,
+                                cleanup_backend.as_ref(),
+                            );
+                            cleanup_backend.flush_teardown();
+                        })
+                        .await
+                        .map_err(|error| format!("stale terminal cleanup failed: {error}"))?;
+                }
+                return Err(format!(
+                    "project changed while runtimes were recovering: {}",
+                    snapshot.project_id
+                ));
+            }
+        }
+        clear_failed_terminal_launch_reservations(
+            &mut workspace,
+            &launches,
+            &failed_terminal_ids,
+            &mut cx,
+        );
+    }
+
+    if let Some(owners) = &owners {
+        let failed_owned_ids = owners.release(&failed_terminal_ids);
+        if !failed_owned_ids.is_empty() {
+            let cleanup_backend = backend.clone();
+            runtime
+                .spawn_blocking(move || {
+                    for terminal_id in failed_owned_ids {
+                        cleanup_backend.kill(&terminal_id);
+                    }
+                    cleanup_backend.flush_teardown();
+                })
+                .await
+                .map_err(|error| format!("partial terminal cleanup failed: {error}"))?;
+        }
+    }
+
+    let mut errors = terminal_errors
+        .into_iter()
+        .map(|error| format!("terminal recovery failed: {error}"))
+        .collect::<Vec<_>>();
+    for snapshot in &quiesced.workspace {
+        let active_service_names = quiesced
+            .active_service_names
+            .get(&snapshot.project_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Err(error) = recover_project_services(
+            &snapshot.project_id,
+            active_service_names,
+            workspace,
+            service_manager,
+            service_tick,
+            runtime,
+        )
+        .await
+        {
+            errors.push(format!(
+                "service recovery failed for {}: {error}",
+                snapshot.project_id
             ));
         }
-        workspace.finish_project_runtime_recovery(&quiesced.workspace, &mut cx);
     }
-    let mut errors = Vec::new();
-    if let Some(error) = terminal_error {
-        errors.push(format!("terminal recovery failed: {error}"));
-    }
-    if let Some(error) = partial_cleanup_error {
-        errors.push(error);
-    }
-    if let Some(error) = service_error {
-        errors.push(format!("service recovery failed: {error}"));
+    {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut workspace = workspace.lock();
+        for snapshot in &quiesced.workspace {
+            let expected_path = expected_paths
+                .get(&snapshot.project_id)
+                .ok_or_else(|| format!("missing recovery path: {}", snapshot.project_id))?;
+            if !workspace.project_runtime_quiesce_is_current_at(snapshot, expected_path) {
+                return Err(format!(
+                    "project changed while services were recovering: {}",
+                    snapshot.project_id
+                ));
+            }
+        }
+        for snapshot in &quiesced.workspace {
+            workspace.finish_project_runtime_recovery(snapshot, &mut cx);
+        }
     }
     if errors.is_empty() {
         Ok(())
@@ -1162,7 +1374,7 @@ fn apply_deferred_hook_actions(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn remove_worktree_project_off_reactor_with<Remove>(
+async fn remove_worktree_project_off_reactor_with<Inspect, Remove>(
     project_id: String,
     force: bool,
     global_hooks: okena_workspace::persistence::HooksConfig,
@@ -1178,17 +1390,26 @@ async fn remove_worktree_project_off_reactor_with<Remove>(
     service_tick: &watch::Sender<u64>,
     deadlines: &SoftCloseDeadlines,
     runtime: &tokio::runtime::Handle,
+    inspect_compose_containers: Inspect,
     remove: Remove,
 ) -> CommandResult
 where
+    Inspect: FnOnce(Vec<PathBuf>) -> Result<(), String> + Send + 'static,
     Remove: FnOnce(&WorktreeRemovalPlan, bool) -> Result<(), String> + Send + 'static,
 {
-    let plan = {
+    let (plan, project_path) = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
-        match workspace.begin_worktree_removal(&project_id, &global_hooks, &mut cx) {
-            Ok(plan) => plan,
-            Err(error) => return CommandResult::Err(error),
+        let project_path = workspace
+            .project(&project_id)
+            .map(|project| project.path.clone());
+        match (
+            workspace.begin_worktree_removal(&project_id, &global_hooks, &mut cx),
+            project_path,
+        ) {
+            (Ok(plan), Some(project_path)) => (plan, project_path),
+            (Err(error), _) => return CommandResult::Err(error),
+            (Ok(_), None) => return CommandResult::Err(format!("project not found: {project_id}")),
         }
     };
     let preflight_plan = plan.clone();
@@ -1202,9 +1423,28 @@ where
             return CommandResult::Err(format!("worktree removal preflight failed: {error}"));
         }
     }
-    let quiesced = match begin_project_runtime_quiesce(
-        &project_id,
+    let safety_targets = {
+        let manager = service_manager.lock();
+        physical_project_safety_targets(
+            &[(project_id.clone(), project_path)],
+            vec![plan.worktree_path().to_path_buf()],
+            &manager,
+        )
+    };
+    if let Err(error) = preflight_physical_project_change(
+        &safety_targets,
+        service_manager,
+        runtime,
+        inspect_compose_containers,
+    )
+    .await
+    {
+        return CommandResult::Err(error);
+    }
+    let quiesced = match begin_project_runtimes_quiesce(
+        std::slice::from_ref(&project_id),
         false,
+        &safety_targets,
         workspace,
         workspace_tick,
         hook_runner,
@@ -1221,8 +1461,14 @@ where
     };
     if let Err(error) = flush_project_runtime_teardown(&quiesced.workspace, backend, runtime).await
     {
+        let expected_paths = quiesced
+            .workspace
+            .iter()
+            .map(|snapshot| (snapshot.project_id.clone(), snapshot.project_path.clone()))
+            .collect();
         let recovery = recover_quiesced_project_runtime(
             &quiesced,
+            &expected_paths,
             workspace,
             workspace_tick,
             hook_runner,
@@ -1255,8 +1501,14 @@ where
         Ok(outcome) => outcome,
         Err(error) => {
             let error = format!("worktree removal task failed: {error}");
+            let expected_paths = quiesced
+                .workspace
+                .iter()
+                .map(|snapshot| (snapshot.project_id.clone(), snapshot.project_path.clone()))
+                .collect();
             let recovery = recover_quiesced_project_runtime(
                 &quiesced,
+                &expected_paths,
                 workspace,
                 workspace_tick,
                 hook_runner,
@@ -1276,8 +1528,14 @@ where
         }
     };
     if let Err(error) = removal {
+        let expected_paths = quiesced
+            .workspace
+            .iter()
+            .map(|snapshot| (snapshot.project_id.clone(), snapshot.project_path.clone()))
+            .collect();
         let recovery = recover_quiesced_project_runtime(
             &quiesced,
+            &expected_paths,
             workspace,
             workspace_tick,
             hook_runner,
@@ -1299,7 +1557,10 @@ where
     let terminal_ids = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
-        if !workspace.project_runtime_quiesce_is_current(&quiesced.workspace) {
+        let Some(snapshot) = quiesced.workspace.first() else {
+            return CommandResult::Err("worktree removal lost its runtime owner".to_string());
+        };
+        if !workspace.project_runtime_quiesce_is_current(snapshot) {
             return CommandResult::Err(format!(
                 "workspace changed while worktree was being removed: {project_id}"
             ));
@@ -1315,7 +1576,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn rename_project_directory_off_reactor_with<Move>(
+async fn rename_project_directory_off_reactor_with<Inspect, Move>(
     project_id: String,
     new_name: String,
     workspace: &Arc<Mutex<Workspace>>,
@@ -1329,9 +1590,11 @@ async fn rename_project_directory_off_reactor_with<Move>(
     service_tick: &watch::Sender<u64>,
     deadlines: &SoftCloseDeadlines,
     runtime: &tokio::runtime::Handle,
+    inspect_compose_containers: Inspect,
     move_directory: Move,
 ) -> CommandResult
 where
+    Inspect: FnOnce(Vec<PathBuf>) -> Result<(), String> + Send + 'static,
     Move: FnOnce(
             &ProjectDirectoryRenamePlan,
         )
@@ -1407,9 +1670,42 @@ where
             ));
         }
     }
-    let quiesced = match begin_project_runtime_quiesce(
-        &project_id,
+    let affected_project_ids = plan
+        .affected_project_ids()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let affected_project_paths = plan
+        .affected_translations()
+        .iter()
+        .map(|translation| {
+            (
+                translation.project_id().to_string(),
+                translation.old_path().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let safety_targets = {
+        let manager = service_manager.lock();
+        physical_project_safety_targets(
+            &affected_project_paths,
+            vec![plan.old_path().to_path_buf()],
+            &manager,
+        )
+    };
+    if let Err(error) = preflight_physical_project_change(
+        &safety_targets,
+        service_manager,
+        runtime,
+        inspect_compose_containers,
+    )
+    .await
+    {
+        return CommandResult::Err(error);
+    }
+    let quiesced = match begin_project_runtimes_quiesce(
+        &affected_project_ids,
         true,
+        &safety_targets,
         workspace,
         workspace_tick,
         hook_runner,
@@ -1426,8 +1722,14 @@ where
     };
     if let Err(error) = flush_project_runtime_teardown(&quiesced.workspace, backend, runtime).await
     {
+        let expected_paths = quiesced
+            .workspace
+            .iter()
+            .map(|snapshot| (snapshot.project_id.clone(), snapshot.project_path.clone()))
+            .collect();
         let recovery = recover_quiesced_project_runtime(
             &quiesced,
+            &expected_paths,
             workspace,
             workspace_tick,
             hook_runner,
@@ -1455,8 +1757,14 @@ where
     let (plan, move_result) = match moved {
         Ok(Ok(moved)) => moved,
         Ok(Err(error)) => {
+            let expected_paths = quiesced
+                .workspace
+                .iter()
+                .map(|snapshot| (snapshot.project_id.clone(), snapshot.project_path.clone()))
+                .collect();
             let recovery = recover_quiesced_project_runtime(
                 &quiesced,
+                &expected_paths,
                 workspace,
                 workspace_tick,
                 hook_runner,
@@ -1476,8 +1784,14 @@ where
         }
         Err(error) => {
             let error = format!("directory rename task failed: {error}");
+            let expected_paths = quiesced
+                .workspace
+                .iter()
+                .map(|snapshot| (snapshot.project_id.clone(), snapshot.project_path.clone()))
+                .collect();
             let recovery = recover_quiesced_project_runtime(
                 &quiesced,
+                &expected_paths,
                 workspace,
                 workspace_tick,
                 hook_runner,
@@ -1497,67 +1811,48 @@ where
         }
     };
 
-    let (new_project_path, terminal_error) = {
+    let expected_paths = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
-        if !workspace.project_runtime_quiesce_is_current(&quiesced.workspace) {
-            return CommandResult::Err(format!(
-                "workspace changed while project directory was being renamed: {project_id}"
-            ));
+        for snapshot in &quiesced.workspace {
+            if !workspace.project_runtime_quiesce_is_current(snapshot) {
+                return CommandResult::Err(format!(
+                    "workspace changed while project directory was being renamed: {}",
+                    snapshot.project_id
+                ));
+            }
         }
         if let Err(error) = workspace.finish_project_directory_rename(&plan, move_result, &mut cx) {
             return CommandResult::Err(error);
         }
-        let new_project_path = workspace
-            .project(&project_id)
-            .map(|project| project.path.clone())
-            .unwrap_or_default();
-        let terminal_error = match spawn_uninitialized_terminals(
-            &mut workspace,
-            &project_id,
-            backend.as_ref(),
-            terminals,
-            settings,
-            None,
-            &mut cx,
-        ) {
-            okena_app_core::workspace::actions::execute::ActionResult::Ok(_) => None,
-            okena_app_core::workspace::actions::execute::ActionResult::Err(error) => Some(error),
-        };
-        (new_project_path, terminal_error)
+        plan.affected_translations()
+            .iter()
+            .map(|translation| {
+                (
+                    translation.project_id().to_string(),
+                    translation.new_path().to_string(),
+                )
+            })
+            .collect::<HashMap<_, _>>()
     };
-    let service_error = recover_project_services(
-        &project_id,
-        &quiesced.active_service_names,
+    let recovery = recover_quiesced_project_runtime(
+        &quiesced,
+        &expected_paths,
         workspace,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+        settings,
+        backend,
+        terminals,
         service_manager,
         service_tick,
         runtime,
     )
-    .await
-    .err();
-    {
-        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
-        let mut workspace = workspace.lock();
-        if !workspace.project_runtime_quiesce_is_current_at(&quiesced.workspace, &new_project_path)
-        {
-            return CommandResult::Err(format!(
-                "project changed while renamed runtimes were recovering: {project_id}"
-            ));
-        }
-        workspace.finish_project_runtime_recovery(&quiesced.workspace, &mut cx);
-    }
-    let mut errors = Vec::new();
-    if let Some(error) = terminal_error {
-        errors.push(format!("terminal rematerialization failed: {error}"));
-    }
-    if let Some(error) = service_error {
-        errors.push(format!("service recovery failed: {error}"));
-    }
-    if errors.is_empty() {
-        CommandResult::Ok(None)
-    } else {
-        CommandResult::Err(format!("directory renamed, but {}", errors.join("; ")))
+    .await;
+    match recovery {
+        Ok(()) => CommandResult::Ok(None),
+        Err(error) => CommandResult::Err(format!("directory renamed, but {error}")),
     }
 }
 
@@ -2871,6 +3166,12 @@ pub async fn daemon_command_loop(
                             &service_tick,
                             &deadlines,
                             &runtime,
+                            |roots| {
+                                okena_services::docker_compose::ensure_no_compose_containers_under(
+                                    &roots,
+                                )
+                                .map_err(|error| error.to_string())
+                            },
                             |plan, force| plan.remove(force),
                         )
                         .await;
@@ -2902,6 +3203,12 @@ pub async fn daemon_command_loop(
                             &service_tick,
                             &deadlines,
                             &runtime,
+                            |roots| {
+                                okena_services::docker_compose::ensure_no_compose_containers_under(
+                                    &roots,
+                                )
+                                .map_err(|error| error.to_string())
+                            },
                             |plan| plan.execute(),
                         )
                         .await;
@@ -3637,6 +3944,7 @@ mod tests {
     use okena_terminal::backend::TerminalBackend;
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
+    use okena_terminal::terminal::{Terminal, TerminalSize};
     use tokio::sync::oneshot;
 
     /// Bundle of the shared state + channels the loop needs, so each test can
@@ -6207,6 +6515,66 @@ mod tests {
         fail_after: Option<usize>,
     }
 
+    struct ReconnectBarrierBackend {
+        blocked: AtomicBool,
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl TerminalBackend for ReconnectBarrierBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("recovery must use reserved reconnect")
+        }
+
+        fn reconnect_terminal(
+            &self,
+            terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            if !self.blocked.swap(true, Ordering::SeqCst) {
+                if let Some(started) = self.started.lock().take() {
+                    let _ = started.send(());
+                }
+                self.release
+                    .lock()
+                    .recv()
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            }
+            Ok(terminal_id.to_string())
+        }
+
+        fn kill(&self, _terminal_id: &str) {}
+
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+
+        fn is_remote(&self) -> bool {
+            false
+        }
+
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
     impl TerminalBackend for RenameRecordingBackend {
         fn transport(&self) -> Arc<dyn TerminalTransport> {
             Arc::new(StubTransport)
@@ -6225,11 +6593,18 @@ mod tests {
 
         fn reconnect_terminal(
             &self,
-            _terminal_id: &str,
-            _cwd: &str,
+            terminal_id: &str,
+            cwd: &str,
             _shell: Option<&ShellType>,
         ) -> anyhow::Result<String> {
-            anyhow::bail!("rename backend does not reconnect terminals")
+            self.events.lock().push(format!("create:{cwd}"));
+            let id = self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_after.is_some_and(|fail_after| id >= fail_after) {
+                anyhow::bail!("injected terminal creation failure");
+            }
+            Ok(terminal_id.to_string())
         }
 
         fn kill(&self, terminal_id: &str) {
@@ -6695,6 +7070,16 @@ mod tests {
         data.projects[1]
             .terminal_names
             .insert("running-hook".to_string(), "Running hook".to_string());
+        data.projects[1].hook_terminals.insert(
+            "completed-hook".to_string(),
+            okena_state::HookTerminalEntry {
+                label: "Completed hook".to_string(),
+                status: okena_state::HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo completed".to_string(),
+                cwd: worktree.to_string_lossy().into_owned(),
+            },
+        );
         let metadata = data.projects[1]
             .worktree_info
             .as_mut()
@@ -6756,6 +7141,7 @@ mod tests {
                         &task_service_tick,
                         &task_deadlines,
                         &task_runtime,
+                        |_| Ok(()),
                         move |_plan, force| {
                             assert!(force, "the caller's force flag reaches git removal");
                             let _ = started_tx.send(());
@@ -6840,6 +7226,7 @@ mod tests {
                         &task_service_tick,
                         &task_deadlines,
                         &task_runtime,
+                        |_| Ok(()),
                         move |_plan, _force| {
                             let _ = started_tx.send(());
                             release_rx.recv().map_err(|error| error.to_string())?;
@@ -6945,6 +7332,7 @@ mod tests {
             &service_tick,
             &deadlines,
             &runtime,
+            |_| Ok(()),
             |_plan, _force| panic!("dirty checkout must fail before physical removal"),
         )
         .await;
@@ -6970,6 +7358,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn docker_container_preflight_blocks_removal_before_runtime_mutation() {
+        let (fixture, workspace) = direct_removal_fixture("docker-preflight");
+        let before = serde_json::to_value(workspace.lock().data()).expect("snapshot workspace");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RenameRecordingBackend {
+            events: events.clone(),
+            next_id: std::sync::atomic::AtomicUsize::new(1),
+            fail_after: None,
+        });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let (workspace_tick, _) = watch::channel(0u64);
+        let (service_tick, _) = watch::channel(0u64);
+        let deadlines: SoftCloseDeadlines = Default::default();
+        let mut focus_manager = FocusManager::new();
+
+        let result = remove_worktree_project_off_reactor_with(
+            "wt1".to_string(),
+            true,
+            Default::default(),
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            &mut focus_manager,
+            &backend,
+            &terminals,
+            &default_settings(),
+            &service_manager,
+            &service_tick,
+            &deadlines,
+            &tokio::runtime::Handle::current(),
+            |_| Err("Compose containers still use the checkout".to_string()),
+            |_plan, _force| panic!("physical removal must not run"),
+        )
+        .await;
+
+        assert!(
+            matches!(result, CommandResult::Err(ref error) if error.contains("Compose containers"))
+        );
+        assert_eq!(
+            serde_json::to_value(workspace.lock().data()).expect("snapshot workspace"),
+            before
+        );
+        assert!(events.lock().is_empty());
+        std::fs::remove_dir_all(fixture).expect("remove fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_partial_runtime_recovery_cleans_created_ptys_and_lifecycle() {
         let (fixture, workspace) = direct_removal_fixture("partial-recovery");
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -6979,6 +7419,16 @@ mod tests {
             fail_after: Some(2),
         });
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let completed_hook = Arc::new(Terminal::new(
+            "completed-hook".to_string(),
+            TerminalSize::default(),
+            backend.transport(),
+            fixture.join("worktree").to_string_lossy().into_owned(),
+        ));
+        completed_hook.process_output(b"retained hook output");
+        terminals
+            .lock()
+            .insert("completed-hook".to_string(), completed_hook.clone());
         let service_manager = Arc::new(Mutex::new(ServiceManager::new(
             backend.clone(),
             terminals.clone(),
@@ -7006,6 +7456,7 @@ mod tests {
             &service_tick,
             &deadlines,
             &runtime,
+            |_| Ok(()),
             |_plan, _force| Err("injected removal failure".to_string()),
         )
         .await;
@@ -7021,23 +7472,43 @@ mod tests {
             .project("wt1")
             .expect("project remains after failure");
         assert!(!workspace.is_project_closing("wt1"));
-        assert!(
-            project
-                .layout
-                .as_ref()
-                .expect("layout retained")
-                .collect_terminal_ids()
-                .is_empty(),
-            "partial terminal ids are cleared from authoritative layout"
+        let recovered_ids = project
+            .layout
+            .as_ref()
+            .expect("layout retained")
+            .collect_terminal_ids();
+        assert_eq!(
+            recovered_ids.len(),
+            1,
+            "only the failed reservation is cleared"
         );
         assert!(
             !project.hook_terminals.contains_key("running-hook"),
             "cancelled active hook entry is not left dead after recovery"
         );
+        assert_eq!(
+            project
+                .hook_terminals
+                .get("completed-hook")
+                .map(|entry| entry.cwd.as_str()),
+            Some(fixture.join("worktree").to_string_lossy().as_ref())
+        );
         drop(workspace);
-        assert!(terminals.lock().is_empty(), "partial PTY registry is clean");
+        assert_eq!(terminals.lock().len(), 2);
+        assert!(terminals.lock().contains_key(&recovered_ids[0]));
+        assert!(Arc::ptr_eq(
+            terminals
+                .lock()
+                .get("completed-hook")
+                .expect("completed hook buffer retained"),
+            &completed_hook
+        ));
+        assert!(
+            String::from_utf8_lossy(&completed_hook.render_snapshot())
+                .contains("retained hook output")
+        );
         let events = events.lock();
-        assert!(events.iter().any(|event| event == "kill:replacement-1"));
+        assert!(events.iter().any(|event| event.starts_with("kill:")));
         assert_eq!(events.iter().filter(|event| *event == "flush").count(), 2);
         drop(events);
         std::fs::remove_dir_all(fixture).expect("remove fixture");
@@ -7053,13 +7524,46 @@ mod tests {
         std::fs::create_dir_all(old_path.join("nested")).expect("create rename fixture");
         let mut data = workspace_with_initialized_terminal("live-in-old-directory");
         data.projects[0].path = old_path.to_string_lossy().into_owned();
+        data.projects[0].hook_terminals.insert(
+            "completed-hook".to_string(),
+            okena_state::HookTerminalEntry {
+                label: "Completed hook".to_string(),
+                status: okena_state::HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo completed".to_string(),
+                cwd: old_path.to_string_lossy().into_owned(),
+            },
+        );
         let mut nested = data.projects[0].clone();
         nested.id = "nested".to_string();
         nested.name = "Nested".to_string();
         nested.path = old_path.join("nested").to_string_lossy().into_owned();
-        nested.layout = None;
+        nested.hook_terminals.clear();
+        nested.terminal_names.clear();
+        nested.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("live-in-nested-directory".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        });
+        let mut unaffected = data.projects[0].clone();
+        unaffected.id = "unaffected".to_string();
+        unaffected.name = "Unaffected".to_string();
+        unaffected.path = fixture.join("outside").to_string_lossy().into_owned();
+        unaffected.hook_terminals.clear();
+        unaffected.terminal_names.clear();
+        unaffected.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("unaffected-live".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        });
         data.projects.push(nested);
+        data.projects.push(unaffected);
         data.project_order.push("nested".to_string());
+        data.project_order.push("unaffected".to_string());
         (fixture, Arc::new(Mutex::new(Workspace::new(data))))
     }
 
@@ -7075,6 +7579,16 @@ mod tests {
             fail_after: None,
         });
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let completed_hook = Arc::new(Terminal::new(
+            "completed-hook".to_string(),
+            TerminalSize::default(),
+            backend.transport(),
+            old_path.to_string_lossy().into_owned(),
+        ));
+        completed_hook.process_output(b"renamed hook output");
+        terminals
+            .lock()
+            .insert("completed-hook".to_string(), completed_hook.clone());
         let service_manager = Arc::new(Mutex::new(ServiceManager::new(
             backend.clone(),
             terminals.clone(),
@@ -7100,12 +7614,18 @@ mod tests {
                 &service_tick,
                 &deadlines,
                 &runtime,
+                |_| Ok(()),
                 {
                     let events = events.clone();
                     move |plan| {
                         assert_eq!(
                             events.lock().as_slice(),
-                            &["kill:live-in-old-directory", "flush"]
+                            &[
+                                "kill:completed-hook",
+                                "kill:live-in-old-directory",
+                                "kill:live-in-nested-directory",
+                                "flush",
+                            ]
                         );
                         plan.execute()
                     }
@@ -7127,20 +7647,186 @@ mod tests {
                 .map(|project| project.path.as_str()),
             Some(new_path.join("nested").to_string_lossy().as_ref())
         );
-        assert!(!workspace.is_project_closing("p1"));
         assert!(matches!(
-            workspace.project("p1").and_then(|project| project.layout.as_ref()),
-            Some(LayoutNode::Terminal { terminal_id: Some(id), .. }) if id == "replacement-1"
+            workspace
+                .project("unaffected")
+                .and_then(|project| project.layout.as_ref()),
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(id),
+                ..
+            }) if id == "unaffected-live"
         ));
+        assert!(!workspace.is_project_closing("p1"));
+        assert_eq!(
+            workspace
+                .project("p1")
+                .and_then(|project| project.hook_terminals.get("completed-hook"))
+                .map(|entry| entry.cwd.as_str()),
+            Some(new_path.to_string_lossy().as_ref())
+        );
+        let recovered_id = match workspace
+            .project("p1")
+            .and_then(|project| project.layout.as_ref())
+        {
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(id),
+                ..
+            }) => id.clone(),
+            _ => panic!("renamed terminal was not recovered"),
+        };
         drop(workspace);
+        assert!(Arc::ptr_eq(
+            terminals
+                .lock()
+                .get("completed-hook")
+                .expect("completed hook buffer retained across rename"),
+            &completed_hook
+        ));
+        assert!(
+            String::from_utf8_lossy(&completed_hook.render_snapshot())
+                .contains("renamed hook output")
+        );
+        assert!(terminals.lock().contains_key(&recovered_id));
         assert_eq!(
             events.lock().as_slice(),
             &[
+                "kill:completed-hook".to_string(),
                 "kill:live-in-old-directory".to_string(),
+                "kill:live-in-nested-directory".to_string(),
                 "flush".to_string(),
                 format!("create:{}", new_path.display()),
+                format!("create:{}", new_path.join("nested").display()),
             ]
         );
+        std::fs::remove_dir_all(fixture).expect("remove rename fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn directory_rename_reconnect_keeps_localset_and_workspace_live() {
+        let (fixture, workspace) = rename_runtime_fixture("reconnect-barrier");
+        let new_path = fixture.join("renamed");
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(ReconnectBarrierBackend {
+            blocked: AtomicBool::new(false),
+            started: Mutex::new(Some(started_tx)),
+            release: Mutex::new(release_rx),
+        });
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let deadlines: SoftCloseDeadlines = Default::default();
+        let runtime = tokio::runtime::Handle::current();
+        let settings = default_settings();
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let task_workspace = workspace.clone();
+                let task_backend = backend.clone();
+                let task_terminals = terminals.clone();
+                let task_service_manager = service_manager.clone();
+                let task_tick = workspace_tick.clone();
+                let task_service_tick = service_tick.clone();
+                let task_deadlines = deadlines.clone();
+                let task_runtime = runtime.clone();
+                let rename = tokio::task::spawn_local(async move {
+                    rename_project_directory_off_reactor_with(
+                        "p1".to_string(),
+                        "renamed".to_string(),
+                        &task_workspace,
+                        &task_tick,
+                        &None,
+                        &None,
+                        &task_backend,
+                        &task_terminals,
+                        &settings,
+                        &task_service_manager,
+                        &task_service_tick,
+                        &task_deadlines,
+                        &task_runtime,
+                        |_| Ok(()),
+                        |plan| plan.execute(),
+                    )
+                    .await
+                });
+
+                started_rx.await.expect("reconnect reached barrier");
+                assert_eq!(
+                    workspace
+                        .try_lock()
+                        .expect("workspace remains unlocked during reconnect")
+                        .project("p1")
+                        .map(|project| project.path.as_str()),
+                    Some(new_path.to_string_lossy().as_ref())
+                );
+                let sibling_workspace = workspace.clone();
+                tokio::task::spawn_local(async move {
+                    tokio::task::yield_now().await;
+                    assert!(sibling_workspace.lock().project("nested").is_some());
+                })
+                .await
+                .expect("sibling LocalSet task progressed");
+
+                release_tx.send(()).expect("release reconnect");
+                assert!(matches!(
+                    rename.await.expect("rename task joined"),
+                    CommandResult::Ok(None)
+                ));
+            })
+            .await;
+        std::fs::remove_dir_all(fixture).expect("remove rename fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn docker_container_preflight_blocks_rename_before_runtime_mutation() {
+        let (fixture, workspace) = rename_runtime_fixture("docker-preflight");
+        let before = serde_json::to_value(workspace.lock().data()).expect("snapshot workspace");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RenameRecordingBackend {
+            events: events.clone(),
+            next_id: std::sync::atomic::AtomicUsize::new(1),
+            fail_after: None,
+        });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let (workspace_tick, _) = watch::channel(0u64);
+        let (service_tick, _) = watch::channel(0u64);
+        let deadlines: SoftCloseDeadlines = Default::default();
+
+        let result = rename_project_directory_off_reactor_with(
+            "p1".to_string(),
+            "renamed".to_string(),
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            &backend,
+            &terminals,
+            &default_settings(),
+            &service_manager,
+            &service_tick,
+            &deadlines,
+            &tokio::runtime::Handle::current(),
+            |_| Err("Compose containers still use the directory".to_string()),
+            |_plan| panic!("physical rename must not run"),
+        )
+        .await;
+
+        assert!(
+            matches!(result, CommandResult::Err(ref error) if error.contains("Compose containers"))
+        );
+        assert_eq!(
+            serde_json::to_value(workspace.lock().data()).expect("snapshot workspace"),
+            before
+        );
+        assert!(events.lock().is_empty());
         std::fs::remove_dir_all(fixture).expect("remove rename fixture");
     }
 
@@ -7180,6 +7866,7 @@ mod tests {
                 &service_tick,
                 &deadlines,
                 &runtime,
+                |_| Ok(()),
                 |_plan| Err("injected move failure".to_string()),
             ))
             .await;
@@ -7194,15 +7881,21 @@ mod tests {
             Some(old_path.to_string_lossy().as_ref())
         );
         assert!(!workspace.is_project_closing("p1"));
-        assert!(matches!(
-            workspace.project("p1").and_then(|project| project.layout.as_ref()),
-            Some(LayoutNode::Terminal { terminal_id: Some(id), .. }) if id == "replacement-1"
-        ));
+        let recovered_id = match workspace
+            .project("p1")
+            .and_then(|project| project.layout.as_ref())
+        {
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(id),
+                ..
+            }) => id.clone(),
+            _ => panic!("failed rename terminal was not recovered"),
+        };
         drop(workspace);
-        assert_eq!(
-            events.lock().last(),
-            Some(&format!("create:{}", old_path.display()))
-        );
+        assert!(terminals.lock().contains_key(&recovered_id));
+        let events = events.lock();
+        assert!(events.contains(&format!("create:{}", old_path.display())));
+        assert!(events.contains(&format!("create:{}", old_path.join("nested").display())));
         std::fs::remove_dir_all(fixture).expect("remove rename fixture");
     }
 
