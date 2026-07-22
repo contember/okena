@@ -25,7 +25,7 @@ use okena_app_core::remote_config::{self, ConfigBackend};
 use okena_core::api::CommandResult;
 use okena_theme::custom::load_custom_themes;
 use okena_theme::{
-    ThemeColors, ThemeMode, DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
+    DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME, ThemeColors, ThemeMode,
 };
 use okena_workspace::persistence::AppSettings;
 use okena_workspace::settings::save_settings;
@@ -83,7 +83,12 @@ impl DaemonConfig {
 
     /// Write a custom theme JSON file (a full `CustomThemeConfig`) and, when
     /// `activate`, switch the persisted preference to it.
-    pub fn save_custom_theme(&mut self, id: String, config: Value, activate: bool) -> CommandResult {
+    pub fn save_custom_theme(
+        &mut self,
+        id: String,
+        config: Value,
+        activate: bool,
+    ) -> CommandResult {
         remote_config::save_custom_theme(self, id, config, activate)
     }
 }
@@ -123,8 +128,7 @@ impl ConfigBackend for DaemonConfig {
             ThemeMode::HighContrast => HIGH_CONTRAST_THEME,
             ThemeMode::Custom => {
                 let target = custom_id.map(|cid| format!("custom:{cid}"));
-                match target
-                    .and_then(|t| load_custom_themes().into_iter().find(|(i, _)| i.id == t))
+                match target.and_then(|t| load_custom_themes().into_iter().find(|(i, _)| i.id == t))
                 {
                     Some((_, colors)) => colors,
                     // Custom mode but no resolvable custom theme: fall back to

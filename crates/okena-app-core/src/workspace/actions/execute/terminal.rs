@@ -5,22 +5,20 @@
 // more than it clarifies here.
 #![allow(clippy::too_many_arguments)]
 
-use super::{
-    ActionResult, ensure_terminal, find_terminal_path, spawn_uninitialized_terminals,
-};
-use crate::workspace::persistence::AppSettings;
-use okena_terminal::backend::TerminalBackend;
-use okena_terminal::shell_config::ShellType;
-use okena_terminal::terminal::TerminalSize;
+use super::{ActionResult, ensure_terminal, find_terminal_path, spawn_uninitialized_terminals};
 use crate::workspace::focus::FocusManager;
+use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::Workspace;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
-use okena_workspace::context::WorkspaceCx;
 use okena_core::keys::SpecialKey;
 use okena_core::types::SplitDirection;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::Terminal;
+use okena_terminal::terminal::TerminalSize;
+use okena_workspace::context::WorkspaceCx;
 
 fn with_ensured_terminal(
     ws: &Workspace,
@@ -51,7 +49,15 @@ pub(super) fn create(
         .filter(|f| f.project_id == project_id)
         .and_then(|f| super::inherited_cwd(ws, terminals, &project_id, &f.layout_path));
     ws.add_terminal(focus_manager, &project_id, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, inherit_cwd, cx)
+    spawn_uninitialized_terminals(
+        ws,
+        &project_id,
+        backend,
+        terminals,
+        settings,
+        inherit_cwd,
+        cx,
+    )
 }
 
 pub(super) fn split(
@@ -69,7 +75,15 @@ pub(super) fn split(
     // mutation invalidates `path`) so the new pane opens in the same directory.
     let inherit_cwd = super::inherited_cwd(ws, terminals, &project_id, &path);
     ws.split_terminal(focus_manager, &project_id, &path, direction, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, inherit_cwd, cx)
+    spawn_uninitialized_terminals(
+        ws,
+        &project_id,
+        backend,
+        terminals,
+        settings,
+        inherit_cwd,
+        cx,
+    )
 }
 
 /// Switch a terminal's shell: kill the old PTY, reset the layout node to
@@ -323,10 +337,7 @@ pub(super) fn read_content(
     })
 }
 
-pub(super) fn export_buffer(
-    terminal_id: String,
-    backend: &dyn TerminalBackend,
-) -> ActionResult {
+pub(super) fn export_buffer(terminal_id: String, backend: &dyn TerminalBackend) -> ActionResult {
     match backend.capture_buffer(&terminal_id) {
         Some(path) => {
             // capture_buffer wrote a daemon-side temp file; read it back and
@@ -336,8 +347,8 @@ pub(super) fn export_buffer(
             let content = String::from_utf8_lossy(&bytes).to_string();
             ActionResult::Ok(Some(serde_json::json!({ "content": content })))
         }
-        None => ActionResult::Err(
-            "buffer capture unavailable (requires a tmux session backend)".into(),
-        ),
+        None => {
+            ActionResult::Err("buffer capture unavailable (requires a tmux session backend)".into())
+        }
     }
 }

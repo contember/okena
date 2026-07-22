@@ -44,13 +44,7 @@ pub trait ActionDispatch: Clone + 'static {
     );
 
     /// Add a tab.
-    fn add_tab(
-        &self,
-        project_id: &str,
-        layout_path: &[usize],
-        in_group: bool,
-        cx: &mut gpui::App,
-    );
+    fn add_tab(&self, project_id: &str, layout_path: &[usize], in_group: bool, cx: &mut gpui::App);
 
     /// Upload a clipboard image pasted into a remote terminal.
     ///
@@ -147,10 +141,12 @@ pub fn set_terminal_view_settings(settings: &TerminalViewSettings, cx: &mut gpui
 }
 
 /// Callback type for registering content panes for dirty notification.
-pub type RegisterContentPaneFn = Box<dyn Fn(String, gpui::WeakEntity<layout::terminal_pane::TerminalContent>) + Send + Sync>;
+pub type RegisterContentPaneFn =
+    Box<dyn Fn(String, gpui::WeakEntity<layout::terminal_pane::TerminalContent>) + Send + Sync>;
 
 /// Global content pane registration function.
-static REGISTER_CONTENT_PANE_FN: std::sync::OnceLock<RegisterContentPaneFn> = std::sync::OnceLock::new();
+static REGISTER_CONTENT_PANE_FN: std::sync::OnceLock<RegisterContentPaneFn> =
+    std::sync::OnceLock::new();
 
 /// Set the global content pane registration function.
 /// Called once by the main app at startup.

@@ -1,14 +1,13 @@
 use crate::keybindings::{
-    format_keystroke, get_action_descriptions, get_config, get_keybindings_path,
-    keystroke_to_config_string, reset_to_defaults, update_config,
-    Cancel, KeybindingEntry, ShowKeybindings,
+    Cancel, KeybindingEntry, ShowKeybindings, format_keystroke, get_action_descriptions,
+    get_config, get_keybindings_path, keystroke_to_config_string, reset_to_defaults, update_config,
 };
 use crate::theme::theme;
-use crate::views::components::{modal_backdrop, modal_content, modal_header, search_input_area};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
+use crate::views::components::{modal_backdrop, modal_content, modal_header, search_input_area};
+use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use gpui::prelude::*;
 
 /// Characters allowed in the keybinding search query.
 const SEARCH_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_+./";
@@ -133,14 +132,22 @@ impl KeybindingsHelp {
     }
 
     /// Handle a keystroke during recording
-    fn handle_recorded_keystroke(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_recorded_keystroke(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editing) = self.editing.as_mut() else {
             return;
         };
 
         // Ignore modifier-only keypresses
         let key = keystroke.key.as_str();
-        if matches!(key, "shift" | "control" | "alt" | "platform" | "function" | "") {
+        if matches!(
+            key,
+            "shift" | "control" | "alt" | "platform" | "function" | ""
+        ) {
             return;
         }
 
@@ -164,26 +171,43 @@ impl KeybindingsHelp {
 
             cx.spawn_in(window, async move |this, cx| {
                 let timeout = smol::Timer::after(std::time::Duration::from_secs(1));
-                smol::future::or(async { timeout.await; true }, async { let _ = cancel_rx.recv().await; false }).await;
+                smol::future::or(
+                    async {
+                        timeout.await;
+                        true
+                    },
+                    async {
+                        let _ = cancel_rx.recv().await;
+                        false
+                    },
+                )
+                .await;
 
                 // If we get here and still waiting, finalize with single keystroke
                 let _ = cx.update(|window, cx| {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(editing) = this.editing.as_mut()
                             && editing.waiting_for_chord
-                                && let Some(single) = editing.first_chord.take() {
-                                    this.finalize_recording(single, window, cx);
-                                }
+                            && let Some(single) = editing.first_chord.take()
+                        {
+                            this.finalize_recording(single, window, cx);
+                        }
                     });
                 });
-            }).detach();
+            })
+            .detach();
 
             cx.notify();
         }
     }
 
     /// Finalize recording: save the new keystroke and check for conflicts
-    fn finalize_recording(&mut self, new_keystroke: String, _window: &mut Window, cx: &mut Context<Self>) {
+    fn finalize_recording(
+        &mut self,
+        new_keystroke: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editing) = self.editing.take() else {
             return;
         };
@@ -211,7 +235,12 @@ impl KeybindingsHelp {
     }
 
     /// Add a new empty binding for an action
-    fn add_binding_for_action(&mut self, action: &str, context: Option<String>, cx: &mut Context<Self>) {
+    fn add_binding_for_action(
+        &mut self,
+        action: &str,
+        context: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let entry = KeybindingEntry::new("unset", context.as_deref());
 
         update_config(|config| {
@@ -287,78 +316,108 @@ impl KeybindingsHelp {
                     .rounded(px(6.0))
                     .border_1()
                     .border_color(rgb(t.border))
-                    .children(bindings.iter().enumerate().map(
-                        |(i, (action, entries))| {
-                            let description = descriptions
-                                .get(action.as_str())
-                                .map(|d| d.description)
-                                .unwrap_or("Unknown action");
-                            let name = descriptions
-                                .get(action.as_str())
-                                .map(|d| d.name)
-                                .unwrap_or(action.as_str());
+                    .children(bindings.iter().enumerate().map(|(i, (action, entries))| {
+                        let description = descriptions
+                            .get(action.as_str())
+                            .map(|d| d.description)
+                            .unwrap_or("Unknown action");
+                        let name = descriptions
+                            .get(action.as_str())
+                            .map(|d| d.name)
+                            .unwrap_or(action.as_str());
 
-                            let is_action_customized = entries.iter().any(|(_, _, c, _)| *c);
-                            let action_clone = action.clone();
-                            let action_for_reset = action.clone();
-                            // Determine context from first entry for "add" button
-                            let entry_context = {
-                                let config = get_config();
-                                config.bindings.get(action.as_str())
-                                    .and_then(|entries| entries.first())
-                                    .and_then(|e| e.context.clone())
-                            };
+                        let is_action_customized = entries.iter().any(|(_, _, c, _)| *c);
+                        let action_clone = action.clone();
+                        let action_for_reset = action.clone();
+                        // Determine context from first entry for "add" button
+                        let entry_context = {
+                            let config = get_config();
+                            config
+                                .bindings
+                                .get(action.as_str())
+                                .and_then(|entries| entries.first())
+                                .and_then(|e| e.context.clone())
+                        };
 
-                            div()
-                                .when(i > 0, |d| {
-                                    d.border_t_1().border_color(rgb(t.border))
-                                })
-                                .child(
-                                    // Action info row
-                                    h_flex()
-                                        .justify_between()
-                                        .px(px(12.0))
-                                        .pt(px(8.0))
-                                        .pb(px(4.0))
-                                        .child(
-                                            v_flex()
-                                                .gap(px(2.0))
-                                                .child(
-                                                    h_flex()
-                                                        .gap(px(8.0))
-                                                        .child(
+                        div()
+                            .when(i > 0, |d| d.border_t_1().border_color(rgb(t.border)))
+                            .child(
+                                // Action info row
+                                h_flex()
+                                    .justify_between()
+                                    .px(px(12.0))
+                                    .pt(px(8.0))
+                                    .pb(px(4.0))
+                                    .child(
+                                        v_flex()
+                                            .gap(px(2.0))
+                                            .child(
+                                                h_flex()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        div()
+                                                            .text_size(ui_text(13.0, cx))
+                                                            .text_color(rgb(t.text_primary))
+                                                            .child(name.to_string()),
+                                                    )
+                                                    .when(is_action_customized, |d| {
+                                                        d.child(
                                                             div()
-                                                                .text_size(ui_text(13.0, cx))
-                                                                .text_color(rgb(t.text_primary))
-                                                                .child(name.to_string()),
+                                                                .text_size(ui_text_sm(cx))
+                                                                .px(px(4.0))
+                                                                .py(px(1.0))
+                                                                .rounded(px(3.0))
+                                                                .bg(rgb(t.border_active))
+                                                                .text_color(rgb(0xFFFFFF))
+                                                                .child("Custom"),
                                                         )
-                                                        .when(is_action_customized, |d| {
-                                                            d.child(
-                                                                div()
-                                                                    .text_size(ui_text_sm(cx))
-                                                                    .px(px(4.0))
-                                                                    .py(px(1.0))
-                                                                    .rounded(px(3.0))
-                                                                    .bg(rgb(t.border_active))
-                                                                    .text_color(rgb(0xFFFFFF))
-                                                                    .child("Custom"),
-                                                            )
-                                                        }),
-                                                )
-                                                .child(
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(ui_text_ms(cx))
+                                                    .text_color(rgb(t.text_muted))
+                                                    .child(description.to_string()),
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap(px(4.0))
+                                            // Add binding button
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "add-{}",
+                                                        action_clone
+                                                    )))
+                                                    .cursor_pointer()
+                                                    .px(px(6.0))
+                                                    .py(px(2.0))
+                                                    .rounded(px(3.0))
+                                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                    .text_size(ui_text_sm(cx))
+                                                    .text_color(rgb(t.text_muted))
+                                                    .child("+")
+                                                    .on_mouse_down(MouseButton::Left, {
+                                                        let action = action_clone.clone();
+                                                        let ctx = entry_context.clone();
+                                                        cx.listener(move |this, _, _window, cx| {
+                                                            this.add_binding_for_action(
+                                                                &action,
+                                                                ctx.clone(),
+                                                                cx,
+                                                            );
+                                                        })
+                                                    }),
+                                            )
+                                            // Reset single action button (only if customized)
+                                            .when(is_action_customized, |d| {
+                                                d.child(
                                                     div()
-                                                        .text_size(ui_text_ms(cx))
-                                                        .text_color(rgb(t.text_muted))
-                                                        .child(description.to_string()),
-                                                ),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .gap(px(4.0))
-                                                // Add binding button
-                                                .child(
-                                                    div()
-                                                        .id(SharedString::from(format!("add-{}", action_clone)))
+                                                        .id(SharedString::from(format!(
+                                                            "reset-{}",
+                                                            action_for_reset
+                                                        )))
                                                         .cursor_pointer()
                                                         .px(px(6.0))
                                                         .py(px(2.0))
@@ -366,40 +425,24 @@ impl KeybindingsHelp {
                                                         .hover(|s| s.bg(rgb(t.bg_hover)))
                                                         .text_size(ui_text_sm(cx))
                                                         .text_color(rgb(t.text_muted))
-                                                        .child("+")
+                                                        .child("↺")
                                                         .on_mouse_down(MouseButton::Left, {
-                                                            let action = action_clone.clone();
-                                                            let ctx = entry_context.clone();
-                                                            cx.listener(move |this, _, _window, cx| {
-                                                                this.add_binding_for_action(&action, ctx.clone(), cx);
-                                                            })
+                                                            let action = action_for_reset.clone();
+                                                            cx.listener(
+                                                                move |this, _, _window, cx| {
+                                                                    this.reset_single_action(
+                                                                        &action, cx,
+                                                                    );
+                                                                },
+                                                            )
                                                         }),
                                                 )
-                                                // Reset single action button (only if customized)
-                                                .when(is_action_customized, |d| {
-                                                    d.child(
-                                                        div()
-                                                            .id(SharedString::from(format!("reset-{}", action_for_reset)))
-                                                            .cursor_pointer()
-                                                            .px(px(6.0))
-                                                            .py(px(2.0))
-                                                            .rounded(px(3.0))
-                                                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                            .text_size(ui_text_sm(cx))
-                                                            .text_color(rgb(t.text_muted))
-                                                            .child("↺")
-                                                            .on_mouse_down(MouseButton::Left, {
-                                                                let action = action_for_reset.clone();
-                                                                cx.listener(move |this, _, _window, cx| {
-                                                                    this.reset_single_action(&action, cx);
-                                                                })
-                                                            }),
-                                                    )
-                                                }),
-                                        ),
-                                )
-                                // Individual binding entries
-                                .children(entries.iter().map(|(keystroke, entry_idx, _is_customized, is_enabled)| {
+                                            }),
+                                    ),
+                            )
+                            // Individual binding entries
+                            .children(entries.iter().map(
+                                |(keystroke, entry_idx, _is_customized, is_enabled)| {
                                     let action_name = action.clone();
                                     let action_for_toggle = action.clone();
                                     let action_for_remove = action.clone();
@@ -411,7 +454,11 @@ impl KeybindingsHelp {
                                     let is_recording = self.editing.as_ref().is_some_and(|e| {
                                         e.action == action_name && e.entry_index == idx
                                     });
-                                    let is_waiting_chord = is_recording && self.editing.as_ref().is_some_and(|e| e.waiting_for_chord);
+                                    let is_waiting_chord = is_recording
+                                        && self
+                                            .editing
+                                            .as_ref()
+                                            .is_some_and(|e| e.waiting_for_chord);
 
                                     h_flex()
                                         .justify_between()
@@ -421,7 +468,10 @@ impl KeybindingsHelp {
                                         .child(
                                             // Keystroke badge (clickable to record)
                                             div()
-                                                .id(SharedString::from(format!("ks-{}-{}", action_name, idx)))
+                                                .id(SharedString::from(format!(
+                                                    "ks-{}-{}",
+                                                    action_name, idx
+                                                )))
                                                 .cursor_pointer()
                                                 .px(px(8.0))
                                                 .py(px(4.0))
@@ -440,10 +490,16 @@ impl KeybindingsHelp {
                                                 })
                                                 .text_size(ui_text_md(cx))
                                                 .font_family("monospace")
-                                                .text_color(if is_recording { rgb(0xFFFFFF) } else { rgb(t.text_secondary) })
+                                                .text_color(if is_recording {
+                                                    rgb(0xFFFFFF)
+                                                } else {
+                                                    rgb(t.text_secondary)
+                                                })
                                                 .child(if is_recording {
                                                     if is_waiting_chord {
-                                                        let first = self.editing.as_ref()
+                                                        let first = self
+                                                            .editing
+                                                            .as_ref()
                                                             .and_then(|e| e.first_chord.as_ref())
                                                             .map(|s| format_keystroke(s))
                                                             .unwrap_or_default();
@@ -457,10 +513,17 @@ impl KeybindingsHelp {
                                                 .on_mouse_down(MouseButton::Left, {
                                                     let action = action_name.clone();
                                                     cx.listener(move |this, _, _window, cx| {
-                                                        if this.editing.as_ref().is_some_and(|e| e.action == action && e.entry_index == idx) {
+                                                        if this.editing.as_ref().is_some_and(|e| {
+                                                            e.action == action
+                                                                && e.entry_index == idx
+                                                        }) {
                                                             this.cancel_recording(cx);
                                                         } else {
-                                                            this.start_recording(action.clone(), idx, cx);
+                                                            this.start_recording(
+                                                                action.clone(),
+                                                                idx,
+                                                                cx,
+                                                            );
                                                         }
                                                     })
                                                 }),
@@ -471,26 +534,40 @@ impl KeybindingsHelp {
                                                 // Toggle enabled/disabled
                                                 .child(
                                                     div()
-                                                        .id(SharedString::from(format!("toggle-{}-{}", action_for_toggle, idx)))
+                                                        .id(SharedString::from(format!(
+                                                            "toggle-{}-{}",
+                                                            action_for_toggle, idx
+                                                        )))
                                                         .cursor_pointer()
                                                         .px(px(6.0))
                                                         .py(px(2.0))
                                                         .rounded(px(3.0))
                                                         .hover(|s| s.bg(rgb(t.bg_hover)))
                                                         .text_size(ui_text_sm(cx))
-                                                        .text_color(if enabled { rgb(t.text_muted) } else { rgb(t.error) })
+                                                        .text_color(if enabled {
+                                                            rgb(t.text_muted)
+                                                        } else {
+                                                            rgb(t.error)
+                                                        })
                                                         .child(if enabled { "●" } else { "○" })
                                                         .on_mouse_down(MouseButton::Left, {
                                                             let action = action_for_toggle.clone();
-                                                            cx.listener(move |this, _, _window, cx| {
-                                                                this.toggle_binding_entry(&action, idx, cx);
-                                                            })
+                                                            cx.listener(
+                                                                move |this, _, _window, cx| {
+                                                                    this.toggle_binding_entry(
+                                                                        &action, idx, cx,
+                                                                    );
+                                                                },
+                                                            )
                                                         }),
                                                 )
                                                 // Remove binding
                                                 .child(
                                                     div()
-                                                        .id(SharedString::from(format!("rm-{}-{}", action_for_remove, idx)))
+                                                        .id(SharedString::from(format!(
+                                                            "rm-{}-{}",
+                                                            action_for_remove, idx
+                                                        )))
                                                         .cursor_pointer()
                                                         .px(px(6.0))
                                                         .py(px(2.0))
@@ -501,15 +578,19 @@ impl KeybindingsHelp {
                                                         .child("×")
                                                         .on_mouse_down(MouseButton::Left, {
                                                             let action = action_for_remove.clone();
-                                                            cx.listener(move |this, _, _window, cx| {
-                                                                this.remove_binding_entry(&action, idx, cx);
-                                                            })
+                                                            cx.listener(
+                                                                move |this, _, _window, cx| {
+                                                                    this.remove_binding_entry(
+                                                                        &action, idx, cx,
+                                                                    );
+                                                                },
+                                                            )
                                                         }),
                                                 ),
                                         )
-                                }))
-                        },
-                    )),
+                                },
+                            ))
+                    })),
             )
     }
 }
@@ -555,7 +636,9 @@ impl Render for KeybindingsHelp {
             if !query.is_empty() {
                 let name = desc.map(|d| d.name).unwrap_or("");
                 let description = desc.map(|d| d.description).unwrap_or("");
-                let keystrokes_match = entries.iter().any(|e| e.keystroke.to_lowercase().contains(&query));
+                let keystrokes_match = entries
+                    .iter()
+                    .any(|e| e.keystroke.to_lowercase().contains(&query));
                 if !name.to_lowercase().contains(&query)
                     && !description.to_lowercase().contains(&query)
                     && !category.to_lowercase().contains(&query)
@@ -569,9 +652,7 @@ impl Render for KeybindingsHelp {
             let entry_details: Vec<(String, usize, bool, bool)> = entries
                 .iter()
                 .enumerate()
-                .map(|(idx, entry)| {
-                    (entry.keystroke.clone(), idx, is_customized, entry.enabled)
-                })
+                .map(|(idx, entry)| (entry.keystroke.clone(), idx, is_customized, entry.enabled))
                 .collect();
 
             if !entry_details.is_empty() {
@@ -582,7 +663,18 @@ impl Render for KeybindingsHelp {
             }
         }
 
-        let category_order = ["Global", "Terminal", "Navigation", "Search", "Fullscreen", "Layout", "Project", "Services", "Git", "Other"];
+        let category_order = [
+            "Global",
+            "Terminal",
+            "Navigation",
+            "Search",
+            "Fullscreen",
+            "Layout",
+            "Project",
+            "Services",
+            "Git",
+            "Other",
+        ];
 
         let focus_handle = self.focus_handle.clone();
         let is_editing = self.editing.is_some();
@@ -611,10 +703,9 @@ impl Render for KeybindingsHelp {
                 }
                 let key = event.keystroke.key.as_str();
                 match key {
-                    "backspace"
-                        if this.search_query.pop().is_some() => {
-                            cx.notify();
-                        }
+                    "backspace" if this.search_query.pop().is_some() => {
+                        cx.notify();
+                    }
                     k if k.len() == 1 && !event.keystroke.modifiers.modified() => {
                         let Some(ch) = k.chars().next() else {
                             return;
@@ -627,13 +718,16 @@ impl Render for KeybindingsHelp {
                     _ => {}
                 }
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                if this.editing.is_some() {
-                    this.cancel_recording(cx);
-                } else {
-                    this.close(cx);
-                }
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    if this.editing.is_some() {
+                        this.cancel_recording(cx);
+                    } else {
+                        this.close(cx);
+                    }
+                }),
+            )
             .child(
                 modal_content("keybindings-modal", &t)
                     .w(px(650.0))
@@ -642,59 +736,60 @@ impl Render for KeybindingsHelp {
                     .on_mouse_down(MouseButton::Left, |_, _, _| {})
                     .child(modal_header(
                         "Keyboard Shortcuts",
-                        Some(if is_editing { "Press keys to record, ESC to cancel" } else { "Click a binding to change it" }),
+                        Some(if is_editing {
+                            "Press keys to record, ESC to cancel"
+                        } else {
+                            "Click a binding to change it"
+                        }),
                         &t,
                         cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(search_input_area(&self.search_query, "Search keybindings…", &t))
+                    .child(search_input_area(
+                        &self.search_query,
+                        "Search keybindings…",
+                        &t,
+                    ))
                     // Conflict/info banners
-                    .child(
-                        div()
-                            .when(!conflicts.is_empty(), |d| {
-                                d.px(px(16.0))
-                                    .py(px(8.0))
-                                    .bg(rgb(t.warning))
-                                    .border_b_1()
-                                    .border_color(rgb(t.border))
+                    .child(div().when(!conflicts.is_empty(), |d| {
+                        d.px(px(16.0))
+                            .py(px(8.0))
+                            .bg(rgb(t.warning))
+                            .border_b_1()
+                            .border_color(rgb(t.border))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.0))
+                                    .child(div().text_size(ui_text_xl(cx)).child("⚠️"))
                                     .child(
-                                        h_flex()
-                                            .gap(px(8.0))
+                                        v_flex()
+                                            .gap(px(2.0))
                                             .child(
                                                 div()
-                                                    .text_size(ui_text_xl(cx))
-                                                    .child("⚠️"),
+                                                    .text_size(ui_text_md(cx))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(rgb(t.text_primary))
+                                                    .child(format!(
+                                                        "{} keybinding conflict{}",
+                                                        conflicts.len(),
+                                                        if conflicts.len() == 1 { "" } else { "s" }
+                                                    )),
                                             )
                                             .child(
-                                                v_flex()
-                                                    .gap(px(2.0))
+                                                div()
+                                                    .text_size(ui_text_ms(cx))
+                                                    .text_color(rgb(t.text_secondary))
                                                     .child(
-                                                        div()
-                                                            .text_size(ui_text_md(cx))
-                                                            .font_weight(FontWeight::MEDIUM)
-                                                            .text_color(rgb(t.text_primary))
-                                                            .child(format!(
-                                                                "{} keybinding conflict{}",
-                                                                conflicts.len(),
-                                                                if conflicts.len() == 1 { "" } else { "s" }
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_size(ui_text_ms(cx))
-                                                            .text_color(rgb(t.text_secondary))
-                                                            .child(
-                                                                conflicts
-                                                                    .iter()
-                                                                    .map(|c| c.to_string())
-                                                                    .collect::<Vec<_>>()
-                                                                    .join("; "),
-                                                            ),
+                                                        conflicts
+                                                            .iter()
+                                                            .map(|c| c.to_string())
+                                                            .collect::<Vec<_>>()
+                                                            .join("; "),
                                                     ),
                                             ),
-                                    )
-                            }),
-                    )
+                                    ),
+                            )
+                    }))
                     .child(
                         // Scrollable content
                         div()
@@ -704,9 +799,9 @@ impl Render for KeybindingsHelp {
                             .px(px(16.0))
                             .py(px(12.0))
                             .children(category_order.iter().filter_map(|category| {
-                                categories.get(category).map(|bindings| {
-                                    self.render_category(category, bindings, cx)
-                                })
+                                categories
+                                    .get(category)
+                                    .map(|bindings| self.render_category(category, bindings, cx))
                             })),
                     )
                     .child(
@@ -759,9 +854,12 @@ impl Render for KeybindingsHelp {
                                                     .text_size(ui_text_md(cx))
                                                     .text_color(rgb(0xFFFFFF))
                                                     .child("Confirm")
-                                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                                                        this.handle_reset_to_defaults(cx);
-                                                    })),
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(|this, _, _window, cx| {
+                                                            this.handle_reset_to_defaults(cx);
+                                                        }),
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -775,9 +873,12 @@ impl Render for KeybindingsHelp {
                                                     .text_size(ui_text_md(cx))
                                                     .text_color(rgb(t.text_primary))
                                                     .child("Cancel")
-                                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                                                        this.cancel_reset(cx);
-                                                    })),
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(|this, _, _window, cx| {
+                                                            this.cancel_reset(cx);
+                                                        }),
+                                                    ),
                                             )
                                     })
                                     .when(!self.show_reset_confirmation, |d| {
@@ -793,9 +894,12 @@ impl Render for KeybindingsHelp {
                                                 .text_size(ui_text_md(cx))
                                                 .text_color(rgb(t.text_primary))
                                                 .child("Reset to Defaults")
-                                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                                                    this.handle_reset_to_defaults(cx);
-                                                })),
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _window, cx| {
+                                                        this.handle_reset_to_defaults(cx);
+                                                    }),
+                                                ),
                                         )
                                     }),
                             ),

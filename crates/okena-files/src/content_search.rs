@@ -5,13 +5,13 @@
 
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
+use grep_searcher::sinks::UTF8;
 use ignore::{WalkBuilder, WalkState};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Skip files larger than this for content search. Lockfiles, bundles, and
 /// generated code are typically uninteresting and dominate I/O time.
@@ -177,19 +177,15 @@ fn add_context_lines(matches: &mut [ContentMatch], file_path: &Path, context_lin
         // Context before
         let start = line_idx.saturating_sub(context_lines);
         for i in start..line_idx {
-            m.context_before.push((
-                i + 1,
-                expand_tabs_simple(all_lines.get(i).unwrap_or(&"")),
-            ));
+            m.context_before
+                .push((i + 1, expand_tabs_simple(all_lines.get(i).unwrap_or(&""))));
         }
 
         // Context after
         let end = (line_idx + 1 + context_lines).min(all_lines.len());
         for i in (line_idx + 1)..end {
-            m.context_after.push((
-                i + 1,
-                expand_tabs_simple(all_lines.get(i).unwrap_or(&"")),
-            ));
+            m.context_after
+                .push((i + 1, expand_tabs_simple(all_lines.get(i).unwrap_or(&""))));
         }
     }
 }
@@ -212,7 +208,9 @@ pub fn search_content(
     }
 
     match config.mode {
-        SearchMode::Fuzzy => search_content_fuzzy(project_path, query, config, cancelled, on_result),
+        SearchMode::Fuzzy => {
+            search_content_fuzzy(project_path, query, config, cancelled, on_result)
+        }
         _ => search_content_grep(project_path, query, config, cancelled, on_result),
     }
 }
@@ -249,100 +247,106 @@ fn search_content_grep(
     let context_lines = config.context_lines;
     let on_result = Mutex::new(on_result);
 
-    configure_walker(project_path, config).build_parallel().run(|| {
-        let matcher = matcher.clone();
-        let mut searcher = Searcher::new();
-        let total_matches = &total_matches;
-        let on_result = &on_result;
+    configure_walker(project_path, config)
+        .build_parallel()
+        .run(|| {
+            let matcher = matcher.clone();
+            let mut searcher = Searcher::new();
+            let total_matches = &total_matches;
+            let on_result = &on_result;
 
-        Box::new(move |entry| {
-            if cancelled.load(Ordering::Relaxed) {
-                return WalkState::Quit;
-            }
-            if total_matches.load(Ordering::Relaxed) >= max_results {
-                return WalkState::Quit;
-            }
+            Box::new(move |entry| {
+                if cancelled.load(Ordering::Relaxed) {
+                    return WalkState::Quit;
+                }
+                if total_matches.load(Ordering::Relaxed) >= max_results {
+                    return WalkState::Quit;
+                }
 
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => return WalkState::Continue,
-            };
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => return WalkState::Continue,
+                };
 
-            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                return WalkState::Continue;
-            }
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    return WalkState::Continue;
+                }
 
-            let path = entry.path();
-            let mut file_matches: Vec<ContentMatch> = Vec::new();
+                let path = entry.path();
+                let mut file_matches: Vec<ContentMatch> = Vec::new();
 
-            let search_result = searcher.search_path(
-                &matcher,
-                path,
-                UTF8(|line_number, line_content| {
-                    if cancelled.load(Ordering::Relaxed) {
-                        return Ok(false);
-                    }
-                    if total_matches.load(Ordering::Relaxed) + file_matches.len() >= max_results {
-                        return Ok(false);
-                    }
-
-                    let line_trimmed = line_content.trim_end_matches(&['\n', '\r'][..]);
-
-                    // Find match ranges within the line
-                    let mut match_ranges = Vec::new();
-                    matcher.find_iter(line_content.as_bytes(), |m| {
-                        let start = m.start();
-                        let end = m.end().min(line_trimmed.len());
-                        if start < line_trimmed.len() {
-                            match_ranges.push(start..end);
+                let search_result = searcher.search_path(
+                    &matcher,
+                    path,
+                    UTF8(|line_number, line_content| {
+                        if cancelled.load(Ordering::Relaxed) {
+                            return Ok(false);
                         }
-                        true
-                    }).ok();
+                        if total_matches.load(Ordering::Relaxed) + file_matches.len() >= max_results
+                        {
+                            return Ok(false);
+                        }
 
-                    // Expand tabs to match syntax highlighter output
-                    let (line_expanded, match_ranges) = expand_tabs(line_trimmed, &match_ranges);
+                        let line_trimmed = line_content.trim_end_matches(&['\n', '\r'][..]);
 
-                    file_matches.push(ContentMatch {
-                        line_number: line_number as usize,
-                        line_content: line_expanded,
-                        match_ranges,
-                        context_before: Vec::new(),
-                        context_after: Vec::new(),
-                    });
+                        // Find match ranges within the line
+                        let mut match_ranges = Vec::new();
+                        matcher
+                            .find_iter(line_content.as_bytes(), |m| {
+                                let start = m.start();
+                                let end = m.end().min(line_trimmed.len());
+                                if start < line_trimmed.len() {
+                                    match_ranges.push(start..end);
+                                }
+                                true
+                            })
+                            .ok();
 
-                    Ok(true)
-                }),
-            );
+                        // Expand tabs to match syntax highlighter output
+                        let (line_expanded, match_ranges) =
+                            expand_tabs(line_trimmed, &match_ranges);
 
-            if search_result.is_err() || file_matches.is_empty() {
-                return WalkState::Continue;
-            }
+                        file_matches.push(ContentMatch {
+                            line_number: line_number as usize,
+                            line_content: line_expanded,
+                            match_ranges,
+                            context_before: Vec::new(),
+                            context_after: Vec::new(),
+                        });
 
-            total_matches.fetch_add(file_matches.len(), Ordering::Relaxed);
+                        Ok(true)
+                    }),
+                );
 
-            if context_lines > 0 {
-                add_context_lines(&mut file_matches, path, context_lines);
-            }
+                if search_result.is_err() || file_matches.is_empty() {
+                    return WalkState::Continue;
+                }
 
-            let relative_path = path
-                .strip_prefix(project_path)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                total_matches.fetch_add(file_matches.len(), Ordering::Relaxed);
 
-            let result = FileSearchResult {
-                file_path: path.to_path_buf(),
-                relative_path,
-                matches: file_matches,
-                best_score: 0,
-            };
+                if context_lines > 0 {
+                    add_context_lines(&mut file_matches, path, context_lines);
+                }
 
-            if let Ok(mut cb) = on_result.lock() {
-                cb(result);
-            }
+                let relative_path = path
+                    .strip_prefix(project_path)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-            WalkState::Continue
-        })
-    });
+                let result = FileSearchResult {
+                    file_path: path.to_path_buf(),
+                    relative_path,
+                    matches: file_matches,
+                    best_score: 0,
+                };
+
+                if let Ok(mut cb) = on_result.lock() {
+                    cb(result);
+                }
+
+                WalkState::Continue
+            })
+        });
 }
 
 /// Search using nucleo-matcher (fuzzy mode).
@@ -372,116 +376,119 @@ fn search_content_fuzzy(
         _ => 30,
     };
 
-    configure_walker(project_path, config).build_parallel().run(|| {
-        let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
-        let total_matches = &total_matches;
-        let on_result = &on_result;
+    configure_walker(project_path, config)
+        .build_parallel()
+        .run(|| {
+            let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+            let total_matches = &total_matches;
+            let on_result = &on_result;
 
-        Box::new(move |entry| {
-            if cancelled.load(Ordering::Relaxed) {
-                return WalkState::Quit;
-            }
-            if total_matches.load(Ordering::Relaxed) >= max_results {
-                return WalkState::Quit;
-            }
-
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => return WalkState::Continue,
-            };
-
-            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                return WalkState::Continue;
-            }
-
-            let path = entry.path();
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(_) => return WalkState::Continue,
-            };
-
-            let mut scored_matches: Vec<(u16, ContentMatch)> = Vec::new();
-
-            for (line_idx, line) in content.lines().enumerate() {
+            Box::new(move |entry| {
                 if cancelled.load(Ordering::Relaxed) {
                     return WalkState::Quit;
                 }
-                if total_matches.load(Ordering::Relaxed) + scored_matches.len() >= max_results {
-                    break;
+                if total_matches.load(Ordering::Relaxed) >= max_results {
+                    return WalkState::Quit;
                 }
 
-                let mut haystack_buf = Vec::new();
-                let haystack = Utf32Str::new(line, &mut haystack_buf);
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => return WalkState::Continue,
+                };
 
-                let mut needle_buf2 = Vec::new();
-                let needle = Utf32Str::new(query, &mut needle_buf2);
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    return WalkState::Continue;
+                }
 
-                let mut indices: Vec<u32> = Vec::new();
-                if let Some(score) = matcher.fuzzy_indices(haystack, needle, &mut indices) {
-                    if score < min_score {
-                        continue;
+                let path = entry.path();
+                let content = match std::fs::read_to_string(path) {
+                    Ok(c) => c,
+                    Err(_) => return WalkState::Continue,
+                };
+
+                let mut scored_matches: Vec<(u16, ContentMatch)> = Vec::new();
+
+                for (line_idx, line) in content.lines().enumerate() {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return WalkState::Quit;
+                    }
+                    if total_matches.load(Ordering::Relaxed) + scored_matches.len() >= max_results {
+                        break;
                     }
 
-                    let char_to_byte: Vec<(usize, char)> = line.char_indices().collect();
-                    let match_ranges: Vec<Range<usize>> = indices
-                        .iter()
-                        .filter_map(|&idx| {
-                            let (byte_pos, ch) = char_to_byte.get(idx as usize)?;
-                            Some(*byte_pos..*byte_pos + ch.len_utf8())
-                        })
-                        .collect();
+                    let mut haystack_buf = Vec::new();
+                    let haystack = Utf32Str::new(line, &mut haystack_buf);
 
-                    // Expand tabs to match syntax highlighter output
-                    let (line_expanded, match_ranges) = expand_tabs(line, &match_ranges);
+                    let mut needle_buf2 = Vec::new();
+                    let needle = Utf32Str::new(query, &mut needle_buf2);
 
-                    scored_matches.push((score, ContentMatch {
-                        line_number: line_idx + 1,
-                        line_content: line_expanded,
-                        match_ranges,
-                        context_before: Vec::new(),
-                        context_after: Vec::new(),
-                    }));
+                    let mut indices: Vec<u32> = Vec::new();
+                    if let Some(score) = matcher.fuzzy_indices(haystack, needle, &mut indices) {
+                        if score < min_score {
+                            continue;
+                        }
+
+                        let char_to_byte: Vec<(usize, char)> = line.char_indices().collect();
+                        let match_ranges: Vec<Range<usize>> = indices
+                            .iter()
+                            .filter_map(|&idx| {
+                                let (byte_pos, ch) = char_to_byte.get(idx as usize)?;
+                                Some(*byte_pos..*byte_pos + ch.len_utf8())
+                            })
+                            .collect();
+
+                        // Expand tabs to match syntax highlighter output
+                        let (line_expanded, match_ranges) = expand_tabs(line, &match_ranges);
+
+                        scored_matches.push((
+                            score,
+                            ContentMatch {
+                                line_number: line_idx + 1,
+                                line_content: line_expanded,
+                                match_ranges,
+                                context_before: Vec::new(),
+                                context_after: Vec::new(),
+                            },
+                        ));
+                    }
                 }
-            }
 
-            if scored_matches.is_empty() {
-                return WalkState::Continue;
-            }
+                if scored_matches.is_empty() {
+                    return WalkState::Continue;
+                }
 
-            // Sort by score descending — best matches first
-            scored_matches.sort_by_key(|b| std::cmp::Reverse(b.0));
+                // Sort by score descending — best matches first
+                scored_matches.sort_by_key(|b| std::cmp::Reverse(b.0));
 
-            let best_score = scored_matches.first().map(|(s, _)| *s).unwrap_or(0);
-            let mut file_matches: Vec<ContentMatch> = scored_matches
-                .into_iter()
-                .map(|(_, m)| m)
-                .collect();
+                let best_score = scored_matches.first().map(|(s, _)| *s).unwrap_or(0);
+                let mut file_matches: Vec<ContentMatch> =
+                    scored_matches.into_iter().map(|(_, m)| m).collect();
 
-            total_matches.fetch_add(file_matches.len(), Ordering::Relaxed);
+                total_matches.fetch_add(file_matches.len(), Ordering::Relaxed);
 
-            if context_lines > 0 {
-                add_context_lines(&mut file_matches, path, context_lines);
-            }
+                if context_lines > 0 {
+                    add_context_lines(&mut file_matches, path, context_lines);
+                }
 
-            let relative_path = path
-                .strip_prefix(project_path)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                let relative_path = path
+                    .strip_prefix(project_path)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-            let result = FileSearchResult {
-                file_path: path.to_path_buf(),
-                relative_path,
-                matches: file_matches,
-                best_score,
-            };
+                let result = FileSearchResult {
+                    file_path: path.to_path_buf(),
+                    relative_path,
+                    matches: file_matches,
+                    best_score,
+                };
 
-            if let Ok(mut cb) = on_result.lock() {
-                cb(result);
-            }
+                if let Ok(mut cb) = on_result.lock() {
+                    cb(result);
+                }
 
-            WalkState::Continue
-        })
-    });
+                WalkState::Continue
+            })
+        });
 }
 
 /// Handle for cancelling a running search.
@@ -521,8 +528,7 @@ fn escape_regex(s: &str) -> String {
     let mut escaped = String::with_capacity(s.len() * 2);
     for c in s.chars() {
         match c {
-            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^'
-            | '$' => {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' => {
                 escaped.push('\\');
                 escaped.push(c);
             }

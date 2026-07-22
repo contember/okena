@@ -114,16 +114,19 @@ impl GitHeader {
                             this.hide_diff_popover(cx);
                         });
                         request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
-                                project_id: pid,
-                                kind: ProjectOverlayKind::DiffViewer {
-                                    file: Some(file_path),
-                                    mode: None,
-                                    commit_message: None,
-                                    commits: None,
-                                    commit_index: None,
-                                },
-                            }), cx);
+                            broker.push_overlay_request(
+                                OverlayRequest::Project(ProjectOverlay {
+                                    project_id: pid,
+                                    kind: ProjectOverlayKind::DiffViewer {
+                                        file: Some(file_path),
+                                        mode: None,
+                                        commit_message: None,
+                                        commits: None,
+                                        commit_index: None,
+                                    },
+                                }),
+                                cx,
+                            );
                         });
                     },
                     t,
@@ -139,38 +142,35 @@ impl GitHeader {
         );
 
         deferred(
-            anchored()
-                .position(position)
-                .snap_to_window()
-                .child(
-                    div()
-                        .id("diff-summary-popover")
-                        .occlude()
-                        .min_w(px(280.0))
-                        .max_w(px(400.0))
-                        .max_h(px(300.0))
-                        .overflow_y_scroll()
-                        .bg(rgb(t.bg_primary))
-                        .border_1()
-                        .border_color(rgb(t.border))
-                        .rounded(px(6.0))
-                        .shadow_lg()
-                        .py(px(6.0))
-                        .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
-                            if *hovered {
-                                this.hover_token.fetch_add(1, Ordering::SeqCst);
-                            } else {
-                                this.hide_diff_popover(cx);
-                            }
-                        }))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(body),
-                ),
+            anchored().position(position).snap_to_window().child(
+                div()
+                    .id("diff-summary-popover")
+                    .occlude()
+                    .min_w(px(280.0))
+                    .max_w(px(400.0))
+                    .max_h(px(300.0))
+                    .overflow_y_scroll()
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(6.0))
+                    .shadow_lg()
+                    .py(px(6.0))
+                    .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                        if *hovered {
+                            this.hover_token.fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            this.hide_diff_popover(cx);
+                        }
+                    }))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_scroll_wheel(|_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(body),
+            ),
         )
         .into_any_element()
     }

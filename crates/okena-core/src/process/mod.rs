@@ -14,7 +14,7 @@
 
 mod bus;
 
-pub use bus::{current_lane, with_lane, CommandBus, CommandHandle, CommandSpec, Lane};
+pub use bus::{CommandBus, CommandHandle, CommandSpec, Lane, current_lane, with_lane};
 
 /// Create a [`std::process::Command`] that does **not** flash a console
 /// window on Windows.  On other platforms this is identical to
@@ -234,7 +234,8 @@ pub fn raise_fd_limit() {
         if libc::setrlimit(libc::RLIMIT_NOFILE, &new) == 0 {
             log::info!(
                 "Raised RLIMIT_NOFILE soft limit {} -> {}",
-                lim.rlim_cur, target
+                lim.rlim_cur,
+                target
             );
         }
     }
@@ -361,8 +362,14 @@ mod tests {
         let b = bus.submit(CommandSpec::new("sleep").arg("30").scope(42));
         std::thread::sleep(Duration::from_millis(80));
         bus.cancel_scope(42);
-        assert_eq!(a.wait().unwrap_err().kind(), std::io::ErrorKind::Interrupted);
-        assert_eq!(b.wait().unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(
+            a.wait().unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert_eq!(
+            b.wait().unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
     }
 
     #[test]
@@ -401,7 +408,10 @@ mod tests {
         let alive = is_process_alive(pid);
         let _ = child.wait();
 
-        assert!(!alive, "an exited, unreaped child must not count as running");
+        assert!(
+            !alive,
+            "an exited, unreaped child must not count as running"
+        );
     }
 
     #[cfg(unix)]

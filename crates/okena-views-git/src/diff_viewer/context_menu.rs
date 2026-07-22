@@ -10,10 +10,10 @@ use gpui::prelude::*;
 use gpui::{ClipboardItem, *};
 use gpui_component::h_flex;
 use okena_core::theme::ThemeColors;
+use okena_files::selection::Selection2DNonEmpty;
 use okena_git::DiffMode;
 use okena_ui::button::button;
 use okena_ui::icon_button::icon_button_sized;
-use okena_files::selection::Selection2DNonEmpty;
 use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
 use okena_ui::modal::{modal_backdrop, modal_content};
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_xl};
@@ -85,7 +85,11 @@ impl DiffViewer {
         kind: DiffTargetKind,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(DiffContextMenu { position, path, kind });
+        self.context_menu = Some(DiffContextMenu {
+            position,
+            path,
+            kind,
+        });
         cx.notify();
     }
 
@@ -111,7 +115,11 @@ impl DiffViewer {
                 &[],
             ),
         };
-        self.commit_hash_menu = Some(CommitHashContextMenu { position, hash, send_text });
+        self.commit_hash_menu = Some(CommitHashContextMenu {
+            position,
+            hash,
+            send_text,
+        });
         cx.notify();
     }
 
@@ -162,15 +170,13 @@ impl DiffViewer {
         let mode = self.diff_mode.clone();
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || op(&*provider)).await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        ToastManager::success(success_msg, cx);
-                        this.load_diff_async(mode, None, cx);
-                    }
-                    Err(e) => {
-                        ToastManager::error(format!("Git operation failed: {}", e), cx);
-                    }
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => {
+                    ToastManager::success(success_msg, cx);
+                    this.load_diff_async(mode, None, cx);
+                }
+                Err(e) => {
+                    ToastManager::error(format!("Git operation failed: {}", e), cx);
                 }
             });
         })
@@ -184,11 +190,7 @@ impl DiffViewer {
         let path = menu.path.clone();
         let msg = format!("Staged {}", path);
         let path_for_op = path.clone();
-        self.spawn_mutation(
-            move |provider| provider.stage_file(&path_for_op),
-            msg,
-            cx,
-        );
+        self.spawn_mutation(move |provider| provider.stage_file(&path_for_op), msg, cx);
     }
 
     pub(super) fn unstage_from_menu(&mut self, cx: &mut Context<Self>) {
@@ -198,11 +200,7 @@ impl DiffViewer {
         let path = menu.path.clone();
         let msg = format!("Unstaged {}", path);
         let path_for_op = path.clone();
-        self.spawn_mutation(
-            move |provider| provider.unstage_file(&path_for_op),
-            msg,
-            cx,
-        );
+        self.spawn_mutation(move |provider| provider.unstage_file(&path_for_op), msg, cx);
     }
 
     // ── Discard flow ────────────────────────────────────────────────────────
@@ -226,11 +224,7 @@ impl DiffViewer {
         let path = confirm.path.clone();
         let msg = format!("Discarded changes in {}", path);
         let path_for_op = path.clone();
-        self.spawn_mutation(
-            move |provider| provider.discard_file(&path_for_op),
-            msg,
-            cx,
-        );
+        self.spawn_mutation(move |provider| provider.discard_file(&path_for_op), msg, cx);
     }
 
     pub(super) fn cancel_discard(&mut self, cx: &mut Context<Self>) {
@@ -261,11 +255,7 @@ impl DiffViewer {
         let file_path = confirm.file_path.clone();
         let msg = format!("Deleted {}", file_path);
         let path_for_op = file_path.clone();
-        self.spawn_mutation(
-            move |provider| provider.delete_file(&path_for_op),
-            msg,
-            cx,
-        );
+        self.spawn_mutation(move |provider| provider.delete_file(&path_for_op), msg, cx);
     }
 
     pub(super) fn cancel_delete(&mut self, cx: &mut Context<Self>) {
@@ -322,11 +312,12 @@ impl DiffViewer {
             )
             .child(menu_separator(t))
             .child(
-                menu_item("dv-sel-ctx-copy", "icons/copy.svg", "Copy", t)
-                    .on_click(cx.listener(|this, _, _, cx| {
+                menu_item("dv-sel-ctx-copy", "icons/copy.svg", "Copy", t).on_click(cx.listener(
+                    |this, _, _, cx| {
                         this.selection_context_menu = None;
                         this.copy_selection(cx);
-                    })),
+                    },
+                )),
             );
 
         Some(
@@ -382,11 +373,12 @@ impl DiffViewer {
             )
             .child(menu_separator(t))
             .child(
-                menu_item("dv-ctx-copy-commit-hash", "icons/copy.svg", "Copy Hash", t)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                menu_item("dv-ctx-copy-commit-hash", "icons/copy.svg", "Copy Hash", t).on_click(
+                    cx.listener(move |this, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(hash_for_copy.clone()));
                         this.close_commit_hash_menu(cx);
-                    })),
+                    }),
+                ),
             );
 
         Some(
@@ -413,11 +405,7 @@ impl DiffViewer {
         )
     }
 
-    fn render_context_menu(
-        &self,
-        t: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_context_menu(&self, t: &ThemeColors, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.context_menu.as_ref()?;
         let position = menu.position;
         let path = menu.path.clone();
@@ -564,11 +552,7 @@ impl DiffViewer {
         )
     }
 
-    fn render_delete_confirm(
-        &self,
-        t: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_delete_confirm(&self, t: &ThemeColors, cx: &mut Context<Self>) -> Option<AnyElement> {
         let confirm = self.delete_confirm.as_ref()?;
         let file_path = confirm.file_path.clone();
         let display_name = file_path
@@ -633,9 +617,11 @@ impl DiffViewer {
                                         14.0,
                                         t,
                                     )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cancel_delete(cx);
-                                    })),
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.cancel_delete(cx);
+                                        },
+                                    )),
                                 ),
                         )
                         .child(
@@ -719,11 +705,7 @@ impl DiffViewer {
         let confirm = self.discard_confirm.as_ref()?;
         let path = confirm.path.clone();
         let kind = confirm.kind;
-        let display_name = path
-            .rsplit('/')
-            .next()
-            .unwrap_or(&path)
-            .to_string();
+        let display_name = path.rsplit('/').next().unwrap_or(&path).to_string();
         let error_msg = confirm.error_message.clone();
         let title = format!("Discard {} Changes", kind.noun());
         let prompt = format!(
@@ -787,9 +769,11 @@ impl DiffViewer {
                                         14.0,
                                         t,
                                     )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cancel_discard(cx);
-                                    })),
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.cancel_discard(cx);
+                                        },
+                                    )),
                                 ),
                         )
                         .child(

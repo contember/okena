@@ -142,9 +142,12 @@ mod tests {
             .expect("hook start should publish")
             .expect("state sender should remain live");
 
-        monitor.record_finish(id, HookStatus::Succeeded {
-            duration: Duration::from_millis(1),
-        });
+        monitor.record_finish(
+            id,
+            HookStatus::Succeeded {
+                duration: Duration::from_millis(1),
+            },
+        );
         tokio::time::timeout(Duration::from_secs(1), state_rx.changed())
             .await
             .expect("hook completion should publish")

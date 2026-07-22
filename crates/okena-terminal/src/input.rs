@@ -43,7 +43,8 @@ pub fn key_to_bytes(
     kitty: KittyKeyboardFlags,
 ) -> Option<Vec<u8>> {
     if kitty.disambiguate_escape_codes
-        && let Some(bytes) = kitty_disambiguate_bytes(event) {
+        && let Some(bytes) = kitty_disambiguate_bytes(event)
+    {
         return Some(bytes);
     }
 
@@ -53,10 +54,12 @@ pub fn key_to_bytes(
     if mods.control && !mods.shift && !mods.alt && !mods.platform {
         let key = event.key.as_str();
         if let Some(c) = key.chars().next()
-            && key.len() == 1 && c.is_ascii_alphabetic() {
-                let ctrl_char = (c.to_ascii_lowercase() as u8) - b'a' + 1;
-                return Some(vec![ctrl_char]);
-            }
+            && key.len() == 1
+            && c.is_ascii_alphabetic()
+        {
+            let ctrl_char = (c.to_ascii_lowercase() as u8) - b'a' + 1;
+            return Some(vec![ctrl_char]);
+        }
     }
 
     // Handle Tab with modifiers
@@ -263,15 +266,23 @@ mod tests {
     }
 
     fn ctrl() -> KeyModifiers {
-        KeyModifiers { control: true, ..Default::default() }
+        KeyModifiers {
+            control: true,
+            ..Default::default()
+        }
     }
 
     fn shift() -> KeyModifiers {
-        KeyModifiers { shift: true, ..Default::default() }
+        KeyModifiers {
+            shift: true,
+            ..Default::default()
+        }
     }
 
     fn on() -> KittyKeyboardFlags {
-        KittyKeyboardFlags { disambiguate_escape_codes: true }
+        KittyKeyboardFlags {
+            disambiguate_escape_codes: true,
+        }
     }
 
     #[test]

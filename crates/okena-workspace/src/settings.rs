@@ -1,8 +1,8 @@
-use okena_transport::client::RemoteConnectionConfig;
-use okena_terminal::session_backend::SessionBackend;
-use okena_terminal::shell_config::ShellType;
 use okena_core::theme::ThemeMode;
 pub use okena_core::types::DiffViewMode;
+use okena_terminal::session_backend::SessionBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_transport::client::RemoteConnectionConfig;
 
 use anyhow::Result;
 use fs2::FileExt;
@@ -132,7 +132,11 @@ pub struct NotificationSettings {
 
 impl Default for NotificationSettings {
     fn default() -> Self {
-        Self { enabled: false, osc: true, bell: true }
+        Self {
+            enabled: false,
+            osc: true,
+            bell: true,
+        }
     }
 }
 
@@ -523,7 +527,10 @@ pub fn load_settings() -> AppSettings {
     log::info!("[settings] loading from {}", path.display());
 
     if !path.exists() {
-        log::warn!("[settings] file not found at {}, using defaults", path.display());
+        log::warn!(
+            "[settings] file not found at {}, using defaults",
+            path.display()
+        );
         return AppSettings::default();
     }
 
@@ -541,7 +548,11 @@ pub fn load_settings() -> AppSettings {
             let old_version = settings.version;
             settings = migrate_settings(settings);
             if settings.version != old_version {
-                log::info!("Settings migrated from v{} to v{}", old_version, settings.version);
+                log::info!(
+                    "Settings migrated from v{} to v{}",
+                    old_version,
+                    settings.version
+                );
                 if let Err(e) = save_settings(&settings) {
                     log::warn!("Failed to save migrated settings: {}", e);
                 }
@@ -549,7 +560,10 @@ pub fn load_settings() -> AppSettings {
             return settings;
         }
         Err(e) => {
-            log::warn!("Failed to parse settings directly: {}, attempting partial recovery", e);
+            log::warn!(
+                "Failed to parse settings directly: {}, attempting partial recovery",
+                e
+            );
         }
     }
 
@@ -661,7 +675,9 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
     if settings.version == 2 {
         log::info!("Migrating settings from v2 to v3 (extension system)");
         if settings.claude_code_integration {
-            settings.enabled_extensions.insert("claude-code".to_string());
+            settings
+                .enabled_extensions
+                .insert("claude-code".to_string());
         }
         if settings.codex_integration {
             settings.enabled_extensions.insert("codex".to_string());
@@ -729,9 +745,10 @@ fn save_settings_locked(settings: &AppSettings) -> Result<()> {
     // by update_remote_connections and not kept in SettingsState's in-memory copy).
     let mut to_save = settings.clone();
     if let Ok(content) = std::fs::read_to_string(&path)
-        && let Ok(on_disk) = serde_json::from_str::<AppSettings>(&content) {
-            to_save.remote_connections = on_disk.remote_connections;
-        }
+        && let Ok(on_disk) = serde_json::from_str::<AppSettings>(&content)
+    {
+        to_save.remote_connections = on_disk.remote_connections;
+    }
 
     write_settings_locked(&to_save)
 }
@@ -812,7 +829,10 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: HooksConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.project.on_open, Some("echo open".into()));
-        assert_eq!(deserialized.terminal.shell_wrapper, Some("devcontainer exec -- {shell}".into()));
+        assert_eq!(
+            deserialized.terminal.shell_wrapper,
+            Some("devcontainer exec -- {shell}".into())
+        );
         assert_eq!(deserialized.worktree.pre_merge, Some("lint".into()));
         assert_eq!(deserialized.worktree.after_remove, Some("log".into()));
     }
@@ -1006,7 +1026,9 @@ mod tests {
     #[test]
     fn enabled_extensions_not_serialized_with_legacy_fields() {
         let mut settings = AppSettings::default();
-        settings.enabled_extensions.insert("claude-code".to_string());
+        settings
+            .enabled_extensions
+            .insert("claude-code".to_string());
         let json = serde_json::to_string_pretty(&settings).unwrap();
         // Legacy bool fields should not appear in serialized output
         assert!(!json.contains("claude_code_integration"));

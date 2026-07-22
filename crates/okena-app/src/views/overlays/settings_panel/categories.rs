@@ -26,7 +26,15 @@ impl SettingsCategory {
     }
 
     pub(super) fn all() -> &'static [SettingsCategory] {
-        &[Self::General, Self::Font, Self::Terminal, Self::Worktree, Self::Hooks, Self::Extensions, Self::PairedDevices]
+        &[
+            Self::General,
+            Self::Font,
+            Self::Terminal,
+            Self::Worktree,
+            Self::Hooks,
+            Self::Extensions,
+            Self::PairedDevices,
+        ]
     }
 
     /// Categories available in project mode (only hooks for now)

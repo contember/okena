@@ -3,14 +3,14 @@
 // them into a context struct would obscure more than it clarifies here.
 #![allow(clippy::too_many_arguments)]
 
-use okena_terminal::backend::TerminalBackend;
-use okena_terminal::shell_config::ShellType;
-use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_terminal::TerminalsRegistry;
-use okena_state::HooksConfig;
 use crate::hook_monitor::{HookMonitor, HookStatus};
 #[cfg(feature = "gpui")]
 use gpui::App;
+use okena_state::HooksConfig;
+use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -34,7 +34,10 @@ impl gpui::Global for HookRunner {}
 
 /// Pending terminal-backed hook actions paired with their env vars, returned
 /// alongside the `HookTerminalResult`s produced by background PTY commands.
-type HookActionOutcome = (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>);
+type HookActionOutcome = (
+    Vec<(String, HashMap<String, String>)>,
+    Vec<HookTerminalResult>,
+);
 
 /// Result of a hook execution via PTY.
 #[derive(Clone)]
@@ -122,7 +125,11 @@ impl HookRunner {
             }
         };
 
-        let cwd = if project_path.is_empty() { "." } else { project_path };
+        let cwd = if project_path.is_empty() {
+            "."
+        } else {
+            project_path
+        };
 
         let terminal_id = if keep_alive {
             // Build a shell command that:
@@ -171,7 +178,9 @@ fn is_valid_env_key(key: &str) -> bool {
     if !bytes[0].is_ascii_alphabetic() && bytes[0] != b'_' {
         return false;
     }
-    bytes[1..].iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+    bytes[1..]
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Build shell export statements from a HashMap of env vars.
@@ -224,7 +233,13 @@ pub fn terminal_hook_env(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
 ) -> HashMap<String, String> {
-    let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+    let mut env = project_env(
+        project_id,
+        project_name,
+        project_path,
+        folder_id,
+        folder_name,
+    );
     if is_worktree {
         let path = std::path::Path::new(project_path);
         let branch = okena_git::get_git_status(path)
@@ -239,7 +254,10 @@ pub fn terminal_hook_env(
 
 /// Build a `std::process::Command` for headless hook execution.
 /// Handles platform dispatch (sh -c / cmd /C), env vars, and cwd.
-fn build_headless_command(command: &str, env_vars: &HashMap<String, String>) -> std::process::Command {
+fn build_headless_command(
+    command: &str,
+    env_vars: &HashMap<String, String>,
+) -> std::process::Command {
     #[cfg(unix)]
     let mut cmd = okena_core::process::command("sh");
     #[cfg(unix)]
@@ -262,8 +280,13 @@ fn build_headless_command(command: &str, env_vars: &HashMap<String, String>) -> 
 }
 
 /// Build a display label for a hook terminal tab.
-fn build_hook_label(hook_type: &str, env_vars: &HashMap<String, String>, project_name: &str) -> String {
-    let context = env_vars.get("OKENA_BRANCH")
+fn build_hook_label(
+    hook_type: &str,
+    env_vars: &HashMap<String, String>,
+    project_name: &str,
+) -> String {
+    let context = env_vars
+        .get("OKENA_BRANCH")
         .map(|s| s.as_str())
         .unwrap_or(project_name);
     format!("{} ({})", hook_type, context)
@@ -314,7 +337,16 @@ fn run_hook_actions(
     for action in actions {
         match action {
             HookAction::Background(cmd) => {
-                if let Some(result) = run_hook(cmd, env_vars.clone(), monitor, hook_type, project_name, runner, project_id, keep_alive) {
+                if let Some(result) = run_hook(
+                    cmd,
+                    env_vars.clone(),
+                    monitor,
+                    hook_type,
+                    project_name,
+                    runner,
+                    project_id,
+                    keep_alive,
+                ) {
                     hook_results.push(result);
                 }
             }
@@ -383,15 +415,29 @@ fn run_hook(
 ) -> Option<HookTerminalResult> {
     // PTY path: create a real terminal so output is visible in the service panel
     if let Some(runner) = runner {
-        let project_path = env_vars.get("OKENA_PROJECT_PATH").cloned().unwrap_or_default();
+        let project_path = env_vars
+            .get("OKENA_PROJECT_PATH")
+            .cloned()
+            .unwrap_or_default();
         let label = build_hook_label(hook_type, &env_vars, project_name);
-        let resolved_cwd = if project_path.is_empty() { ".".to_string() } else { project_path.clone() };
+        let resolved_cwd = if project_path.is_empty() {
+            ".".to_string()
+        } else {
+            project_path.clone()
+        };
 
         match runner.create_hook_terminal(&command, &env_vars, &project_path, keep_alive) {
             Ok((terminal_id, full_cmd)) => {
                 // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
-                let _ = monitor.map(|m| m.record_start(hook_type, &command, project_name, Some(terminal_id.clone())));
-                log::info!("Hook '{}' started in terminal {} (label: {})", hook_type, terminal_id, label);
+                let _ = monitor.map(|m| {
+                    m.record_start(hook_type, &command, project_name, Some(terminal_id.clone()))
+                });
+                log::info!(
+                    "Hook '{}' started in terminal {} (label: {})",
+                    hook_type,
+                    terminal_id,
+                    label
+                );
                 return Some(HookTerminalResult {
                     terminal_id,
                     label,
@@ -437,26 +483,28 @@ fn run_hook(
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                     let exit_code = output.status.code().unwrap_or(-1);
-                    log::warn!(
-                        "Hook command failed (exit {}): {}",
-                        exit_code,
-                        stderr,
-                    );
+                    log::warn!("Hook command failed (exit {}): {}", exit_code, stderr,);
                     if let (Some(monitor), Some(id)) = (&monitor_clone, exec_id) {
-                        monitor.record_finish(id, HookStatus::Failed {
-                            duration,
-                            exit_code,
-                            stderr,
-                        });
+                        monitor.record_finish(
+                            id,
+                            HookStatus::Failed {
+                                duration,
+                                exit_code,
+                                stderr,
+                            },
+                        );
                     }
                 }
             }
             Err(e) => {
                 log::error!("Failed to execute hook command '{}': {}", command, e);
                 if let (Some(monitor), Some(id)) = (&monitor_clone, exec_id) {
-                    monitor.record_finish(id, HookStatus::SpawnError {
-                        message: e.to_string(),
-                    });
+                    monitor.record_finish(
+                        id,
+                        HookStatus::SpawnError {
+                            message: e.to_string(),
+                        },
+                    );
                 }
             }
         }
@@ -481,11 +529,19 @@ fn run_hook_sync(
     // PTY path: requires both runner and monitor (monitor provides the exit waiter channel).
     // If runner exists but monitor is missing, fall through to headless execution.
     if let (Some(runner), Some(monitor)) = (runner, monitor) {
-        let project_path = env_vars.get("OKENA_PROJECT_PATH").cloned().unwrap_or_default();
+        let project_path = env_vars
+            .get("OKENA_PROJECT_PATH")
+            .cloned()
+            .unwrap_or_default();
         let label = build_hook_label(hook_type, &env_vars, project_name);
-        let resolved_cwd = if project_path.is_empty() { ".".to_string() } else { project_path.clone() };
+        let resolved_cwd = if project_path.is_empty() {
+            ".".to_string()
+        } else {
+            project_path.clone()
+        };
 
-        let (terminal_id, full_cmd) = runner.create_hook_terminal(command, &env_vars, &project_path, false)?;
+        let (terminal_id, full_cmd) =
+            runner.create_hook_terminal(command, &env_vars, &project_path, false)?;
 
         // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
         let _ = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
@@ -522,7 +578,10 @@ fn run_hook_sync(
             return Err(format!("Hook failed (exit {})", code));
         }
     } else if runner.is_some() {
-        log::warn!("HookRunner available but no HookMonitor for sync hook '{}'; falling back to headless", hook_type);
+        log::warn!(
+            "HookRunner available but no HookMonitor for sync hook '{}'; falling back to headless",
+            hook_type
+        );
     }
 
     // Fallback: headless execution
@@ -534,14 +593,18 @@ fn run_hook_sync(
         .lane(okena_core::process::Lane::Long)
         .label("hook")
         .timeout(std::time::Duration::from_secs(300));
-    let output = okena_core::process::run(spec)
-        .map_err(|e| {
-            let msg = format!("Failed to execute hook '{}': {}", command, e);
-            if let (Some(monitor), Some(id)) = (monitor, exec_id) {
-                monitor.record_finish(id, HookStatus::SpawnError { message: e.to_string() });
-            }
-            msg
-        })?;
+    let output = okena_core::process::run(spec).map_err(|e| {
+        let msg = format!("Failed to execute hook '{}': {}", command, e);
+        if let (Some(monitor), Some(id)) = (monitor, exec_id) {
+            monitor.record_finish(
+                id,
+                HookStatus::SpawnError {
+                    message: e.to_string(),
+                },
+            );
+        }
+        msg
+    })?;
 
     let duration = start.elapsed();
     if output.status.success() {
@@ -553,13 +616,16 @@ fn run_hook_sync(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let exit_code = output.status.code().unwrap_or(-1);
         if let (Some(monitor), Some(id)) = (monitor, exec_id) {
-            monitor.record_finish(id, HookStatus::Failed { duration, exit_code, stderr: stderr.clone() });
+            monitor.record_finish(
+                id,
+                HookStatus::Failed {
+                    duration,
+                    exit_code,
+                    stderr: stderr.clone(),
+                },
+            );
         }
-        Err(format!(
-            "Hook failed (exit {}): {}",
-            exit_code,
-            stderr,
-        ))
+        Err(format!("Hook failed (exit {}): {}", exit_code, stderr,))
     }
 }
 
@@ -601,9 +667,27 @@ pub fn fire_on_project_open(
     monitor: Option<&HookMonitor>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_open) {
-        let env = project_env(project_id, project_name, project_path, folder_id, folder_name);
-        log::info!("Running on_project_open hook for project '{}'", project_name);
-        if let Some(result) = run_hook(cmd, env, monitor, "on_project_open", project_name, runner, project_id, true) {
+        let env = project_env(
+            project_id,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        );
+        log::info!(
+            "Running on_project_open hook for project '{}'",
+            project_name
+        );
+        if let Some(result) = run_hook(
+            cmd,
+            env,
+            monitor,
+            "on_project_open",
+            project_name,
+            runner,
+            project_id,
+            true,
+        ) {
             return vec![result];
         }
     }
@@ -626,9 +710,27 @@ pub fn fire_on_project_close(
     monitor: Option<&HookMonitor>,
 ) {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_close) {
-        let env = project_env(project_id, project_name, project_path, folder_id, folder_name);
-        log::info!("Running on_project_close hook for project '{}'", project_name);
-        run_hook(cmd, env, monitor, "on_project_close", project_name, None, project_id, true);
+        let env = project_env(
+            project_id,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        );
+        log::info!(
+            "Running on_project_close hook for project '{}'",
+            project_name
+        );
+        run_hook(
+            cmd,
+            env,
+            monitor,
+            "on_project_close",
+            project_name,
+            None,
+            project_id,
+            true,
+        );
     }
 }
 
@@ -648,10 +750,25 @@ pub fn fire_on_worktree_create(
     monitor: Option<&HookMonitor>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_create) {
-        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+        let mut env = project_env(
+            project_id,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        );
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_worktree_create hook for branch '{}'", branch);
-        if let Some(result) = run_hook(cmd, env, monitor, "on_worktree_create", project_name, runner, project_id, true) {
+        if let Some(result) = run_hook(
+            cmd,
+            env,
+            monitor,
+            "on_worktree_create",
+            project_name,
+            runner,
+            project_id,
+            true,
+        ) {
             return vec![result];
         }
     }
@@ -675,10 +792,29 @@ pub fn fire_on_worktree_close_with_services(
     monitor: Option<&HookMonitor>,
 ) {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_close) {
-        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+        let mut env = project_env(
+            project_id,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        );
         env.insert("OKENA_BRANCH".into(), branch.into());
-        log::info!("Running on_worktree_close hook for project '{}' (branch: {})", project_name, branch);
-        run_hook(cmd, env, monitor, "on_worktree_close", project_name, None, project_id, true);
+        log::info!(
+            "Running on_worktree_close hook for project '{}' (branch: {})",
+            project_name,
+            branch
+        );
+        run_hook(
+            cmd,
+            env,
+            monitor,
+            "on_worktree_close",
+            project_name,
+            None,
+            project_id,
+            true,
+        );
     }
 }
 
@@ -713,7 +849,10 @@ pub fn fire_on_worktree_close(
 
 /// Bare sync hook runner for tests (no monitor, no runner).
 #[cfg(test)]
-fn run_hook_sync_bare(command: &str, env_vars: HashMap<String, String>) -> Result<Option<HookTerminalResult>, String> {
+fn run_hook_sync_bare(
+    command: &str,
+    env_vars: HashMap<String, String>,
+) -> Result<Option<HookTerminalResult>, String> {
     run_hook_sync(command, env_vars, None, "", "", None, "")
 }
 
@@ -728,7 +867,13 @@ fn merge_env(
     folder_id: Option<&str>,
     folder_name: Option<&str>,
 ) -> HashMap<String, String> {
-    let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+    let mut env = project_env(
+        project_id,
+        project_name,
+        project_path,
+        folder_id,
+        folder_name,
+    );
     env.insert("OKENA_BRANCH".into(), branch.into());
     env.insert("OKENA_TARGET_BRANCH".into(), target_branch.into());
     env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
@@ -751,9 +896,26 @@ pub fn fire_pre_merge(
     runner: Option<&HookRunner>,
 ) -> Result<Option<HookTerminalResult>, String> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.pre_merge) {
-        let env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path, folder_id, folder_name);
+        let env = merge_env(
+            project_id,
+            project_name,
+            project_path,
+            branch,
+            target_branch,
+            main_repo_path,
+            folder_id,
+            folder_name,
+        );
         log::info!("Running pre_merge hook for project '{}'", project_name);
-        return run_hook_sync(&cmd, env, monitor, "pre_merge", project_name, runner, project_id);
+        return run_hook_sync(
+            &cmd,
+            env,
+            monitor,
+            "pre_merge",
+            project_name,
+            runner,
+            project_id,
+        );
     }
     Ok(None)
 }
@@ -774,9 +936,27 @@ pub fn fire_post_merge(
     runner: Option<&HookRunner>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.post_merge) {
-        let env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path, folder_id, folder_name);
+        let env = merge_env(
+            project_id,
+            project_name,
+            project_path,
+            branch,
+            target_branch,
+            main_repo_path,
+            folder_id,
+            folder_name,
+        );
         log::info!("Running post_merge hook for project '{}'", project_name);
-        if let Some(result) = run_hook(cmd, env, monitor, "post_merge", project_name, runner, project_id, true) {
+        if let Some(result) = run_hook(
+            cmd,
+            env,
+            monitor,
+            "post_merge",
+            project_name,
+            runner,
+            project_id,
+            true,
+        ) {
             return vec![result];
         }
     }
@@ -798,11 +978,28 @@ pub fn fire_before_worktree_remove(
     runner: Option<&HookRunner>,
 ) -> Result<Option<HookTerminalResult>, String> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.before_remove) {
-        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+        let mut env = project_env(
+            project_id,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        );
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
-        log::info!("Running before_worktree_remove hook for project '{}'", project_name);
-        return run_hook_sync(&cmd, env, monitor, "before_worktree_remove", project_name, runner, project_id);
+        log::info!(
+            "Running before_worktree_remove hook for project '{}'",
+            project_name
+        );
+        return run_hook_sync(
+            &cmd,
+            env,
+            monitor,
+            "before_worktree_remove",
+            project_name,
+            runner,
+            project_id,
+        );
     }
     Ok(None)
 }
@@ -824,11 +1021,29 @@ pub fn fire_before_worktree_remove_async(
     runner: Option<&HookRunner>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.before_remove) {
-        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+        let mut env = project_env(
+            project_id,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        );
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
-        log::info!("Running before_worktree_remove hook (async) for project '{}'", project_name);
-        if let Some(result) = run_hook(cmd, env, monitor, "before_worktree_remove", project_name, runner, project_id, false) {
+        log::info!(
+            "Running before_worktree_remove hook (async) for project '{}'",
+            project_name
+        );
+        if let Some(result) = run_hook(
+            cmd,
+            env,
+            monitor,
+            "before_worktree_remove",
+            project_name,
+            runner,
+            project_id,
+            false,
+        ) {
             return vec![result];
         }
     }
@@ -853,11 +1068,34 @@ pub fn fire_on_rebase_conflict(
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> HookActionOutcome {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_rebase_conflict) {
-        let mut env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path, folder_id, folder_name);
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| {
+        &h.worktree.on_rebase_conflict
+    }) {
+        let mut env = merge_env(
+            project_id,
+            project_name,
+            project_path,
+            branch,
+            target_branch,
+            main_repo_path,
+            folder_id,
+            folder_name,
+        );
         env.insert("OKENA_REBASE_ERROR".into(), rebase_error.into());
-        log::info!("Running on_rebase_conflict hook for project '{}'", project_name);
-        return run_hook_actions(&cmd, env, monitor, "on_rebase_conflict", project_name, runner, project_id, true);
+        log::info!(
+            "Running on_rebase_conflict hook for project '{}'",
+            project_name
+        );
+        return run_hook_actions(
+            &cmd,
+            env,
+            monitor,
+            "on_rebase_conflict",
+            project_name,
+            runner,
+            project_id,
+            true,
+        );
     }
     (Vec::new(), Vec::new())
 }
@@ -878,10 +1116,28 @@ pub fn fire_on_dirty_worktree_close(
     runner: Option<&HookRunner>,
 ) -> HookActionOutcome {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_dirty_close) {
-        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+        let mut env = project_env(
+            project_id,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        );
         env.insert("OKENA_BRANCH".into(), branch.into());
-        log::info!("Running on_dirty_worktree_close hook for project '{}'", project_name);
-        return run_hook_actions(&cmd, env, monitor, "on_dirty_worktree_close", project_name, runner, project_id, true);
+        log::info!(
+            "Running on_dirty_worktree_close hook for project '{}'",
+            project_name
+        );
+        return run_hook_actions(
+            &cmd,
+            env,
+            monitor,
+            "on_dirty_worktree_close",
+            project_name,
+            runner,
+            project_id,
+            true,
+        );
     }
     (Vec::new(), Vec::new())
 }
@@ -898,13 +1154,23 @@ pub fn fire_on_dirty_worktree_close_headless(
     folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
 ) -> Result<(), String> {
-    let Some(command) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_dirty_close) else {
+    let Some(command) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_dirty_close)
+    else {
         return Ok(());
     };
 
-    let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+    let mut env = project_env(
+        project_id,
+        project_name,
+        project_path,
+        folder_id,
+        folder_name,
+    );
     env.insert("OKENA_BRANCH".into(), branch.into());
-    log::info!("Running on_dirty_worktree_close hook for project '{}'", project_name);
+    log::info!(
+        "Running on_dirty_worktree_close hook for project '{}'",
+        project_name
+    );
 
     for action in parse_hook_actions(&command) {
         let command = match action {
@@ -938,11 +1204,29 @@ pub fn fire_worktree_removed(
     runner: Option<&HookRunner>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.after_remove) {
-        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+        let mut env = project_env(
+            project_id,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        );
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
-        log::info!("Running worktree_removed hook for project '{}'", project_name);
-        if let Some(result) = run_hook(cmd, env, monitor, "worktree_removed", project_name, runner, project_id, true) {
+        log::info!(
+            "Running worktree_removed hook for project '{}'",
+            project_name
+        );
+        if let Some(result) = run_hook(
+            cmd,
+            env,
+            monitor,
+            "worktree_removed",
+            project_name,
+            runner,
+            project_id,
+            true,
+        ) {
             return vec![result];
         }
     }
@@ -958,7 +1242,9 @@ pub fn resolve_terminal_on_create(
     global_hooks: &HooksConfig,
     _cx: &App,
 ) -> Option<String> {
-    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_create)
+    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| {
+        &h.terminal.on_create
+    })
 }
 
 /// Resolve the `terminal.on_create` hook command (without GPUI context).
@@ -968,14 +1254,20 @@ pub fn resolve_terminal_on_create_simple(
     parent_hooks: Option<&HooksConfig>,
     global_hooks: &HooksConfig,
 ) -> Option<String> {
-    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_create)
+    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| {
+        &h.terminal.on_create
+    })
 }
 
 /// Apply the `terminal.on_create` command by wrapping the shell to run
 /// the command first, then `exec` into the original shell.
 /// Environment variables are exported so they persist in the shell session.
 /// Produces: `sh -c 'export K=V; ...; <on_create_cmd>; exec <shell_cmd>'`
-pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str, env_vars: &HashMap<String, String>) -> ShellType {
+pub fn apply_on_create(
+    shell: &ShellType,
+    on_create_cmd: &str,
+    env_vars: &HashMap<String, String>,
+) -> ShellType {
     let shell_cmd = shell.to_command_string();
     let prefix = build_export_prefix(env_vars);
     let script = format!("{}{}; exec {}", prefix, on_create_cmd, shell_cmd);
@@ -1004,8 +1296,16 @@ pub fn fire_terminal_on_close_with_services(
     global_hooks: &HooksConfig,
     monitor: Option<&HookMonitor>,
 ) {
-    if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_close) {
-        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
+    if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| {
+        &h.terminal.on_close
+    }) {
+        let mut env = project_env(
+            project_id,
+            project_name,
+            project_path,
+            folder_id,
+            folder_name,
+        );
         env.insert("OKENA_TERMINAL_ID".into(), terminal_id.into());
         if let Some(name) = terminal_name {
             env.insert("OKENA_TERMINAL_NAME".into(), name.into());
@@ -1022,8 +1322,20 @@ pub fn fire_terminal_on_close_with_services(
                 env.insert("OKENA_BRANCH".into(), branch);
             }
         }
-        log::info!("Running terminal.on_close hook for terminal '{}'", terminal_id);
-        run_hook(cmd, env, monitor, "terminal.on_close", project_name, None, project_id, true);
+        log::info!(
+            "Running terminal.on_close hook for terminal '{}'",
+            terminal_id
+        );
+        run_hook(
+            cmd,
+            env,
+            monitor,
+            "terminal.on_close",
+            project_name,
+            None,
+            project_id,
+            true,
+        );
     }
 }
 
@@ -1072,7 +1384,9 @@ pub fn resolve_shell_wrapper(
     parent_hooks: Option<&HooksConfig>,
     global_hooks: &HooksConfig,
 ) -> Option<String> {
-    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.shell_wrapper)
+    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| {
+        &h.terminal.shell_wrapper
+    })
 }
 
 /// Apply shell_wrapper to a ShellType, producing a new ShellType.
@@ -1084,7 +1398,11 @@ pub fn resolve_shell_wrapper(
 /// avoiding an extra `sh` process layer (important for session backends like dtach/tmux).
 ///
 /// The shell is expected to be already resolved (not `ShellType::Default`).
-pub fn apply_shell_wrapper(shell: &ShellType, wrapper: &str, env_vars: &HashMap<String, String>) -> ShellType {
+pub fn apply_shell_wrapper(
+    shell: &ShellType,
+    wrapper: &str,
+    env_vars: &HashMap<String, String>,
+) -> ShellType {
     let shell_cmd = shell.to_command_string();
     // Replace {shell} with `exec <shell>` so the shell replaces the wrapper process.
     // This is critical for session backends (dtach/tmux) that monitor the top-level process.
@@ -1115,11 +1433,17 @@ mod tests {
     #[test]
     fn resolve_hook_prefers_project_over_global() {
         let project = HooksConfig {
-            worktree: WorktreeHooks { pre_merge: Some("project-cmd".into()), ..Default::default() },
+            worktree: WorktreeHooks {
+                pre_merge: Some("project-cmd".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let global = HooksConfig {
-            worktree: WorktreeHooks { pre_merge: Some("global-cmd".into()), ..Default::default() },
+            worktree: WorktreeHooks {
+                pre_merge: Some("global-cmd".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let resolved = resolve_hook(&project, &global, |h| &h.worktree.pre_merge);
@@ -1130,7 +1454,10 @@ mod tests {
     fn resolve_hook_falls_back_to_global() {
         let project = HooksConfig::default();
         let global = HooksConfig {
-            worktree: WorktreeHooks { pre_merge: Some("global-cmd".into()), ..Default::default() },
+            worktree: WorktreeHooks {
+                pre_merge: Some("global-cmd".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let resolved = resolve_hook(&project, &global, |h| &h.worktree.pre_merge);
@@ -1161,7 +1488,8 @@ mod tests {
 
     #[test]
     fn parse_hook_actions_mixed_multiline() {
-        let actions = parse_hook_actions("terminal: claude -p \"fix\"\necho logged\n\nterminal: htop");
+        let actions =
+            parse_hook_actions("terminal: claude -p \"fix\"\necho logged\n\nterminal: htop");
         assert_eq!(actions.len(), 3);
         assert!(matches!(&actions[0], HookAction::Terminal(cmd) if cmd == "claude -p \"fix\""));
         assert!(matches!(&actions[1], HookAction::Background(cmd) if cmd == "echo logged"));
@@ -1186,7 +1514,16 @@ mod tests {
     fn run_hook_actions_returns_terminal_actions() {
         let mut env = HashMap::new();
         env.insert("KEY".into(), "val".into());
-        let (terminal_actions, _hook_results) = run_hook_actions("terminal: my-cmd\necho bg", env, None, "test", "proj", None, "proj-id", true);
+        let (terminal_actions, _hook_results) = run_hook_actions(
+            "terminal: my-cmd\necho bg",
+            env,
+            None,
+            "test",
+            "proj",
+            None,
+            "proj-id",
+            true,
+        );
         assert_eq!(terminal_actions.len(), 1);
         assert_eq!(terminal_actions[0].0, "my-cmd");
         assert_eq!(terminal_actions[0].1.get("KEY").unwrap(), "val");
@@ -1226,13 +1563,19 @@ mod tests {
     fn build_hook_label_uses_branch() {
         let mut env = HashMap::new();
         env.insert("OKENA_BRANCH".into(), "feature/foo".into());
-        assert_eq!(build_hook_label("on_project_open", &env, "my-project"), "on_project_open (feature/foo)");
+        assert_eq!(
+            build_hook_label("on_project_open", &env, "my-project"),
+            "on_project_open (feature/foo)"
+        );
     }
 
     #[test]
     fn build_hook_label_falls_back_to_project_name() {
         let env = HashMap::new();
-        assert_eq!(build_hook_label("on_project_open", &env, "my-project"), "on_project_open (my-project)");
+        assert_eq!(
+            build_hook_label("on_project_open", &env, "my-project"),
+            "on_project_open (my-project)"
+        );
     }
 
     #[test]
@@ -1241,16 +1584,23 @@ mod tests {
 
         let project = HooksConfig::default();
         let parent = HooksConfig {
-            terminal: TerminalHooks { on_create: Some("parent-cmd".into()), ..Default::default() },
+            terminal: TerminalHooks {
+                on_create: Some("parent-cmd".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let global = HooksConfig {
-            terminal: TerminalHooks { on_create: Some("global-cmd".into()), ..Default::default() },
+            terminal: TerminalHooks {
+                on_create: Some("global-cmd".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
         // Project empty → falls through to parent
-        let resolved = resolve_hook_with_parent(&project, Some(&parent), &global, |h| &h.terminal.on_create);
+        let resolved =
+            resolve_hook_with_parent(&project, Some(&parent), &global, |h| &h.terminal.on_create);
         assert_eq!(resolved, Some("parent-cmd".into()));
 
         // Project empty, no parent → falls through to global
@@ -1259,10 +1609,15 @@ mod tests {
 
         // Project set → wins over parent and global
         let project_with_hook = HooksConfig {
-            terminal: TerminalHooks { on_create: Some("project-cmd".into()), ..Default::default() },
+            terminal: TerminalHooks {
+                on_create: Some("project-cmd".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
-        let resolved = resolve_hook_with_parent(&project_with_hook, Some(&parent), &global, |h| &h.terminal.on_create);
+        let resolved = resolve_hook_with_parent(&project_with_hook, Some(&parent), &global, |h| {
+            &h.terminal.on_create
+        });
         assert_eq!(resolved, Some("project-cmd".into()));
     }
 
@@ -1296,7 +1651,11 @@ mod tests {
             ShellType::Custom { path: _, args } => {
                 // for_command uses $SHELL -ic on Unix
                 assert!(args[0] == "-c" || args[0] == "-ic", "got: {}", args[0]);
-                assert!(args[1].contains("devcontainer exec -- exec /bin/zsh --login"), "got: {}", args[1]);
+                assert!(
+                    args[1].contains("devcontainer exec -- exec /bin/zsh --login"),
+                    "got: {}",
+                    args[1]
+                );
             }
             other => panic!("Expected ShellType::Custom, got: {:?}", other),
         }
@@ -1315,7 +1674,11 @@ mod tests {
             ShellType::Custom { path: _, args } => {
                 // for_command uses $SHELL -ic on Unix
                 assert!(args[0] == "-c" || args[0] == "-ic", "got: {}", args[0]);
-                assert!(args[1].contains("echo hello && exec /bin/zsh"), "got: {}", args[1]);
+                assert!(
+                    args[1].contains("echo hello && exec /bin/zsh"),
+                    "got: {}",
+                    args[1]
+                );
             }
             other => panic!("Expected ShellType::Custom, got: {:?}", other),
         }
@@ -1356,7 +1719,11 @@ mod tests {
         let prefix = build_export_prefix(&env);
         if !cfg!(windows) {
             // POSIX: single quotes with '\'' escaping
-            assert!(prefix.contains("'\\''"), "Expected single-quote escape in: {}", prefix);
+            assert!(
+                prefix.contains("'\\''"),
+                "Expected single-quote escape in: {}",
+                prefix
+            );
         }
     }
 

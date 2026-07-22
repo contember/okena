@@ -1,12 +1,12 @@
 //! Service list rendering for the sidebar
 
-use okena_ui::theme::theme;
 use gpui::*;
 use okena_core::api::ActionRequest;
+use okena_ui::theme::theme;
 use okena_views_services::types::ServiceSnapshot;
 
-use crate::sidebar::{Sidebar, SidebarProjectInfo, SidebarServiceInfo, GroupKind};
 use crate::item_widgets::sidebar_group_header;
+use crate::sidebar::{GroupKind, Sidebar, SidebarProjectInfo, SidebarServiceInfo};
 
 impl Sidebar {
     /// Render the "Services" group header with collapse chevron + Start All / Stop All / Reload buttons.
@@ -37,52 +37,62 @@ impl Sidebar {
             // Spacer to push action buttons to the right
             div().flex_1(),
         )
-        .child(
-            okena_views_services::sidebar::render_service_group_actions(
-                &project_id,
-                &t,
-                cx,
-                {
-                    let entity = entity.clone();
-                    let project_id = project_id.clone();
-                    move |_window, cx| {
-                        if let Some(entity) = entity.upgrade() {
-                            entity.update(cx, |this, cx| {
-                                this.dispatch_action_for_project(&project_id, ActionRequest::StartAllServices {
+        .child(okena_views_services::sidebar::render_service_group_actions(
+            &project_id,
+            &t,
+            cx,
+            {
+                let entity = entity.clone();
+                let project_id = project_id.clone();
+                move |_window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.dispatch_action_for_project(
+                                &project_id,
+                                ActionRequest::StartAllServices {
                                     project_id: project_id.clone(),
-                                }, cx);
-                            });
-                        }
+                                },
+                                cx,
+                            );
+                        });
                     }
-                },
-                {
-                    let entity = entity.clone();
-                    let project_id = project_id.clone();
-                    move |_window, cx| {
-                        if let Some(entity) = entity.upgrade() {
-                            entity.update(cx, |this, cx| {
-                                this.dispatch_action_for_project(&project_id, ActionRequest::StopAllServices {
+                }
+            },
+            {
+                let entity = entity.clone();
+                let project_id = project_id.clone();
+                move |_window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.dispatch_action_for_project(
+                                &project_id,
+                                ActionRequest::StopAllServices {
                                     project_id: project_id.clone(),
-                                }, cx);
-                            });
-                        }
+                                },
+                                cx,
+                            );
+                        });
                     }
-                },
-                {
-                    let entity = entity.clone();
-                    let project_id = project_id.clone();
-                    move |_window, cx| {
-                        if let Some(entity) = entity.upgrade() {
-                            entity.update(cx, |this, cx| {
-                                this.dispatch_action_for_project(&project_id, ActionRequest::ReloadServices {
+                }
+            },
+            {
+                let entity = entity.clone();
+                let project_id = project_id.clone();
+                move |_window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.dispatch_action_for_project(
+                                &project_id,
+                                ActionRequest::ReloadServices {
                                     project_id: project_id.clone(),
-                                }, cx);
-                            });
-                        }
+                                },
+                                cx,
+                            );
+                        });
                     }
-                },
-            ),
-        )
+                }
+            },
+        ))
         .on_click(cx.listener({
             let project_id = project_id.clone();
             move |this, _, _window, cx| {
@@ -132,10 +142,14 @@ impl Sidebar {
                 move |_window, cx| {
                     if let Some(entity) = entity.upgrade() {
                         entity.update(cx, |this, cx| {
-                            this.dispatch_action_for_project(&project_id, ActionRequest::StartService {
-                                project_id: project_id.clone(),
-                                service_name: service_name.clone(),
-                            }, cx);
+                            this.dispatch_action_for_project(
+                                &project_id,
+                                ActionRequest::StartService {
+                                    project_id: project_id.clone(),
+                                    service_name: service_name.clone(),
+                                },
+                                cx,
+                            );
                         });
                     }
                 }
@@ -148,10 +162,14 @@ impl Sidebar {
                 move |_window, cx| {
                     if let Some(entity) = entity.upgrade() {
                         entity.update(cx, |this, cx| {
-                            this.dispatch_action_for_project(&project_id, ActionRequest::StopService {
-                                project_id: project_id.clone(),
-                                service_name: service_name.clone(),
-                            }, cx);
+                            this.dispatch_action_for_project(
+                                &project_id,
+                                ActionRequest::StopService {
+                                    project_id: project_id.clone(),
+                                    service_name: service_name.clone(),
+                                },
+                                cx,
+                            );
                         });
                     }
                 }
@@ -164,10 +182,14 @@ impl Sidebar {
                 move |_window, cx| {
                     if let Some(entity) = entity.upgrade() {
                         entity.update(cx, |this, cx| {
-                            this.dispatch_action_for_project(&project_id, ActionRequest::RestartService {
-                                project_id: project_id.clone(),
-                                service_name: service_name.clone(),
-                            }, cx);
+                            this.dispatch_action_for_project(
+                                &project_id,
+                                ActionRequest::RestartService {
+                                    project_id: project_id.clone(),
+                                    service_name: service_name.clone(),
+                                },
+                                cx,
+                            );
                         });
                     }
                 }

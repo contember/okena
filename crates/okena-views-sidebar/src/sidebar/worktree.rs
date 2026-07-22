@@ -17,7 +17,12 @@ impl Sidebar {
         project_id: &str,
         cx: &App,
     ) -> Option<(okena_transport::remote_action::RemoteActionClient, String)> {
-        let conn_id = self.workspace.read(cx).project(project_id)?.connection_id.clone()?;
+        let conn_id = self
+            .workspace
+            .read(cx)
+            .project(project_id)?
+            .connection_id
+            .clone()?;
         let get = self.get_remote_connections.as_ref()?;
         let config = get(cx).into_iter().find(|s| s.config.id == conn_id)?.config;
         let token = config.effective_auth_token()?;
@@ -52,7 +57,9 @@ impl Sidebar {
             // The client must know the branch before dispatching CreateWorktree
             // (visibility is keyed on it).
             let branch_result = smol::unblock(move || -> Result<String, String> {
-                let action = ActionRequest::GenerateWorktreeBranchName { project_id: daemon_id };
+                let action = ActionRequest::GenerateWorktreeBranchName {
+                    project_id: daemon_id,
+                };
                 match client.post_action(action) {
                     Ok(Some(v)) => v
                         .get("branch")
@@ -93,6 +100,7 @@ impl Sidebar {
                 sidebar.creating_worktree.remove(&parent_id_for_cleanup);
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 }

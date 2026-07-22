@@ -26,18 +26,12 @@ mod tests {
 
     #[test]
     fn make_prefixed_id_format() {
-        assert_eq!(
-            make_prefixed_id("conn-1", "term-a"),
-            "remote:conn-1:term-a"
-        );
+        assert_eq!(make_prefixed_id("conn-1", "term-a"), "remote:conn-1:term-a");
     }
 
     #[test]
     fn strip_prefix_valid() {
-        assert_eq!(
-            strip_prefix("remote:conn-1:term-a", "conn-1"),
-            "term-a"
-        );
+        assert_eq!(strip_prefix("remote:conn-1:term-a", "conn-1"), "term-a");
     }
 
     #[test]

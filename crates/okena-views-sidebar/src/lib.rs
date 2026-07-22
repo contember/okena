@@ -1,20 +1,20 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod activity_order;
-pub mod sidebar;
-pub mod project_list;
-pub mod folder_list;
-pub mod worktree_list;
-pub mod hook_list;
-pub mod remote_list;
-pub mod service_list;
-pub mod item_widgets;
 pub mod color_picker;
 pub mod context_menu;
-pub mod folder_context_menu;
-pub mod rename_directory_dialog;
-pub mod hook_log;
 pub mod drag;
+pub mod folder_context_menu;
+pub mod folder_list;
+pub mod hook_list;
+pub mod hook_log;
+pub mod item_widgets;
+pub mod project_list;
+pub mod remote_list;
+pub mod rename_directory_dialog;
+pub mod service_list;
+pub mod sidebar;
+pub mod worktree_list;
 
 pub use sidebar::Sidebar;
 
@@ -22,23 +22,28 @@ pub use sidebar::Sidebar;
 pub use sidebar::{DispatchActionFn, GetSettingsFn, SidebarSettings};
 
 // Re-export remote manager callback types
-pub use sidebar::{RemoteConnectionSnapshot, GetRemoteConnectionsFn, SendRemoteActionFn, GetRemoteFolderFn};
+pub use sidebar::{
+    GetRemoteConnectionsFn, GetRemoteFolderFn, RemoteConnectionSnapshot, SendRemoteActionFn,
+};
 
 // Re-export context menu types
 pub use context_menu::{ContextMenu, ContextMenuEvent};
 pub use folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
-pub use rename_directory_dialog::{RenameDirectoryDialog, RenameDirectoryDialogEvent};
 pub use hook_log::{HookLog, HookLogEvent};
+pub use rename_directory_dialog::{RenameDirectoryDialog, RenameDirectoryDialogEvent};
 
 // Re-export popover types
-pub use worktree_list::{WorktreeListPopover, WorktreeListPopoverEvent};
 pub use color_picker::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
+pub use worktree_list::{WorktreeListPopover, WorktreeListPopoverEvent};
 
-gpui::actions!(okena_views_sidebar, [
-    SidebarUp,
-    SidebarDown,
-    SidebarConfirm,
-    SidebarToggleExpand,
-    SidebarEscape,
-    Cancel,
-]);
+gpui::actions!(
+    okena_views_sidebar,
+    [
+        SidebarUp,
+        SidebarDown,
+        SidebarConfirm,
+        SidebarToggleExpand,
+        SidebarEscape,
+        Cancel,
+    ]
+);

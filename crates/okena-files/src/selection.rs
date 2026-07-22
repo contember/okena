@@ -13,9 +13,10 @@ use gpui::{ClipboardItem, Context};
 /// This is a convenience function to avoid duplicating clipboard logic.
 pub fn copy_to_clipboard<V: 'static>(cx: &mut Context<V>, text: Option<String>) {
     if let Some(text) = text
-        && !text.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
+        && !text.is_empty()
+    {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
 }
 
 /// Extension trait for SelectionState with 2D positions to check line selection.
@@ -64,9 +65,7 @@ pub trait Selection2DNonEmpty {
 impl Selection2DNonEmpty for SelectionState<(usize, usize)> {
     fn normalized_non_empty(&self) -> Option<((usize, usize), (usize, usize))> {
         match (&self.start, &self.end) {
-            (Some(s), Some(e)) if s != e => {
-                Some(<(usize, usize)>::normalized_pair(*s, *e))
-            }
+            (Some(s), Some(e)) if s != e => Some(<(usize, usize)>::normalized_pair(*s, *e)),
             _ => None,
         }
     }

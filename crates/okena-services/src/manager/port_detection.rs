@@ -18,7 +18,12 @@ impl ServiceManager {
         cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
-        if self.instances.get(&key).and_then(|i| i.terminal_id.as_ref()).is_none() {
+        if self
+            .instances
+            .get(&key)
+            .and_then(|i| i.terminal_id.as_ref())
+            .is_none()
+        {
             return;
         }
         self.port_detection_active.insert(
@@ -85,10 +90,8 @@ impl ServiceManager {
                         let service_root_pids: Vec<((String, String), Vec<u32>)> = services
                             .iter()
                             .map(|(key, tid)| {
-                                let pids = batch_pids
-                                    .get(tid.as_str())
-                                    .cloned()
-                                    .unwrap_or_default();
+                                let pids =
+                                    batch_pids.get(tid.as_str()).cloned().unwrap_or_default();
                                 (key.clone(), pids)
                             })
                             .collect();
@@ -97,7 +100,8 @@ impl ServiceManager {
                         let tree = port_detect::build_process_tree();
 
                         // Expand to descendant PIDs per service
-                        let mut all_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                        let mut all_pids: std::collections::HashSet<u32> =
+                            std::collections::HashSet::new();
                         let service_pid_sets: Vec<(
                             (String, String),
                             std::collections::HashSet<u32>,
@@ -148,19 +152,19 @@ impl ServiceManager {
                             state.polls_remaining = state.polls_remaining.saturating_sub(1);
 
                             if !ports.is_empty() {
-                                let ports_changed =
-                                    if let Some(inst) = this.instances.get_mut(&key) {
-                                        if inst.status == ServiceStatus::Running
-                                            && inst.detected_ports != ports
-                                        {
-                                            inst.detected_ports = ports;
-                                            true
-                                        } else {
-                                            false
-                                        }
+                                let ports_changed = if let Some(inst) = this.instances.get_mut(&key)
+                                {
+                                    if inst.status == ServiceStatus::Running
+                                        && inst.detected_ports != ports
+                                    {
+                                        inst.detected_ports = ports;
+                                        true
                                     } else {
                                         false
-                                    };
+                                    }
+                                } else {
+                                    false
+                                };
 
                                 if state.found_any && !ports_changed {
                                     state.stable_count += 1;

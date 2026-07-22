@@ -1,8 +1,8 @@
 use crate::routes::AppState;
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 
 pub async fn list_tokens(State(state): State<AppState>) -> impl IntoResponse {
     let tokens = state.auth_store.list_tokens();

@@ -146,12 +146,17 @@ pub fn get_head_sha(path: &Path) -> Option<String> {
 pub fn get_pushed_sha(path: &Path) -> Option<String> {
     let repo = crate::gix_helpers::open(path)?;
     let branch = super::head_branch_short(&repo)?;
-    let head_ref = repo.find_reference(&format!("refs/heads/{}", branch)).ok()?;
+    let head_ref = repo
+        .find_reference(&format!("refs/heads/{}", branch))
+        .ok()?;
     let head_full: gix::refs::FullName = head_ref.name().into();
     let upstream_name = repo
         .branch_remote_tracking_ref_name(head_full.as_ref(), gix::remote::Direction::Fetch)?
         .ok()?;
-    let id = repo.rev_parse_single(upstream_name.as_bstr()).ok()?.detach();
+    let id = repo
+        .rev_parse_single(upstream_name.as_bstr())
+        .ok()?
+        .detach();
     Some(id.to_hex().to_string())
 }
 
@@ -201,7 +206,11 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
         .ok()
         .map(|p| {
             let s = p.to_string_lossy().to_string();
-            if s.is_empty() { String::new() } else { format!("{}/", s) }
+            if s.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", s)
+            }
         })
         .unwrap_or_default();
 
@@ -220,7 +229,8 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     // HEAD-blob vs worktree-file directly, so the staging split doesn't matter.
     // Untracked files surface as `DirectoryContents` entries — collect those in
     // the same pass instead of walking the worktree a second time.
-    let mut changed: std::collections::HashSet<gix::bstr::BString> = std::collections::HashSet::new();
+    let mut changed: std::collections::HashSet<gix::bstr::BString> =
+        std::collections::HashSet::new();
     let mut untracked: Vec<String> = Vec::new();
     for item in iter {
         let item = item.ok()?;
@@ -298,7 +308,9 @@ fn head_blob_bytes(head_tree: Option<&gix::Tree<'_>>, rela_path: &gix::bstr::BSt
     };
     let path = gix::path::from_bstr(rela_path);
     match tree.lookup_entry_by_path(path.as_ref()) {
-        Ok(Some(entry)) if entry.mode().is_blob() => entry.object().map(|o| o.data.clone()).unwrap_or_default(),
+        Ok(Some(entry)) if entry.mode().is_blob() => {
+            entry.object().map(|o| o.data.clone()).unwrap_or_default()
+        }
         _ => Vec::new(),
     }
 }
@@ -307,11 +319,16 @@ fn head_blob_bytes(head_tree: Option<&gix::Tree<'_>>, rela_path: &gix::bstr::BSt
 /// in via gix's `blame` feature), with Git's slider heuristics so hunk
 /// placement — and therefore the counts — match `git diff --numstat`.
 fn diff_line_counts(before: &[u8], after: &[u8]) -> (usize, usize) {
-    use gix::diff::blob::{diff_with_slider_heuristics, sources::byte_lines, Algorithm, InternedInput};
+    use gix::diff::blob::{
+        Algorithm, InternedInput, diff_with_slider_heuristics, sources::byte_lines,
+    };
 
     let input = InternedInput::new(byte_lines(before), byte_lines(after));
     let diff = diff_with_slider_heuristics(Algorithm::Histogram, &input);
-    (diff.count_additions() as usize, diff.count_removals() as usize)
+    (
+        diff.count_additions() as usize,
+        diff.count_removals() as usize,
+    )
 }
 
 /// Git treats a blob as binary if a NUL byte appears near the start; such files
@@ -333,14 +350,19 @@ pub fn count_ahead_behind(path: &Path) -> Option<(usize, usize)> {
 
     // Resolve the upstream tracking ref via gix; `None` (skip) for branches
     // without one — the common local-only branch case.
-    let head_ref = repo.find_reference(&format!("refs/heads/{}", branch)).ok()?;
+    let head_ref = repo
+        .find_reference(&format!("refs/heads/{}", branch))
+        .ok()?;
     let head_full: gix::refs::FullName = head_ref.name().into();
     let upstream_name = repo
         .branch_remote_tracking_ref_name(head_full.as_ref(), gix::remote::Direction::Fetch)?
         .ok()?;
 
     // Resolve both tips to commit ids.
-    let upstream_id = repo.rev_parse_single(upstream_name.as_bstr()).ok()?.detach();
+    let upstream_id = repo
+        .rev_parse_single(upstream_name.as_bstr())
+        .ok()?
+        .detach();
     let head_id = repo.head_id().ok()?.detach();
 
     // ahead = commits reachable from HEAD but not upstream; behind = the reverse.
@@ -449,11 +471,14 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         match get_status(tmp.path()) {
             StatusFetch::NotRepo => {}
-            other => panic!("expected NotRepo for non-git path, got {:?}", match other {
-                StatusFetch::Status(_) => "Status",
-                StatusFetch::NotRepo => "NotRepo",
-                StatusFetch::Transient => "Transient",
-            }),
+            other => panic!(
+                "expected NotRepo for non-git path, got {:?}",
+                match other {
+                    StatusFetch::Status(_) => "Status",
+                    StatusFetch::NotRepo => "NotRepo",
+                    StatusFetch::Transient => "Transient",
+                }
+            ),
         }
     }
 
@@ -477,11 +502,14 @@ mod tests {
         std::fs::write(repo.join("new.txt"), "line1\nline2\nline3\n").unwrap();
         match get_status(&repo) {
             StatusFetch::Status(s) => assert_eq!(s.lines_added, 3),
-            other => panic!("expected Status with 3 untracked lines, got {}", match other {
-                StatusFetch::Status(_) => "Status",
-                StatusFetch::NotRepo => "NotRepo",
-                StatusFetch::Transient => "Transient",
-            }),
+            other => panic!(
+                "expected Status with 3 untracked lines, got {}",
+                match other {
+                    StatusFetch::Status(_) => "Status",
+                    StatusFetch::NotRepo => "NotRepo",
+                    StatusFetch::Transient => "Transient",
+                }
+            ),
         }
     }
 
@@ -563,7 +591,10 @@ mod tests {
         let remote_tmp = tempfile::tempdir().expect("create remote tempdir");
         let remote_path = remote_tmp.path().join("origin.git");
         git_in(&repo, &["init", "--bare", remote_path.to_str().unwrap()]);
-        git_in(&repo, &["remote", "add", "origin", remote_path.to_str().unwrap()]);
+        git_in(
+            &repo,
+            &["remote", "add", "origin", remote_path.to_str().unwrap()],
+        );
         git_in(&repo, &["push", "-u", "origin", "main"]);
 
         // No unpushed commits yet.
@@ -575,7 +606,13 @@ mod tests {
             git_in(&repo, &["add", "."]);
             git_in(
                 &repo,
-                &["-c", "commit.gpgsign=false", "commit", "-m", &format!("c{}", i)],
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    &format!("c{}", i),
+                ],
             );
         }
 
@@ -599,7 +636,13 @@ mod tests {
             git_in(&repo, &["add", "."]);
             git_in(
                 &repo,
-                &["-c", "commit.gpgsign=false", "commit", "-m", &format!("f{}", i)],
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    &format!("f{}", i),
+                ],
             );
         }
         // Two commits ahead of main, none behind — independent of any upstream.
@@ -620,7 +663,11 @@ mod tests {
         let branch = get_current_branch(&repo).expect("should return short hash");
         // Short hash from gix has at least 7 chars and is hex
         assert!(branch.len() >= 7, "expected short hash, got {:?}", branch);
-        assert!(branch.chars().all(|c| c.is_ascii_hexdigit()), "expected hex hash, got {:?}", branch);
+        assert!(
+            branch.chars().all(|c| c.is_ascii_hexdigit()),
+            "expected hex hash, got {:?}",
+            branch
+        );
     }
 
     #[test]
@@ -721,7 +768,10 @@ mod tests {
         let (_tmp, repo) = init_temp_repo();
         std::fs::write(repo.join("orig.txt"), "l1\nl2\nl3\n").unwrap();
         git_in(&repo, &["add", "."]);
-        git_in(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", "add orig"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "add orig"],
+        );
         git_in(&repo, &["mv", "orig.txt", "renamed.txt"]);
         // --no-renames semantics: 3 lines removed from orig + 3 added to renamed.
         assert_eq!(get_diff_stats(&repo), Some((3, 3)));
@@ -736,7 +786,10 @@ mod tests {
         std::fs::write(repo.join("keep.txt"), "1\n2\n3\n4\n5\n").unwrap();
         std::fs::write(repo.join("doomed.txt"), "x\ny\n").unwrap();
         git_in(&repo, &["add", "."]);
-        git_in(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", "seed"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "seed"],
+        );
         std::fs::write(repo.join("keep.txt"), "1\n2\nTWO-AND-A-HALF\n3\n4\n5\n6\n").unwrap();
         std::fs::remove_file(repo.join("doomed.txt")).unwrap();
         std::fs::write(repo.join("staged-new.txt"), "p\nq\n").unwrap();
@@ -745,7 +798,16 @@ mod tests {
 
         // CLI baseline: tracked numstat (HEAD) + untracked line counts.
         let out = std::process::Command::new("git")
-            .args(["-C", repo.to_str().unwrap(), "diff", "--numstat", "--no-renames", "--no-color", "--no-ext-diff", "HEAD"])
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "diff",
+                "--numstat",
+                "--no-renames",
+                "--no-color",
+                "--no-ext-diff",
+                "HEAD",
+            ])
             .output()
             .unwrap();
         let (mut cli_add, mut cli_rem) = (0usize, 0usize);
@@ -757,11 +819,20 @@ mod tests {
             }
         }
         let untracked = std::process::Command::new("git")
-            .args(["-C", repo.to_str().unwrap(), "ls-files", "--others", "--exclude-standard"])
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+            ])
             .output()
             .unwrap();
         for f in String::from_utf8_lossy(&untracked.stdout).lines() {
-            cli_add += std::fs::read_to_string(repo.join(f)).unwrap().lines().count();
+            cli_add += std::fs::read_to_string(repo.join(f))
+                .unwrap()
+                .lines()
+                .count();
         }
 
         assert_eq!(get_diff_stats(&repo), Some((cli_add, cli_rem)));

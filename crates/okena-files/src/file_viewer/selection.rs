@@ -1,7 +1,7 @@
 //! Selection, clipboard, scrollbar, and navigation for the file viewer.
 
 use crate::code_view::{get_selected_text, start_scrollbar_drag, update_scrollbar_drag};
-use crate::selection::{copy_to_clipboard, Selection1DExtension, Selection2DNonEmpty};
+use crate::selection::{Selection1DExtension, Selection2DNonEmpty, copy_to_clipboard};
 use gpui::*;
 use okena_core::send_payload::{CodeBlock, SendPayload};
 use std::path::PathBuf;
@@ -56,7 +56,8 @@ impl FileViewer {
         let first_idx = start_line.min(last_line_idx);
         let last_idx = end_line.min(last_line_idx);
 
-        let text: String = tab.highlighted_lines
+        let text: String = tab
+            .highlighted_lines
             .get(first_idx..=last_idx)?
             .iter()
             .map(|l| l.plain_text.as_str())

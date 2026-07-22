@@ -199,7 +199,12 @@ impl CommandSpec {
         let env = cmd
             .get_envs()
             .filter_map(|(k, v)| {
-                v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
             })
             .collect();
         Self {

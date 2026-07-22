@@ -175,12 +175,7 @@ pub fn render_branch_status(
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
-            .child(
-                svg()
-                    .path(icon)
-                    .size(px(10.0))
-                    .text_color(rgb(color)),
-            )
+            .child(svg().path(icon).size(px(10.0)).text_color(rgb(color)))
             .tooltip(move |_window, cx| Tooltip::new(tooltip.clone()).build(_window, cx));
         if let Some(bcb) = on_ci_bounds {
             el = el.child(

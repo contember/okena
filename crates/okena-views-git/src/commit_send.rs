@@ -1,7 +1,7 @@
 //! Shared formatting for "Send commit to terminal" — produces a `git log`-style block
 //! used by the diff viewer and the commit graph context menu.
 
-use okena_git::{format_relative_time, CommitLogEntry};
+use okena_git::{CommitLogEntry, format_relative_time};
 
 /// Format a commit reference for pasting into a terminal. Mirrors the
 /// `git log` default output:

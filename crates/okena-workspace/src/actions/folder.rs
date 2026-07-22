@@ -2,9 +2,9 @@
 //!
 //! Actions for creating, modifying, and deleting sidebar folders.
 
-use okena_core::theme::FolderColor;
 use crate::context::WorkspaceCx;
 use crate::state::{FolderData, WindowId, Workspace};
+use okena_core::theme::FolderColor;
 
 impl Workspace {
     /// Create a new folder, appending it to project_order
@@ -23,13 +23,21 @@ impl Workspace {
 
     /// Delete a folder, splicing its contained projects back into project_order at the folder's position
     pub fn delete_folder(&mut self, folder_id: &str, cx: &mut impl WorkspaceCx) {
-        let project_ids = self.data.folders.iter()
+        let project_ids = self
+            .data
+            .folders
+            .iter()
             .find(|f| f.id == folder_id)
             .map(|f| f.project_ids.clone())
             .unwrap_or_default();
 
         // Find folder position in project_order
-        if let Some(pos) = self.data.project_order.iter().position(|id| id == folder_id) {
+        if let Some(pos) = self
+            .data
+            .project_order
+            .iter()
+            .position(|id| id == folder_id)
+        {
             self.data.project_order.remove(pos);
             // Insert contained projects at the folder's old position
             for (i, pid) in project_ids.into_iter().enumerate() {
@@ -51,7 +59,12 @@ impl Workspace {
     }
 
     /// Set the color for a folder
-    pub fn set_folder_item_color(&mut self, folder_id: &str, color: FolderColor, cx: &mut impl WorkspaceCx) {
+    pub fn set_folder_item_color(
+        &mut self,
+        folder_id: &str,
+        color: FolderColor,
+        cx: &mut impl WorkspaceCx,
+    ) {
         if let Some(folder) = self.folder_mut(folder_id) {
             folder.folder_color = color;
             self.notify_data(cx);
@@ -91,7 +104,12 @@ impl Workspace {
     ///
     /// Unknown extra ids inherit the silent no-op contract from
     /// `set_folder_collapsed`.
-    pub fn toggle_folder_collapsed(&mut self, window_id: WindowId, folder_id: &str, cx: &mut impl WorkspaceCx) {
+    pub fn toggle_folder_collapsed(
+        &mut self,
+        window_id: WindowId,
+        folder_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
         if !self.data.folders.iter().any(|f| f.id == folder_id) {
             return;
         }
@@ -100,7 +118,13 @@ impl Workspace {
     }
 
     /// Move a project into a folder at a given position
-    pub fn move_project_to_folder(&mut self, project_id: &str, folder_id: &str, position: Option<usize>, cx: &mut impl WorkspaceCx) {
+    pub fn move_project_to_folder(
+        &mut self,
+        project_id: &str,
+        folder_id: &str,
+        position: Option<usize>,
+        cx: &mut impl WorkspaceCx,
+    ) {
         // Remove from any current folder
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
@@ -119,7 +143,12 @@ impl Workspace {
 
     /// Move a project out of its folder into the top-level project_order
     #[allow(dead_code)]
-    pub fn move_project_out_of_folder(&mut self, project_id: &str, top_level_index: usize, cx: &mut impl WorkspaceCx) {
+    pub fn move_project_out_of_folder(
+        &mut self,
+        project_id: &str,
+        top_level_index: usize,
+        cx: &mut impl WorkspaceCx,
+    ) {
         // Remove from any folder
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
@@ -128,29 +157,43 @@ impl Workspace {
         self.data.project_order.retain(|id| id != project_id);
 
         let target = top_level_index.min(self.data.project_order.len());
-        self.data.project_order.insert(target, project_id.to_string());
+        self.data
+            .project_order
+            .insert(target, project_id.to_string());
         self.notify_data(cx);
     }
 
     /// Reorder a project within a folder
     #[allow(dead_code)]
-    pub fn reorder_project_in_folder(&mut self, folder_id: &str, project_id: &str, new_index: usize, cx: &mut impl WorkspaceCx) {
+    pub fn reorder_project_in_folder(
+        &mut self,
+        folder_id: &str,
+        project_id: &str,
+        new_index: usize,
+        cx: &mut impl WorkspaceCx,
+    ) {
         if let Some(folder) = self.folder_mut(folder_id)
-            && let Some(current) = folder.project_ids.iter().position(|id| id == project_id) {
-                let id = folder.project_ids.remove(current);
-                let target = if new_index > current {
-                    new_index.saturating_sub(1)
-                } else {
-                    new_index
-                };
-                let target = target.min(folder.project_ids.len());
-                folder.project_ids.insert(target, id);
-                self.notify_data(cx);
-            }
+            && let Some(current) = folder.project_ids.iter().position(|id| id == project_id)
+        {
+            let id = folder.project_ids.remove(current);
+            let target = if new_index > current {
+                new_index.saturating_sub(1)
+            } else {
+                new_index
+            };
+            let target = target.min(folder.project_ids.len());
+            folder.project_ids.insert(target, id);
+            self.notify_data(cx);
+        }
     }
 
     /// Reorder any top-level item (project or folder) in project_order
-    pub fn move_item_in_order(&mut self, item_id: &str, new_index: usize, cx: &mut impl WorkspaceCx) {
+    pub fn move_item_in_order(
+        &mut self,
+        item_id: &str,
+        new_index: usize,
+        cx: &mut impl WorkspaceCx,
+    ) {
         if let Some(current) = self.data.project_order.iter().position(|id| id == item_id) {
             let id = self.data.project_order.remove(current);
             let target = if new_index > current {
@@ -167,8 +210,8 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use crate::state::*;
     use crate::settings::HooksConfig;
+    use crate::state::*;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
@@ -211,7 +254,9 @@ mod tests {
 
     /// Simulate delete_folder: splice projects back into project_order
     fn simulate_delete_folder(data: &mut WorkspaceData, folder_id: &str) {
-        let project_ids = data.folders.iter()
+        let project_ids = data
+            .folders
+            .iter()
             .find(|f| f.id == folder_id)
             .map(|f| f.project_ids.clone())
             .unwrap_or_default();
@@ -226,7 +271,12 @@ mod tests {
     }
 
     /// Simulate move_project_to_folder
-    fn simulate_move_to_folder(data: &mut WorkspaceData, project_id: &str, folder_id: &str, position: Option<usize>) {
+    fn simulate_move_to_folder(
+        data: &mut WorkspaceData,
+        project_id: &str,
+        folder_id: &str,
+        position: Option<usize>,
+    ) {
         for folder in &mut data.folders {
             folder.project_ids.retain(|id| id != project_id);
         }
@@ -280,9 +330,11 @@ mod tests {
 
 #[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
-    use gpui::AppContext as _;
-    use crate::state::{FolderData, LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
+    use crate::state::{
+        FolderData, LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData,
+    };
+    use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
@@ -342,10 +394,8 @@ mod gpui_tests {
 
     #[gpui::test]
     fn test_delete_folder_gpui(cx: &mut gpui::TestAppContext) {
-        let mut data = make_workspace_data(
-            vec![make_project("p1"), make_project("p2")],
-            vec!["f1"],
-        );
+        let mut data =
+            make_workspace_data(vec![make_project("p1"), make_project("p2")], vec!["f1"]);
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
@@ -399,13 +449,13 @@ mod gpui_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
         ];
         let workspace = cx.new(|_cx| Workspace::new(data));
@@ -416,7 +466,10 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.active_folder_filter(WindowId::Main), Some(&"f1".to_string()));
+            assert_eq!(
+                ws.active_folder_filter(WindowId::Main),
+                Some(&"f1".to_string())
+            );
         });
 
         // Delete f1 — filter should auto-clear
@@ -443,7 +496,9 @@ mod gpui_tests {
             project_ids: vec![],
             folder_color: FolderColor::default(),
         }];
-        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.main_window
+            .folder_collapsed
+            .insert("f1".to_string(), true);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -498,7 +553,9 @@ mod gpui_tests {
             project_ids: vec![],
             folder_color: FolderColor::default(),
         }];
-        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.main_window
+            .folder_collapsed
+            .insert("f1".to_string(), true);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         let unknown = uuid::Uuid::new_v4();
@@ -528,7 +585,10 @@ mod gpui_tests {
             ws.toggle_folder_collapsed(WindowId::Main, "f1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.data().main_window.folder_collapsed.get("f1"), Some(&true));
+            assert_eq!(
+                ws.data().main_window.folder_collapsed.get("f1"),
+                Some(&true)
+            );
         });
 
         // Second toggle: true -> false. main_window removes the entry
@@ -608,17 +668,16 @@ mod gpui_tests {
         // (the new source of truth). Without the scrub, a re-added folder with
         // the same id would inherit the deleted folder's collapsed state on
         // the next render.
-        let mut data = make_workspace_data(
-            vec![make_project("p1")],
-            vec!["f1"],
-        );
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["f1"]);
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
             folder_color: FolderColor::default(),
         }];
-        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.main_window
+            .folder_collapsed
+            .insert("f1".to_string(), true);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
@@ -651,7 +710,9 @@ mod gpui_tests {
             },
         ];
         data.main_window.folder_filter = Some("f1".to_string());
-        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.main_window
+            .folder_collapsed
+            .insert("f1".to_string(), true);
 
         let mut extra = WindowState {
             folder_filter: Some("f1".to_string()),
@@ -688,13 +749,13 @@ mod gpui_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                    folder_color: FolderColor::default(),
+                folder_color: FolderColor::default(),
             },
         ];
         let workspace = cx.new(|_cx| Workspace::new(data));
@@ -710,7 +771,10 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.active_folder_filter(WindowId::Main), Some(&"f1".to_string()));
+            assert_eq!(
+                ws.active_folder_filter(WindowId::Main),
+                Some(&"f1".to_string())
+            );
         });
     }
 }

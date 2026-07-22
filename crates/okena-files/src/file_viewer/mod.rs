@@ -15,7 +15,7 @@ use crate::blame::{BlameError, BlameLine, BlameProvider};
 use crate::code_view::ScrollbarDrag;
 use crate::list_directory::DirEntry;
 use crate::selection::SelectionState;
-use crate::syntax::{load_syntax_set, HighlightedLine};
+use crate::syntax::{HighlightedLine, load_syntax_set};
 use context_menu::{DeleteConfirmState, FileRenameState, FileTreeContextMenu, TabContextMenu};
 use gpui::*;
 use okena_markdown::{MarkdownDocument, MarkdownSelection};
@@ -754,14 +754,9 @@ impl FileViewer {
             // and font tabs have no highlighted content; SVG tabs do (the
             // source-view XML), so they need the rehighlight too.
             if rehighlight && !tab.is_font && (!tab.is_image || tab.is_svg) {
-                tab.do_highlight_content(
-                    &tab.file_path.clone(),
-                    &self.syntax_set,
-                    self.is_dark,
-                );
+                tab.do_highlight_content(&tab.file_path.clone(), &self.syntax_set, self.is_dark);
             }
         }
-
     }
 
     /// Invalidate the cached directory listings and re-fetch the ones that are
@@ -845,8 +840,7 @@ impl FileViewer {
                         }
                     }
                     Err(error)
-                        if !relative_path.is_empty()
-                            && is_missing_directory_error(&error) =>
+                        if !relative_path.is_empty() && is_missing_directory_error(&error) =>
                     {
                         let parent = prune_missing_directory(
                             &relative_path,
@@ -938,11 +932,7 @@ impl FileViewer {
     /// callback's chase-loop recursion, where the user may have switched
     /// tabs mid-raster and `self.active_tab()` would target the wrong
     /// path.
-    pub(super) fn maybe_rerender_svg_for(
-        &mut self,
-        relative_path: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn maybe_rerender_svg_for(&mut self, relative_path: String, cx: &mut Context<Self>) {
         let svg_renderer = cx.svg_renderer();
         let Some((bytes, target_scale)) = self.compute_rerender_target(&relative_path) else {
             return;
@@ -981,12 +971,15 @@ impl FileViewer {
                 {
                     tab.image_view.svg_rerender_in_flight = false;
                     match (result, tab.image_data.as_mut()) {
-                        (Ok(new_image), Some(DecodedImage::Rendered {
-                            image,
-                            rendered_scale,
-                            svg_bytes,
-                            ..
-                        })) => {
+                        (
+                            Ok(new_image),
+                            Some(DecodedImage::Rendered {
+                                image,
+                                rendered_scale,
+                                svg_bytes,
+                                ..
+                            }),
+                        ) => {
                             // Discard the result if image_data was
                             // replaced (different SVG bytes) while we
                             // were rasterizing — otherwise the stale
@@ -1010,11 +1003,14 @@ impl FileViewer {
                                 cx.drop_image(new_image, None);
                             }
                         }
-                        (Err(_), Some(DecodedImage::Rendered {
-                            rendered_scale,
-                            svg_bytes,
-                            ..
-                        })) => {
+                        (
+                            Err(_),
+                            Some(DecodedImage::Rendered {
+                                rendered_scale,
+                                svg_bytes,
+                                ..
+                            }),
+                        ) => {
                             // Pin rendered_scale to the failed target so
                             // compute_rerender_target stops requesting
                             // the same raster on every chase tick. The
@@ -1058,11 +1054,11 @@ impl FileViewer {
     /// would meaningfully sharpen the preview. Returns `None` when the tab
     /// isn't an SVG, isn't zoomed in past its rendered scale, or already
     /// has a re-raster in flight.
-    fn compute_rerender_target(
-        &self,
-        relative_path: &str,
-    ) -> Option<(Arc<Vec<u8>>, f32)> {
-        let tab = self.tabs.iter().find(|t| t.relative_path == relative_path)?;
+    fn compute_rerender_target(&self, relative_path: &str) -> Option<(Arc<Vec<u8>>, f32)> {
+        let tab = self
+            .tabs
+            .iter()
+            .find(|t| t.relative_path == relative_path)?;
         if !tab.is_svg || tab.image_view.svg_rerender_in_flight {
             return None;
         }
@@ -1127,7 +1123,11 @@ impl FileViewer {
     /// - Otherwise creates a new tab after the active one.
     pub fn open_file_in_tab(&mut self, relative_path: String, cx: &mut Context<Self>) {
         // Already open? Switch to it.
-        if let Some(idx) = self.tabs.iter().position(|t| t.relative_path == relative_path) {
+        if let Some(idx) = self
+            .tabs
+            .iter()
+            .position(|t| t.relative_path == relative_path)
+        {
             if idx != self.active_tab {
                 let current = self.active_tab().relative_path.clone();
                 self.history.push(&current);
@@ -1322,7 +1322,11 @@ impl FileViewer {
     /// Navigate to a file without pushing history (used by back/forward).
     fn navigate_to_file_no_history(&mut self, relative_path: String, cx: &mut Context<Self>) {
         // If file is open in a tab, switch to it
-        if let Some(idx) = self.tabs.iter().position(|t| t.relative_path == relative_path) {
+        if let Some(idx) = self
+            .tabs
+            .iter()
+            .position(|t| t.relative_path == relative_path)
+        {
             self.active_tab = idx;
             cx.notify();
             return;
@@ -1348,7 +1352,10 @@ impl FileViewer {
     fn spawn_tab_load(&mut self, relative_path: String, cx: &mut Context<Self>) {
         self.next_load_generation = self.next_load_generation.wrapping_add(1);
         let generation = self.next_load_generation;
-        if let Some(tab) = self.tabs.iter_mut().find(|t| t.relative_path == relative_path)
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.relative_path == relative_path)
         {
             tab.load_generation = generation;
         }
@@ -1409,8 +1416,10 @@ impl FileViewer {
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 let mut old_image: Option<DecodedImage> = None;
-                if let Some(tab) =
-                    this.tabs.iter_mut().find(|t| t.relative_path == relative_path)
+                if let Some(tab) = this
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.relative_path == relative_path)
                 {
                     // Drop stale results: a newer spawn_tab_load has been
                     // queued for this tab (closed-and-reopened, navigated
@@ -1546,7 +1555,10 @@ fn register_font_bytes(cx: &mut App, ttf_bytes: &Arc<Vec<u8>>) {
     }
 
     let bytes: Vec<u8> = ttf_bytes.as_ref().clone();
-    if let Err(e) = cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(bytes)]) {
+    if let Err(e) = cx
+        .text_system()
+        .add_fonts(vec![std::borrow::Cow::Owned(bytes)])
+    {
         log::warn!("Failed to register font with text system: {}", e);
         // Roll back the dedup entry so a transient registration failure
         // doesn't permanently block a retry from re-attempting it.
@@ -1575,7 +1587,7 @@ impl Focusable for FileViewer {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileViewer, FileViewerTab, NavigationHistory, MAX_TABS, is_missing_directory_error,
+        FileViewer, FileViewerTab, MAX_TABS, NavigationHistory, is_missing_directory_error,
         prune_missing_directory,
     };
     use crate::list_directory::{DIRECTORY_NOT_FOUND_ERROR, DirEntry};
@@ -1592,8 +1604,7 @@ mod tests {
     #[::core::prelude::v1::test]
     fn insert_tab_below_limit_inserts_after_active() {
         let mut tabs = vec![tab("a"), tab("b"), tab("c")];
-        let (active, evicted) =
-            FileViewer::insert_tab_after_active(&mut tabs, 0, tab("new"));
+        let (active, evicted) = FileViewer::insert_tab_after_active(&mut tabs, 0, tab("new"));
         assert_eq!(active, 1);
         assert!(evicted.is_none());
         assert_eq!(paths(&tabs), ["a", "new", "b", "c"]);
@@ -1601,11 +1612,9 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn insert_tab_at_limit_evicts_oldest_and_keeps_active() {
-        let mut tabs: Vec<FileViewerTab> =
-            (0..MAX_TABS).map(|i| tab(&format!("f{i}"))).collect();
+        let mut tabs: Vec<FileViewerTab> = (0..MAX_TABS).map(|i| tab(&format!("f{i}"))).collect();
         // Active is somewhere in the middle.
-        let (active, evicted) =
-            FileViewer::insert_tab_after_active(&mut tabs, 10, tab("new"));
+        let (active, evicted) = FileViewer::insert_tab_after_active(&mut tabs, 10, tab("new"));
         assert_eq!(tabs.len(), MAX_TABS);
         // Oldest (index 0) was evicted; everything shifted left by one, so the
         // active file f10 stays active and the new tab lands right after it.
@@ -1617,15 +1626,16 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn insert_tab_at_limit_skips_active_when_active_is_oldest() {
-        let mut tabs: Vec<FileViewerTab> =
-            (0..MAX_TABS).map(|i| tab(&format!("f{i}"))).collect();
+        let mut tabs: Vec<FileViewerTab> = (0..MAX_TABS).map(|i| tab(&format!("f{i}"))).collect();
         // Active IS the oldest tab — must not evict it.
-        let (active, evicted) =
-            FileViewer::insert_tab_after_active(&mut tabs, 0, tab("new"));
+        let (active, evicted) = FileViewer::insert_tab_after_active(&mut tabs, 0, tab("new"));
         assert_eq!(tabs.len(), MAX_TABS);
         assert_eq!(active, 1);
         // f0 (active) preserved at index 0; f1 (next oldest) evicted.
-        assert_eq!(evicted.expect("next-oldest tab returned").relative_path, "f1");
+        assert_eq!(
+            evicted.expect("next-oldest tab returned").relative_path,
+            "f1"
+        );
         assert_eq!(tabs[0].relative_path, "f0");
         assert_eq!(tabs[1].relative_path, "new");
         assert_eq!(tabs[2].relative_path, "f2");
@@ -1776,16 +1786,9 @@ mod tests {
         assert_eq!(parent, "apps");
         assert_eq!(
             loaded_dirs.keys().cloned().collect::<HashSet<_>>(),
-            HashSet::from([
-                String::new(),
-                "apps".to_string(),
-                "apps/kept".to_string(),
-            ])
+            HashSet::from([String::new(), "apps".to_string(), "apps/kept".to_string(),])
         );
-        assert_eq!(
-            loading_dirs,
-            HashSet::from(["apps/kept/other".to_string()])
-        );
+        assert_eq!(loading_dirs, HashSet::from(["apps/kept/other".to_string()]));
         assert_eq!(
             expanded_folders,
             HashSet::from(["apps".to_string(), "apps/kept".to_string()])

@@ -1,17 +1,17 @@
 //! Terminal content component.
 
 use crate::elements::terminal_element::{
-    deregister_resize_viewer as deregister_shared_resize_viewer, next_resize_viewer_id, LinkKind,
-    SearchMatch, TerminalElement,
+    LinkKind, SearchMatch, TerminalElement,
+    deregister_resize_viewer as deregister_shared_resize_viewer, next_resize_viewer_id,
 };
-use crate::terminal_view_settings;
-use okena_terminal::terminal::Terminal;
-use okena_files::theme::theme;
-use okena_ui::color_utils::tint_color;
 use crate::layout::navigation::register_pane_bounds;
+use crate::terminal_view_settings;
+use gpui::*;
+use okena_files::theme::theme;
+use okena_terminal::terminal::Terminal;
+use okena_ui::color_utils::tint_color;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{WindowId, Workspace};
-use gpui::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -160,10 +160,11 @@ impl TerminalContent {
             return false;
         }
         if let Some(terminal) = self.terminal.as_ref()
-            && let Some((col, row, _)) = self.pixel_to_cell(event_position) {
-                let mods = Self::mouse_modifier_bits(modifiers);
-                terminal.send_mouse_button(button_code, false, col, row as usize, mods);
-            }
+            && let Some((col, row, _)) = self.pixel_to_cell(event_position)
+        {
+            let mods = Self::mouse_modifier_bits(modifiers);
+            terminal.send_mouse_button(button_code, false, col, row as usize, mods);
+        }
         self.forwarded_button = None;
         self.mouse_down_cell = None;
         true
@@ -171,7 +172,9 @@ impl TerminalContent {
 
     pub fn set_terminal(&mut self, terminal: Option<Arc<Terminal>>, cx: &mut Context<Self>) {
         if let Some(old_terminal) = self.terminal.as_ref() {
-            let next_id = terminal.as_ref().map(|terminal| terminal.terminal_id.as_str());
+            let next_id = terminal
+                .as_ref()
+                .map(|terminal| terminal.terminal_id.as_str());
             if next_id != Some(old_terminal.terminal_id.as_str()) {
                 deregister_shared_resize_viewer(&old_terminal.terminal_id, self.resize_viewer_id);
                 old_terminal.remove_focus_reporter(self.resize_viewer_id);
@@ -267,7 +270,10 @@ impl TerminalContent {
 
     const TERMINAL_PADDING: f32 = 4.0;
 
-    fn pixel_to_cell(&self, pos: Point<Pixels>) -> Option<(usize, i32, alacritty_terminal::index::Side)> {
+    fn pixel_to_cell(
+        &self,
+        pos: Point<Pixels>,
+    ) -> Option<(usize, i32, alacritty_terminal::index::Side)> {
         let bounds = self.element_bounds?;
         let terminal = self.terminal.as_ref()?;
         let (cell_width, cell_height) = terminal.cell_dimensions();
@@ -292,7 +298,12 @@ impl TerminalContent {
         Some((col, row, side))
     }
 
-    fn pixel_to_cell_raw(&self, pos: Point<Pixels>, cell_width: f32, cell_height: f32) -> (usize, usize) {
+    fn pixel_to_cell_raw(
+        &self,
+        pos: Point<Pixels>,
+        cell_width: f32,
+        cell_height: f32,
+    ) -> (usize, usize) {
         if let Some(bounds) = self.element_bounds {
             let x = (f32::from(pos.x) - f32::from(bounds.origin.x)).max(0.0);
             let y = (f32::from(pos.y) - f32::from(bounds.origin.y)).max(0.0);
@@ -308,7 +319,12 @@ impl TerminalContent {
     /// paths outside the project or `~`-prefixed paths we can't resolve.
     fn project_relative_path(&self, raw: &str, cx: &App) -> Option<String> {
         let clean = super::url_detector::strip_line_col_suffix(raw);
-        let project_path = self.workspace.read(cx).project(&self.project_id)?.path.clone();
+        let project_path = self
+            .workspace
+            .read(cx)
+            .project(&self.project_id)?
+            .path
+            .clone();
         let cwd = self
             .terminal
             .as_ref()
@@ -331,7 +347,11 @@ impl TerminalContent {
         self.mouse_down_cell = Some((col, row));
 
         if event.modifiers.platform || event.modifiers.control {
-            if let Some(uri) = self.terminal.as_ref().and_then(|t| t.hyperlink_at(col, row)) {
+            if let Some(uri) = self
+                .terminal
+                .as_ref()
+                .and_then(|t| t.hyperlink_at(col, row))
+            {
                 UrlDetector::open_url(&uri);
                 self.mouse_down_cell = None;
                 return;
@@ -342,10 +362,16 @@ impl TerminalContent {
                         UrlDetector::open_url(&url_match.url);
                     }
                     LinkKind::FilePath { line, col } => {
-                        if self.workspace.read(cx).is_local_daemon_project(&self.project_id) {
+                        if self
+                            .workspace
+                            .read(cx)
+                            .is_local_daemon_project(&self.project_id)
+                        {
                             let file_opener = terminal_view_settings(cx).file_opener.clone();
                             UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
-                        } else if let Some(relative_path) = self.project_relative_path(&url_match.url, cx) {
+                        } else if let Some(relative_path) =
+                            self.project_relative_path(&url_match.url, cx)
+                        {
                             self.request_broker.update(cx, |broker, cx| {
                                 broker.push_overlay_request(
                                     okena_workspace::requests::OverlayRequest::Project(
@@ -377,7 +403,11 @@ impl TerminalContent {
             let same_position =
                 (col as i32 - last_col as i32).abs() <= 1 && (row - last_row).abs() <= 0;
             if elapsed < 400 && same_position {
-                if self.click_count >= 3 { 1 } else { self.click_count + 1 }
+                if self.click_count >= 3 {
+                    1
+                } else {
+                    self.click_count + 1
+                }
             } else {
                 1
             }
@@ -483,9 +513,10 @@ impl TerminalContent {
         if let Some((button, mods)) = self.forwarded_button {
             if let Some(ref terminal) = self.terminal
                 && terminal.supports_mouse_drag()
-                    && let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
-                        terminal.send_mouse_drag(button, col, row as usize, mods);
-                    }
+                && let Some((col, row, _side)) = self.pixel_to_cell(event.position)
+            {
+                terminal.send_mouse_drag(button, col, row as usize, mods);
+            }
             return;
         }
 
@@ -494,7 +525,10 @@ impl TerminalContent {
                 if let Some(ref terminal) = self.terminal {
                     terminal.end_selection();
                     if !terminal.has_selection()
-                        || terminal.get_selected_text().map(|s| s.is_empty()).unwrap_or(true)
+                        || terminal
+                            .get_selected_text()
+                            .map(|s| s.is_empty())
+                            .unwrap_or(true)
                     {
                         terminal.clear_selection();
                     }
@@ -505,10 +539,11 @@ impl TerminalContent {
             }
 
             if let Some(ref terminal) = self.terminal
-                && let Some((col, row, side)) = self.pixel_to_cell(event.position) {
-                    terminal.update_selection(col, row, side);
-                    cx.notify();
-                }
+                && let Some((col, row, side)) = self.pixel_to_cell(event.position)
+            {
+                terminal.update_selection(col, row, side);
+                cx.notify();
+            }
         }
     }
 
@@ -519,34 +554,42 @@ impl TerminalContent {
         }
 
         if self.is_selecting
-            && let Some(ref terminal) = self.terminal {
-                terminal.end_selection();
-                self.is_selecting = false;
+            && let Some(ref terminal) = self.terminal
+        {
+            terminal.end_selection();
+            self.is_selecting = false;
 
-                let empty_selection = !terminal.has_selection()
-                    || terminal.get_selected_text().map(|s| s.is_empty()).unwrap_or(true);
+            let empty_selection = !terminal.has_selection()
+                || terminal
+                    .get_selected_text()
+                    .map(|s| s.is_empty())
+                    .unwrap_or(true);
 
-                if empty_selection {
-                    terminal.clear_selection();
+            if empty_selection {
+                terminal.clear_selection();
 
-                    // Click-to-cursor: on a clean single click (no drag), move cursor
-                    if self.click_count == 1
-                        && let Some((col, row)) = self.mouse_down_cell.take()
-                            && !terminal.is_mouse_mode() && !terminal.is_alt_screen() && !terminal.has_running_child() {
-                                terminal.move_cursor_to_click(col, row);
-                            }
+                // Click-to-cursor: on a clean single click (no drag), move cursor
+                if self.click_count == 1
+                    && let Some((col, row)) = self.mouse_down_cell.take()
+                    && !terminal.is_mouse_mode()
+                    && !terminal.is_alt_screen()
+                    && !terminal.has_running_child()
+                {
+                    terminal.move_cursor_to_click(col, row);
                 }
-                cx.notify();
             }
+            cx.notify();
+        }
 
         // Sync any non-empty selection to PRIMARY so middle-click paste works
         // for drag, double-click (word), and triple-click (line) selections.
         #[cfg(target_os = "linux")]
         if let Some(ref terminal) = self.terminal
             && let Some(text) = terminal.get_selected_text()
-                && !text.is_empty() {
-                    cx.write_to_primary(ClipboardItem::new_string(text));
-                }
+            && !text.is_empty()
+        {
+            cx.write_to_primary(ClipboardItem::new_string(text));
+        }
 
         self.mouse_down_cell = None;
     }
@@ -613,7 +656,10 @@ impl Render for TerminalContent {
 
         let terminal_clone = terminal.clone();
         let focus_handle = self.focus_handle.clone();
-        let zoom_level = self.workspace.read(cx).get_terminal_zoom(&self.project_id, &self.layout_path);
+        let zoom_level = self
+            .workspace
+            .read(cx)
+            .get_terminal_zoom(&self.project_id, &self.layout_path);
 
         let element_bounds_setter = {
             let entity = cx.entity().downgrade();
@@ -623,7 +669,13 @@ impl Render for TerminalContent {
             let fh = self.focus_handle.clone();
             move |bounds: Bounds<Pixels>, _window: &mut Window, cx: &mut App| {
                 if let Some(window_id) = window_id {
-                    register_pane_bounds(window_id, project_id.clone(), layout_path.clone(), bounds, Some(fh.clone()));
+                    register_pane_bounds(
+                        window_id,
+                        project_id.clone(),
+                        layout_path.clone(),
+                        bounds,
+                        Some(fh.clone()),
+                    );
                 }
 
                 if let Some(entity) = entity.upgrade() {
@@ -697,7 +749,10 @@ impl Render for TerminalContent {
                     this.in_scroll_inertia && matches!(event.delta, ScrollDelta::Pixels(_));
 
                 if event.modifiers.control && !is_inertial_momentum {
-                    let current_zoom = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
+                    let current_zoom = this
+                        .workspace
+                        .read(cx)
+                        .get_terminal_zoom(&this.project_id, &this.layout_path);
                     let zoom_delta = if f32::from(delta.y) > 0.0 { 0.1 } else { -0.1 };
                     let new_zoom = (current_zoom + zoom_delta).clamp(0.5, 3.0);
                     let project_id = this.project_id.clone();
@@ -706,7 +761,12 @@ impl Render for TerminalContent {
                         workspace.set_terminal_zoom(&project_id, &layout_path, new_zoom, cx);
                     });
                 } else {
-                    this.handle_scroll(f32::from(delta.y), event.position, event.modifiers.shift, cx);
+                    this.handle_scroll(
+                        f32::from(delta.y),
+                        event.position,
+                        event.modifiers.shift,
+                        cx,
+                    );
                 }
             }))
             .on_mouse_down(
@@ -716,12 +776,19 @@ impl Render for TerminalContent {
                         cx.notify();
                         return;
                     }
-                    let has_selection = this.terminal.as_ref().map(|t| t.has_selection()).unwrap_or(false);
-                    let link_url = this.pixel_to_cell(event.position).and_then(|(col, row, _side)| {
-                        this.url_detector.find_at(col, row)
-                            .filter(|m| m.kind == LinkKind::Url)
-                            .map(|m| m.url)
-                    });
+                    let has_selection = this
+                        .terminal
+                        .as_ref()
+                        .map(|t| t.has_selection())
+                        .unwrap_or(false);
+                    let link_url =
+                        this.pixel_to_cell(event.position)
+                            .and_then(|(col, row, _side)| {
+                                this.url_detector
+                                    .find_at(col, row)
+                                    .filter(|m| m.kind == LinkKind::Url)
+                                    .map(|m| m.url)
+                            });
                     cx.emit(TerminalContentEvent::RequestContextMenu {
                         position: event.position,
                         has_selection,
@@ -762,24 +829,24 @@ impl Render for TerminalContent {
                     }
                 }),
             )
-            .child(canvas(element_bounds_setter, |_, _, _, _| {}).absolute().size_full())
             .child(
-                div()
-                    .size_full()
-                    .p(px(4.0))
-                    .bg(rgb(term_bg))
-                    .child(
-                        TerminalElement::new(terminal_clone, focus_handle, self.resize_viewer_id)
-                            .with_zoom(zoom_level)
-                            .with_bg_tint(bg_tint)
-                            .with_search(self.search_matches.clone(), self.search_current_index)
-                            .with_urls(
-                                self.url_detector.matches_arc(),
-                                self.url_detector.hovered_group(),
-                            )
-                            .with_cursor_visible(self.cursor_visible)
-                            .with_cursor_style(render_settings.cursor_style),
-                    ),
+                canvas(element_bounds_setter, |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(
+                div().size_full().p(px(4.0)).bg(rgb(term_bg)).child(
+                    TerminalElement::new(terminal_clone, focus_handle, self.resize_viewer_id)
+                        .with_zoom(zoom_level)
+                        .with_bg_tint(bg_tint)
+                        .with_search(self.search_matches.clone(), self.search_current_index)
+                        .with_urls(
+                            self.url_detector.matches_arc(),
+                            self.url_detector.hovered_group(),
+                        )
+                        .with_cursor_visible(self.cursor_visible)
+                        .with_cursor_style(render_settings.cursor_style),
+                ),
             )
             .child(self.scrollbar.clone())
             .into_any_element()
@@ -814,7 +881,8 @@ fn remote_project_relative_path(raw: &str, project_path: &str, cwd: &str) -> Opt
 
     let project_parts = normalize_path_parts(&project_path)?;
     let candidate_parts = normalize_path_parts(&candidate)?;
-    let windows_path = project_path.as_bytes().get(1) == Some(&b':') || project_path.starts_with("//");
+    let windows_path =
+        project_path.as_bytes().get(1) == Some(&b':') || project_path.starts_with("//");
     if candidate_parts.len() <= project_parts.len()
         || !candidate_parts
             .iter()
@@ -931,11 +999,7 @@ mod tests {
     #[test]
     fn remote_relative_path_uses_terminal_cwd() {
         assert_eq!(
-            remote_project_relative_path(
-                "../shared.rs",
-                "/srv/project",
-                "/srv/project/src/bin"
-            ),
+            remote_project_relative_path("../shared.rs", "/srv/project", "/srv/project/src/bin"),
             Some("src/shared.rs".to_string())
         );
     }

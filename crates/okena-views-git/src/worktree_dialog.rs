@@ -115,7 +115,9 @@ impl WorktreeDialog {
                     });
                 let generated_branch = client
                     .post_action(ActionRequest::GenerateWorktreeBranchName { project_id })
-                    .and_then(|value| value.ok_or_else(|| "Missing generated branch name".to_string()))
+                    .and_then(|value| {
+                        value.ok_or_else(|| "Missing generated branch name".to_string())
+                    })
                     .and_then(|value| {
                         value
                             .get("branch")
@@ -170,7 +172,8 @@ impl WorktreeDialog {
         if query.is_empty() {
             self.filtered_branches = (0..self.branches.len()).collect();
         } else {
-            self.filtered_branches = self.branches
+            self.filtered_branches = self
+                .branches
                 .iter()
                 .enumerate()
                 .filter(|(_, b)| b.to_lowercase().contains(&query))
@@ -214,7 +217,8 @@ impl WorktreeDialog {
             // No branch selected — use input text as new branch name
             let name = self.branch_search_input.read(cx).value().trim().to_string();
             if name.is_empty() {
-                self.error_message = Some("Please select a branch or type a new branch name".to_string());
+                self.error_message =
+                    Some("Please select a branch or type a new branch name".to_string());
                 cx.notify();
                 return;
             }

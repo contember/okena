@@ -1,16 +1,18 @@
-use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
-use crate::client::config::{LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
+use crate::client::config::{LOCAL_DAEMON_CONNECTION_ID, LocalEndpoint, RemoteConnectionConfig};
 use crate::client::id::make_prefixed_id;
-use crate::client::state::{collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states};
-use crate::client::types::{
-    ConnectionEvent, ConnectionStatus, SessionError, WsClientMessage, TOKEN_REFRESH_AGE_SECS,
+use crate::client::state::{
+    collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states,
 };
+use crate::client::types::{
+    ConnectionEvent, ConnectionStatus, SessionError, TOKEN_REFRESH_AGE_SECS, WsClientMessage,
+};
+use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
 
+use futures::{Sink, Stream};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use futures::{Sink, Stream};
 use tokio_tungstenite::tungstenite;
 
 type TcpWsStream =
@@ -141,9 +143,9 @@ async fn fetch_remote_settings(
         token,
         ActionRequest::GetSettings,
     )
-        .await
-        .map_err(|error| format!("Failed to fetch settings: {error}"))?
-        .ok_or_else(|| "Settings fetch returned no payload".to_string())
+    .await
+    .map_err(|error| format!("Failed to fetch settings: {error}"))?
+    .ok_or_else(|| "Settings fetch returned no payload".to_string())
 }
 
 /// Reconnect budget after an established WS drops. The local daemon connection
@@ -151,7 +153,11 @@ async fn fetch_remote_settings(
 /// ensure_local_daemon, which can respawn the daemon) takes over quickly;
 /// user-managed remotes keep the patient schedule for flaky networks.
 fn ws_reconnect_max_attempts(config: &RemoteConnectionConfig) -> u32 {
-    if config.id == LOCAL_DAEMON_CONNECTION_ID { 3 } else { 10 }
+    if config.id == LOCAL_DAEMON_CONNECTION_ID {
+        3
+    } else {
+        10
+    }
 }
 
 /// Sleep before reconnect `attempt` (1-based). Local daemon: flat 1s (see
@@ -200,7 +206,11 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     /// Remove terminals for this connection that are NOT in the given set of
     /// (unprefixed) terminal IDs.  Called on reconnect to clean up terminals
     /// that disappeared on the server while the client was offline.
-    fn remove_terminals_except(&self, connection_id: &str, keep_ids: &std::collections::HashSet<String>);
+    fn remove_terminals_except(
+        &self,
+        connection_id: &str,
+        keep_ids: &std::collections::HashSet<String>,
+    );
 }
 
 /// Generic remote client state machine, parameterized by a platform handler.
@@ -378,7 +388,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         )
                         .map(|client| {
                             let scheme = if tls { "https" } else { "http" };
-                            (client, format!("{}://{}:{}", scheme, config.host, config.port))
+                            (
+                                client,
+                                format!("{}://{}:{}", scheme, config.host, config.port),
+                            )
                         })
                     };
                     let (client, base_url) = match client_and_url {
@@ -447,11 +460,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 config.tls = true;
                 let fp = observed.lock().ok().and_then(|g| g.clone());
                 config.pinned_cert_sha256 = fp.clone();
-                log::info!(
-                    "Auto-upgraded {}:{} to TLS",
-                    config.host,
-                    config.port
-                );
+                log::info!("Auto-upgraded {}:{} to TLS", config.host, config.port);
                 let _ = event_tx
                     .send(ConnectionEvent::TlsUpgraded {
                         connection_id: config.id.clone(),
@@ -481,7 +490,16 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             log::info!("Token valid for {}", config.display_endpoint());
                         }
                         // Token is valid - start WebSocket
-                        Self::run_ws_loop(config, token, event_tx, ws_tx, ws_rx, handler, shared_token).await;
+                        Self::run_ws_loop(
+                            config,
+                            token,
+                            event_tx,
+                            ws_tx,
+                            ws_rx,
+                            handler,
+                            shared_token,
+                        )
+                        .await;
                         return;
                     }
                     Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
@@ -501,10 +519,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     Ok(resp) => {
                         // Transient server error (e.g. 500 during startup) —
                         // token may still be valid, don't discard it.
-                        let msg = format!(
-                            "Token validation: unexpected HTTP {}",
-                            resp.status()
-                        );
+                        let msg = format!("Token validation: unexpected HTTP {}", resp.status());
                         log::warn!("{}", msg);
                         let _ = event_tx
                             .send(ConnectionEvent::StatusChanged {
@@ -612,8 +627,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
                             // Capture the cert fingerprint observed during the
                             // (TLS) pairing handshake so the manager can pin it.
-                            let cert_fingerprint =
-                                observed.lock().ok().and_then(|g| g.clone());
+                            let cert_fingerprint = observed.lock().ok().and_then(|g| g.clone());
 
                             // Notify manager to save the token (+ pin the cert)
                             let _ = event_tx
@@ -725,7 +739,9 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let mut current_token = token;
 
         loop {
-            match Self::ws_session(&config, &current_token, &event_tx, &ws_tx, &ws_rx, &handler).await {
+            match Self::ws_session(&config, &current_token, &event_tx, &ws_tx, &ws_rx, &handler)
+                .await
+            {
                 Ok(()) => {
                     // Clean disconnect requested
                     log::info!(
@@ -793,9 +809,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
                     // Read the latest token (may have been refreshed since last attempt)
                     if let Ok(guard) = shared_token.read()
-                        && let Some(ref latest) = *guard {
-                            current_token = latest.clone();
-                        }
+                        && let Some(ref latest) = *guard
+                    {
+                        current_token = latest.clone();
+                    }
                 }
             }
         }
@@ -822,15 +839,15 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let (ws_stream, _response) = if let Some(path) = local_unix_path(config) {
             #[cfg(unix)]
             {
-                let stream = tokio::net::UnixStream::connect(path)
-                    .await
-                    .map_err(|e| SessionError::Transient(format!("Unix socket connect failed: {}", e)))?;
-                let (ws, response) = tokio_tungstenite::client_async(
-                    "ws://okena.local/v1/stream",
-                    stream,
-                )
-                .await
-                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
+                let stream = tokio::net::UnixStream::connect(path).await.map_err(|e| {
+                    SessionError::Transient(format!("Unix socket connect failed: {}", e))
+                })?;
+                let (ws, response) =
+                    tokio_tungstenite::client_async("ws://okena.local/v1/stream", stream)
+                        .await
+                        .map_err(|e| {
+                            SessionError::Transient(format!("WebSocket connect failed: {}", e))
+                        })?;
                 (AnyWsStream::Unix(Box::new(ws)), response)
             }
             #[cfg(not(unix))]
@@ -846,9 +863,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 config.pinned_cert_sha256.clone(),
                 observed.clone(),
             );
-            let (ws, response) = tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
-                .await
-                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
+            let (ws, response) =
+                tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
+                    .await
+                    .map_err(|e| {
+                        SessionError::Transient(format!("WebSocket connect failed: {}", e))
+                    })?;
             (AnyWsStream::Tcp(Box::new(ws)), response)
         } else {
             let (ws, response) = tokio_tungstenite::connect_async(&ws_url)
@@ -887,10 +907,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             tungstenite::Message::Text(text) => {
                 let parsed: serde_json::Value = serde_json::from_str(text)
                     .map_err(|e| SessionError::Transient(format!("Invalid JSON: {}", e)))?;
-                let msg_type = parsed
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if msg_type == "auth_ok" {
                     log::info!("Authenticated with {}:{}", config.host, config.port);
                 } else if msg_type == "auth_failed" {
@@ -1107,7 +1124,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         okena_core::ws::parse_binary_frame(&data)
                     {
                         match frame_type {
-                            okena_core::ws::FRAME_TYPE_PTY | okena_core::ws::FRAME_TYPE_SNAPSHOT => {
+                            okena_core::ws::FRAME_TYPE_PTY
+                            | okena_core::ws::FRAME_TYPE_SNAPSHOT => {
                                 // Route PTY output or snapshot to the correct terminal
                                 if let Some(remote_tid) = reverse_stream_map.get(&stream_id) {
                                     let prefixed = make_prefixed_id(&config_id, remote_tid);
@@ -1124,54 +1142,57 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     // JSON message
                     match serde_json::from_str::<serde_json::Value>(&text) {
                         Ok(value) => {
-                            let msg_type = value
-                                .get("type")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             match msg_type {
                                 "subscribed" => {
                                     if let Some(mappings) = value.get("mappings")
-                                        && let Ok(map) = serde_json::from_value::<
-                                            HashMap<String, u32>,
-                                        >(
-                                            mappings.clone()
-                                        ) {
-                                            log::info!(
-                                                "Subscribed to {} terminal streams",
-                                                map.len()
-                                            );
-                                            for (terminal_id, stream_id) in &map {
-                                                reverse_stream_map
-                                                    .insert(*stream_id, terminal_id.clone());
-                                            }
-                                            // Update shared stream_map for writer task
-                                            if let Ok(mut sm) = stream_map.write() {
-                                                for (terminal_id, stream_id) in &map {
-                                                    sm.insert(terminal_id.clone(), *stream_id);
-                                                }
-                                            }
-                                            // Pre-resize terminals to server dimensions before snapshots arrive
-                                            if let Some(sizes) = value.get("sizes")
-                                                && let Ok(size_map) = serde_json::from_value::<
-                                                    HashMap<String, (u16, u16)>,
-                                                >(sizes.clone()) {
-                                                    for (terminal_id, (cols, rows)) in &size_map {
-                                                        let prefixed = make_prefixed_id(&config_id, terminal_id);
-                                                        // Pre-resize only sizes the grid for the snapshot;
-                                                        // it must not claim authority, so the client can
-                                                        // still enforce its own window size after connect.
-                                                        handler_clone.resize_terminal(&prefixed, *cols, *rows, false);
-                                                    }
-                                                    log::info!("Pre-resized {} terminals to server dimensions", size_map.len());
-                                                }
-
-                                            let _ = event_tx_clone
-                                                .send(ConnectionEvent::SubscriptionMappings {
-                                                    connection_id: config_id.clone(),
-                                                    mappings: map,
-                                                })
-                                                .await;
+                                        && let Ok(map) =
+                                            serde_json::from_value::<HashMap<String, u32>>(
+                                                mappings.clone(),
+                                            )
+                                    {
+                                        log::info!("Subscribed to {} terminal streams", map.len());
+                                        for (terminal_id, stream_id) in &map {
+                                            reverse_stream_map
+                                                .insert(*stream_id, terminal_id.clone());
                                         }
+                                        // Update shared stream_map for writer task
+                                        if let Ok(mut sm) = stream_map.write() {
+                                            for (terminal_id, stream_id) in &map {
+                                                sm.insert(terminal_id.clone(), *stream_id);
+                                            }
+                                        }
+                                        // Pre-resize terminals to server dimensions before snapshots arrive
+                                        if let Some(sizes) = value.get("sizes")
+                                            && let Ok(size_map) = serde_json::from_value::<
+                                                HashMap<String, (u16, u16)>,
+                                            >(
+                                                sizes.clone()
+                                            )
+                                        {
+                                            for (terminal_id, (cols, rows)) in &size_map {
+                                                let prefixed =
+                                                    make_prefixed_id(&config_id, terminal_id);
+                                                // Pre-resize only sizes the grid for the snapshot;
+                                                // it must not claim authority, so the client can
+                                                // still enforce its own window size after connect.
+                                                handler_clone.resize_terminal(
+                                                    &prefixed, *cols, *rows, false,
+                                                );
+                                            }
+                                            log::info!(
+                                                "Pre-resized {} terminals to server dimensions",
+                                                size_map.len()
+                                            );
+                                        }
+
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::SubscriptionMappings {
+                                                connection_id: config_id.clone(),
+                                                mappings: map,
+                                            })
+                                            .await;
+                                    }
                                 }
                                 "state_changed" => {
                                     log::info!("State changed on remote server");
@@ -1181,10 +1202,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                     // of rebuilding a client per event.
                                     match client
                                         .get(format!("{}/v1/state", base_url))
-                                        .header(
-                                            "Authorization",
-                                            format!("Bearer {}", token),
-                                        )
+                                        .header("Authorization", format!("Bearer {}", token))
                                         .timeout(std::time::Duration::from_secs(10))
                                         .send()
                                         .await
@@ -1193,8 +1211,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             if let Ok(new_state) =
                                                 resp.json::<StateResponse>().await
                                             {
-                                                let diff =
-                                                    diff_states(&cached_state, &new_state);
+                                                let diff = diff_states(&cached_state, &new_state);
                                                 let new_size_map =
                                                     collect_terminal_sizes(&new_state);
 
@@ -1228,29 +1245,39 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 // channel would leave the new terminals silently
                                                 // never streaming output.
                                                 if !diff.added_terminals.is_empty()
-                                                    && let Err(e) = ws_tx_clone.send(
-                                                        WsClientMessage::Subscribe {
+                                                    && let Err(e) = ws_tx_clone
+                                                        .send(WsClientMessage::Subscribe {
                                                             terminal_ids: diff
                                                                 .added_terminals
                                                                 .clone(),
-                                                        },
-                                                    ).await {
-                                                        log::warn!("failed to send Subscribe for {} terminals: {}", diff.added_terminals.len(), e);
-                                                    }
+                                                        })
+                                                        .await
+                                                {
+                                                    log::warn!(
+                                                        "failed to send Subscribe for {} terminals: {}",
+                                                        diff.added_terminals.len(),
+                                                        e
+                                                    );
+                                                }
 
                                                 // Unsubscribe from removed terminals. Likewise
                                                 // blocking — a dropped Unsubscribe leaks a stream
                                                 // for an already-gone terminal.
                                                 if !diff.removed_terminals.is_empty()
-                                                    && let Err(e) = ws_tx_clone.send(
-                                                        WsClientMessage::Unsubscribe {
+                                                    && let Err(e) = ws_tx_clone
+                                                        .send(WsClientMessage::Unsubscribe {
                                                             terminal_ids: diff
                                                                 .removed_terminals
                                                                 .clone(),
-                                                        },
-                                                    ).await {
-                                                        log::warn!("failed to send Unsubscribe for {} terminals: {}", diff.removed_terminals.len(), e);
-                                                    }
+                                                        })
+                                                        .await
+                                                {
+                                                    log::warn!(
+                                                        "failed to send Unsubscribe for {} terminals: {}",
+                                                        diff.removed_terminals.len(),
+                                                        e
+                                                    );
+                                                }
 
                                                 cached_state = new_state.clone();
 
@@ -1288,10 +1315,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                     // Keep-alive response, ignore
                                 }
                                 "dropped" => {
-                                    let count = value
-                                        .get("count")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
+                                    let count =
+                                        value.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                                     log::warn!(
                                         "Server dropped {} messages for {}:{}",
                                         count,
@@ -1301,10 +1326,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                     let _ = event_tx_clone
                                         .send(ConnectionEvent::ServerWarning {
                                             connection_id: config_id.clone(),
-                                            message: format!(
-                                                "Server dropped {} messages",
-                                                count
-                                            ),
+                                            message: format!("Server dropped {} messages", count),
                                         })
                                         .await;
                                 }
@@ -1334,39 +1356,51 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             .and_then(|v| v.as_bool())
                                             .unwrap_or(false);
                                         let prefixed = make_prefixed_id(&config_id, terminal_id);
-                                        handler_clone.resize_terminal(&prefixed, cols as u16, rows as u16, server_owns);
+                                        handler_clone.resize_terminal(
+                                            &prefixed,
+                                            cols as u16,
+                                            rows as u16,
+                                            server_owns,
+                                        );
                                     }
                                 }
                                 "git_status_changed" => {
                                     if let Some(projects) = value.get("projects")
                                         && let Ok(statuses) = serde_json::from_value::<
                                             HashMap<String, okena_core::api::ApiGitStatus>,
-                                        >(projects.clone()) {
-                                            let _ = event_tx_clone
-                                                .send(ConnectionEvent::GitStatusChanged {
-                                                    connection_id: config_id.clone(),
-                                                    statuses,
-                                                })
-                                                .await;
-                                        }
+                                        >(
+                                            projects.clone()
+                                        )
+                                    {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::GitStatusChanged {
+                                                connection_id: config_id.clone(),
+                                                statuses,
+                                            })
+                                            .await;
+                                    }
                                 }
                                 "system_stats_changed" => {
                                     if let Some(stats) = value.get("stats")
                                         && let Ok(stats) = serde_json::from_value::<
                                             okena_core::api::ApiSystemStats,
-                                        >(stats.clone()) {
-                                            let _ = event_tx_clone
-                                                .send(ConnectionEvent::SystemStatsChanged {
-                                                    connection_id: config_id.clone(),
-                                                    stats,
-                                                })
-                                                .await;
-                                        }
+                                        >(
+                                            stats.clone()
+                                        )
+                                    {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::SystemStatsChanged {
+                                                connection_id: config_id.clone(),
+                                                stats,
+                                            })
+                                            .await;
+                                    }
                                 }
                                 "terminal_focus_requested" => {
                                     match serde_json::from_value::<
                                         okena_core::api::ApiTerminalFocusRequest,
-                                    >(value.clone()) {
+                                    >(value.clone())
+                                    {
                                         Ok(request) => {
                                             let _ = event_tx_clone
                                                 .send(ConnectionEvent::TerminalFocusRequested {
@@ -1376,7 +1410,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 .await;
                                         }
                                         Err(e) => {
-                                            log::warn!("Failed to parse terminal focus request: {}", e);
+                                            log::warn!(
+                                                "Failed to parse terminal focus request: {}",
+                                                e
+                                            );
                                         }
                                     }
                                 }
@@ -1571,14 +1608,7 @@ mod tests {
 
         fn remove_terminal(&self, _prefixed_id: &str) {}
 
-        fn resize_terminal(
-            &self,
-            _prefixed_id: &str,
-            _cols: u16,
-            _rows: u16,
-            _server_owns: bool,
-        ) {
-        }
+        fn resize_terminal(&self, _prefixed_id: &str, _cols: u16, _rows: u16, _server_owns: bool) {}
 
         fn remove_all_terminals(&self, _connection_id: &str) {
             self.remove_all_calls.fetch_add(1, Ordering::Relaxed);

@@ -131,9 +131,15 @@ impl WorkspaceData {
     /// Mirrors the inverse helper `delete_project_scrub_all_windows`,
     /// which removes the id from every window's per-project storage on
     /// project-delete so no orphan entries survive.
-    pub fn add_project_hide_in_other_windows(&mut self, project_id: &str, spawning_window: WindowId) {
+    pub fn add_project_hide_in_other_windows(
+        &mut self,
+        project_id: &str,
+        spawning_window: WindowId,
+    ) {
         if spawning_window != WindowId::Main {
-            self.main_window.hidden_project_ids.insert(project_id.to_string());
+            self.main_window
+                .hidden_project_ids
+                .insert(project_id.to_string());
         }
         for extra in &mut self.extra_windows {
             if spawning_window != WindowId::Extra(extra.id) {
@@ -149,7 +155,9 @@ impl WorkspaceData {
     /// window that should see the project by default; every open viewport must
     /// start hidden.
     pub fn hide_project_in_all_windows(&mut self, project_id: &str) {
-        self.main_window.hidden_project_ids.insert(project_id.to_string());
+        self.main_window
+            .hidden_project_ids
+            .insert(project_id.to_string());
         for extra in &mut self.extra_windows {
             extra.hidden_project_ids.insert(project_id.to_string());
         }
@@ -293,9 +301,7 @@ impl WorkspaceData {
         let valid_folders: std::collections::HashSet<String> =
             self.folders.iter().map(|f| f.id.clone()).collect();
 
-        for window in
-            std::iter::once(&mut self.main_window).chain(self.extra_windows.iter_mut())
-        {
+        for window in std::iter::once(&mut self.main_window).chain(self.extra_windows.iter_mut()) {
             window
                 .hidden_project_ids
                 .retain(|id| valid_projects.contains(id));

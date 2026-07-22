@@ -18,11 +18,7 @@ use gpui::*;
 ///     .child(color_dot(0x4EC9B0, false))
 ///     .child(div().child("My Project"))
 /// ```
-pub fn list_row(
-    id: impl Into<ElementId>,
-    left_padding: f32,
-    t: &ThemeColors,
-) -> Stateful<Div> {
+pub fn list_row(id: impl Into<ElementId>, left_padding: f32, t: &ThemeColors) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(24.0))

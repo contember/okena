@@ -20,7 +20,7 @@ mod graph;
 mod lane_layout;
 
 pub use branch_status::{
-    render_branch_status, BoundsCallback, BranchStatusCallbacks, ClickCallback, ClickHandler,
+    BoundsCallback, BranchStatusCallbacks, ClickCallback, ClickHandler, render_branch_status,
 };
 pub use commit_log::render_commit_log_content;
 pub use diff_tree::render_diff_file_list_interactive;
@@ -224,6 +224,11 @@ pub fn render_diff_stats_badge(lines_added: usize, lines_removed: usize, t: &The
             d.child(render_sign_count("+", lines_added, t.term_green, 0.7))
         })
         .when(lines_removed > 0, |d| {
-            d.child(render_sign_count("\u{2212}", lines_removed, t.term_red, 0.7))
+            d.child(render_sign_count(
+                "\u{2212}",
+                lines_removed,
+                t.term_red,
+                0.7,
+            ))
         })
 }

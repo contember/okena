@@ -16,15 +16,15 @@ mod session;
 mod tab;
 mod terminal;
 
-use okena_core::api::{ActionRequest, CommandResult};
+use crate::workspace::focus::FocusManager;
+use crate::workspace::hooks;
 use crate::workspace::persistence::AppSettings;
+use crate::workspace::state::{LayoutNode, WindowId, Workspace};
+use okena_core::api::{ActionRequest, CommandResult};
+use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_terminal::TerminalsRegistry;
-use crate::workspace::focus::FocusManager;
-use crate::workspace::hooks;
-use crate::workspace::state::{LayoutNode, WindowId, Workspace};
 use okena_workspace::context::WorkspaceCx;
 use std::sync::Arc;
 
@@ -65,19 +65,59 @@ pub fn execute_action(
 ) -> ActionResult {
     match action {
         // ── Terminal ops ─────────────────────────────────────────────
-        ActionRequest::CreateTerminal { project_id } => {
-            terminal::create(ws, focus_manager, project_id, backend, terminals, settings, cx)
-        }
-        ActionRequest::SplitTerminal { project_id, path, direction } => {
-            terminal::split(ws, focus_manager, project_id, path, direction, backend, terminals, settings, cx)
-        }
-        ActionRequest::CloseTerminal { project_id, terminal_id } => {
-            terminal::close(ws, focus_manager, project_id, terminal_id, backend, terminals, cx)
-        }
-        ActionRequest::CloseTerminals { project_id, terminal_ids } => {
-            terminal::close_many(ws, focus_manager, project_id, terminal_ids, backend, terminals, cx)
-        }
-        ActionRequest::FocusTerminal { project_id, terminal_id, window: _ } => {
+        ActionRequest::CreateTerminal { project_id } => terminal::create(
+            ws,
+            focus_manager,
+            project_id,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::SplitTerminal {
+            project_id,
+            path,
+            direction,
+        } => terminal::split(
+            ws,
+            focus_manager,
+            project_id,
+            path,
+            direction,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::CloseTerminal {
+            project_id,
+            terminal_id,
+        } => terminal::close(
+            ws,
+            focus_manager,
+            project_id,
+            terminal_id,
+            backend,
+            terminals,
+            cx,
+        ),
+        ActionRequest::CloseTerminals {
+            project_id,
+            terminal_ids,
+        } => terminal::close_many(
+            ws,
+            focus_manager,
+            project_id,
+            terminal_ids,
+            backend,
+            terminals,
+            cx,
+        ),
+        ActionRequest::FocusTerminal {
+            project_id,
+            terminal_id,
+            window: _,
+        } => {
             // `window` was already consumed at the bridge to resolve the target
             // `window_id` (passed in above); the per-window FocusManager handed
             // to `execute_action` is already the right one.
@@ -97,39 +137,74 @@ pub fn execute_action(
         ActionRequest::SendBytes { terminal_id, data } => {
             terminal::send_bytes(ws, terminal_id, data, backend, terminals)
         }
-        ActionRequest::RunCommand { terminal_id, command } => {
-            terminal::run_command(ws, terminal_id, command, backend, terminals)
-        }
+        ActionRequest::RunCommand {
+            terminal_id,
+            command,
+        } => terminal::run_command(ws, terminal_id, command, backend, terminals),
         ActionRequest::SendSpecialKey { terminal_id, key } => {
             terminal::send_special_key(ws, terminal_id, key, backend, terminals)
         }
-        ActionRequest::Resize { terminal_id, cols, rows } => {
-            terminal::resize(ws, terminal_id, cols, rows, backend, terminals)
-        }
-        ActionRequest::UpdateSplitSizes { project_id, path, sizes } => {
-            terminal::update_split_sizes(ws, project_id, path, sizes, cx)
-        }
-        ActionRequest::ToggleMinimized { project_id, terminal_id } => {
-            terminal::toggle_minimized(ws, project_id, terminal_id, cx)
-        }
-        ActionRequest::SetFullscreen { project_id, terminal_id, window: _ } => {
-            terminal::set_fullscreen(ws, focus_manager, project_id, terminal_id, cx)
-        }
-        ActionRequest::RenameTerminal { project_id, terminal_id, name } => {
-            terminal::rename(ws, project_id, terminal_id, name, cx)
-        }
-        ActionRequest::SwitchTerminalShell { project_id, terminal_id, shell } => {
-            terminal::switch_shell(ws, project_id, terminal_id, shell, backend, terminals, settings, cx)
-        }
-        ActionRequest::AddDiscoveredWorktree { parent_project_id, worktree_path, branch } => {
-            project::add_discovered_worktree(ws, window_id, parent_project_id, worktree_path, branch, backend, terminals, settings, cx)
-        }
-        ActionRequest::RerunHook { project_id, terminal_id } => {
-            project::rerun_hook(ws, project_id, terminal_id, backend, terminals, cx)
-        }
-        ActionRequest::DismissHook { project_id, terminal_id } => {
-            project::dismiss_hook(ws, project_id, terminal_id, backend, terminals, cx)
-        }
+        ActionRequest::Resize {
+            terminal_id,
+            cols,
+            rows,
+        } => terminal::resize(ws, terminal_id, cols, rows, backend, terminals),
+        ActionRequest::UpdateSplitSizes {
+            project_id,
+            path,
+            sizes,
+        } => terminal::update_split_sizes(ws, project_id, path, sizes, cx),
+        ActionRequest::ToggleMinimized {
+            project_id,
+            terminal_id,
+        } => terminal::toggle_minimized(ws, project_id, terminal_id, cx),
+        ActionRequest::SetFullscreen {
+            project_id,
+            terminal_id,
+            window: _,
+        } => terminal::set_fullscreen(ws, focus_manager, project_id, terminal_id, cx),
+        ActionRequest::RenameTerminal {
+            project_id,
+            terminal_id,
+            name,
+        } => terminal::rename(ws, project_id, terminal_id, name, cx),
+        ActionRequest::SwitchTerminalShell {
+            project_id,
+            terminal_id,
+            shell,
+        } => terminal::switch_shell(
+            ws,
+            project_id,
+            terminal_id,
+            shell,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::AddDiscoveredWorktree {
+            parent_project_id,
+            worktree_path,
+            branch,
+        } => project::add_discovered_worktree(
+            ws,
+            window_id,
+            parent_project_id,
+            worktree_path,
+            branch,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::RerunHook {
+            project_id,
+            terminal_id,
+        } => project::rerun_hook(ws, project_id, terminal_id, backend, terminals, cx),
+        ActionRequest::DismissHook {
+            project_id,
+            terminal_id,
+        } => project::dismiss_hook(ws, project_id, terminal_id, backend, terminals, cx),
         ActionRequest::ReadContent { terminal_id } => {
             terminal::read_content(ws, terminal_id, backend, terminals)
         }
@@ -138,106 +213,194 @@ pub fn execute_action(
         }
 
         // ── Tab / pane-move ops ──────────────────────────────────────
-        ActionRequest::AddTab { project_id, path, in_group } => {
-            tab::add_tab(ws, focus_manager, project_id, path, in_group, backend, terminals, settings, cx)
-        }
-        ActionRequest::SetActiveTab { project_id, path, index } => {
-            tab::set_active_tab(ws, project_id, path, index, cx)
-        }
-        ActionRequest::MoveTab { project_id, path, from_index, to_index } => {
-            tab::move_tab(ws, project_id, path, from_index, to_index, cx)
-        }
-        ActionRequest::MoveTerminalToTabGroup { project_id, terminal_id, target_path, position, target_project_id } => {
-            tab::move_terminal_to_tab_group(ws, focus_manager, project_id, terminal_id, target_path, position, target_project_id, cx)
-        }
-        ActionRequest::MovePaneTo { project_id, terminal_id, target_project_id, target_terminal_id, zone } => {
-            tab::move_pane_to(ws, focus_manager, project_id, terminal_id, target_project_id, target_terminal_id, zone, cx)
-        }
+        ActionRequest::AddTab {
+            project_id,
+            path,
+            in_group,
+        } => tab::add_tab(
+            ws,
+            focus_manager,
+            project_id,
+            path,
+            in_group,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::SetActiveTab {
+            project_id,
+            path,
+            index,
+        } => tab::set_active_tab(ws, project_id, path, index, cx),
+        ActionRequest::MoveTab {
+            project_id,
+            path,
+            from_index,
+            to_index,
+        } => tab::move_tab(ws, project_id, path, from_index, to_index, cx),
+        ActionRequest::MoveTerminalToTabGroup {
+            project_id,
+            terminal_id,
+            target_path,
+            position,
+            target_project_id,
+        } => tab::move_terminal_to_tab_group(
+            ws,
+            focus_manager,
+            project_id,
+            terminal_id,
+            target_path,
+            position,
+            target_project_id,
+            cx,
+        ),
+        ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+        } => tab::move_pane_to(
+            ws,
+            focus_manager,
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+            cx,
+        ),
 
         // ── Git ops ──────────────────────────────────────────────────
         ActionRequest::GitStatus { project_id } => git::status(ws, project_id),
         ActionRequest::GitDiffSummary { project_id } => git::diff_summary(ws, project_id),
-        ActionRequest::GitDiff { project_id, mode, ignore_whitespace } => {
-            git::diff(ws, project_id, mode, ignore_whitespace)
-        }
+        ActionRequest::GitDiff {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => git::diff(ws, project_id, mode, ignore_whitespace),
         ActionRequest::GitBranches { project_id } => git::branches(ws, project_id),
         ActionRequest::GitListPullRequests { project_id, limit } => {
             git::list_pull_requests(ws, project_id, limit)
         }
-        ActionRequest::GitFileContents { project_id, file_path, mode } => {
-            git::file_contents(ws, project_id, file_path, mode)
-        }
-        ActionRequest::GitCommitGraph { project_id, count, branch } => {
-            git::commit_graph(ws, project_id, count, branch)
-        }
+        ActionRequest::GitFileContents {
+            project_id,
+            file_path,
+            mode,
+        } => git::file_contents(ws, project_id, file_path, mode),
+        ActionRequest::GitCommitGraph {
+            project_id,
+            count,
+            branch,
+        } => git::commit_graph(ws, project_id, count, branch),
         ActionRequest::GitListBranches { project_id } => git::list_branches(ws, project_id),
         ActionRequest::GitListWorktrees { project_id } => git::list_worktrees(ws, project_id),
         ActionRequest::WorktreeCloseInfo { project_id } => git::worktree_close_info(ws, project_id),
-        ActionRequest::GenerateWorktreeBranchName { project_id } => git::generate_worktree_branch_name(ws, project_id),
+        ActionRequest::GenerateWorktreeBranchName { project_id } => {
+            git::generate_worktree_branch_name(ws, project_id)
+        }
         ActionRequest::GitListBranchesClassified { project_id } => {
             git::list_branches_classified(ws, project_id)
         }
         ActionRequest::GitCheckoutLocalBranch { project_id, branch } => {
             git::checkout_local_branch(ws, project_id, branch)
         }
-        ActionRequest::GitCheckoutRemoteBranch { project_id, remote_branch } => {
-            git::checkout_remote_branch(ws, project_id, remote_branch)
-        }
-        ActionRequest::GitCreateAndCheckoutBranch { project_id, new_name, start_point } => {
-            git::create_and_checkout_branch(ws, project_id, new_name, start_point)
-        }
-        ActionRequest::GitStageFile { project_id, file_path } => {
-            git::stage_file(ws, project_id, file_path)
-        }
-        ActionRequest::GitUnstageFile { project_id, file_path } => {
-            git::unstage_file(ws, project_id, file_path)
-        }
-        ActionRequest::GitDiscardFile { project_id, file_path } => {
-            git::discard_file(ws, project_id, file_path)
-        }
-        ActionRequest::GitBlame { project_id, relative_path } => {
-            git::blame(ws, project_id, relative_path)
-        }
+        ActionRequest::GitCheckoutRemoteBranch {
+            project_id,
+            remote_branch,
+        } => git::checkout_remote_branch(ws, project_id, remote_branch),
+        ActionRequest::GitCreateAndCheckoutBranch {
+            project_id,
+            new_name,
+            start_point,
+        } => git::create_and_checkout_branch(ws, project_id, new_name, start_point),
+        ActionRequest::GitStageFile {
+            project_id,
+            file_path,
+        } => git::stage_file(ws, project_id, file_path),
+        ActionRequest::GitUnstageFile {
+            project_id,
+            file_path,
+        } => git::unstage_file(ws, project_id, file_path),
+        ActionRequest::GitDiscardFile {
+            project_id,
+            file_path,
+        } => git::discard_file(ws, project_id, file_path),
+        ActionRequest::GitBlame {
+            project_id,
+            relative_path,
+        } => git::blame(ws, project_id, relative_path),
 
         // ── Filesystem ops ───────────────────────────────────────────
-        ActionRequest::ListFiles { project_id, show_ignored } => {
-            files::list_files(ws, project_id, show_ignored)
-        }
-        ActionRequest::ListDirectory { project_id, relative_path, show_ignored } => {
-            files::list_directory(ws, project_id, relative_path, show_ignored)
-        }
-        ActionRequest::ReadFile { project_id, relative_path } => {
-            files::read_file(ws, project_id, relative_path)
-        }
-        ActionRequest::ReadFileBytes { project_id, relative_path } => {
-            files::read_file_bytes(ws, project_id, relative_path)
-        }
-        ActionRequest::FileSize { project_id, relative_path } => {
-            files::file_size(ws, project_id, relative_path)
-        }
-        ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines, show_ignored } => {
-            files::search_content(ws, project_id, query, case_sensitive, mode, max_results, file_glob, context_lines, show_ignored)
-        }
-        ActionRequest::RenameFile { project_id, relative_path, new_name } => {
-            files::rename_file(ws, project_id, relative_path, new_name)
-        }
-        ActionRequest::DeleteFile { project_id, relative_path } => {
-            files::delete_file(ws, project_id, relative_path)
-        }
-        ActionRequest::CreateFile { project_id, relative_path } => {
-            files::create_file(ws, project_id, relative_path)
-        }
-        ActionRequest::CreateDirectory { project_id, relative_path } => {
-            files::create_directory(ws, project_id, relative_path)
-        }
+        ActionRequest::ListFiles {
+            project_id,
+            show_ignored,
+        } => files::list_files(ws, project_id, show_ignored),
+        ActionRequest::ListDirectory {
+            project_id,
+            relative_path,
+            show_ignored,
+        } => files::list_directory(ws, project_id, relative_path, show_ignored),
+        ActionRequest::ReadFile {
+            project_id,
+            relative_path,
+        } => files::read_file(ws, project_id, relative_path),
+        ActionRequest::ReadFileBytes {
+            project_id,
+            relative_path,
+        } => files::read_file_bytes(ws, project_id, relative_path),
+        ActionRequest::FileSize {
+            project_id,
+            relative_path,
+        } => files::file_size(ws, project_id, relative_path),
+        ActionRequest::SearchContent {
+            project_id,
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        } => files::search_content(
+            ws,
+            project_id,
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        ),
+        ActionRequest::RenameFile {
+            project_id,
+            relative_path,
+            new_name,
+        } => files::rename_file(ws, project_id, relative_path, new_name),
+        ActionRequest::DeleteFile {
+            project_id,
+            relative_path,
+        } => files::delete_file(ws, project_id, relative_path),
+        ActionRequest::CreateFile {
+            project_id,
+            relative_path,
+        } => files::create_file(ws, project_id, relative_path),
+        ActionRequest::CreateDirectory {
+            project_id,
+            relative_path,
+        } => files::create_directory(ws, project_id, relative_path),
 
         // ── Project / folder / worktree ops ──────────────────────────
         ActionRequest::AddProject { name, path } => {
             project::add_project(ws, window_id, name, path, backend, terminals, settings, cx)
         }
-        ActionRequest::ReorderProjectInFolder { folder_id, project_id, new_index } => {
-            project::reorder_in_folder(ws, folder_id, project_id, new_index, cx)
-        }
+        ActionRequest::ReorderProjectInFolder {
+            folder_id,
+            project_id,
+            new_index,
+        } => project::reorder_in_folder(ws, folder_id, project_id, new_index, cx),
         ActionRequest::SetProjectColor { project_id, color } => {
             project::set_project_color(ws, project_id, color, cx)
         }
@@ -250,50 +413,87 @@ pub fn execute_action(
         ActionRequest::UpdateProjectHooks { project_id, hooks } => {
             project::update_project_hooks(ws, project_id, *hooks, cx)
         }
-        ActionRequest::RenameProjectDirectory { project_id, new_name } => {
-            project::rename_project_directory(ws, project_id, new_name, cx)
-        }
+        ActionRequest::RenameProjectDirectory {
+            project_id,
+            new_name,
+        } => project::rename_project_directory(ws, project_id, new_name, cx),
         ActionRequest::DeleteProject { project_id } => {
             project::delete_project(ws, focus_manager, project_id, settings, cx)
         }
-        ActionRequest::SetProjectShowInOverview { project_id, show, window: _ } => {
-            project::set_show_in_overview(ws, focus_manager, window_id, project_id, show, cx)
-        }
+        ActionRequest::SetProjectShowInOverview {
+            project_id,
+            show,
+            window: _,
+        } => project::set_show_in_overview(ws, focus_manager, window_id, project_id, show, cx),
         ActionRequest::RemoveWorktreeProject { project_id, force } => {
             project::remove_worktree_project(ws, focus_manager, project_id, force, settings, cx)
         }
-        ActionRequest::CloseWorktree { project_id, merge, stash, fetch, push, delete_branch } => {
-            project::close_worktree(ws, focus_manager, project_id, merge, stash, fetch, push, delete_branch, settings, cx)
-        }
+        ActionRequest::CloseWorktree {
+            project_id,
+            merge,
+            stash,
+            fetch,
+            push,
+            delete_branch,
+        } => project::close_worktree(
+            ws,
+            focus_manager,
+            project_id,
+            merge,
+            stash,
+            fetch,
+            push,
+            delete_branch,
+            settings,
+            cx,
+        ),
         ActionRequest::CreateFolder { name } => project::create_folder(ws, name, cx),
         ActionRequest::DeleteFolder { folder_id } => project::delete_folder(ws, folder_id, cx),
         ActionRequest::RenameFolder { folder_id, name } => {
             project::rename_folder(ws, folder_id, name, cx)
         }
-        ActionRequest::MoveProjectToFolder { project_id, folder_id, position } => {
-            project::move_to_folder(ws, project_id, folder_id, position, cx)
-        }
-        ActionRequest::MoveProjectOutOfFolder { project_id, top_level_index } => {
-            project::move_out_of_folder(ws, project_id, top_level_index, cx)
-        }
-        ActionRequest::MoveProject { project_id, new_index } => {
-            project::move_project(ws, project_id, new_index, cx)
-        }
+        ActionRequest::MoveProjectToFolder {
+            project_id,
+            folder_id,
+            position,
+        } => project::move_to_folder(ws, project_id, folder_id, position, cx),
+        ActionRequest::MoveProjectOutOfFolder {
+            project_id,
+            top_level_index,
+        } => project::move_out_of_folder(ws, project_id, top_level_index, cx),
+        ActionRequest::MoveProject {
+            project_id,
+            new_index,
+        } => project::move_project(ws, project_id, new_index, cx),
         ActionRequest::MoveItemInOrder { item_id, new_index } => {
             project::move_item_in_order(ws, item_id, new_index, cx)
         }
         ActionRequest::ToggleProjectPinned { project_id } => {
             project::toggle_project_pinned(ws, project_id, cx)
         }
-        ActionRequest::ReorderWorktree { parent_id, worktree_id, new_index } => {
-            project::reorder_worktree(ws, parent_id, worktree_id, new_index, cx)
-        }
+        ActionRequest::ReorderWorktree {
+            parent_id,
+            worktree_id,
+            new_index,
+        } => project::reorder_worktree(ws, parent_id, worktree_id, new_index, cx),
         ActionRequest::SetWorktreeColorOverride { project_id, color } => {
             project::set_worktree_color_override(ws, project_id, color, cx)
         }
-        ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
-            project::create_worktree(ws, window_id, project_id, branch, create_branch, backend, terminals, settings, cx)
-        }
+        ActionRequest::CreateWorktree {
+            project_id,
+            branch,
+            create_branch,
+        } => project::create_worktree(
+            ws,
+            window_id,
+            project_id,
+            branch,
+            create_branch,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
 
         // ── Sessions (whole-workspace; daemon owns session files + state) ──
         ActionRequest::ListSessions => session::list_sessions_action(),
@@ -305,16 +505,23 @@ pub fn execute_action(
             session::rename_session_action(old_name, new_name)
         }
         ActionRequest::DeleteSession { name } => session::delete_session_action(name),
-        ActionRequest::ImportWorkspace { path } => {
-            session::import_workspace_action(ws, focus_manager, path, backend, terminals, settings, cx)
-        }
+        ActionRequest::ImportWorkspace { path } => session::import_workspace_action(
+            ws,
+            focus_manager,
+            path,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
         ActionRequest::ExportWorkspace { path } => session::export_workspace_action(ws, path),
 
         // Soft-close undo / finalize are handled by the daemon command loop
         // directly (it owns the grace deadlines + kept-alive PTYs).
-        ActionRequest::UndoSoftClose { .. }
-        | ActionRequest::CloseTerminalNow { .. } => {
-            ActionResult::Err("soft-close undo/finalize must be handled by the daemon command loop".to_string())
+        ActionRequest::UndoSoftClose { .. } | ActionRequest::CloseTerminalNow { .. } => {
+            ActionResult::Err(
+                "soft-close undo/finalize must be handled by the daemon command loop".to_string(),
+            )
         }
 
         // Service actions are handled by the remote command loop directly
@@ -361,10 +568,11 @@ pub fn ensure_terminal(
     let mut cwd = None;
     for project in &ws.data().projects {
         if let Some(layout) = &project.layout
-            && layout.find_terminal_path(terminal_id).is_some() {
-                cwd = Some(project.path.clone());
-                break;
-            }
+            && layout.find_terminal_path(terminal_id).is_some()
+        {
+            cwd = Some(project.path.clone());
+            break;
+        }
     }
     let cwd = cwd?;
 
@@ -410,7 +618,10 @@ pub(super) fn inherited_cwd(
     let layout = ws.project(project_id)?.layout.as_ref()?;
     let node = layout.get_at_path(path)?;
     let rel = node.find_visible_terminal_path();
-    let LayoutNode::Terminal { terminal_id: Some(terminal_id), .. } = node.get_at_path(&rel)?
+    let LayoutNode::Terminal {
+        terminal_id: Some(terminal_id),
+        ..
+    } = node.get_at_path(&rel)?
     else {
         return None;
     };
@@ -447,7 +658,9 @@ pub fn spawn_uninitialized_terminals(
     let project_name = project.name.clone();
     let project_hooks = project.hooks.clone();
     let is_worktree = project.worktree_info.is_some();
-    let parent_hooks = project.worktree_info.as_ref()
+    let parent_hooks = project
+        .worktree_info
+        .as_ref()
         .and_then(|wt| ws.project(&wt.parent_project_id))
         .map(|p| p.hooks.clone());
     let project_default_shell = project.default_shell.clone();
@@ -455,18 +668,34 @@ pub fn spawn_uninitialized_terminals(
     if let Some(layout) = &project.layout {
         collect_uninitialized_terminals_with_shell(layout, vec![], &mut uninitialized);
     }
-    log::info!("spawn_uninitialized_terminals: project={}, uninitialized_count={}", project_id, uninitialized.len());
+    log::info!(
+        "spawn_uninitialized_terminals: project={}, uninitialized_count={}",
+        project_id,
+        uninitialized.len()
+    );
 
     let global_default = settings.default_shell.clone();
     let global_hooks = settings.hooks.clone();
 
     // Resolve shell_wrapper and on_create once for all terminals in this project
-    let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
-    let on_create_cmd = hooks::resolve_terminal_on_create_simple(&project_hooks, parent_hooks.as_ref(), &global_hooks);
+    let shell_wrapper =
+        hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
+    let on_create_cmd = hooks::resolve_terminal_on_create_simple(
+        &project_hooks,
+        parent_hooks.as_ref(),
+        &global_hooks,
+    );
     let folder = ws.folder_for_project_or_parent(project_id);
     let folder_id = folder.map(|f| f.id.as_str());
     let folder_name = folder.map(|f| f.name.as_str());
-    let env = hooks::terminal_hook_env(project_id, &project_name, &project_path, is_worktree, folder_id, folder_name);
+    let env = hooks::terminal_hook_env(
+        project_id,
+        &project_name,
+        &project_path,
+        is_worktree,
+        folder_id,
+        folder_name,
+    );
 
     let mut spawned_ids = Vec::new();
     for (path, shell_type) in uninitialized {
@@ -501,11 +730,7 @@ pub fn spawn_uninitialized_terminals(
                 spawned_ids.push(terminal_id);
             }
             Err(e) => {
-                log::error!(
-                    "Failed to spawn terminal for project {}: {}",
-                    project_id,
-                    e
-                );
+                log::error!("Failed to spawn terminal for project {}: {}", project_id, e);
                 return ActionResult::Err(format!("failed to spawn terminal: {}", e));
             }
         }
@@ -539,7 +764,10 @@ pub fn find_terminal_path(
 
 /// Canonicalize a relative path within a project directory and verify it doesn't
 /// escape the project root (path traversal protection).
-fn resolve_project_file(project_path: &str, relative_path: &str) -> Result<std::path::PathBuf, String> {
+fn resolve_project_file(
+    project_path: &str,
+    relative_path: &str,
+) -> Result<std::path::PathBuf, String> {
     let full_path = std::path::Path::new(project_path).join(relative_path);
     let canonical = full_path
         .canonicalize()
@@ -556,7 +784,10 @@ fn resolve_project_file(project_path: &str, relative_path: &str) -> Result<std::
 /// Resolve a new (possibly non-existent) target path inside a project. The parent
 /// must exist and canonicalize inside the project root. The leaf filename is then
 /// joined back on — so the target itself does not need to exist yet.
-fn resolve_new_project_file(project_path: &str, relative_path: &str) -> Result<std::path::PathBuf, String> {
+fn resolve_new_project_file(
+    project_path: &str,
+    relative_path: &str,
+) -> Result<std::path::PathBuf, String> {
     if relative_path.is_empty() {
         return Err("relative_path must not be empty".to_string());
     }

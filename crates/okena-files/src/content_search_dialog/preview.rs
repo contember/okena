@@ -41,7 +41,8 @@ impl ContentSearchDialog {
     pub(super) fn close_preview_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.preview_search = None;
         self.preview_search_sig = None;
-        self.search_input.update(cx, |input, cx| input.focus(window, cx));
+        self.search_input
+            .update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -80,7 +81,10 @@ impl ContentSearchDialog {
     }
 
     /// Render the file preview panel showing the selected match's file.
-    pub(super) fn render_preview_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn render_preview_panel(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let t = theme(cx);
 
         // Get the currently selected match info
@@ -135,7 +139,11 @@ impl ContentSearchDialog {
                 );
         }
 
-        let lines = self.highlight_cache.get(&file_path).cloned().unwrap_or_default();
+        let lines = self
+            .highlight_cache
+            .get(&file_path)
+            .cloned()
+            .unwrap_or_default();
         let line_count = lines.len();
         let match_bg = search_match_bg(t.search_match_bg);
         let current_match_bg = Hsla::from(Rgba {
@@ -150,7 +158,11 @@ impl ContentSearchDialog {
         let search_inputs = self.preview_search.as_ref().map(|search| {
             let query = search.input.read(cx).value().to_string();
             let case = search.case_sensitive();
-            ((file_path.clone(), line_count, query.clone(), case), query, case)
+            (
+                (file_path.clone(), line_count, query.clone(), case),
+                query,
+                case,
+            )
         });
         if let Some((sig, query, case)) = search_inputs
             && self.preview_search_sig.as_ref() != Some(&sig)
@@ -238,142 +250,157 @@ impl ContentSearchDialog {
             .children(preview_search_bar)
             // File content
             .child(
-                uniform_list(
-                    "preview-lines",
-                    line_count,
-                    move |range, _window, cx| {
-                        view.update(cx, |this, cx| {
-                            let t = theme(cx);
-                            range
-                                .map(|line_idx| {
-                                    let line_number = line_idx + 1;
-                                    let line_num_str = format!("{:>4}", line_number);
+                uniform_list("preview-lines", line_count, move |range, _window, cx| {
+                    view.update(cx, |this, cx| {
+                        let t = theme(cx);
+                        range
+                            .map(|line_idx| {
+                                let line_number = line_idx + 1;
+                                let line_num_str = format!("{:>4}", line_number);
 
-                                    // Check if this line has matches
-                                    let line_match = all_matches_in_file
-                                        .iter()
-                                        .find(|(ln, _)| *ln == line_number);
+                                // Check if this line has matches
+                                let line_match = all_matches_in_file
+                                    .iter()
+                                    .find(|(ln, _)| *ln == line_number);
 
-                                    let is_current_match = line_number == match_line;
+                                let is_current_match = line_number == match_line;
 
-                                    // Combine match highlights with selection highlights
-                                    let line_len = lines.get(line_idx).map_or(0, |hl| hl.plain_text.len());
-                                    let sel_bg_ranges = selection_bg_ranges(&this.preview_selection, line_idx, line_len);
+                                // Combine match highlights with selection highlights
+                                let line_len =
+                                    lines.get(line_idx).map_or(0, |hl| hl.plain_text.len());
+                                let sel_bg_ranges = selection_bg_ranges(
+                                    &this.preview_selection,
+                                    line_idx,
+                                    line_len,
+                                );
 
-                                    let styled_text = if let Some(hl) =
-                                        lines.get(line_idx)
-                                    {
-                                        let mut bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> = Vec::new();
-                                        if let Some((_, ranges)) = line_match {
-                                            let bg = if is_current_match {
-                                                current_match_bg
-                                            } else {
-                                                match_bg
-                                            };
-                                            bg_ranges.extend(
-                                                ranges
-                                                    .iter()
-                                                    .filter(|r| r.end <= hl.plain_text.len())
-                                                    .map(|r| (r.clone(), bg)),
-                                            );
-                                        }
-                                        bg_ranges.extend(sel_bg_ranges);
-                                        if let Some(search) = this.preview_search.as_ref() {
-                                            bg_ranges.extend(search.ranges_for_cell(line_idx, &t));
-                                        }
-                                        build_styled_text_with_backgrounds(
-                                            &hl.spans, &bg_ranges,
-                                        )
-                                    } else {
-                                        StyledText::new(String::new())
-                                    };
+                                let styled_text = if let Some(hl) = lines.get(line_idx) {
+                                    let mut bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> =
+                                        Vec::new();
+                                    if let Some((_, ranges)) = line_match {
+                                        let bg = if is_current_match {
+                                            current_match_bg
+                                        } else {
+                                            match_bg
+                                        };
+                                        bg_ranges.extend(
+                                            ranges
+                                                .iter()
+                                                .filter(|r| r.end <= hl.plain_text.len())
+                                                .map(|r| (r.clone(), bg)),
+                                        );
+                                    }
+                                    bg_ranges.extend(sel_bg_ranges);
+                                    if let Some(search) = this.preview_search.as_ref() {
+                                        bg_ranges.extend(search.ranges_for_cell(line_idx, &t));
+                                    }
+                                    build_styled_text_with_backgrounds(&hl.spans, &bg_ranges)
+                                } else {
+                                    StyledText::new(String::new())
+                                };
 
-                                    let text_layout = styled_text.layout().clone();
-                                    let plain_text = lines.get(line_idx).map(|hl| hl.plain_text.clone()).unwrap_or_default();
+                                let text_layout = styled_text.layout().clone();
+                                let plain_text = lines
+                                    .get(line_idx)
+                                    .map(|hl| hl.plain_text.clone())
+                                    .unwrap_or_default();
 
-                                    let row_bg = if is_current_match {
-                                        Some(current_match_bg)
-                                    } else if line_match.is_some() {
-                                        Some(match_bg)
-                                    } else {
-                                        None
-                                    };
+                                let row_bg = if is_current_match {
+                                    Some(current_match_bg)
+                                } else if line_match.is_some() {
+                                    Some(match_bg)
+                                } else {
+                                    None
+                                };
 
-                                    div()
-                                        .id(ElementId::Name(format!("preview-line-{}", line_idx).into()))
-                                        .flex()
-                                        .items_center()
-                                        .px(px(8.0))
-                                        .h(px(24.0))
-                                        .text_size(ui_text(13.0, cx))
-                                        .font_family("monospace")
-                                        .when_some(row_bg, |d, bg| d.bg(bg))
-                                        .on_mouse_down(MouseButton::Left, {
-                                            let text_layout = text_layout.clone();
-                                            let plain_text = plain_text.clone();
-                                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("preview-line-{}", line_idx).into(),
+                                    ))
+                                    .flex()
+                                    .items_center()
+                                    .px(px(8.0))
+                                    .h(px(24.0))
+                                    .text_size(ui_text(13.0, cx))
+                                    .font_family("monospace")
+                                    .when_some(row_bg, |d, bg| d.bg(bg))
+                                    .on_mouse_down(MouseButton::Left, {
+                                        let text_layout = text_layout.clone();
+                                        let plain_text = plain_text.clone();
+                                        cx.listener(
+                                            move |this, event: &MouseDownEvent, _window, cx| {
                                                 let col = text_layout
                                                     .index_for_position(event.position)
                                                     .unwrap_or_else(|ix| ix)
                                                     .min(line_len);
                                                 if event.click_count >= 3 {
-                                                    this.preview_selection.start = Some((line_idx, 0));
-                                                    this.preview_selection.end = Some((line_idx, line_len));
+                                                    this.preview_selection.start =
+                                                        Some((line_idx, 0));
+                                                    this.preview_selection.end =
+                                                        Some((line_idx, line_len));
                                                     this.preview_selection.finish();
                                                 } else if event.click_count == 2 {
-                                                    let (start, end) = find_word_boundaries(&plain_text, col);
-                                                    this.preview_selection.start = Some((line_idx, start));
-                                                    this.preview_selection.end = Some((line_idx, end));
+                                                    let (start, end) =
+                                                        find_word_boundaries(&plain_text, col);
+                                                    this.preview_selection.start =
+                                                        Some((line_idx, start));
+                                                    this.preview_selection.end =
+                                                        Some((line_idx, end));
                                                     this.preview_selection.finish();
                                                 } else {
-                                                    this.preview_selection.start = Some((line_idx, col));
-                                                    this.preview_selection.end = Some((line_idx, col));
+                                                    this.preview_selection.start =
+                                                        Some((line_idx, col));
+                                                    this.preview_selection.end =
+                                                        Some((line_idx, col));
                                                     this.preview_selection.is_selecting = true;
                                                 }
                                                 cx.notify();
-                                            })
-                                        })
-                                        .on_mouse_move({
-                                            let text_layout = text_layout.clone();
-                                            cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                                            },
+                                        )
+                                    })
+                                    .on_mouse_move({
+                                        let text_layout = text_layout.clone();
+                                        cx.listener(
+                                            move |this, event: &MouseMoveEvent, _window, cx| {
                                                 if this.preview_selection.is_selecting {
                                                     let col = text_layout
                                                         .index_for_position(event.position)
                                                         .unwrap_or_else(|ix| ix)
                                                         .min(line_len);
-                                                    this.preview_selection.end = Some((line_idx, col));
+                                                    this.preview_selection.end =
+                                                        Some((line_idx, col));
                                                     cx.notify();
                                                 }
-                                            })
-                                        })
-                                        .on_mouse_up(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _window, cx| {
-                                                this.preview_selection.finish();
-                                                cx.notify();
-                                            }),
+                                            },
                                         )
-                                        .child(
-                                            div()
-                                                .text_color(rgb(t.text_muted))
-                                                .min_w(px(44.0))
-                                                .flex_shrink_0()
-                                                .text_size(ui_text_ms(cx))
-                                                .child(line_num_str),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .overflow_hidden()
-                                                .text_color(rgb(t.text_primary))
-                                                .child(styled_text),
-                                        )
-                                        .into_any_element()
-                                })
-                                .collect()
-                        })
-                    },
-                )
+                                    })
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _window, cx| {
+                                            this.preview_selection.finish();
+                                            cx.notify();
+                                        }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(rgb(t.text_muted))
+                                            .min_w(px(44.0))
+                                            .flex_shrink_0()
+                                            .text_size(ui_text_ms(cx))
+                                            .child(line_num_str),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .text_color(rgb(t.text_primary))
+                                            .child(styled_text),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect()
+                    })
+                })
                 .flex_1()
                 .track_scroll(&self.preview_scroll_handle),
             )

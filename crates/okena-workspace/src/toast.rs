@@ -24,10 +24,7 @@ const MAX_VISIBLE_TOASTS: usize = 5;
 #[cfg(any(feature = "gpui", test))]
 fn trim_to_cap(queue: &mut Vec<Toast>) {
     while queue.len() > MAX_VISIBLE_TOASTS {
-        let idx = queue
-            .iter()
-            .position(|t| t.actions.is_empty())
-            .unwrap_or(0);
+        let idx = queue.iter().position(|t| t.actions.is_empty()).unwrap_or(0);
         queue.remove(idx);
     }
 }
@@ -121,11 +118,14 @@ impl ToastManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{trim_to_cap, Toast, ToastAction, ToastActionStyle, MAX_VISIBLE_TOASTS};
+    use super::{MAX_VISIBLE_TOASTS, Toast, ToastAction, ToastActionStyle, trim_to_cap};
 
     fn action_toast(msg: &str) -> Toast {
-        Toast::info(msg)
-            .with_actions(vec![ToastAction::new("undo", "Undo", ToastActionStyle::Primary)])
+        Toast::info(msg).with_actions(vec![ToastAction::new(
+            "undo",
+            "Undo",
+            ToastActionStyle::Primary,
+        )])
     }
 
     #[test]
@@ -149,6 +149,9 @@ mod tests {
             .collect();
         trim_to_cap(&mut q);
         assert_eq!(q.len(), MAX_VISIBLE_TOASTS);
-        assert_eq!(q[0].message, "a1", "oldest action toast dropped as fallback");
+        assert_eq!(
+            q[0].message, "a1",
+            "oldest action toast dropped as fallback"
+        );
     }
 }

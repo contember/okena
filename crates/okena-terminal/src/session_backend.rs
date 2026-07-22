@@ -261,20 +261,13 @@ impl ResolvedBackend {
                     shell_escape(&window_name),
                     unset_args
                 );
-                Some((
-                    "sh".to_string(),
-                    vec!["-c".to_string(), tmux_cmd],
-                ))
+                Some(("sh".to_string(), vec!["-c".to_string(), tmux_cmd]))
             }
             Self::Screen => {
                 // screen -D -R <name>
                 // -D -R: reattach if exists, create if not (and detach other attached sessions)
                 // Note: screen doesn't have a direct way to set cwd, we'll handle that separately
-                let mut args = vec![
-                    "-D".to_string(),
-                    "-R".to_string(),
-                    session_name.to_string(),
-                ];
+                let mut args = vec!["-D".to_string(), "-R".to_string(), session_name.to_string()];
                 if let Some(cmd) = command {
                     args.push(user_shell());
                     args.push("-ic".to_string());
@@ -298,9 +291,7 @@ impl ResolvedBackend {
                         let sh = user_shell();
                         format!("{} -ic {}", shell_escape(&sh), shell_escape(cmd))
                     }
-                    None => {
-                        shell_escape(&user_shell())
-                    }
+                    None => shell_escape(&user_shell()),
                 };
 
                 let parent = socket_path.parent().and_then(|p| p.to_str())?;
@@ -384,9 +375,11 @@ impl ResolvedBackend {
                 );
 
                 #[cfg(all(unix, not(target_os = "macos")))]
-                let _ = crate::process::safe_output(
-                    crate::process::command("tmux").args(["kill-session", "-t", session_name]),
-                );
+                let _ = crate::process::safe_output(crate::process::command("tmux").args([
+                    "kill-session",
+                    "-t",
+                    session_name,
+                ]));
             }
             Self::Screen => {
                 #[cfg(target_os = "macos")]
@@ -397,9 +390,12 @@ impl ResolvedBackend {
                 );
 
                 #[cfg(all(unix, not(target_os = "macos")))]
-                let _ = crate::process::safe_output(
-                    crate::process::command("screen").args(["-S", session_name, "-X", "quit"]),
-                );
+                let _ = crate::process::safe_output(crate::process::command("screen").args([
+                    "-S",
+                    session_name,
+                    "-X",
+                    "quit",
+                ]));
             }
             Self::Dtach => {
                 let socket_path = get_dtach_socket_path(session_name);
@@ -423,7 +419,11 @@ impl ResolvedBackend {
                         for &pid in holders.get(&socket_path).into_iter().flatten() {
                             let pid = pid as i32;
                             if pid == my_pid {
-                                log::debug!("Skipping own PID {} when killing dtach session {}", pid, session_name);
+                                log::debug!(
+                                    "Skipping own PID {} when killing dtach session {}",
+                                    pid,
+                                    session_name
+                                );
                                 continue;
                             }
                             // SAFETY: `libc::kill` is a thin FFI wrapper over the
@@ -440,7 +440,11 @@ impl ResolvedBackend {
                             unsafe {
                                 libc::kill(pid, libc::SIGTERM);
                             }
-                            log::debug!("Sent SIGTERM to dtach process {} for session {}", pid, session_name);
+                            log::debug!(
+                                "Sent SIGTERM to dtach process {} for session {}",
+                                pid,
+                                session_name
+                            );
                         }
                     }
                     let _ = std::fs::remove_file(&socket_path);
@@ -596,7 +600,9 @@ pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> Reso
                 log::info!("psmux requested but inside WSL — using screen instead");
                 ResolvedBackend::Screen
             } else {
-                log::warn!("psmux requested but no session tool available in WSL, falling back to none");
+                log::warn!(
+                    "psmux requested but no session tool available in WSL, falling back to none"
+                );
                 ResolvedBackend::None
             }
         }
@@ -617,10 +623,13 @@ pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> Reso
         }
     };
 
-    CACHE.lock().unwrap_or_else(|poisoned| {
-        log::warn!("WSL backend cache mutex was poisoned, recovering");
-        poisoned.into_inner()
-    }).insert(key, result);
+    CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| {
+            log::warn!("WSL backend cache mutex was poisoned, recovering");
+            poisoned.into_inner()
+        })
+        .insert(key, result);
     result
 }
 
@@ -631,7 +640,12 @@ fn is_wsl_tool_available(distro: Option<&str>, tool: &str) -> bool {
     if let Some(d) = distro {
         cmd.args(["-d", d]);
     }
-    cmd.args(["--", "sh", "-c", &format!("command -v {}", shell_escape(tool))]);
+    cmd.args([
+        "--",
+        "sh",
+        "-c",
+        &format!("command -v {}", shell_escape(tool)),
+    ]);
     crate::process::safe_output(&mut cmd)
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -670,11 +684,13 @@ impl ResolvedBackend {
             Self::None | Self::Psmux => return None,
             Self::Tmux => {
                 // Tmux doesn't reference host paths or $SHELL, so delegate to build_command
-                let (_program, inner_args) = self.build_command(session_name, wsl_cwd, command, &[])?;
+                let (_program, inner_args) =
+                    self.build_command(session_name, wsl_cwd, command, &[])?;
                 inner_args.last()?.to_string()
             }
             Self::Screen => {
-                let (_program, inner_args) = self.build_command(session_name, wsl_cwd, command, &[])?;
+                let (_program, inner_args) =
+                    self.build_command(session_name, wsl_cwd, command, &[])?;
                 let mut parts = vec!["screen".to_string()];
                 parts.extend(inner_args.iter().map(|a| shell_escape(a)));
                 parts.join(" ")
@@ -703,7 +719,12 @@ impl ResolvedBackend {
             args.push("-d".to_string());
             args.push(d.to_string());
         }
-        args.extend(["--".to_string(), "sh".to_string(), "-c".to_string(), inner_cmd]);
+        args.extend([
+            "--".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            inner_cmd,
+        ]);
 
         Some(("wsl.exe".to_string(), args))
     }
@@ -853,9 +874,10 @@ pub fn get_extended_path() -> String {
 
     for dir in &candidates {
         if dir.is_dir()
-            && let Some(s) = dir.to_str() {
-                push(s.to_string());
-            }
+            && let Some(s) = dir.to_str()
+        {
+            push(s.to_string());
+        }
     }
 
     // Also resolve fnm's current Node version if fnm is installed
@@ -866,9 +888,10 @@ pub fn get_extended_path() -> String {
         let cargo_bin = Path::new(&extra).join("bin");
         if cargo_bin.is_dir()
             && let Some(s) = cargo_bin.to_str()
-                && seen.insert(s.to_string()) {
-                    result.push(s.to_string());
-                }
+            && seen.insert(s.to_string())
+        {
+            result.push(s.to_string());
+        }
     }
 
     // Append inherited PATH entries (keeps system paths at the end)
@@ -884,7 +907,11 @@ pub fn get_extended_path() -> String {
 
 /// Try to find fnm's current Node bin directory.
 #[cfg(not(windows))]
-fn resolve_fnm_path(home: &std::path::Path, result: &mut Vec<String>, seen: &mut std::collections::HashSet<String>) {
+fn resolve_fnm_path(
+    home: &std::path::Path,
+    result: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
     // fnm stores the active version in $FNM_MULTISHELL_PATH or we can run `fnm env`.
     // But to avoid spawning processes, check the default symlink location.
     let fnm_dir = home.join(".local/share/fnm");
@@ -904,18 +931,25 @@ fn resolve_fnm_path(home: &std::path::Path, result: &mut Vec<String>, seen: &mut
         let node_bin = if version.is_absolute() {
             version.join("installation/bin")
         } else {
-            fnm_dir.join("node-versions").join(version.to_string_lossy().trim()).join("installation/bin")
+            fnm_dir
+                .join("node-versions")
+                .join(version.to_string_lossy().trim())
+                .join("installation/bin")
         };
         // Validate the resolved path stays within fnm directory to prevent symlink escape
         if let Ok(canonical_bin) = node_bin.canonicalize() {
             if !canonical_bin.starts_with(&fnm_canonical) {
-                log::warn!("fnm alias points outside fnm directory, skipping: {:?}", node_bin);
+                log::warn!(
+                    "fnm alias points outside fnm directory, skipping: {:?}",
+                    node_bin
+                );
                 return;
             }
             if let Some(s) = canonical_bin.to_str()
-                && seen.insert(s.to_string()) {
-                    result.push(s.to_string());
-                }
+                && seen.insert(s.to_string())
+            {
+                result.push(s.to_string());
+            }
         }
     }
 }
@@ -953,9 +987,9 @@ fn is_dtach_available() -> bool {
                 .arg("-v")
                 .env("PATH", get_extended_path()),
         )
-            // dtach -v exits with 0 and prints version
-            .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
-            .unwrap_or(false)
+        // dtach -v exits with 0 and prints version
+        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+        .unwrap_or(false)
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -982,8 +1016,8 @@ fn is_tmux_available() -> bool {
                 .arg("-V")
                 .env("PATH", get_extended_path()),
         )
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1029,8 +1063,8 @@ fn is_screen_available() -> bool {
                 .arg("-v")
                 .env("PATH", get_extended_path()),
         )
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1197,9 +1231,16 @@ mod tests {
         // No initial program, then ';' separators with set/rename commands
         assert!(args.contains(&";".to_string()));
         let semi_count = args.iter().filter(|a| a.as_str() == ";").count();
-        assert_eq!(semi_count, 4, "expected four `;` separators (status, mouse, automatic-rename, rename-window)");
+        assert_eq!(
+            semi_count, 4,
+            "expected four `;` separators (status, mouse, automatic-rename, rename-window)"
+        );
         assert!(args.iter().any(|a| a == "rename-window"));
-        assert_eq!(args.last().unwrap(), "app", "window name = last cwd segment");
+        assert_eq!(
+            args.last().unwrap(),
+            "app",
+            "window name = last cwd segment"
+        );
     }
 
     #[test]
@@ -1210,7 +1251,10 @@ mod tests {
         let (program, args) = result.unwrap();
         assert_eq!(program, "psmux");
         // custom command is wrapped via cmd.exe /c
-        let cmd_pos = args.iter().position(|a| a == "cmd.exe").expect("cmd.exe in args");
+        let cmd_pos = args
+            .iter()
+            .position(|a| a == "cmd.exe")
+            .expect("cmd.exe in args");
         assert_eq!(args[cmd_pos + 1], "/c");
         assert_eq!(args[cmd_pos + 2], "npm run dev");
     }
@@ -1219,7 +1263,9 @@ mod tests {
     fn test_psmux_build_command_with_extra_env() {
         let backend = ResolvedBackend::Psmux;
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), Some("C:\\tmp".to_string()))];
-        let (_, args) = backend.build_command("tm-test", "C:\\tmp", None, &env).unwrap();
+        let (_, args) = backend
+            .build_command("tm-test", "C:\\tmp", None, &env)
+            .unwrap();
         // -e KEY=VAL must appear before -s so psmux applies it to the new session
         let e_pos = args.iter().position(|a| a == "-e").expect("-e in args");
         let s_pos = args.iter().position(|a| a == "-s").expect("-s in args");
@@ -1241,14 +1287,25 @@ mod tests {
     #[test]
     fn test_none_build_command() {
         let backend = ResolvedBackend::None;
-        assert!(backend.build_command("test-session", "/home/user", None, &[]).is_none());
-        assert!(backend.build_command("test-session", "/home/user", Some("echo hi"), &[]).is_none());
+        assert!(
+            backend
+                .build_command("test-session", "/home/user", None, &[])
+                .is_none()
+        );
+        assert!(
+            backend
+                .build_command("test-session", "/home/user", Some("echo hi"), &[])
+                .is_none()
+        );
     }
 
     #[test]
     fn test_tmux_build_command_with_extra_env() {
         let backend = ResolvedBackend::Tmux;
-        let env = vec![("CLAUDE_CONFIG_DIR".to_string(), Some("/tmp/foo".to_string()))];
+        let env = vec![(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            Some("/tmp/foo".to_string()),
+        )];
         let (_, args) = backend
             .build_command("tm-test", "/tmp", None, &env)
             .unwrap();
@@ -1304,12 +1361,28 @@ mod tests {
         // The inner command should contain dtach with WSL-native socket path
         let inner_cmd = args.last().unwrap();
         assert!(inner_cmd.contains("dtach -A"), "inner cmd: {}", inner_cmd);
-        assert!(inner_cmd.contains("-E -r winch"), "inner cmd: {}", inner_cmd);
+        assert!(
+            inner_cmd.contains("-E -r winch"),
+            "inner cmd: {}",
+            inner_cmd
+        );
         // Must use WSL-native socket path, not Windows temp dir
-        assert!(inner_cmd.contains("/tmp/okena-dtach/"), "socket path should be WSL-native: {}", inner_cmd);
+        assert!(
+            inner_cmd.contains("/tmp/okena-dtach/"),
+            "socket path should be WSL-native: {}",
+            inner_cmd
+        );
         // Must use $SHELL (resolved inside WSL), not /bin/sh
-        assert!(inner_cmd.contains("\"$SHELL\""), "should use $SHELL not /bin/sh: {}", inner_cmd);
-        assert!(!inner_cmd.contains("/bin/sh"), "should not contain /bin/sh: {}", inner_cmd);
+        assert!(
+            inner_cmd.contains("\"$SHELL\""),
+            "should use $SHELL not /bin/sh: {}",
+            inner_cmd
+        );
+        assert!(
+            !inner_cmd.contains("/bin/sh"),
+            "should not contain /bin/sh: {}",
+            inner_cmd
+        );
     }
 
     #[test]
@@ -1326,8 +1399,16 @@ mod tests {
         let (program, args) = result.unwrap();
         assert_eq!(program, "wsl.exe");
         let inner_cmd = args.last().unwrap();
-        assert!(inner_cmd.contains("tmux new-session -A"), "inner cmd: {}", inner_cmd);
-        assert!(inner_cmd.contains("set status off"), "inner cmd: {}", inner_cmd);
+        assert!(
+            inner_cmd.contains("tmux new-session -A"),
+            "inner cmd: {}",
+            inner_cmd
+        );
+        assert!(
+            inner_cmd.contains("set status off"),
+            "inner cmd: {}",
+            inner_cmd
+        );
     }
 
     #[test]

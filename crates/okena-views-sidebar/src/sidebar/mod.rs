@@ -8,28 +8,28 @@
 //! - Organizing projects into collapsible folders
 
 mod cursor;
-mod render;
 mod renames;
+mod render;
 mod worktree;
 
 #[cfg(test)]
 mod from_project_test;
 
+use gpui::prelude::FluentBuilder;
+use gpui::*;
+use gpui_component::h_flex;
+use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
-use okena_transport::client::{ConnectionStatus, RemoteConnectionConfig};
 use okena_core::theme::FolderColor;
 use okena_services::manager::ServiceManager;
 use okena_terminal::TerminalsRegistry;
+use okena_transport::client::{ConnectionStatus, RemoteConnectionConfig};
 use okena_ui::click_detector::ClickDetector;
 use okena_ui::rename_state::RenameState;
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_xl, ui_text_xs};
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{FolderData, ProjectData, WindowId, Workspace};
-use gpui::*;
-use gpui::prelude::FluentBuilder;
-use gpui_component::h_flex;
-use gpui_component::tooltip::Tooltip;
 use std::collections::{HashMap, HashSet};
 
 /// Callback for dispatching actions for a given project.
@@ -90,18 +90,41 @@ impl GroupKind {
 /// Identifies each visible row in the sidebar for keyboard cursor navigation.
 #[derive(Clone, Debug)]
 pub enum SidebarCursorItem {
-    Folder { folder_id: String },
-    Project { project_id: String },
-    WorktreeProject { project_id: String },
-    GroupHeader { project_id: String, group: GroupKind },
-    Terminal { project_id: String, terminal_id: String },
-    Service { project_id: String, service_name: String },
+    Folder {
+        folder_id: String,
+    },
+    Project {
+        project_id: String,
+    },
+    WorktreeProject {
+        project_id: String,
+    },
+    GroupHeader {
+        project_id: String,
+        group: GroupKind,
+    },
+    Terminal {
+        project_id: String,
+        terminal_id: String,
+    },
+    Service {
+        project_id: String,
+        service_name: String,
+    },
     #[allow(dead_code)]
-    Hook { project_id: String, terminal_id: String },
+    Hook {
+        project_id: String,
+        terminal_id: String,
+    },
     #[allow(dead_code)]
-    RemoteConnection { connection_id: String },
+    RemoteConnection {
+        connection_id: String,
+    },
     #[allow(dead_code)]
-    RemoteProject { connection_id: String, project_id: String },
+    RemoteProject {
+        connection_id: String,
+        project_id: String,
+    },
 }
 
 /// Sidebar view with project and terminal list
@@ -191,7 +214,14 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, focus_manager: Entity<okena_workspace::focus::FocusManager>, request_broker: Entity<RequestBroker>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        window_id: WindowId,
+        workspace: Entity<Workspace>,
+        focus_manager: Entity<okena_workspace::focus::FocusManager>,
+        request_broker: Entity<RequestBroker>,
+        terminals: TerminalsRegistry,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Observe RequestBroker to drain sidebar requests outside of render().
         // Requests are stored in pending_sidebar_requests and applied in render()
         // where Window access is available (needed for focus/rename).
@@ -199,12 +229,13 @@ impl Sidebar {
             if !this.request_broker.read(cx).has_sidebar_requests() {
                 return;
             }
-            let requests = this.request_broker.update(cx, |broker, _cx| {
-                broker.drain_sidebar_requests()
-            });
+            let requests = this
+                .request_broker
+                .update(cx, |broker, _cx| broker.drain_sidebar_requests());
             this.pending_sidebar_requests.extend(requests);
             cx.notify();
-        }).detach();
+        })
+        .detach();
 
         // The Sidebar renders inside a `.cached()` view (window render), so it
         // only repaints when a notify comes from an entity it observes. It
@@ -216,7 +247,8 @@ impl Sidebar {
         // invalidates the cache, so the row stays stale until an unrelated
         // snapshot happens to repaint. Matches status_bar/project_column, which
         // observe the workspace for the same reason.
-        cx.observe(&workspace, |_this, _ws, cx| cx.notify()).detach();
+        cx.observe(&workspace, |_this, _ws, cx| cx.notify())
+            .detach();
 
         // Hook terminals are displayed in the dedicated HookPanel, so we no
         // longer auto-expand the sidebar project when hooks appear.
@@ -298,7 +330,12 @@ impl Sidebar {
     }
 
     /// Dispatch an action for a project using the dispatch callback.
-    pub(crate) fn dispatch_action_for_project(&self, project_id: &str, action: ActionRequest, cx: &mut App) {
+    pub(crate) fn dispatch_action_for_project(
+        &self,
+        project_id: &str,
+        action: ActionRequest,
+        cx: &mut App,
+    ) {
         if let Some(ref dispatch) = self.dispatch_action {
             (dispatch)(project_id, action, cx);
         }
@@ -308,7 +345,12 @@ impl Sidebar {
     /// Folder ids are `remote:<conn>:<id>`; the dispatcher strips the prefix
     /// against the resolved connection. Falls back to the local daemon for an
     /// unprefixed id.
-    pub(crate) fn dispatch_action_for_folder(&self, folder_id: &str, action: ActionRequest, cx: &mut App) {
+    pub(crate) fn dispatch_action_for_folder(
+        &self,
+        folder_id: &str,
+        action: ActionRequest,
+        cx: &mut App,
+    ) {
         let conn_id = folder_id
             .strip_prefix("remote:")
             .and_then(|rest| rest.split(':').next())
@@ -323,7 +365,11 @@ impl Sidebar {
     /// on the next snapshot.
     pub(crate) fn dispatch_daemon_action(&self, action: ActionRequest, cx: &mut App) {
         if let Some(ref dispatch) = self.dispatch_for_connection {
-            (dispatch)(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID, action, cx);
+            (dispatch)(
+                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                action,
+                cx,
+            );
         }
     }
 
@@ -368,15 +414,28 @@ impl Sidebar {
     }
 
     pub(crate) fn is_group_collapsed(&self, project_id: &str, group: &GroupKind) -> bool {
-        self.collapsed_groups.contains(&(project_id.to_string(), group.clone()))
+        self.collapsed_groups
+            .contains(&(project_id.to_string(), group.clone()))
     }
 
-    pub(crate) fn request_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn request_context_menu(
+        &mut self,
+        project_id: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         self.request_broker.update(cx, |broker, cx| {
-            broker.push_overlay_request(okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {
-                project_id,
-                kind: okena_workspace::requests::ProjectOverlayKind::ContextMenu { position },
-            }), cx);
+            broker.push_overlay_request(
+                okena_workspace::requests::OverlayRequest::Project(
+                    okena_workspace::requests::ProjectOverlay {
+                        project_id,
+                        kind: okena_workspace::requests::ProjectOverlayKind::ContextMenu {
+                            position,
+                        },
+                    },
+                ),
+                cx,
+            );
         });
     }
 
@@ -398,7 +457,8 @@ impl Sidebar {
     pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
         cx.observe(&manager, |_this, _sm, cx| {
             cx.notify();
-        }).detach();
+        })
+        .detach();
         self.service_manager = Some(manager);
         cx.notify();
     }
@@ -406,8 +466,13 @@ impl Sidebar {
     /// Count how many terminals from the given IDs are currently waiting for input
     pub fn count_waiting_terminals(&self, terminal_ids: &[String]) -> usize {
         let terminals = self.terminals.lock();
-        terminal_ids.iter()
-            .filter(|id| terminals.get(id.as_str()).is_some_and(|t| t.is_waiting_for_input()))
+        terminal_ids
+            .iter()
+            .filter(|id| {
+                terminals
+                    .get(id.as_str())
+                    .is_some_and(|t| t.is_waiting_for_input())
+            })
             .count()
     }
 
@@ -445,7 +510,7 @@ impl Sidebar {
                                 svg()
                                     .path("icons/folder.svg")
                                     .size(px(14.0))
-                                    .text_color(rgb(t.text_secondary))
+                                    .text_color(rgb(t.text_secondary)),
                             )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.create_folder(window, cx);
@@ -534,7 +599,11 @@ impl Sidebar {
                     // (Custom) view — the Activity view already has a NEEDS
                     // ATTENTION tier — so it's hidden in activity mode.
                     .when(!activity_mode, |row| {
-                        let attn_color = if show_attention { t.border_active } else { t.text_secondary };
+                        let attn_color = if show_attention {
+                            t.border_active
+                        } else {
+                            t.text_secondary
+                        };
                         row.child(
                             div()
                                 .id("attention-toggle")
@@ -572,40 +641,46 @@ impl Sidebar {
     }
 
     /// Segmented `Custom | Activity` control for the projects header.
-    fn render_sort_mode_toggle(&self, activity_mode: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sort_mode_toggle(
+        &self,
+        activity_mode: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
         let window_id = self.window_id;
 
-        let segment = |label: &'static str, id: &'static str, active: bool, cx: &mut Context<Self>| {
-            let mut seg = div()
-                .id(id)
-                .px(px(8.0))
-                .py(px(1.0))
-                .rounded(px(4.0))
-                .text_size(ui_text_xs(cx))
-                .cursor_pointer();
-            if active {
-                seg = seg
-                    .bg(rgb(t.bg_primary))
-                    .text_color(rgb(t.text_primary))
-                    .shadow_sm();
-            } else {
-                seg = seg
-                    .text_color(rgb(t.text_muted))
-                    .hover(|s| s.text_color(rgb(t.text_secondary)));
-            }
-            seg.child(label).on_click(cx.listener(move |this, _, _window, cx| {
-                cx.stop_propagation();
-                // Only flip when switching to the other mode; clicking the
-                // already-active segment is a no-op.
+        let segment =
+            |label: &'static str, id: &'static str, active: bool, cx: &mut Context<Self>| {
+                let mut seg = div()
+                    .id(id)
+                    .px(px(8.0))
+                    .py(px(1.0))
+                    .rounded(px(4.0))
+                    .text_size(ui_text_xs(cx))
+                    .cursor_pointer();
                 if active {
-                    return;
+                    seg = seg
+                        .bg(rgb(t.bg_primary))
+                        .text_color(rgb(t.text_primary))
+                        .shadow_sm();
+                } else {
+                    seg = seg
+                        .text_color(rgb(t.text_muted))
+                        .hover(|s| s.text_color(rgb(t.text_secondary)));
                 }
-                this.workspace.update(cx, |ws, cx| {
-                    ws.toggle_project_sort_mode(window_id, cx);
-                });
-            }))
-        };
+                seg.child(label)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        cx.stop_propagation();
+                        // Only flip when switching to the other mode; clicking the
+                        // already-active segment is a no-op.
+                        if active {
+                            return;
+                        }
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.toggle_project_sort_mode(window_id, cx);
+                        });
+                    }))
+            };
 
         h_flex()
             .gap(px(2.0))
@@ -683,7 +758,11 @@ impl SidebarProjectInfo {
     /// viewport model — each window has its own `hidden_project_ids`). The
     /// `window_id` is the id of the window that owns the sidebar instance
     /// rendering this projection.
-    pub(crate) fn from_project(project: &ProjectData, workspace: &Workspace, window_id: WindowId) -> Self {
+    pub(crate) fn from_project(
+        project: &ProjectData,
+        workspace: &Workspace,
+        window_id: WindowId,
+    ) -> Self {
         let layout = project.layout.as_ref();
         // For worktree projects, show the git branch instead of the stored name.
         // The branch comes from the daemon's git poll over the wire
@@ -721,17 +800,22 @@ impl SidebarProjectInfo {
             terminal_names: project.terminal_names.clone(),
             is_orphan: false,
             worktree_count: 0,
-            parent_project_id: project.worktree_info.as_ref().map(|w| w.parent_project_id.clone()),
+            parent_project_id: project
+                .worktree_info
+                .as_ref()
+                .map(|w| w.parent_project_id.clone()),
             services: Vec::new(),
-            hook_terminals: project.hook_terminals.iter().map(|(tid, entry)| {
-                SidebarHookInfo {
+            hook_terminals: project
+                .hook_terminals
+                .iter()
+                .map(|(tid, entry)| SidebarHookInfo {
                     terminal_id: tid.clone(),
                     label: entry.label.clone(),
                     status: entry.status.clone(),
                     command: entry.command.clone(),
                     cwd: entry.cwd.clone(),
-                }
-            }).collect(),
+                })
+                .collect(),
             is_closing: false,
             // Explicit mid-create marker, set by the daemon while the git
             // checkout is in flight and mirrored over the wire. NOT derived from

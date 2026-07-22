@@ -7,10 +7,10 @@ use crate::views::overlays::detached_overlay::DetachedOverlayView;
 use gpui::*;
 use okena_ui::overlay::CloseEvent;
 
-#[cfg(not(target_os = "linux"))]
-use gpui_component::Root;
 #[cfg(target_os = "linux")]
 use crate::simple_root::SimpleRoot as Root;
+#[cfg(not(target_os = "linux"))]
+use gpui_component::Root;
 
 /// Open the given overlay entity in a fresh OS window with a thin chrome bar.
 ///
@@ -20,11 +20,8 @@ use crate::simple_root::SimpleRoot as Root;
 ///
 /// Window bounds (position + size) are restored from the last detached overlay
 /// the user opened, so the window doesn't reset to a tiny default every time.
-pub fn open_detached_overlay<T, E>(
-    title: impl Into<SharedString>,
-    content: Entity<T>,
-    cx: &mut App,
-) where
+pub fn open_detached_overlay<T, E>(title: impl Into<SharedString>, content: Entity<T>, cx: &mut App)
+where
     T: Render + Focusable + EventEmitter<E> + 'static,
     E: CloseEvent + 'static,
 {
@@ -80,9 +77,8 @@ pub fn open_detached_overlay<T, E>(
             ..Default::default()
         },
         move |window, cx| {
-            let view = cx.new(|cx| {
-                DetachedOverlayView::new(content.clone(), title.clone(), window, cx)
-            });
+            let view =
+                cx.new(|cx| DetachedOverlayView::new(content.clone(), title.clone(), window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         },
     )

@@ -621,11 +621,7 @@ async fn handle_ws(
         .active_connections
         .fetch_sub(1, Ordering::SeqCst)
         .saturating_sub(1);
-    if remaining == 0
-        && state
-            .shutdown_when_idle
-            .swap(false, Ordering::SeqCst)
-    {
+    if remaining == 0 && state.shutdown_when_idle.swap(false, Ordering::SeqCst) {
         log::info!("Last client disconnected from UI-owned daemon; shutting down");
         super::shutdown::schedule_process_shutdown(&state);
     }
@@ -920,15 +916,10 @@ mod tests {
         let (out_tx, mut out_rx) = mpsc::channel(4);
         let subscribed = HashMap::from([("terminal".to_string(), 7)]);
         let watermarks = HashMap::from([("terminal".to_string(), covered)]);
-        let outcome = drain_post_snapshot(
-            &out_tx,
-            &mut pty_rx,
-            &subscribed,
-            &watermarks,
-            "connection",
-        )
-        .await
-        .unwrap();
+        let outcome =
+            drain_post_snapshot(&out_tx, &mut pty_rx, &subscribed, &watermarks, "connection")
+                .await
+                .unwrap();
         assert!(matches!(outcome, PostSnapshotDrain::Complete));
 
         let message = out_rx.recv().await.unwrap();

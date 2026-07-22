@@ -1,13 +1,23 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ReviewChanges, ShowHookLog, ShowLogConsole, NewProject, NewWindow, CloseWindow, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout, ToggleProjectLayout, ShowBranchSwitcher, ShowProfileManager, RestartDaemon};
+use crate::keybindings::{
+    CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout, FocusActiveProject,
+    FocusSidebar, InstallUpdate, NewProject, NewWindow, OpenSettingsFile, RestartDaemon,
+    ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer,
+    ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowPairingDialog,
+    ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector,
+    StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout, ToggleSidebar,
+    ToggleSidebarAutoHide,
+};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
+use crate::ui::tokens::{ui_text_md, ui_text_xl};
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
-use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
+use crate::views::layout::split_pane::{
+    DragState, compute_resize, render_project_divider, render_sidebar_divider,
+};
 use crate::views::overlays::pairing_dialog::PairingEndpoint;
 use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
-use crate::ui::tokens::{ui_text_md, ui_text_xl};
-use gpui::*;
 use gpui::prelude::*;
+use gpui::*;
 
 use super::WindowView;
 
@@ -27,7 +37,8 @@ impl WindowView {
     fn to_pixel_widths(widths: &[f32], container_width: f32, min_col_width: f32) -> Vec<f32> {
         let num_dividers = widths.len().saturating_sub(1) as f32;
         let available_width = (container_width - num_dividers * 1.0).max(0.0);
-        widths.iter()
+        widths
+            .iter()
             .map(|w| (available_width * w / 100.0).max(min_col_width))
             .collect()
     }
@@ -40,7 +51,12 @@ impl WindowView {
     /// project) so it lands in the middle rather than flush against an edge.
     /// `center: false` scrolls the minimum needed and is a no-op when the
     /// project is already fully visible.
-    pub(super) fn scroll_to_focused_project(&self, focused_id: Option<&str>, center: bool, cx: &Context<Self>) {
+    pub(super) fn scroll_to_focused_project(
+        &self,
+        focused_id: Option<&str>,
+        center: bool,
+        cx: &Context<Self>,
+    ) {
         let focused_id = match focused_id {
             Some(id) => id,
             None => return,
@@ -54,8 +70,15 @@ impl WindowView {
             return;
         }
 
-        let visible_projects: Vec<String> = workspace.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual())
-            .iter().map(|p| p.id.clone()).collect();
+        let visible_projects: Vec<String> = workspace
+            .visible_projects(
+                self.window_id,
+                fm.focused_project_id(),
+                fm.is_focus_individual(),
+            )
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
         let num_projects = visible_projects.len();
         if num_projects <= 1 {
             return;
@@ -74,11 +97,13 @@ impl WindowView {
             f32::from(if is_rows { b.size.height } else { b.size.width })
         };
 
-        let raw_widths: Vec<f32> = visible_projects.iter()
+        let raw_widths: Vec<f32> = visible_projects
+            .iter()
             .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
             .collect();
         let widths = Self::normalize_widths(&raw_widths);
-        let pixel_widths = Self::to_pixel_widths(&widths, container_size, settings.min_column_width);
+        let pixel_widths =
+            Self::to_pixel_widths(&widths, container_size, settings.min_column_width);
 
         // Compute the leading edge (along the grid axis) of the focused project
         let mut col_lead: f32 = 0.0;
@@ -112,10 +137,12 @@ impl WindowView {
         let max_offset = self.projects_scroll_handle.max_offset();
         if is_rows {
             let clamped = new_offset.clamp(-f32::from(max_offset.y), 0.0);
-            self.projects_scroll_handle.set_offset(point(px(0.0), px(clamped)));
+            self.projects_scroll_handle
+                .set_offset(point(px(0.0), px(clamped)));
         } else {
             let clamped = new_offset.clamp(-f32::from(max_offset.x), 0.0);
-            self.projects_scroll_handle.set_offset(point(px(clamped), px(0.0)));
+            self.projects_scroll_handle
+                .set_offset(point(px(clamped), px(0.0)));
         }
     }
 
@@ -128,7 +155,13 @@ impl WindowView {
         if let Some(project_id) = self.pending_center_scroll.take() {
             let workspace = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
-            let num_visible = workspace.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual()).len();
+            let num_visible = workspace
+                .visible_projects(
+                    self.window_id,
+                    fm.focused_project_id(),
+                    fm.is_focus_individual(),
+                )
+                .len();
             let is_zoomed = fm.focused_project_id().is_some();
 
             let is_rows = workspace.project_layout_mode(self.window_id).is_rows();
@@ -167,7 +200,15 @@ impl WindowView {
             if let Some(pid) = fm.fullscreen_project_id() {
                 vec![pid.to_string()]
             } else {
-                workspace.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| p.id.clone()).collect()
+                workspace
+                    .visible_projects(
+                        self.window_id,
+                        fm.focused_project_id(),
+                        fm.is_focus_individual(),
+                    )
+                    .iter()
+                    .map(|p| p.id.clone())
+                    .collect()
             }
         };
 
@@ -176,14 +217,18 @@ impl WindowView {
         // Evict stale pane map entries for projects no longer rendered
         // (e.g. worktree columns hidden in overview mode)
         {
-            let visible_ids: std::collections::HashSet<&str> = visible_projects.iter()
-                .map(|s| s.as_str()).collect();
+            let visible_ids: std::collections::HashSet<&str> =
+                visible_projects.iter().map(|s| s.as_str()).collect();
             prune_pane_map(self.window_id, &visible_ids);
         }
 
         // Empty state when folder filter yields no results
         if num_projects == 0 {
-            let has_folder_filter = self.workspace.read(cx).active_folder_filter(self.window_id).is_some();
+            let has_folder_filter = self
+                .workspace
+                .read(cx)
+                .active_folder_filter(self.window_id)
+                .is_some();
             if has_folder_filter {
                 let t = theme(cx);
                 let workspace = self.workspace.clone();
@@ -254,13 +299,18 @@ impl WindowView {
         let settings = settings_entity(cx).read(cx).settings.clone();
 
         // Per-window orientation: columns (side by side) vs rows (stacked).
-        let is_rows = self.workspace.read(cx).project_layout_mode(self.window_id).is_rows();
+        let is_rows = self
+            .workspace
+            .read(cx)
+            .project_layout_mode(self.window_id)
+            .is_rows();
 
         let widths: Vec<f32> = if num_projects <= 1 {
             vec![100.0; num_projects]
         } else {
             let workspace = self.workspace.read(cx);
-            let raw_widths: Vec<f32> = visible_projects.iter()
+            let raw_widths: Vec<f32> = visible_projects
+                .iter()
                 .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
                 .collect();
             Self::normalize_widths(&raw_widths)
@@ -275,7 +325,8 @@ impl WindowView {
             let b = container_bounds.borrow();
             f32::from(if is_rows { b.size.height } else { b.size.width })
         };
-        let pixel_widths = Self::to_pixel_widths(&widths, container_size, settings.min_column_width);
+        let pixel_widths =
+            Self::to_pixel_widths(&widths, container_size, settings.min_column_width);
 
         // Project currently hovered in the Switch Project overlay (any window).
         // Its panel gets an accent ring here so a hover also reveals where the
@@ -297,9 +348,7 @@ impl WindowView {
                     .when(!is_rows, |d| d.w(px(pixel_size)).h_full())
                     .flex_shrink_0()
                     .relative()
-                    .child(AnyView::from(col).cached(
-                        StyleRefinement::default().size_full()
-                    ))
+                    .child(AnyView::from(col).cached(StyleRefinement::default().size_full()))
                     // Accent ring drawn as a non-occluding overlay so it adds no
                     // layout shift and does not intercept clicks on the panel.
                     .when(is_hovered, |d| {
@@ -354,33 +403,35 @@ impl WindowView {
             // Scroll the project grid along its axis. Columns scroll
             // horizontally (shift+wheel or native horizontal wheel); rows
             // scroll vertically with the natural wheel.
-            .on_scroll_wheel(cx.listener(move |_this, event: &ScrollWheelEvent, _window, cx| {
-                let delta = event.delta.pixel_delta(px(17.0));
-                let max_offset = scroll_handle_for_wheel.max_offset();
-                let current = scroll_handle_for_wheel.offset();
-                if is_rows {
-                    let amount = if !delta.y.is_zero() { delta.y } else { delta.x };
-                    if amount.is_zero() || max_offset.y <= px(2.0) {
-                        return;
-                    }
-                    let new_y = (current.y + amount).clamp(-max_offset.y, px(0.0));
-                    scroll_handle_for_wheel.set_offset(point(current.x, new_y));
-                } else {
-                    let amount = if event.modifiers.shift {
-                        if !delta.x.is_zero() { delta.x } else { delta.y }
-                    } else if !delta.x.is_zero() {
-                        delta.x
+            .on_scroll_wheel(
+                cx.listener(move |_this, event: &ScrollWheelEvent, _window, cx| {
+                    let delta = event.delta.pixel_delta(px(17.0));
+                    let max_offset = scroll_handle_for_wheel.max_offset();
+                    let current = scroll_handle_for_wheel.offset();
+                    if is_rows {
+                        let amount = if !delta.y.is_zero() { delta.y } else { delta.x };
+                        if amount.is_zero() || max_offset.y <= px(2.0) {
+                            return;
+                        }
+                        let new_y = (current.y + amount).clamp(-max_offset.y, px(0.0));
+                        scroll_handle_for_wheel.set_offset(point(current.x, new_y));
                     } else {
-                        return;
-                    };
-                    if max_offset.x <= px(2.0) {
-                        return;
+                        let amount = if event.modifiers.shift {
+                            if !delta.x.is_zero() { delta.x } else { delta.y }
+                        } else if !delta.x.is_zero() {
+                            delta.x
+                        } else {
+                            return;
+                        };
+                        if max_offset.x <= px(2.0) {
+                            return;
+                        }
+                        let new_x = (current.x + amount).clamp(-max_offset.x, px(0.0));
+                        scroll_handle_for_wheel.set_offset(point(new_x, current.y));
                     }
-                    let new_x = (current.x + amount).clamp(-max_offset.x, px(0.0));
-                    scroll_handle_for_wheel.set_offset(point(new_x, current.y));
-                }
-                cx.notify();
-            }))
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .id("projects-grid")
@@ -390,17 +441,21 @@ impl WindowView {
                     .when(!is_rows, |d| d.overflow_x_hidden())
                     .track_scroll(&self.projects_scroll_handle)
                     // Canvas to capture container bounds (updates persistent bounds for next render)
-                    .child(canvas(
-                        {
-                            let container_bounds = container_bounds.clone();
-                            move |bounds, _window, _cx| {
-                                *container_bounds.borrow_mut() = bounds;
-                            }
-                        },
-                        |_bounds, _prepaint, _window, _cx| {},
-                    ).absolute().size_full())
+                    .child(
+                        canvas(
+                            {
+                                let container_bounds = container_bounds.clone();
+                                move |bounds, _window, _cx| {
+                                    *container_bounds.borrow_mut() = bounds;
+                                }
+                            },
+                            |_bounds, _prepaint, _window, _cx| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
                     // Mouse handlers are on root div - no need to duplicate here
-                    .children(elements)
+                    .children(elements),
             )
             // Scrollbar overlay: along the bottom for columns, along the right
             // edge for rows. Drag state (`hscroll_*`) is axis-agnostic since
@@ -425,40 +480,66 @@ impl WindowView {
                             // Jump to clicked position
                             if let Some(bounds) = *this.hscroll_bounds.borrow() {
                                 let (track, origin, pos) = if is_rows {
-                                    (f32::from(bounds.size.height), f32::from(bounds.origin.y), f32::from(event.position.y))
+                                    (
+                                        f32::from(bounds.size.height),
+                                        f32::from(bounds.origin.y),
+                                        f32::from(event.position.y),
+                                    )
                                 } else {
-                                    (f32::from(bounds.size.width), f32::from(bounds.origin.x), f32::from(event.position.x))
+                                    (
+                                        f32::from(bounds.size.width),
+                                        f32::from(bounds.origin.x),
+                                        f32::from(event.position.x),
+                                    )
                                 };
                                 let ratio = ((pos - origin) / track).clamp(0.0, 1.0);
                                 let new = -ratio * f32::from(max);
-                                let off = if is_rows { point(px(0.0), px(new)) } else { point(px(new), px(0.0)) };
+                                let off = if is_rows {
+                                    point(px(0.0), px(new))
+                                } else {
+                                    point(px(new), px(0.0))
+                                };
                                 this.projects_scroll_handle.set_offset(off);
                             }
                             cx.notify();
                         }),
                     )
-                    .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                        if !this.hscroll_dragging {
-                            return;
-                        }
-                        let max_offset = this.projects_scroll_handle.max_offset();
-                        let max = if is_rows { max_offset.y } else { max_offset.x };
-                        if max <= px(2.0) {
-                            return;
-                        }
-                        if let Some(bounds) = *this.hscroll_bounds.borrow() {
-                            let (track, origin, pos) = if is_rows {
-                                (f32::from(bounds.size.height), f32::from(bounds.origin.y), f32::from(event.position.y))
-                            } else {
-                                (f32::from(bounds.size.width), f32::from(bounds.origin.x), f32::from(event.position.x))
-                            };
-                            let ratio = ((pos - origin) / track).clamp(0.0, 1.0);
-                            let new = -ratio * f32::from(max);
-                            let off = if is_rows { point(px(0.0), px(new)) } else { point(px(new), px(0.0)) };
-                            this.projects_scroll_handle.set_offset(off);
-                        }
-                        cx.notify();
-                    }))
+                    .on_mouse_move(
+                        cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                            if !this.hscroll_dragging {
+                                return;
+                            }
+                            let max_offset = this.projects_scroll_handle.max_offset();
+                            let max = if is_rows { max_offset.y } else { max_offset.x };
+                            if max <= px(2.0) {
+                                return;
+                            }
+                            if let Some(bounds) = *this.hscroll_bounds.borrow() {
+                                let (track, origin, pos) = if is_rows {
+                                    (
+                                        f32::from(bounds.size.height),
+                                        f32::from(bounds.origin.y),
+                                        f32::from(event.position.y),
+                                    )
+                                } else {
+                                    (
+                                        f32::from(bounds.size.width),
+                                        f32::from(bounds.origin.x),
+                                        f32::from(event.position.x),
+                                    )
+                                };
+                                let ratio = ((pos - origin) / track).clamp(0.0, 1.0);
+                                let new = -ratio * f32::from(max);
+                                let off = if is_rows {
+                                    point(px(0.0), px(new))
+                                } else {
+                                    point(px(new), px(0.0))
+                                };
+                                this.projects_scroll_handle.set_offset(off);
+                            }
+                            cx.notify();
+                        }),
+                    )
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
@@ -468,49 +549,59 @@ impl WindowView {
                             }
                         }),
                     )
-                    .child(canvas(
-                        {
-                            let hscroll_bounds = hscroll_bounds.clone();
-                            move |bounds, _window, _cx| {
-                                *hscroll_bounds.borrow_mut() = Some(bounds);
-                            }
-                        },
-                        move |bounds, _, window, _cx| {
-                            let max_scroll = scroll_handle.max_offset();
-                            let max = if is_rows { max_scroll.y } else { max_scroll.x };
-                            if max <= px(2.0) {
-                                return;
-                            }
-                            let offset = scroll_handle.offset();
-                            let off = if is_rows { offset.y } else { offset.x };
-                            let track = if is_rows {
-                                f32::from(bounds.size.height)
-                            } else {
-                                f32::from(bounds.size.width)
-                            };
-                            let content = track + f32::from(max);
-                            let thumb = (track / content * track).max(30.0);
-                            let scroll_ratio = f32::from(-off) / f32::from(max);
-                            let thumb_pos = scroll_ratio * (track - thumb);
+                    .child(
+                        canvas(
+                            {
+                                let hscroll_bounds = hscroll_bounds.clone();
+                                move |bounds, _window, _cx| {
+                                    *hscroll_bounds.borrow_mut() = Some(bounds);
+                                }
+                            },
+                            move |bounds, _, window, _cx| {
+                                let max_scroll = scroll_handle.max_offset();
+                                let max = if is_rows { max_scroll.y } else { max_scroll.x };
+                                if max <= px(2.0) {
+                                    return;
+                                }
+                                let offset = scroll_handle.offset();
+                                let off = if is_rows { offset.y } else { offset.x };
+                                let track = if is_rows {
+                                    f32::from(bounds.size.height)
+                                } else {
+                                    f32::from(bounds.size.width)
+                                };
+                                let content = track + f32::from(max);
+                                let thumb = (track / content * track).max(30.0);
+                                let scroll_ratio = f32::from(-off) / f32::from(max);
+                                let thumb_pos = scroll_ratio * (track - thumb);
 
-                            let thumb_bounds = if is_rows {
-                                Bounds {
-                                    origin: point(bounds.origin.x + px(1.0), bounds.origin.y + px(thumb_pos)),
-                                    size: size(px(4.0), px(thumb)),
-                                }
-                            } else {
-                                Bounds {
-                                    origin: point(bounds.origin.x + px(thumb_pos), bounds.origin.y + px(1.0)),
-                                    size: size(px(thumb), px(4.0)),
-                                }
-                            };
-                            window.paint_quad(fill(thumb_bounds, scrollbar_color).corner_radii(px(2.0)));
-                        },
-                    ).size_full())
+                                let thumb_bounds = if is_rows {
+                                    Bounds {
+                                        origin: point(
+                                            bounds.origin.x + px(1.0),
+                                            bounds.origin.y + px(thumb_pos),
+                                        ),
+                                        size: size(px(4.0), px(thumb)),
+                                    }
+                                } else {
+                                    Bounds {
+                                        origin: point(
+                                            bounds.origin.x + px(thumb_pos),
+                                            bounds.origin.y + px(1.0),
+                                        ),
+                                        size: size(px(thumb), px(4.0)),
+                                    }
+                                };
+                                window.paint_quad(
+                                    fill(thumb_bounds, scrollbar_color).corner_radii(px(2.0)),
+                                );
+                            },
+                        )
+                        .size_full(),
+                    )
             })
             .into_any_element()
     }
-
 }
 
 impl Render for WindowView {
@@ -567,10 +658,15 @@ impl Render for WindowView {
                                 this.sidebar_ctrl.set_width(new_width);
                                 // Persist through global SettingsState (debounced)
                                 let width = this.sidebar_ctrl.width();
-                                settings_entity(cx).update(cx, |s, cx| s.set_sidebar_width(width, cx));
+                                settings_entity(cx)
+                                    .update(cx, |s, cx| s.set_sidebar_width(width, cx));
                                 cx.notify();
                             }
-                            DragState::ServicePanel { project_id, initial_mouse_y, initial_height } => {
+                            DragState::ServicePanel {
+                                project_id,
+                                initial_mouse_y,
+                                initial_height,
+                            } => {
                                 // Dragging up increases height, dragging down decreases
                                 let delta = initial_mouse_y - f32::from(event.position.y);
                                 let new_height = initial_height + delta;
@@ -581,7 +677,11 @@ impl Render for WindowView {
                                     });
                                 }
                             }
-                            DragState::HookPanel { project_id, initial_mouse_y, initial_height } => {
+                            DragState::HookPanel {
+                                project_id,
+                                initial_mouse_y,
+                                initial_height,
+                            } => {
                                 let delta = initial_mouse_y - f32::from(event.position.y);
                                 let new_height = initial_height + delta;
                                 let project_id = project_id.clone();
@@ -593,7 +693,13 @@ impl Render for WindowView {
                             }
                             _ => {
                                 // Handle split and project column resize
-                                compute_resize(this.window_id, event.position, state, &workspace, cx);
+                                compute_resize(
+                                    this.window_id,
+                                    event.position,
+                                    state,
+                                    &workspace,
+                                    cx,
+                                );
                                 // Bypass all .cached() views so terminal elements
                                 // repaint with new bounds during drag.
                                 window.refresh();
@@ -613,9 +719,8 @@ impl Render for WindowView {
             }))
             // Global mouse up handler to end resize (registered via window event
             // to reliably fire regardless of which child element the cursor is over)
-            .child(canvas(
-                |_bounds, _window, _cx| {},
-                {
+            .child(
+                canvas(|_bounds, _window, _cx| {}, {
                     let active_drag = active_drag.clone();
                     let terminals = self.terminals.clone();
                     let workspace = workspace.clone();
@@ -634,9 +739,11 @@ impl Render for WindowView {
                                 // clearing the drag, so we can commit its final
                                 // sizes to the daemon below.
                                 let split_drag = match &*active_drag.borrow() {
-                                    Some(DragState::Split { project_id, layout_path, .. }) => {
-                                        Some((project_id.clone(), layout_path.clone()))
-                                    }
+                                    Some(DragState::Split {
+                                        project_id,
+                                        layout_path,
+                                        ..
+                                    }) => Some((project_id.clone(), layout_path.clone())),
                                     _ => None,
                                 };
                                 let was_dragging = active_drag.borrow().is_some();
@@ -661,9 +768,10 @@ impl Render for WindowView {
                                         .and_then(|p| p.layout.as_ref())
                                         .and_then(|layout| layout.get_at_path(&layout_path))
                                         .and_then(|node| match node {
-                                            okena_workspace::state::LayoutNode::Split { sizes, .. } => {
-                                                Some(sizes.clone())
-                                            }
+                                            okena_workspace::state::LayoutNode::Split {
+                                                sizes,
+                                                ..
+                                            } => Some(sizes.clone()),
                                             _ => None,
                                         });
                                     if let Some(sizes) = final_sizes
@@ -688,8 +796,10 @@ impl Render for WindowView {
                             }
                         });
                     }
-                },
-            ).absolute().size_full())
+                })
+                .absolute()
+                .size_full(),
+            )
             // Handle sidebar toggle action from title bar
             .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
                 this.toggle_sidebar(cx);
@@ -724,7 +834,9 @@ impl Render for WindowView {
                         cx.notify();
                     });
                 } else {
-                    let project_id = this.focus_manager.read(cx)
+                    let project_id = this
+                        .focus_manager
+                        .read(cx)
                         .focused_terminal_state()
                         .map(|state| state.project_id);
                     if let Some(project_id) = project_id {
@@ -750,9 +862,10 @@ impl Render for WindowView {
                         .or_else(|| fm.focused_project_id().map(String::from))
                 };
                 if let Some(project_id) = project_id
-                    && let Some(col) = this.project_columns.get(&project_id).cloned() {
-                        col.update(cx, |col, cx| col.show_branch_picker(window, cx));
-                    }
+                    && let Some(col) = this.project_columns.get(&project_id).cloned()
+                {
+                    col.update(cx, |col, cx| col.show_branch_picker(window, cx));
+                }
             }))
             // Handle equalize layout action
             .on_action(cx.listener(|this, _: &EqualizeLayout, _window, cx| {
@@ -801,15 +914,17 @@ impl Render for WindowView {
                     ws.spawn_extra_window(Some(spawning_bounds), cx);
                 });
             }))
-            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| match this.window_id {
-                crate::workspace::state::WindowId::Main => cx.quit(),
-                extra_id @ crate::workspace::state::WindowId::Extra(_) => {
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.close_extra_window(extra_id, cx);
-                    });
-                    window.remove_window();
-                }
-            }))
+            .on_action(
+                cx.listener(|this, _: &CloseWindow, window, cx| match this.window_id {
+                    crate::workspace::state::WindowId::Main => cx.quit(),
+                    extra_id @ crate::workspace::state::WindowId::Extra(_) => {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.close_extra_window(extra_id, cx);
+                        });
+                        window.remove_window();
+                    }
+                }),
+            )
             // Handle focus sidebar action (keyboard navigation)
             .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
                 // Ensure sidebar is visible
@@ -834,13 +949,14 @@ impl Render for WindowView {
             // Handle show session manager action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
-                move |this, _: &ShowSessionManager, _window, cx| {
-                    match this.local_daemon_action_client(cx) {
-                        Ok(client) => overlay_manager
-                            .update(cx, |om, cx| om.toggle_session_manager(client, cx)),
-                        Err(error) => {
-                            crate::views::panels::toast::ToastManager::error(error, cx);
-                        }
+                move |this, _: &ShowSessionManager, _window, cx| match this
+                    .local_daemon_action_client(cx)
+                {
+                    Ok(client) => {
+                        overlay_manager.update(cx, |om, cx| om.toggle_session_manager(client, cx))
+                    }
+                    Err(error) => {
+                        crate::views::panels::toast::ToastManager::error(error, cx);
                     }
                 }
             }))
@@ -892,11 +1008,11 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &RestartDaemon, _window, cx| {
                 this.request_restart_daemon(cx);
             }))
-            .on_action(cx.listener(
-                |_this, _: &okena_ext_updater::RebuildLocal, _window, cx| {
+            .on_action(
+                cx.listener(|_this, _: &okena_ext_updater::RebuildLocal, _window, cx| {
                     cx.emit(super::WindowViewEvent::RebuildLocal);
-                },
-            ))
+                }),
+            )
             .on_action(cx.listener(
                 |_this, _: &okena_ext_updater::RestartLocalBuild, _window, cx| {
                     cx.emit(super::WindowViewEvent::RestartLocalBuild);
@@ -961,14 +1077,16 @@ impl Render for WindowView {
                 if let Some(update_info) = cx.try_global::<okena_ext_updater::GlobalUpdateInfo>() {
                     let info = update_info.0.clone();
                     cx.spawn(async move |this, cx| {
-                        match smol::unblock(okena_ext_updater::daemon_client::request_install).await {
+                        match smol::unblock(okena_ext_updater::daemon_client::request_install).await
+                        {
                             Ok(snapshot) => info.apply_snapshot(snapshot),
                             Err(e) => info.set_status(okena_ext_updater::UpdateStatus::Failed {
                                 error: e.to_string(),
                             }),
                         }
                         let _ = this.update(cx, |_, cx| cx.notify());
-                    }).detach();
+                    })
+                    .detach();
                 }
             }))
             // Handle toggle pane switcher action
@@ -990,7 +1108,9 @@ impl Render for WindowView {
             // Handle start all services action
             .on_action(cx.listener(|this, _: &StartAllServices, _window, cx| {
                 if let Some(ref sm) = this.service_manager {
-                    let project_id = this.focus_manager.read(cx)
+                    let project_id = this
+                        .focus_manager
+                        .read(cx)
                         .focused_terminal_state()
                         .map(|f| f.project_id.clone());
                     if let Some(pid) = project_id {
@@ -1004,7 +1124,9 @@ impl Render for WindowView {
             // Handle stop all services action
             .on_action(cx.listener(|this, _: &StopAllServices, _window, cx| {
                 if let Some(ref sm) = this.service_manager {
-                    let project_id = this.focus_manager.read(cx)
+                    let project_id = this
+                        .focus_manager
+                        .read(cx)
                         .focused_terminal_state()
                         .map(|f| f.project_id.clone());
                     if let Some(pid) = project_id {
@@ -1016,18 +1138,26 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &ShowFileSearch, _window, cx| {
                 let fm = this.focus_manager.read(cx);
                 let ws = this.workspace.read(cx);
-                let project_id = fm.focused_terminal_state()
+                let project_id = fm
+                    .focused_terminal_state()
                     .map(|f| f.project_id.clone())
                     .or_else(|| {
-                        ws.visible_projects(this.window_id, fm.focused_project_id(), fm.is_focus_individual())
-                            .first()
-                            .map(|p| p.id.clone())
+                        ws.visible_projects(
+                            this.window_id,
+                            fm.focused_project_id(),
+                            fm.is_focus_individual(),
+                        )
+                        .first()
+                        .map(|p| p.id.clone())
                     });
 
                 if let Some(project_id) = project_id {
                     this.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                            OverlayRequest::Project(ProjectOverlay { project_id, kind: ProjectOverlayKind::FileSearch }),
+                            OverlayRequest::Project(ProjectOverlay {
+                                project_id,
+                                kind: ProjectOverlayKind::FileSearch,
+                            }),
                             cx,
                         );
                     });
@@ -1037,18 +1167,26 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &ShowContentSearch, _window, cx| {
                 let fm = this.focus_manager.read(cx);
                 let ws = this.workspace.read(cx);
-                let project_id = fm.focused_terminal_state()
+                let project_id = fm
+                    .focused_terminal_state()
                     .map(|f| f.project_id.clone())
                     .or_else(|| {
-                        ws.visible_projects(this.window_id, fm.focused_project_id(), fm.is_focus_individual())
-                            .first()
-                            .map(|p| p.id.clone())
+                        ws.visible_projects(
+                            this.window_id,
+                            fm.focused_project_id(),
+                            fm.is_focus_individual(),
+                        )
+                        .first()
+                        .map(|p| p.id.clone())
                     });
 
                 if let Some(project_id) = project_id {
                     this.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                            OverlayRequest::Project(ProjectOverlay { project_id, kind: ProjectOverlayKind::ContentSearch }),
+                            OverlayRequest::Project(ProjectOverlay {
+                                project_id,
+                                kind: ProjectOverlayKind::ContentSearch,
+                            }),
                             cx,
                         );
                     });
@@ -1065,22 +1203,34 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &ShowDiffViewer, _window, cx| {
                 let fm = this.focus_manager.read(cx);
                 let ws = this.workspace.read(cx);
-                let project_id = fm.focused_terminal_state()
+                let project_id = fm
+                    .focused_terminal_state()
                     .map(|f| f.project_id.clone())
                     .or_else(|| {
-                        ws.visible_projects(this.window_id, fm.focused_project_id(), fm.is_focus_individual())
-                            .first()
-                            .map(|p| p.id.clone())
+                        ws.visible_projects(
+                            this.window_id,
+                            fm.focused_project_id(),
+                            fm.is_focus_individual(),
+                        )
+                        .first()
+                        .map(|p| p.id.clone())
                     });
 
                 if let Some(project_id) = project_id {
                     this.request_broker.update(cx, |broker, cx| {
-                        broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
-                            project_id,
-                            kind: ProjectOverlayKind::DiffViewer {
-                                file: None, mode: None, commit_message: None, commits: None, commit_index: None,
-                            },
-                        }), cx);
+                        broker.push_overlay_request(
+                            OverlayRequest::Project(ProjectOverlay {
+                                project_id,
+                                kind: ProjectOverlayKind::DiffViewer {
+                                    file: None,
+                                    mode: None,
+                                    commit_message: None,
+                                    commits: None,
+                                    commit_index: None,
+                                },
+                            }),
+                            cx,
+                        );
                     });
                 }
             }))
@@ -1091,12 +1241,17 @@ impl Render for WindowView {
                 let target = {
                     let fm = this.focus_manager.read(cx);
                     let ws = this.workspace.read(cx);
-                    let project_id = fm.focused_terminal_state()
+                    let project_id = fm
+                        .focused_terminal_state()
                         .map(|f| f.project_id.clone())
                         .or_else(|| {
-                            ws.visible_projects(this.window_id, fm.focused_project_id(), fm.is_focus_individual())
-                                .first()
-                                .map(|p| p.id.clone())
+                            ws.visible_projects(
+                                this.window_id,
+                                fm.focused_project_id(),
+                                fm.is_focus_individual(),
+                            )
+                            .first()
+                            .map(|p| p.id.clone())
                         });
                     project_id.and_then(|pid| {
                         let review_base = ws
@@ -1120,20 +1275,28 @@ impl Render for WindowView {
                         head: "HEAD".to_string(),
                     })
                 } else {
-                    crate::git::resolve_review_base(std::path::Path::new(&project_path))
-                        .map(|base| crate::git::DiffMode::BranchCompare {
+                    crate::git::resolve_review_base(std::path::Path::new(&project_path)).map(
+                        |base| crate::git::DiffMode::BranchCompare {
                             base,
                             head: "HEAD".to_string(),
-                        })
+                        },
+                    )
                 };
 
                 this.request_broker.update(cx, |broker, cx| {
-                    broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
-                        project_id,
-                        kind: ProjectOverlayKind::DiffViewer {
-                            file: None, mode, commit_message: None, commits: None, commit_index: None,
-                        },
-                    }), cx);
+                    broker.push_overlay_request(
+                        OverlayRequest::Project(ProjectOverlay {
+                            project_id,
+                            kind: ProjectOverlayKind::DiffViewer {
+                                file: None,
+                                mode,
+                                commit_message: None,
+                                commits: None,
+                                commit_index: None,
+                            },
+                        }),
+                        cx,
+                    );
                 });
             }))
             // Title bar at the top (with window controls)
@@ -1153,24 +1316,32 @@ impl Render for WindowView {
                     .min_w_0()
                     .relative()
                     // Auto-hide hover zone (invisible strip on the left edge)
-                    .when(self.sidebar_ctrl.is_auto_hide() && !self.sidebar_ctrl.is_open() && !self.sidebar_ctrl.is_hover_shown(), |d| {
-                        d.child(
-                            div()
-                                .id("sidebar-hover-zone")
-                                .absolute()
-                                .left_0()
-                                .top_0()
-                                .h_full()
-                                .w(px(8.0))
-                                .hover(|s| s.cursor_pointer())
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                                    this.show_sidebar_on_hover(cx);
-                                }))
-                                .on_mouse_move(cx.listener(|this, _, _window, cx| {
-                                    this.show_sidebar_on_hover(cx);
-                                }))
-                        )
-                    })
+                    .when(
+                        self.sidebar_ctrl.is_auto_hide()
+                            && !self.sidebar_ctrl.is_open()
+                            && !self.sidebar_ctrl.is_hover_shown(),
+                        |d| {
+                            d.child(
+                                div()
+                                    .id("sidebar-hover-zone")
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .h_full()
+                                    .w(px(8.0))
+                                    .hover(|s| s.cursor_pointer())
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _window, cx| {
+                                            this.show_sidebar_on_hover(cx);
+                                        }),
+                                    )
+                                    .on_mouse_move(cx.listener(|this, _, _window, cx| {
+                                        this.show_sidebar_on_hover(cx);
+                                    })),
+                            )
+                        },
+                    )
                     .child(
                         // Sidebar container - animated width
                         {
@@ -1187,15 +1358,13 @@ impl Render for WindowView {
                                 .when(show_sidebar, |d| {
                                     d.child(
                                         // Inner wrapper to maintain sidebar at full width for clipping effect
-                                        div()
-                                            .w(px(configured_width))
-                                            .h_full()
-                                            .child(AnyView::from(self.sidebar.clone()).cached(
-                                                StyleRefinement::default().size_full()
-                                            ))
+                                        div().w(px(configured_width)).h_full().child(
+                                            AnyView::from(self.sidebar.clone())
+                                                .cached(StyleRefinement::default().size_full()),
+                                        ),
                                     )
                                 })
-                        }
+                        },
                     )
                     // Sidebar resize divider (only when sidebar is visible)
                     .when(self.sidebar_ctrl.should_render(), |d| {
@@ -1224,9 +1393,10 @@ impl Render for WindowView {
             // Status bar at the bottom
             .child(self.status_bar.clone())
             // App menu dropdown (renders on top of everything, not on macOS where native menu is used)
-            .when(!cfg!(target_os = "macos") && self.title_bar.read(cx).is_menu_open(), |d| {
-                d.child(self.title_bar.update(cx, |tb, cx| tb.render_menu(cx)))
-            })
+            .when(
+                !cfg!(target_os = "macos") && self.title_bar.read(cx).is_menu_open(),
+                |d| d.child(self.title_bar.update(cx, |tb, cx| tb.render_menu(cx))),
+            )
             // Color picker popover (positioned popup, rendered at root for full-window backdrop)
             .when(has_color_picker, |d| {
                 d.children(self.overlay_manager.read(cx).render_color_picker())

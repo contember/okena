@@ -6,8 +6,8 @@ pub use okena_core::api::{
 };
 #[allow(unused_imports)]
 pub use okena_core::ws::{
-    WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
-    parse_pty_frame, FRAME_TYPE_INPUT, FRAME_TYPE_PTY, FRAME_TYPE_SNAPSHOT, PROTO_VERSION,
+    FRAME_TYPE_INPUT, FRAME_TYPE_PTY, FRAME_TYPE_SNAPSHOT, PROTO_VERSION, WsInbound, WsOutbound,
+    build_binary_frame, build_pty_frame, parse_binary_frame, parse_pty_frame,
 };
 
 // LayoutNode conversion helpers (from_api, from_api_prefixed, to_api) are now
@@ -15,9 +15,9 @@ pub use okena_core::ws::{
 
 #[cfg(test)]
 mod tests {
-    use okena_workspace::state::LayoutNode;
     use okena_core::api::ApiLayoutNode;
     use okena_core::types::SplitDirection;
+    use okena_workspace::state::LayoutNode;
 
     #[test]
     fn prefixed_terminal_id() {

@@ -17,8 +17,8 @@
 //! are not compiled out in release.)
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use arc_swap::ArcSwap;
 use env_filter::Filter;
@@ -111,7 +111,10 @@ impl LogHub {
 
     /// The directive string currently in effect.
     pub fn directives(&self) -> String {
-        self.directives.lock().map(|d| d.clone()).unwrap_or_default()
+        self.directives
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
 
     /// Clone every buffered line with `seq >= since` (use `0` for the full
@@ -120,7 +123,11 @@ impl LogHub {
         let Ok(ring) = self.ring.lock() else {
             return Vec::new();
         };
-        ring.buf.iter().filter(|l| l.seq >= since).cloned().collect()
+        ring.buf
+            .iter()
+            .filter(|l| l.seq >= since)
+            .cloned()
+            .collect()
     }
 
     /// Seq the next captured line will get — i.e. one past the newest line.
@@ -220,7 +227,11 @@ mod tests {
         rec(&hub, log::Level::Trace, "okena::cmd", "after");
         // The set_capture_filter info line is on target okena::log, which the
         // `okena::cmd=trace` directive does not admit, so only "after" lands.
-        let msgs: Vec<String> = hub.snapshot_since(0).into_iter().map(|l| l.message).collect();
+        let msgs: Vec<String> = hub
+            .snapshot_since(0)
+            .into_iter()
+            .map(|l| l.message)
+            .collect();
         assert!(msgs.contains(&"after".to_string()));
         assert!(!msgs.contains(&"before".to_string()));
     }
@@ -232,7 +243,11 @@ mod tests {
         rec(&hub, log::Level::Info, "okena", "b");
         let cursor = hub.next_seq();
         rec(&hub, log::Level::Info, "okena", "c");
-        let new: Vec<String> = hub.snapshot_since(cursor).into_iter().map(|l| l.message).collect();
+        let new: Vec<String> = hub
+            .snapshot_since(cursor)
+            .into_iter()
+            .map(|l| l.message)
+            .collect();
         assert_eq!(new, vec!["c"]);
     }
 

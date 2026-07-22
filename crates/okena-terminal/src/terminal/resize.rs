@@ -24,7 +24,11 @@ impl Terminal {
         // Clamp to at least 1 col/row - alacritty_terminal panics on zero dimensions
         let cols = new_size.cols.max(1);
         let rows = new_size.rows.max(1);
-        let new_size = TerminalSize { cols, rows, ..new_size };
+        let new_size = TerminalSize {
+            cols,
+            rows,
+            ..new_size
+        };
 
         // Always update local size immediately (optimistic UI)
         {
@@ -53,9 +57,12 @@ impl Terminal {
             drop(rs);
             log::debug!(
                 "terminal resize send: terminal={} {}x{}",
-                self.terminal_id, new_size.cols, new_size.rows
+                self.terminal_id,
+                new_size.cols,
+                new_size.rows
             );
-            self.transport.resize(&self.terminal_id, new_size.cols, new_size.rows);
+            self.transport
+                .resize(&self.terminal_id, new_size.cols, new_size.rows);
         } else {
             // Store pending resize
             rs.pending_pty_resize = Some((new_size.cols, new_size.rows));

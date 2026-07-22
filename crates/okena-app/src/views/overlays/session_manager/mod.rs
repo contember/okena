@@ -44,12 +44,15 @@ impl SessionManager {
 
         // Default export path
         let default_export_path = dirs::home_dir()
-            .map(|p| p.join("workspace-export.json").to_string_lossy().to_string())
+            .map(|p| {
+                p.join("workspace-export.json")
+                    .to_string_lossy()
+                    .to_string()
+            })
             .unwrap_or_else(|| "workspace-export.json".to_string());
 
-        let new_session_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("Enter session name...")
-        });
+        let new_session_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter session name..."));
 
         let export_path_input = cx.new(|cx| {
             SimpleInputState::new(cx)
@@ -57,9 +60,8 @@ impl SessionManager {
                 .default_value(default_export_path)
         });
 
-        let import_path_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("Enter path to import...")
-        });
+        let import_path_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter path to import..."));
 
         let mut manager = Self {
             client,

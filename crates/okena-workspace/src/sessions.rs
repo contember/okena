@@ -1,5 +1,5 @@
-use okena_terminal::session_backend::SessionBackend;
 use crate::state::WorkspaceData;
+use okena_terminal::session_backend::SessionBackend;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -19,8 +19,8 @@ fn atomic_write_json(path: &Path, content: &str) -> std::io::Result<()> {
 }
 
 use super::persistence::{
-    get_config_dir, migrate_legacy_json, migrate_workspace, validate_workspace_data,
-    WORKSPACE_VERSION,
+    WORKSPACE_VERSION, get_config_dir, migrate_legacy_json, migrate_workspace,
+    validate_workspace_data,
 };
 
 /// Metadata about a saved session
@@ -57,7 +57,13 @@ fn get_session_path(name: &str) -> PathBuf {
 /// Sanitize session name for use as filename
 fn sanitize_session_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -76,42 +82,43 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
         let path = entry.path();
 
         if path.extension().is_some_and(|ext| ext == "json")
-            && let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                // Read file metadata for timestamps
-                let metadata = std::fs::metadata(&path)?;
-                let modified = metadata.modified().ok();
-                let created = metadata.created().ok();
+            && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+        {
+            // Read file metadata for timestamps
+            let metadata = std::fs::metadata(&path)?;
+            let modified = metadata.modified().ok();
+            let created = metadata.created().ok();
 
-                // Try to read workspace to get project count
-                let project_count = if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(content) = migrate_legacy_json(&content) {
-                        if let Ok(data) = serde_json::from_str::<WorkspaceData>(&content) {
-                            data.projects.len()
-                        } else {
-                            0
-                        }
-                    } else if let Ok(data) = serde_json::from_str::<WorkspaceData>(&content) {
+            // Try to read workspace to get project count
+            let project_count = if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(content) = migrate_legacy_json(&content) {
+                    if let Ok(data) = serde_json::from_str::<WorkspaceData>(&content) {
                         data.projects.len()
                     } else {
                         0
                     }
+                } else if let Ok(data) = serde_json::from_str::<WorkspaceData>(&content) {
+                    data.projects.len()
                 } else {
                     0
-                };
+                }
+            } else {
+                0
+            };
 
-                sessions.push(SessionInfo {
-                    name: name.to_string(),
-                    created_at: created
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| format_timestamp(d.as_secs()))
-                        .unwrap_or_else(|| "Unknown".to_string()),
-                    modified_at: modified
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| format_timestamp(d.as_secs()))
-                        .unwrap_or_else(|| "Unknown".to_string()),
-                    project_count,
-                });
-            }
+            sessions.push(SessionInfo {
+                name: name.to_string(),
+                created_at: created
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| format_timestamp(d.as_secs()))
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                modified_at: modified
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| format_timestamp(d.as_secs()))
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                project_count,
+            });
+        }
     }
 
     // Sort by modification time (most recent first)
@@ -212,16 +219,19 @@ pub fn export_workspace(data: &WorkspaceData, path: &std::path::Path) -> Result<
 pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
-    let content = migrate_legacy_json(&content)
-        .with_context(|| format!("Failed to migrate legacy workspace file: {}", path.display()))?;
+    let content = migrate_legacy_json(&content).with_context(|| {
+        format!(
+            "Failed to migrate legacy workspace file: {}",
+            path.display()
+        )
+    })?;
 
     // Try to parse as ExportedWorkspace first (has version/metadata)
     let mut data = if let Ok(exported) = serde_json::from_str::<ExportedWorkspace>(&content) {
         exported.workspace
     } else {
         // Fall back to parsing as raw WorkspaceData (for backwards compatibility)
-        serde_json::from_str(&content)
-            .with_context(|| "Failed to parse workspace file")?
+        serde_json::from_str(&content).with_context(|| "Failed to parse workspace file")?
     };
 
     data = migrate_workspace(data);
@@ -328,7 +338,8 @@ mod tests {
 
     #[test]
     fn import_raw_legacy_workspace_runs_json_migration() {
-        let path = write_import_file(r#"{
+        let path = write_import_file(
+            r#"{
             "version": 1,
             "projects": [
                 {
@@ -349,20 +360,28 @@ mod tests {
                 }
             ],
             "project_widths": {"p1": 60.0}
-        }"#);
+        }"#,
+        );
 
         let data = import_workspace(&path).expect("legacy raw import should load");
         let _ = fs::remove_file(path);
 
         assert_eq!(data.version, WORKSPACE_VERSION);
         assert!(data.main_window.hidden_project_ids.contains("p1"));
-        assert_eq!(data.main_window.folder_collapsed.get("f1").copied(), Some(true));
-        assert_eq!(data.main_window.project_widths.get("p1").copied(), Some(60.0));
+        assert_eq!(
+            data.main_window.folder_collapsed.get("f1").copied(),
+            Some(true)
+        );
+        assert_eq!(
+            data.main_window.project_widths.get("p1").copied(),
+            Some(60.0)
+        );
     }
 
     #[test]
     fn import_exported_legacy_workspace_runs_nested_json_migration() {
-        let path = write_import_file(r#"{
+        let path = write_import_file(
+            r#"{
             "version": 1,
             "exported_at": "2026-05-12T00:00:00Z",
             "workspace": {
@@ -387,14 +406,21 @@ mod tests {
                 ],
                 "project_widths": {"p1": 60.0}
             }
-        }"#);
+        }"#,
+        );
 
         let data = import_workspace(&path).expect("legacy exported import should load");
         let _ = fs::remove_file(path);
 
         assert_eq!(data.version, WORKSPACE_VERSION);
         assert!(data.main_window.hidden_project_ids.contains("p1"));
-        assert_eq!(data.main_window.folder_collapsed.get("f1").copied(), Some(true));
-        assert_eq!(data.main_window.project_widths.get("p1").copied(), Some(60.0));
+        assert_eq!(
+            data.main_window.folder_collapsed.get("f1").copied(),
+            Some(true)
+        );
+        assert_eq!(
+            data.main_window.project_widths.get("p1").copied(),
+            Some(60.0)
+        );
     }
 }

@@ -1,11 +1,11 @@
-use crate::views::overlays::detached_terminal::DetachedTerminalView;
+#[cfg(target_os = "linux")]
+use crate::simple_root::SimpleRoot as Root;
 use crate::terminal::terminal::TerminalTransport;
+use crate::views::overlays::detached_terminal::DetachedTerminalView;
 use crate::workspace::state::Workspace;
 use gpui::*;
 #[cfg(not(target_os = "linux"))]
 use gpui_component::Root;
-#[cfg(target_os = "linux")]
-use crate::simple_root::SimpleRoot as Root;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -26,8 +26,10 @@ impl Okena {
             .map(|(terminal_id, project_id, _)| (terminal_id, project_id))
             .collect();
 
-        let current_ids: HashSet<String> =
-            current.iter().map(|(terminal_id, _)| terminal_id.clone()).collect();
+        let current_ids: HashSet<String> = current
+            .iter()
+            .map(|(terminal_id, _)| terminal_id.clone())
+            .collect();
 
         let new: Vec<(String, String)> = current
             .iter()

@@ -1,5 +1,5 @@
 use crate::settings::settings_entity;
-use crate::views::sidebar_controller::{AnimationTarget, SidebarController, FRAME_TIME_MS};
+use crate::views::sidebar_controller::{AnimationTarget, FRAME_TIME_MS, SidebarController};
 use gpui::*;
 
 use super::WindowView;
@@ -15,7 +15,8 @@ impl WindowView {
         // window (which uses the global as its first-launch default before
         // its own WindowState entry exists) opens with the user's most
         // recent preference.
-        self.workspace.update(cx, |ws, cx| ws.set_sidebar_open(window_id, open, cx));
+        self.workspace
+            .update(cx, |ws, cx| ws.set_sidebar_open(window_id, open, cx));
         settings_entity(cx).update(cx, |s, cx| s.set_sidebar_open(open, cx));
         self.sync_status_bar_sidebar_state(cx);
         self.animate_sidebar_to(target, cx);
@@ -38,7 +39,8 @@ impl WindowView {
         let open = self.sidebar_ctrl.is_open();
         let window_id = self.window_id;
         let auto_hide = self.sidebar_ctrl.is_auto_hide();
-        self.workspace.update(cx, |ws, cx| ws.set_sidebar_open(window_id, open, cx));
+        self.workspace
+            .update(cx, |ws, cx| ws.set_sidebar_open(window_id, open, cx));
         settings_entity(cx).update(cx, |s, cx| {
             s.set_sidebar_auto_hide(auto_hide, cx);
             s.set_sidebar_open(open, cx);
@@ -101,6 +103,7 @@ impl WindowView {
                 this.sidebar_ctrl.set_animation(target);
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 }

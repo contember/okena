@@ -1,16 +1,16 @@
 //! Shell selector overlay for switching terminal shells.
 
 use crate::actions::Cancel;
-use okena_terminal::shell_config::{available_shells, AvailableShell, ShellType};
-use okena_ui::theme::theme;
-use okena_ui::tokens::{ui_text, ui_text_md};
-use okena_files::list_overlay::{
-    handle_list_overlay_key, ListOverlayAction, ListOverlayConfig, ListOverlayState,
-};
-use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
+use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
-use gpui::prelude::*;
+use okena_files::list_overlay::{
+    ListOverlayAction, ListOverlayConfig, ListOverlayState, handle_list_overlay_key,
+};
+use okena_terminal::shell_config::{AvailableShell, ShellType, available_shells};
+use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
+use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text, ui_text_md};
 
 /// Shell selector overlay for choosing a shell.
 pub struct ShellSelectorOverlay {
@@ -22,8 +22,15 @@ pub struct ShellSelectorOverlay {
 }
 
 impl ShellSelectorOverlay {
-    pub fn new(current_shell: ShellType, context: Option<(String, String)>, cx: &mut Context<Self>) -> Self {
-        let shells: Vec<_> = available_shells().into_iter().filter(|s| s.available).collect();
+    pub fn new(
+        current_shell: ShellType,
+        context: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let shells: Vec<_> = available_shells()
+            .into_iter()
+            .filter(|s| s.available)
+            .collect();
         let selected_index = shells
             .iter()
             .position(|s| s.shell_type == current_shell)
@@ -74,7 +81,9 @@ pub enum ShellSelectorOverlayEvent {
 }
 
 impl okena_ui::overlay::CloseEvent for ShellSelectorOverlayEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 impl EventEmitter<ShellSelectorOverlayEvent> for ShellSelectorOverlay {}
@@ -108,9 +117,12 @@ impl Render for ShellSelectorOverlay {
                     _ => {}
                 }
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
             .child(
                 modal_content("shell-selector-overlay-modal", &t)
                     .w(px(config_width))
@@ -127,47 +139,49 @@ impl Render for ShellSelectorOverlay {
                             .py(px(4.0))
                             .max_h(px(self.state.config.max_height))
                             .overflow_y_scroll()
-                            .children(self.state.filtered.iter().enumerate().map(|(i, filter_result)| {
-                                let shell = &self.state.items[filter_result.index];
-                                let is_current = shell.shell_type == current_shell;
-                                let is_selected = i == selected_index;
-                                let shell_type = shell.shell_type.clone();
-                                let name = shell.name.clone();
+                            .children(self.state.filtered.iter().enumerate().map(
+                                |(i, filter_result)| {
+                                    let shell = &self.state.items[filter_result.index];
+                                    let is_current = shell.shell_type == current_shell;
+                                    let is_selected = i == selected_index;
+                                    let shell_type = shell.shell_type.clone();
+                                    let name = shell.name.clone();
 
-                                div()
-                                    .id(ElementId::Name(format!("shell-opt-{}", i).into()))
-                                    .w_full()
-                                    .px(px(12.0))
-                                    .py(px(8.0))
-                                    .cursor_pointer()
-                                    .when(is_selected, |d| d.bg(rgb(t.bg_hover)))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.select_shell(shell_type.clone(), cx);
-                                        }),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .justify_between()
-                                            .child(
-                                                div()
-                                                    .text_size(ui_text(13.0, cx))
-                                                    .text_color(rgb(t.text_primary))
-                                                    .child(name),
-                                            )
-                                            .when(is_current, |d| {
-                                                d.child(
-                                                    div()
-                                                        .text_size(ui_text_md(cx))
-                                                        .text_color(rgb(t.success))
-                                                        .child("✓"),
-                                                )
+                                    div()
+                                        .id(ElementId::Name(format!("shell-opt-{}", i).into()))
+                                        .w_full()
+                                        .px(px(12.0))
+                                        .py(px(8.0))
+                                        .cursor_pointer()
+                                        .when(is_selected, |d| d.bg(rgb(t.bg_hover)))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _window, cx| {
+                                                cx.stop_propagation();
+                                                this.select_shell(shell_type.clone(), cx);
                                             }),
-                                    )
-                            })),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .text_size(ui_text(13.0, cx))
+                                                        .text_color(rgb(t.text_primary))
+                                                        .child(name),
+                                                )
+                                                .when(is_current, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .text_size(ui_text_md(cx))
+                                                            .text_color(rgb(t.success))
+                                                            .child("✓"),
+                                                    )
+                                                }),
+                                        )
+                                },
+                            )),
                     ),
             )
     }

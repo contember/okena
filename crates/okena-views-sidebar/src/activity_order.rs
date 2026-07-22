@@ -163,7 +163,11 @@ mod tests {
         assert_eq!(ids(&out), vec!["att", "run", "rest"]);
         assert_eq!(
             out.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
-            vec![ActivityTier::Attention, ActivityTier::Running, ActivityTier::Rest],
+            vec![
+                ActivityTier::Attention,
+                ActivityTier::Running,
+                ActivityTier::Rest
+            ],
         );
     }
 

@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use gix::bstr::BStr;
 use gix::ObjectId;
+use gix::bstr::BStr;
 
 /// Whether a line is attributable to a committed change or is a working-tree
 /// modification that has no commit yet.
@@ -83,10 +83,7 @@ pub fn get_blame(repo_path: &Path, relative_path: &str) -> Result<Vec<BlameLine>
     let repo = crate::gix_helpers::open(repo_path).ok_or(BlameError::NotGitRepo)?;
     let workdir = repo.workdir().ok_or(BlameError::NotGitRepo)?.to_path_buf();
 
-    let head_id = repo
-        .head_id()
-        .map_err(|_| BlameError::NoCommits)?
-        .detach();
+    let head_id = repo.head_id().map_err(|_| BlameError::NoCommits)?.detach();
     let head_commit = repo
         .head_commit()
         .map_err(|e| BlameError::Backend(e.to_string()))?;
@@ -255,7 +252,7 @@ fn count_lines(content: &[u8]) -> usize {
 /// line is unchanged, or `None` if the line was inserted/modified in the
 /// working tree. Uses imara-diff (already pulled by the gix `blame` feature).
 fn map_wt_lines_to_head(head: &[u8], wt: &[u8]) -> Vec<Option<u32>> {
-    use gix::diff::blob::{sources::byte_lines, Algorithm, Diff, InternedInput};
+    use gix::diff::blob::{Algorithm, Diff, InternedInput, sources::byte_lines};
 
     let input = InternedInput::new(byte_lines(head), byte_lines(wt));
     let mut diff = Diff::compute(Algorithm::Histogram, &input);
@@ -316,8 +313,16 @@ mod tests {
 
     fn commit_file(dir: &Path, file: &str, content: &str, msg: &str) {
         fs::write(dir.join(file), content).unwrap();
-        Command::new("git").args(["add", file]).current_dir(dir).output().unwrap();
-        Command::new("git").args(["commit", "-m", msg]).current_dir(dir).output().unwrap();
+        Command::new("git")
+            .args(["add", file])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", msg])
+            .current_dir(dir)
+            .output()
+            .unwrap();
     }
 
     #[test]

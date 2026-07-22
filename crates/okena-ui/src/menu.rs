@@ -46,12 +46,7 @@ pub fn menu_item_with_color(
         .text_size(MENU_TEXT)
         .text_color(rgb(text_color))
         .hover(|s| s.bg(rgb(t.bg_hover)))
-        .child(
-            svg()
-                .path(icon)
-                .size(MENU_ICON)
-                .text_color(rgb(icon_color)),
-        )
+        .child(svg().path(icon).size(MENU_ICON).text_color(rgb(icon_color)))
         .child(label.into())
 }
 
@@ -114,13 +109,12 @@ pub fn menu_item_conditional(
         .rounded(RADIUS_STD)
         .text_size(MENU_TEXT)
         .text_color(rgb(text_color))
-        .cursor(if enabled { CursorStyle::PointingHand } else { CursorStyle::Arrow })
-        .child(
-            svg()
-                .path(icon)
-                .size(MENU_ICON)
-                .text_color(rgb(icon_color)),
-        )
+        .cursor(if enabled {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::Arrow
+        })
+        .child(svg().path(icon).size(MENU_ICON).text_color(rgb(icon_color)))
         .child(label.into());
 
     if enabled {
@@ -157,9 +151,5 @@ pub fn context_menu_panel(id: impl Into<ElementId>, t: &ThemeColors) -> Stateful
 
 /// Menu separator - 1px horizontal line.
 pub fn menu_separator(t: &ThemeColors) -> Div {
-    div()
-        .h(px(1.0))
-        .mx(SPACE_XL)
-        .my(SPACE_SM)
-        .bg(rgb(t.border))
+    div().h(px(1.0)).mx(SPACE_XL).my(SPACE_SM).bg(rgb(t.border))
 }

@@ -1,12 +1,12 @@
 //! Project context menu overlay.
 
 use crate::Cancel;
+use gpui::prelude::*;
+use gpui::*;
 use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
 use okena_ui::theme::theme;
 use okena_workspace::requests::ContextMenuRequest;
 use okena_workspace::state::{WindowId, Workspace};
-use gpui::prelude::*;
-use gpui::*;
 
 /// Pick the hide/show menu label given (a) whether any extra windows exist and
 /// (b) whether the project is currently hidden in the window hosting the menu.
@@ -46,7 +46,10 @@ mod tests {
 
     #[test]
     fn multi_window_visible_reads_hide_from_this_window() {
-        assert_eq!(hide_project_menu_label(true, false), "Hide from this window");
+        assert_eq!(
+            hide_project_menu_label(true, false),
+            "Hide from this window"
+        );
     }
 
     #[test]
@@ -58,27 +61,66 @@ mod tests {
 /// Event emitted by ContextMenu
 pub enum ContextMenuEvent {
     Close,
-    AddTerminal { project_id: String },
-    CreateWorktree { project_id: String },
-    QuickCreateWorktree { project_id: String },
-    ManageWorktrees { project_id: String, position: gpui::Point<gpui::Pixels> },
-    RenameProject { project_id: String, project_name: String },
-    RenameDirectory { project_id: String, project_path: String },
-    CloseWorktree { project_id: String },
-    DeleteProject { project_id: String },
-    ConfigureHooks { project_id: String },
-    ReloadServices { project_id: String },
-    FocusParent { project_id: String },
-    CopyPath { path: String },
-    BrowseFiles { project_id: String },
-    ShowDiff { project_id: String },
-    FocusProject { project_id: String },
-    HideProject { project_id: String },
-    ToggleProjectPinned { project_id: String },
+    AddTerminal {
+        project_id: String,
+    },
+    CreateWorktree {
+        project_id: String,
+    },
+    QuickCreateWorktree {
+        project_id: String,
+    },
+    ManageWorktrees {
+        project_id: String,
+        position: gpui::Point<gpui::Pixels>,
+    },
+    RenameProject {
+        project_id: String,
+        project_name: String,
+    },
+    RenameDirectory {
+        project_id: String,
+        project_path: String,
+    },
+    CloseWorktree {
+        project_id: String,
+    },
+    DeleteProject {
+        project_id: String,
+    },
+    ConfigureHooks {
+        project_id: String,
+    },
+    ReloadServices {
+        project_id: String,
+    },
+    FocusParent {
+        project_id: String,
+    },
+    CopyPath {
+        path: String,
+    },
+    BrowseFiles {
+        project_id: String,
+    },
+    ShowDiff {
+        project_id: String,
+    },
+    FocusProject {
+        project_id: String,
+    },
+    HideProject {
+        project_id: String,
+    },
+    ToggleProjectPinned {
+        project_id: String,
+    },
 }
 
 impl okena_ui::overlay::CloseEvent for ContextMenuEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 /// Project context menu component
@@ -271,171 +313,279 @@ impl Render for ContextMenu {
             .inset_0()
             .occlude()
             .id("context-menu-backdrop")
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
             .child(deferred(
-                anchored()
-                    .position(position)
-                    .snap_to_window()
-                    .child(
-                        context_menu_panel("project-context-menu", &t)
-                    // Add Terminal option
-                    .child(
-                        menu_item("context-menu-add-terminal", "icons/plus.svg", "Add Terminal", &t)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.add_terminal(cx);
-                            })),
-                    )
-                    // Browse Files
-                    .child(
-                        menu_item("context-menu-browse-files", "icons/file.svg", "Browse Files", &t)
+                anchored().position(position).snap_to_window().child(
+                    context_menu_panel("project-context-menu", &t)
+                        // Add Terminal option
+                        .child(
+                            menu_item(
+                                "context-menu-add-terminal",
+                                "icons/plus.svg",
+                                "Add Terminal",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.add_terminal(cx);
+                                },
+                            )),
+                        )
+                        // Browse Files
+                        .child(
+                            menu_item(
+                                "context-menu-browse-files",
+                                "icons/file.svg",
+                                "Browse Files",
+                                &t,
+                            )
                             .on_click(cx.listener({
                                 let project_id = self.request.project_id.clone();
                                 move |this, _, _window, cx| {
                                     this.browse_files(project_id.clone(), cx);
                                 }
                             })),
-                    )
-                    // Show Diff
-                    .when(is_git_repo, |d| {
-                        d.child(
-                            menu_item("context-menu-show-diff", "icons/git-commit.svg", "Show Diff", &t)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.show_diff(cx);
+                        )
+                        // Show Diff
+                        .when(is_git_repo, |d| {
+                            d.child(
+                                menu_item(
+                                    "context-menu-show-diff",
+                                    "icons/git-commit.svg",
+                                    "Show Diff",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.show_diff(cx);
+                                    },
+                                )),
+                            )
+                        })
+                        .child(menu_separator(&t))
+                        // Copy Path
+                        .child(
+                            menu_item("context-menu-copy-path", "icons/copy.svg", "Copy Path", &t)
+                                .on_click(cx.listener({
+                                    let project_path = project_path.clone();
+                                    move |this, _, _window, cx| {
+                                        this.copy_path(project_path.clone(), cx);
+                                    }
                                 })),
                         )
-                    })
-                    .child(menu_separator(&t))
-                    // Copy Path
-                    .child(
-                        menu_item("context-menu-copy-path", "icons/copy.svg", "Copy Path", &t)
-                            .on_click(cx.listener({
-                                let project_path = project_path.clone();
-                                move |this, _, _window, cx| {
-                                    this.copy_path(project_path.clone(), cx);
-                                }
-                            })),
-                    )
-                    // Focus Project
-                    .child(
-                        menu_item("context-menu-focus-project", "icons/fullscreen.svg", "Focus Project", &t)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.focus_project(cx);
-                            })),
-                    )
-                    // Pin / Unpin (anchors the project to the top of the
-                    // activity-sorted view; harmless in manual mode)
-                    .child(
-                        menu_item(
-                            "context-menu-toggle-pinned",
-                            "icons/bookmark.svg",
-                            if is_pinned { "Unpin" } else { "Pin to top" },
-                            &t,
+                        // Focus Project
+                        .child(
+                            menu_item(
+                                "context-menu-focus-project",
+                                "icons/fullscreen.svg",
+                                "Focus Project",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.focus_project(cx);
+                                },
+                            )),
                         )
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            this.toggle_pinned(cx);
-                        })),
-                    )
-                    // Hide / Show Project (label + icon depend on extras presence and per-window hidden state)
-                    .child(
-                        menu_item("context-menu-hide-project", hide_project_icon, hide_project_label, &t)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.hide_project(cx);
-                            })),
-                    )
-                    .child(menu_separator(&t))
-                    // Create Worktree option (only for git repos that are not already worktrees)
-                    .when(is_git_repo && !is_worktree, |d| {
-                        d.child(
-                            menu_item("context-menu-create-worktree", "icons/git-branch.svg", "Create Worktree...", &t)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.create_worktree(cx);
-                                })),
+                        // Pin / Unpin (anchors the project to the top of the
+                        // activity-sorted view; harmless in manual mode)
+                        .child(
+                            menu_item(
+                                "context-menu-toggle-pinned",
+                                "icons/bookmark.svg",
+                                if is_pinned { "Unpin" } else { "Pin to top" },
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.toggle_pinned(cx);
+                                },
+                            )),
                         )
-                    })
-                    // Quick Create Worktree (only for git repos that are not already worktrees)
-                    .when(is_git_repo && !is_worktree, |d| {
-                        d.child(
-                            menu_item("context-menu-quick-create-wt", "icons/plus.svg", "Quick Create Worktree", &t)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.quick_create_worktree(cx);
-                                })),
+                        // Hide / Show Project (label + icon depend on extras presence and per-window hidden state)
+                        .child(
+                            menu_item(
+                                "context-menu-hide-project",
+                                hide_project_icon,
+                                hide_project_label,
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.hide_project(cx);
+                                },
+                            )),
                         )
-                    })
-                    // Manage Worktrees (only for git repos that are not already worktrees)
-                    .when(is_git_repo && !is_worktree, |d| {
-                        d.child(
-                            menu_item("context-menu-manage-wt", "icons/git-branch.svg", "Manage Worktrees", &t)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.manage_worktrees(cx);
-                                })),
-                        )
-                    })
-                    // Separator (only if worktree items above were shown)
-                    .when(is_git_repo && !is_worktree, |d| d.child(menu_separator(&t)))
-                    // Rename option
-                    .child(
-                        menu_item("context-menu-rename", "icons/edit.svg", "Rename Project", &t)
+                        .child(menu_separator(&t))
+                        // Create Worktree option (only for git repos that are not already worktrees)
+                        .when(is_git_repo && !is_worktree, |d| {
+                            d.child(
+                                menu_item(
+                                    "context-menu-create-worktree",
+                                    "icons/git-branch.svg",
+                                    "Create Worktree...",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.create_worktree(cx);
+                                    },
+                                )),
+                            )
+                        })
+                        // Quick Create Worktree (only for git repos that are not already worktrees)
+                        .when(is_git_repo && !is_worktree, |d| {
+                            d.child(
+                                menu_item(
+                                    "context-menu-quick-create-wt",
+                                    "icons/plus.svg",
+                                    "Quick Create Worktree",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.quick_create_worktree(cx);
+                                    },
+                                )),
+                            )
+                        })
+                        // Manage Worktrees (only for git repos that are not already worktrees)
+                        .when(is_git_repo && !is_worktree, |d| {
+                            d.child(
+                                menu_item(
+                                    "context-menu-manage-wt",
+                                    "icons/git-branch.svg",
+                                    "Manage Worktrees",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.manage_worktrees(cx);
+                                    },
+                                )),
+                            )
+                        })
+                        // Separator (only if worktree items above were shown)
+                        .when(is_git_repo && !is_worktree, |d| d.child(menu_separator(&t)))
+                        // Rename option
+                        .child(
+                            menu_item(
+                                "context-menu-rename",
+                                "icons/edit.svg",
+                                "Rename Project",
+                                &t,
+                            )
                             .on_click(cx.listener({
                                 let project_name = project_name_for_rename.clone();
                                 move |this, _, _window, cx| {
                                     this.rename_project(project_name.clone(), cx);
                                 }
                             })),
-                    )
-                    // Rename Directory option
-                    .child(
-                        menu_item("context-menu-rename-dir", "icons/folder.svg", "Rename Directory...", &t)
+                        )
+                        // Rename Directory option
+                        .child(
+                            menu_item(
+                                "context-menu-rename-dir",
+                                "icons/folder.svg",
+                                "Rename Directory...",
+                                &t,
+                            )
                             .on_click(cx.listener({
                                 let project_path = project_path_for_rename_dir.clone();
                                 move |this, _, _window, cx| {
                                     this.rename_directory(project_path.clone(), cx);
                                 }
                             })),
-                    )
-                    // Configure Hooks option
-                    .child(
-                        menu_item("context-menu-configure-hooks", "icons/terminal.svg", "Configure Hooks...", &t)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.configure_hooks(cx);
-                            })),
-                    )
-                    // Reload Services option
-                    .child(
-                        menu_item("context-menu-reload-services", "icons/file.svg", "Reload Services", &t)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.reload_services(cx);
-                            })),
-                    )
-                    // Focus Parent Project option (only for worktree projects)
-                    .when(is_worktree, |d| {
-                        d.child(
-                            menu_item("context-menu-focus-parent", "icons/chevron-up.svg", "Focus Parent Project", &t)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.focus_parent(cx);
-                                })),
                         )
-                    })
-                    // Close Worktree option (only for worktree projects)
-                    .when(is_worktree, |d| {
-                        d.child(
-                            menu_item_with_color("context-menu-close-worktree", "icons/git-branch.svg", "Close Worktree", t.warning, t.warning, &t)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.close_worktree(cx);
-                                })),
+                        // Configure Hooks option
+                        .child(
+                            menu_item(
+                                "context-menu-configure-hooks",
+                                "icons/terminal.svg",
+                                "Configure Hooks...",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.configure_hooks(cx);
+                                },
+                            )),
                         )
-                    })
-                    // Delete option
-                    .child(
-                        menu_item_with_color("context-menu-delete", "icons/trash.svg", "Delete Project", t.error, t.error, &t)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.delete_project(cx);
-                            })),
-                    ),
+                        // Reload Services option
+                        .child(
+                            menu_item(
+                                "context-menu-reload-services",
+                                "icons/file.svg",
+                                "Reload Services",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.reload_services(cx);
+                                },
+                            )),
+                        )
+                        // Focus Parent Project option (only for worktree projects)
+                        .when(is_worktree, |d| {
+                            d.child(
+                                menu_item(
+                                    "context-menu-focus-parent",
+                                    "icons/chevron-up.svg",
+                                    "Focus Parent Project",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.focus_parent(cx);
+                                    },
+                                )),
+                            )
+                        })
+                        // Close Worktree option (only for worktree projects)
+                        .when(is_worktree, |d| {
+                            d.child(
+                                menu_item_with_color(
+                                    "context-menu-close-worktree",
+                                    "icons/git-branch.svg",
+                                    "Close Worktree",
+                                    t.warning,
+                                    t.warning,
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.close_worktree(cx);
+                                    },
+                                )),
+                            )
+                        })
+                        // Delete option
+                        .child(
+                            menu_item_with_color(
+                                "context-menu-delete",
+                                "icons/trash.svg",
+                                "Delete Project",
+                                t.error,
+                                t.error,
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.delete_project(cx);
+                                },
+                            )),
+                        ),
                 ),
             ))
     }

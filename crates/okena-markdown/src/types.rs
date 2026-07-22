@@ -3,10 +3,21 @@
 /// A node in the markdown AST.
 #[derive(Clone)]
 pub(crate) enum Node {
-    Heading { level: u8, children: Vec<Inline> },
-    Paragraph { children: Vec<Inline> },
-    CodeBlock { language: Option<String>, code: String },
-    List { ordered: bool, items: Vec<Vec<Inline>> },
+    Heading {
+        level: u8,
+        children: Vec<Inline>,
+    },
+    Paragraph {
+        children: Vec<Inline>,
+    },
+    CodeBlock {
+        language: Option<String>,
+        code: String,
+    },
+    List {
+        ordered: bool,
+        items: Vec<Vec<Inline>>,
+    },
     Table {
         headers: Vec<Vec<Inline>>,
         rows: Vec<Vec<Vec<Inline>>>,
@@ -14,14 +25,19 @@ pub(crate) enum Node {
         /// rendering does not re-measure every cell on every frame.
         col_widths: Vec<usize>,
     },
-    Blockquote { children: Vec<Inline> },
+    Blockquote {
+        children: Vec<Inline>,
+    },
     HorizontalRule,
     /// YAML frontmatter at the top of the document, rendered as a metadata card
     /// rather than fed to the markdown parser (where it degrades into a heading).
     /// `text_len` is the flat-text length (in chars), precomputed at parse time
     /// so selection-offset accounting does not rebuild the flat text on every
     /// frame — same rationale as `Table`'s `col_widths`.
-    Frontmatter { block: Frontmatter, text_len: usize },
+    Frontmatter {
+        block: Frontmatter,
+        text_len: usize,
+    },
 }
 
 /// Parsed YAML frontmatter block.

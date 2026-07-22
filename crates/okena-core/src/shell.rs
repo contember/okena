@@ -67,9 +67,15 @@ impl ShellType {
     /// Resolve `ShellType::Default` into a concrete shell by checking
     /// the project's default shell first, then the global setting.
     /// Non-Default variants are returned unchanged.
-    pub fn resolve_default(self, project_shell: Option<&ShellType>, global_shell: &ShellType) -> ShellType {
+    pub fn resolve_default(
+        self,
+        project_shell: Option<&ShellType>,
+        global_shell: &ShellType,
+    ) -> ShellType {
         if self == ShellType::Default {
-            project_shell.cloned().unwrap_or_else(|| global_shell.clone())
+            project_shell
+                .cloned()
+                .unwrap_or_else(|| global_shell.clone())
         } else {
             self
         }
@@ -108,7 +114,11 @@ impl ShellType {
             ShellType::Cmd => "CMD",
             #[cfg(windows)]
             ShellType::PowerShell { core } => {
-                if *core { "pwsh" } else { "PS" }
+                if *core {
+                    "pwsh"
+                } else {
+                    "PS"
+                }
             }
             #[cfg(windows)]
             ShellType::Wsl { .. } => "WSL",
@@ -124,16 +134,17 @@ impl ShellType {
             #[cfg(windows)]
             ShellType::Cmd => "cmd.exe".to_string(),
             #[cfg(windows)]
-            ShellType::PowerShell { core } => {
-                if *core { "pwsh.exe -NoLogo" } else { "powershell.exe -NoLogo" }.to_string()
+            ShellType::PowerShell { core } => if *core {
+                "pwsh.exe -NoLogo"
+            } else {
+                "powershell.exe -NoLogo"
             }
+            .to_string(),
             #[cfg(windows)]
-            ShellType::Wsl { distro } => {
-                match distro {
-                    Some(d) => format!("wsl.exe -d {}", d),
-                    None => "wsl.exe".to_string(),
-                }
-            }
+            ShellType::Wsl { distro } => match distro {
+                Some(d) => format!("wsl.exe -d {}", d),
+                None => "wsl.exe".to_string(),
+            },
             ShellType::Custom { path, args } => {
                 if args.is_empty() {
                     shell_quote(path)
@@ -154,7 +165,15 @@ fn shell_quote(s: &str) -> String {
         return "''".to_string();
     }
     // If it only contains safe characters, no quoting needed
-    if s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'.' || b == b'-' || b == b'_' || b == b'=' || b == b':') {
+    if s.bytes().all(|b| {
+        b.is_ascii_alphanumeric()
+            || b == b'/'
+            || b == b'.'
+            || b == b'-'
+            || b == b'_'
+            || b == b'='
+            || b == b':'
+    }) {
         return s.to_string();
     }
     // Single-quote and escape embedded single quotes

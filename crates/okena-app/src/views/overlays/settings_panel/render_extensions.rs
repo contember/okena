@@ -3,8 +3,8 @@ use crate::theme::theme;
 use gpui::*;
 use okena_extensions::ExtensionRegistry;
 
-use super::components::*;
 use super::SettingsPanel;
+use super::components::*;
 
 impl SettingsPanel {
     pub(super) fn render_extensions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

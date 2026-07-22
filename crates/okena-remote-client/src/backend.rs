@@ -3,9 +3,9 @@ use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::TerminalTransport;
 use okena_transport::client::{
-    close_remote_terminal, make_prefixed_id, resize_remote_terminal, send_remote_terminal_input,
-    WsClientMessage, REMOTE_TERMINAL_ANSWERS_QUERIES, REMOTE_TERMINAL_RESIZE_DEBOUNCE_MS,
-    REMOTE_TERMINAL_USES_MOUSE_BACKEND,
+    REMOTE_TERMINAL_ANSWERS_QUERIES, REMOTE_TERMINAL_RESIZE_DEBOUNCE_MS,
+    REMOTE_TERMINAL_USES_MOUSE_BACKEND, WsClientMessage, close_remote_terminal, make_prefixed_id,
+    resize_remote_terminal, send_remote_terminal_input,
 };
 use std::path::PathBuf;
 use std::sync::Arc;

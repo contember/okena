@@ -22,24 +22,23 @@ pub mod status;
 pub mod worktree;
 
 pub use branch::{
-    checkout_local_branch, checkout_remote_branch, create_and_checkout_branch,
+    BranchList, checkout_local_branch, checkout_remote_branch, create_and_checkout_branch,
     delete_local_branch, delete_remote_branch, discard_file_changes, fetch_all,
     get_available_branches_for_worktree, get_default_branch, list_branches,
-    list_branches_classified, merge_branch, push_branch, rebase_onto,
-    resolve_base_ref, resolve_review_base, stage_file,
-    stash_changes, stash_pop, unstage_file, BranchList,
+    list_branches_classified, merge_branch, push_branch, rebase_onto, resolve_base_ref,
+    resolve_review_base, stage_file, stash_changes, stash_pop, unstage_file,
 };
 pub use ci::{get_ci_checks, get_pr_info, has_github_remote, list_pull_requests};
 pub use paths::{
     compute_target_paths, get_repo_root, normalize_path, project_path_in_worktree,
     resolve_git_root_and_subdir,
 };
-pub use status::{
-    apply_pr_base, count_ahead_behind, count_ahead_behind_vs, count_unpushed_commits,
-    get_current_branch, get_head_sha, get_head_snapshot, get_status, has_uncommitted_changes,
-    HeadSnapshot, StatusFetch,
-};
 pub(crate) use status::worktree_diff;
+pub use status::{
+    HeadSnapshot, StatusFetch, apply_pr_base, count_ahead_behind, count_ahead_behind_vs,
+    count_unpushed_commits, get_current_branch, get_head_sha, get_head_snapshot, get_status,
+    has_uncommitted_changes,
+};
 pub use worktree::{
     create_worktree, create_worktree_with_start_point, fetch_and_fast_forward, list_git_worktrees,
     remove_worktree, remove_worktree_fast,
@@ -61,18 +60,25 @@ pub(crate) fn require_success(output: std::process::Output) -> GitResult<()> {
 
 /// Convert a `Path` to a UTF-8 `&str`, returning `GitError::InvalidPath` on failure.
 pub(crate) fn path_str(path: &Path) -> GitResult<&str> {
-    path.to_str().ok_or_else(|| GitError::InvalidPath(path.to_path_buf()))
+    path.to_str()
+        .ok_or_else(|| GitError::InvalidPath(path.to_path_buf()))
 }
 
 /// Get branches that are already checked out in worktrees (main + linked).
 /// Detached worktrees are skipped.
 pub(crate) fn get_worktree_branches(path: &Path) -> Vec<String> {
-    worktree::list_git_worktrees(path).into_iter().map(|(_, b)| b).collect()
+    worktree::list_git_worktrees(path)
+        .into_iter()
+        .map(|(_, b)| b)
+        .collect()
 }
 
 /// Read the short branch name from a repo's HEAD, or `None` if detached.
 pub(crate) fn head_branch_short(repo: &gix::Repository) -> Option<String> {
-    repo.head_name().ok().flatten().map(|n| n.shorten().to_string())
+    repo.head_name()
+        .ok()
+        .flatten()
+        .map(|n| n.shorten().to_string())
 }
 
 /// Shared test helpers used by submodule unit tests.
@@ -114,6 +120,11 @@ pub(crate) mod test_support {
             .env("GIT_COMMITTER_EMAIL", "test@test")
             .output()
             .expect("git command failed");
-        assert!(status.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&status.stderr));
+        assert!(
+            status.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&status.stderr)
+        );
     }
 }

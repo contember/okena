@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_services::manager::ServiceManager;
-use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
 use okena_workspace::state::Workspace;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;

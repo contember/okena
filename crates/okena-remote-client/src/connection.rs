@@ -1,12 +1,12 @@
 use crate::backend::{RemoteBackend, RemoteTransport};
+use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_terminal::TerminalsRegistry;
 
 use okena_core::api::{ApiSystemStats, StateResponse};
 use okena_transport::client::{
-    is_remote_terminal, ConnectionEvent, ConnectionHandler, ConnectionStatus,
-    RemoteClient, RemoteConnectionConfig, WsClientMessage,
+    ConnectionEvent, ConnectionHandler, ConnectionStatus, RemoteClient, RemoteConnectionConfig,
+    WsClientMessage, is_remote_terminal,
 };
 
 use std::collections::HashMap;
@@ -53,12 +53,13 @@ impl ConnectionHandler for DesktopConnectionHandler {
             }
             return;
         }
-        let transport = Arc::new(RemoteTransport::new(
-            ws_sender,
-            connection_id.to_string(),
-        ));
+        let transport = Arc::new(RemoteTransport::new(ws_sender, connection_id.to_string()));
         let size = if cols > 0 && rows > 0 {
-            TerminalSize { cols, rows, ..TerminalSize::default() }
+            TerminalSize {
+                cols,
+                rows,
+                ..TerminalSize::default()
+            }
         } else {
             TerminalSize::default()
         };
@@ -86,7 +87,9 @@ impl ConnectionHandler for DesktopConnectionHandler {
     }
 
     fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16, server_owns: bool) {
-        log::debug!("client recv resize: terminal={prefixed_id} {cols}x{rows} server_owns={server_owns}");
+        log::debug!(
+            "client recv resize: terminal={prefixed_id} {cols}x{rows} server_owns={server_owns}"
+        );
         if let Some(terminal) = self.terminals.lock().get(prefixed_id) {
             // The origin's local user just reclaimed resize authority. Mark the
             // remote side as resize owner on this client so its TerminalElement
@@ -256,8 +259,13 @@ mod tests {
             transport,
             String::new(),
         ));
-        terminals.lock().insert(prefixed_id.to_string(), terminal.clone());
-        (DesktopConnectionHandler::new(terminals, activity_tx), terminal)
+        terminals
+            .lock()
+            .insert(prefixed_id.to_string(), terminal.clone());
+        (
+            DesktopConnectionHandler::new(terminals, activity_tx),
+            terminal,
+        )
     }
 
     #[test]

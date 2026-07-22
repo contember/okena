@@ -4,4 +4,3 @@ pub use okena_git::*;
 
 // Watcher re-exported from okena-views-git crate
 pub use okena_views_git::watcher;
-

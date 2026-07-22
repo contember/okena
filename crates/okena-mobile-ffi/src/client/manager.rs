@@ -3,8 +3,8 @@ use crate::client::terminal_holder::TerminalHolder;
 
 use okena_core::api::{ActionRequest, ApiFullscreen, ApiLayoutNode, StateResponse};
 use okena_transport::client::{
-    make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig,
-    WsClientMessage,
+    ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig, WsClientMessage,
+    make_prefixed_id,
 };
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
@@ -49,11 +49,8 @@ fn merge_layout_structure(server: &ApiLayoutNode, local: &ApiLayoutNode) -> ApiL
             },
         ) if direction == local_direction => {
             let mapping = matching_api_child_indices(server_children, local_children);
-            let children = merge_mapped_api_children(
-                server_children,
-                local_children,
-                mapping.as_deref(),
-            );
+            let children =
+                merge_mapped_api_children(server_children, local_children, mapping.as_deref());
             let sizes = mapping
                 .filter(|indices| local_sizes.len() == indices.len())
                 .map(|indices| {
@@ -153,8 +150,7 @@ fn matching_api_child_indices(
         .iter()
         .zip(&local_ids)
         .all(|(server, local)| {
-            (server.is_empty() && local.is_empty())
-                || server.iter().any(|id| local.contains(id))
+            (server.is_empty() && local.is_empty()) || server.iter().any(|id| local.contains(id))
         })
         .then(|| (0..server.len()).collect())
 }
@@ -169,10 +165,7 @@ fn merged_api_active_tab(
     let Some(local_child) = local_children.get(local_active) else {
         return fallback;
     };
-    let selected_ids: HashSet<String> = local_child
-        .collect_terminal_ids()
-        .into_iter()
-        .collect();
+    let selected_ids: HashSet<String> = local_child.collect_terminal_ids().into_iter().collect();
     if selected_ids.is_empty() {
         return local_active.min(server_children.len().saturating_sub(1));
     }
@@ -206,7 +199,9 @@ fn collect_terminal_presentation(
                 collect_terminal_presentation(child, presentation);
             }
         }
-        ApiLayoutNode::Terminal { terminal_id: None, .. } => {}
+        ApiLayoutNode::Terminal {
+            terminal_id: None, ..
+        } => {}
     }
 }
 
@@ -231,7 +226,9 @@ fn apply_terminal_presentation(
                 apply_terminal_presentation(child, presentation);
             }
         }
-        ApiLayoutNode::Terminal { terminal_id: None, .. } => {}
+        ApiLayoutNode::Terminal {
+            terminal_id: None, ..
+        } => {}
     }
 }
 
@@ -246,25 +243,32 @@ fn merge_state_presentation(next: &mut StateResponse, previous: &StateResponse) 
         }
     }
 
-    next.fullscreen_terminal = previous.fullscreen_terminal.as_ref().and_then(|fullscreen| {
-        let terminal_exists = next.projects.iter().any(|project| {
-            project.id == fullscreen.project_id
-                && project
-                    .layout
-                    .as_ref()
-                    .is_some_and(|layout| layout_contains_terminal(layout, &fullscreen.terminal_id))
+    next.fullscreen_terminal = previous
+        .fullscreen_terminal
+        .as_ref()
+        .and_then(|fullscreen| {
+            let terminal_exists = next.projects.iter().any(|project| {
+                project.id == fullscreen.project_id
+                    && project.layout.as_ref().is_some_and(|layout| {
+                        layout_contains_terminal(layout, &fullscreen.terminal_id)
+                    })
+            });
+            terminal_exists.then(|| fullscreen.clone())
         });
-        terminal_exists.then(|| fullscreen.clone())
-    });
 }
 
 fn layout_contains_terminal(layout: &ApiLayoutNode, terminal_id: &str) -> bool {
     match layout {
-        ApiLayoutNode::Terminal { terminal_id: Some(id), .. } => id == terminal_id,
+        ApiLayoutNode::Terminal {
+            terminal_id: Some(id),
+            ..
+        } => id == terminal_id,
         ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => children
             .iter()
             .any(|child| layout_contains_terminal(child, terminal_id)),
-        ApiLayoutNode::Terminal { terminal_id: None, .. } => false,
+        ApiLayoutNode::Terminal {
+            terminal_id: None, ..
+        } => false,
     }
 }
 
@@ -416,12 +420,7 @@ impl ConnectionManager {
 
         let (event_tx, event_rx) = async_channel::bounded::<ConnectionEvent>(256);
 
-        let client = RemoteClient::new(
-            config,
-            self.runtime.clone(),
-            handler.clone(),
-            event_tx,
-        );
+        let client = RemoteClient::new(config, self.runtime.clone(), handler.clone(), event_tx);
 
         // Spawn event processor task
         let conn_id_clone = conn_id.clone();
@@ -439,10 +438,9 @@ impl ConnectionManager {
         self.connections.write().insert(conn_id.clone(), connection);
 
         // Spawn event processor
-        let event_task = self.runtime.spawn(Self::process_events(
-            conn_id_clone.clone(),
-            event_rx,
-        ));
+        let event_task = self
+            .runtime
+            .spawn(Self::process_events(conn_id_clone.clone(), event_rx));
 
         // Store the task handle
         if let Some(conn) = self.connections.write().get_mut(&conn_id) {
@@ -517,7 +515,12 @@ impl ConnectionManager {
         let mut state = connection.state_cache.write();
         let project = state
             .as_mut()
-            .and_then(|state| state.projects.iter_mut().find(|project| project.id == project_id))
+            .and_then(|state| {
+                state
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.id == project_id)
+            })
             .ok_or_else(|| format!("Project not found: {project_id}"))?;
         let changed = project
             .layout
@@ -549,9 +552,10 @@ impl ConnectionManager {
             Some(terminal_id) => {
                 let exists = state.projects.iter().any(|project| {
                     project.id == project_id
-                        && project.layout.as_ref().is_some_and(|layout| {
-                            layout_contains_terminal(layout, &terminal_id)
-                        })
+                        && project
+                            .layout
+                            .as_ref()
+                            .is_some_and(|layout| layout_contains_terminal(layout, &terminal_id))
                 });
                 if !exists {
                     return Err(format!("Terminal not found: {terminal_id}"));
@@ -580,7 +584,12 @@ impl ConnectionManager {
         let mut state = connection.state_cache.write();
         let layout = state
             .as_mut()
-            .and_then(|state| state.projects.iter_mut().find(|project| project.id == project_id))
+            .and_then(|state| {
+                state
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.id == project_id)
+            })
             .and_then(|project| project.layout.as_mut())
             .and_then(|layout| layout_at_path_mut(layout, path))
             .ok_or_else(|| format!("Tab group not found at path: {path:?}"))?;
@@ -654,11 +663,7 @@ impl ConnectionManager {
     }
 
     /// Send an action to the remote server via POST /v1/actions.
-    pub async fn send_action(
-        &self,
-        conn_id: &str,
-        action: ActionRequest,
-    ) -> anyhow::Result<()> {
+    pub async fn send_action(&self, conn_id: &str, action: ActionRequest) -> anyhow::Result<()> {
         self.send_action_with_response(conn_id, action).await?;
         Ok(())
     }
@@ -691,10 +696,7 @@ impl ConnectionManager {
     }
 
     /// Background task that drains the event channel and updates connection state.
-    async fn process_events(
-        conn_id: String,
-        event_rx: async_channel::Receiver<ConnectionEvent>,
-    ) {
+    async fn process_events(conn_id: String, event_rx: async_channel::Receiver<ConnectionEvent>) {
         while let Ok(event) = event_rx.recv().await {
             let mgr = match MANAGER.get() {
                 Some(m) => m,
@@ -728,7 +730,9 @@ impl ConnectionManager {
                             cert_fingerprint.clone();
                     }
                 }
-                ConnectionEvent::TlsUpgraded { cert_fingerprint, .. } => {
+                ConnectionEvent::TlsUpgraded {
+                    cert_fingerprint, ..
+                } => {
                     let mut client = conn.client.write();
                     client.config_mut().tls = true;
                     client.config_mut().pinned_cert_sha256 = cert_fingerprint.clone();
@@ -756,10 +760,7 @@ impl ConnectionManager {
                 ConnectionEvent::SubscriptionMappings { mappings, .. } => {
                     conn.client.write().update_stream_mappings(mappings);
                 }
-                ConnectionEvent::GitStatusChanged {
-                    statuses,
-                    ..
-                } => {
+                ConnectionEvent::GitStatusChanged { statuses, .. } => {
                     if let Some(state) = conn.state_cache.write().as_mut() {
                         for project in &mut state.projects {
                             project.git_status = statuses.get(&project.id).cloned();
@@ -775,12 +776,7 @@ impl ConnectionManager {
                     // The mobile bridge has no toast surface yet; surfacing these
                     // in the RN UI would need a dedicated FFI callback. Log for now
                     // so daemon-originated toasts are at least observable.
-                    log::info!(
-                        "Toast for {} [{}]: {}",
-                        conn_id,
-                        toast.level,
-                        toast.message
-                    );
+                    log::info!("Toast for {} [{}]: {}", conn_id, toast.level, toast.message);
                 }
             }
         }

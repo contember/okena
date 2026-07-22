@@ -39,18 +39,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use okena_app_core::remote_snapshot::build_state_response;
 use okena_app_core::workspace::actions::execute::{
     ensure_terminal, execute_action, spawn_uninitialized_terminals,
 };
-use okena_app_core::remote_snapshot::build_state_response;
-use okena_core::api::{
-    ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult,
-};
-use okena_core::git_poll::{git_poll_trigger_for_action, GitPollTrigger};
+use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
+use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
 use okena_services::manager::ServiceManager;
-use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
 use okena_workspace::actions::soft_close::{
     begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow,
 };
@@ -62,7 +60,7 @@ use okena_workspace::state::{WindowId, Workspace};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
-use crate::daemon_config::{get_settings_schema, DaemonConfig};
+use crate::daemon_config::{DaemonConfig, get_settings_schema};
 use crate::service_cx::ServiceReactorRef;
 use crate::soft_close::SoftCloseDeadlines;
 use crate::workspace_cx::DaemonWorkspaceCx;
@@ -108,10 +106,7 @@ fn send_git_poll_trigger_after_success(
     }
 }
 
-fn publish_config_change_after_success(
-    result: &CommandResult,
-    state_version: &watch::Sender<u64>,
-) {
+fn publish_config_change_after_success(result: &CommandResult, state_version: &watch::Sender<u64>) {
     if matches!(result, CommandResult::Ok(_)) {
         state_version.send_modify(|version| *version = version.wrapping_add(1));
     }
@@ -546,8 +541,11 @@ pub async fn daemon_command_loop(
     // Shared service reactor: built once, `cx()` re-borrowed per service arm.
     // It re-locks `service_manager` internally on reentry, so the loop locks the
     // manager itself only while the cx is alive — never across an await.
-    let service_reactor =
-        ServiceReactorRef::new(service_manager.clone(), runtime.clone(), service_tick.clone());
+    let service_reactor = ServiceReactorRef::new(
+        service_manager.clone(),
+        runtime.clone(),
+        service_tick.clone(),
+    );
 
     loop {
         let msg: BridgeMessage = match bridge_rx.recv().await {
@@ -572,145 +570,141 @@ pub async fn daemon_command_loop(
         };
 
         let result: CommandResult = match command {
-            RemoteCommand::Action(action) => match action {
-                // ── Service actions ──────────────────────────────────────────
-                ActionRequest::StartService { project_id, service_name } => {
-                    let mut sm = service_manager.lock();
-                    let mut cx = service_reactor.cx();
-                    sm.start_service_action(&project_id, &service_name, &mut cx)
-                }
-                ActionRequest::StopService { project_id, service_name } => {
-                    let mut sm = service_manager.lock();
-                    let mut cx = service_reactor.cx();
-                    sm.stop_service_action(&project_id, &service_name, &mut cx)
-                }
-                ActionRequest::RestartService { project_id, service_name } => {
-                    let mut sm = service_manager.lock();
-                    let mut cx = service_reactor.cx();
-                    sm.restart_service_action(&project_id, &service_name, &mut cx)
-                }
-                ActionRequest::StartAllServices { project_id } => {
-                    let mut sm = service_manager.lock();
-                    let mut cx = service_reactor.cx();
-                    sm.start_all_action(&project_id, &mut cx)
-                }
-                ActionRequest::StopAllServices { project_id } => {
-                    let mut sm = service_manager.lock();
-                    let mut cx = service_reactor.cx();
-                    sm.stop_all_action(&project_id, &mut cx)
-                }
-                ActionRequest::ReloadServices { project_id } => {
-                    let mut sm = service_manager.lock();
-                    let mut cx = service_reactor.cx();
-                    sm.reload_services_action(&project_id, &mut cx)
-                }
+            RemoteCommand::Action(action) => {
+                match action {
+                    // ── Service actions ──────────────────────────────────────────
+                    ActionRequest::StartService {
+                        project_id,
+                        service_name,
+                    } => {
+                        let mut sm = service_manager.lock();
+                        let mut cx = service_reactor.cx();
+                        sm.start_service_action(&project_id, &service_name, &mut cx)
+                    }
+                    ActionRequest::StopService {
+                        project_id,
+                        service_name,
+                    } => {
+                        let mut sm = service_manager.lock();
+                        let mut cx = service_reactor.cx();
+                        sm.stop_service_action(&project_id, &service_name, &mut cx)
+                    }
+                    ActionRequest::RestartService {
+                        project_id,
+                        service_name,
+                    } => {
+                        let mut sm = service_manager.lock();
+                        let mut cx = service_reactor.cx();
+                        sm.restart_service_action(&project_id, &service_name, &mut cx)
+                    }
+                    ActionRequest::StartAllServices { project_id } => {
+                        let mut sm = service_manager.lock();
+                        let mut cx = service_reactor.cx();
+                        sm.start_all_action(&project_id, &mut cx)
+                    }
+                    ActionRequest::StopAllServices { project_id } => {
+                        let mut sm = service_manager.lock();
+                        let mut cx = service_reactor.cx();
+                        sm.stop_all_action(&project_id, &mut cx)
+                    }
+                    ActionRequest::ReloadServices { project_id } => {
+                        let mut sm = service_manager.lock();
+                        let mut cx = service_reactor.cx();
+                        sm.reload_services_action(&project_id, &mut cx)
+                    }
 
-                // ── App-scoped: settings / theme ─────────────────────────────
-                ActionRequest::GetSettings => daemon_config.get_settings(),
-                ActionRequest::GetSettingsSchema => get_settings_schema(),
-                ActionRequest::SetSettings { patch } => {
-                    let result = daemon_config.set_settings(patch);
-                    publish_config_change_after_success(&result, &state_version);
-                    result
-                }
-                ActionRequest::GetThemes => daemon_config.get_themes(),
-                ActionRequest::GetTheme { id } => daemon_config.get_theme(id),
-                ActionRequest::SetTheme { id } => {
-                    let result = daemon_config.set_theme(id);
-                    publish_config_change_after_success(&result, &state_version);
-                    result
-                }
-                ActionRequest::SaveCustomTheme { id, config, activate } => {
-                    let result = daemon_config.save_custom_theme(id, config, activate);
-                    publish_config_change_after_success(&result, &state_version);
-                    result
-                }
+                    // ── App-scoped: settings / theme ─────────────────────────────
+                    ActionRequest::GetSettings => daemon_config.get_settings(),
+                    ActionRequest::GetSettingsSchema => get_settings_schema(),
+                    ActionRequest::SetSettings { patch } => {
+                        let result = daemon_config.set_settings(patch);
+                        publish_config_change_after_success(&result, &state_version);
+                        result
+                    }
+                    ActionRequest::GetThemes => daemon_config.get_themes(),
+                    ActionRequest::GetTheme { id } => daemon_config.get_theme(id),
+                    ActionRequest::SetTheme { id } => {
+                        let result = daemon_config.set_theme(id);
+                        publish_config_change_after_success(&result, &state_version);
+                        result
+                    }
+                    ActionRequest::SaveCustomTheme {
+                        id,
+                        config,
+                        activate,
+                    } => {
+                        let result = daemon_config.save_custom_theme(id, config, activate);
+                        publish_config_change_after_success(&result, &state_version);
+                        result
+                    }
 
-                // ── Command palette ──────────────────────────────────────────
-                // The daemon has no GUI action registry, so there are no
-                // invokable commands to list or dispatch (the agreed parity
-                // decision; the GUI's headless mode rejects these too).
-                ActionRequest::ListActions => {
-                    CommandResult::Ok(Some(serde_json::json!({ "actions": [] })))
-                }
-                ActionRequest::InvokeAction { .. } => {
-                    CommandResult::Err("command palette unavailable in daemon mode".to_string())
-                }
+                    // ── Command palette ──────────────────────────────────────────
+                    // The daemon has no GUI action registry, so there are no
+                    // invokable commands to list or dispatch (the agreed parity
+                    // decision; the GUI's headless mode rejects these too).
+                    ActionRequest::ListActions => {
+                        CommandResult::Ok(Some(serde_json::json!({ "actions": [] })))
+                    }
+                    ActionRequest::InvokeAction { .. } => {
+                        CommandResult::Err("command palette unavailable in daemon mode".to_string())
+                    }
 
-                // ── Soft-close: undo (restore the ejected pane) ──────────────
-                ActionRequest::UndoSoftClose { terminal_id } => {
-                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                    let mut ws = workspace.lock();
-                    undo_soft_close_flow(
-                        &deadlines,
-                        &mut ws,
-                        &mut focus_manager,
-                        &terminals,
-                        &terminal_id,
-                        &mut cx,
-                    );
-                    CommandResult::Ok(None)
-                }
-
-                // ── Soft-close: finalize now ("Close now") ───────────────────
-                ActionRequest::CloseTerminalNow { terminal_id } => {
-                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                    let mut ws = workspace.lock();
-                    close_now_flow(
-                        &deadlines,
-                        &mut ws,
-                        &*backend,
-                        &terminals,
-                        &terminal_id,
-                        &mut cx,
-                    );
-                    CommandResult::Ok(None)
-                }
-
-                // ── Close terminal: grace-aware soft close ───────────────────
-                // Faithful daemon-side port of the GUI's optimistic close. A
-                // busy terminal is ejected from the layout (mirrors to clients)
-                // but its PTY is kept alive for the grace period; the finalizer
-                // loop ([`crate::soft_close::run_soft_close_poll`]) kills it on
-                // expiry. Idle terminals and `grace == 0` keep the immediate
-                // close. The Undo / Close-now toast buttons are built here but
-                // are inert until the client wires their actions.
-                ActionRequest::CloseTerminal { project_id, terminal_id } => {
-                    let grace = settings.lock().terminal_close_grace_secs;
-
-                    if grace == 0 {
-                        // Feature off → immediate close (unchanged behavior).
-                        // Snapshot settings BEFORE locking the workspace.
-                        let app_settings = settings.lock().clone();
+                    // ── Soft-close: undo (restore the ejected pane) ──────────────
+                    ActionRequest::UndoSoftClose { terminal_id } => {
+                        let mut cx =
+                            DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
                         let mut ws = workspace.lock();
-                        run_main_workspace_action(
-                            ActionRequest::CloseTerminal { project_id, terminal_id },
+                        undo_soft_close_flow(
+                            &deadlines,
                             &mut ws,
                             &mut focus_manager,
-                            &backend,
                             &terminals,
-                            &app_settings,
-                            &workspace_tick,
-                            &hook_runner,
-                            &hook_monitor,
-                        )
-                    } else {
-                        // Probe busy-ness OFF the loop thread (forks
-                        // tmux/lsof/pgrep). Hold NO locks across the await. Also
-                        // grab the foreground command for the toast label.
-                        let probe = {
-                            let backend = backend.clone();
-                            let tid = terminal_id.clone();
-                            runtime.spawn_blocking(move || probe_busy(&*backend, &tid))
-                        };
-                        let (busy, command) = probe.await.unwrap_or((false, None));
+                            &terminal_id,
+                            &mut cx,
+                        );
+                        CommandResult::Ok(None)
+                    }
 
-                        if !busy {
-                            // Idle → immediate close.
+                    // ── Soft-close: finalize now ("Close now") ───────────────────
+                    ActionRequest::CloseTerminalNow { terminal_id } => {
+                        let mut cx =
+                            DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                        let mut ws = workspace.lock();
+                        close_now_flow(
+                            &deadlines,
+                            &mut ws,
+                            &*backend,
+                            &terminals,
+                            &terminal_id,
+                            &mut cx,
+                        );
+                        CommandResult::Ok(None)
+                    }
+
+                    // ── Close terminal: grace-aware soft close ───────────────────
+                    // Faithful daemon-side port of the GUI's optimistic close. A
+                    // busy terminal is ejected from the layout (mirrors to clients)
+                    // but its PTY is kept alive for the grace period; the finalizer
+                    // loop ([`crate::soft_close::run_soft_close_poll`]) kills it on
+                    // expiry. Idle terminals and `grace == 0` keep the immediate
+                    // close. The Undo / Close-now toast buttons are built here but
+                    // are inert until the client wires their actions.
+                    ActionRequest::CloseTerminal {
+                        project_id,
+                        terminal_id,
+                    } => {
+                        let grace = settings.lock().terminal_close_grace_secs;
+
+                        if grace == 0 {
+                            // Feature off → immediate close (unchanged behavior).
+                            // Snapshot settings BEFORE locking the workspace.
                             let app_settings = settings.lock().clone();
                             let mut ws = workspace.lock();
                             run_main_workspace_action(
-                                ActionRequest::CloseTerminal { project_id, terminal_id },
+                                ActionRequest::CloseTerminal {
+                                    project_id,
+                                    terminal_id,
+                                },
                                 &mut ws,
                                 &mut focus_manager,
                                 &backend,
@@ -721,147 +715,183 @@ pub async fn daemon_command_loop(
                                 &hook_monitor,
                             )
                         } else {
-                            // Soft close: eject the pane (mirrors back), keep the
-                            // PTY, surface an Undo/Close-now toast, and arm the
-                            // grace deadline for the finalizer loop. `None` from
-                            // the flow means the terminal wasn't in the layout —
-                            // fall back to an immediate close.
-                            let toast = {
-                                let mut cx = DaemonWorkspaceCx::new(
+                            // Probe busy-ness OFF the loop thread (forks
+                            // tmux/lsof/pgrep). Hold NO locks across the await. Also
+                            // grab the foreground command for the toast label.
+                            let probe = {
+                                let backend = backend.clone();
+                                let tid = terminal_id.clone();
+                                runtime.spawn_blocking(move || probe_busy(&*backend, &tid))
+                            };
+                            let (busy, command) = probe.await.unwrap_or((false, None));
+
+                            if !busy {
+                                // Idle → immediate close.
+                                let app_settings = settings.lock().clone();
+                                let mut ws = workspace.lock();
+                                run_main_workspace_action(
+                                    ActionRequest::CloseTerminal {
+                                        project_id,
+                                        terminal_id,
+                                    },
+                                    &mut ws,
+                                    &mut focus_manager,
+                                    &backend,
+                                    &terminals,
+                                    &app_settings,
                                     &workspace_tick,
                                     &hook_runner,
                                     &hook_monitor,
-                                );
-                                let mut ws = workspace.lock();
-                                begin_soft_close_flow(
-                                    &deadlines,
-                                    &mut ws,
-                                    &mut focus_manager,
-                                    &terminals,
-                                    &project_id,
-                                    &terminal_id,
-                                    grace,
-                                    command,
-                                    &mut cx,
                                 )
-                            };
-                            match toast {
-                                Some(toast) => {
-                                    if let Some(hm) = &hook_monitor {
-                                        hm.push_toast(toast);
-                                    }
-                                    CommandResult::Ok(None)
-                                }
-                                None => {
-                                    // Not in the layout — immediate close.
-                                    let app_settings = settings.lock().clone();
-                                    let mut ws = workspace.lock();
-                                    run_main_workspace_action(
-                                        ActionRequest::CloseTerminal {
-                                            project_id,
-                                            terminal_id,
-                                        },
-                                        &mut ws,
-                                        &mut focus_manager,
-                                        &backend,
-                                        &terminals,
-                                        &app_settings,
+                            } else {
+                                // Soft close: eject the pane (mirrors back), keep the
+                                // PTY, surface an Undo/Close-now toast, and arm the
+                                // grace deadline for the finalizer loop. `None` from
+                                // the flow means the terminal wasn't in the layout —
+                                // fall back to an immediate close.
+                                let toast = {
+                                    let mut cx = DaemonWorkspaceCx::new(
                                         &workspace_tick,
                                         &hook_runner,
                                         &hook_monitor,
+                                    );
+                                    let mut ws = workspace.lock();
+                                    begin_soft_close_flow(
+                                        &deadlines,
+                                        &mut ws,
+                                        &mut focus_manager,
+                                        &terminals,
+                                        &project_id,
+                                        &terminal_id,
+                                        grace,
+                                        command,
+                                        &mut cx,
                                     )
+                                };
+                                match toast {
+                                    Some(toast) => {
+                                        if let Some(hm) = &hook_monitor {
+                                            hm.push_toast(toast);
+                                        }
+                                        CommandResult::Ok(None)
+                                    }
+                                    None => {
+                                        // Not in the layout — immediate close.
+                                        let app_settings = settings.lock().clone();
+                                        let mut ws = workspace.lock();
+                                        run_main_workspace_action(
+                                            ActionRequest::CloseTerminal {
+                                                project_id,
+                                                terminal_id,
+                                            },
+                                            &mut ws,
+                                            &mut focus_manager,
+                                            &backend,
+                                            &terminals,
+                                            &app_settings,
+                                            &workspace_tick,
+                                            &hook_runner,
+                                            &hook_monitor,
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // ── Create worktree: run the blocking git off the reactor ────
-                // `git fetch` + `git worktree add` are network/disk-heavy (up to
-                // seconds on a cold fetch). Routing them through the synchronous
-                // `execute_action` path holds the workspace lock the whole time,
-                // stalling EVERY other daemon action. Split it (mirroring the
-                // `CloseTerminal` busy-probe): resolve paths under a brief lock,
-                // run the git on a blocking thread with NO lock held, then do the
-                // fast workspace mutation (register project + fire on_worktree_create
-                // + spawn PTYs) under the lock.
-                ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
-                    // Phase 0: resolve paths. Read settings first, then the
-                    // workspace (settings-before-workspace lock order), and drop
-                    // both before the blocking git runs.
-                    let template = settings.lock().worktree.path_template.clone();
-                    let prepared = {
-                        let ws = workspace.lock();
-                        ws.project(&project_id).map(|p| {
-                            let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(
-                                std::path::Path::new(&p.path),
-                            );
-                            let (worktree_path, wt_project_path) =
-                                okena_git::compute_target_paths(&git_root, &subdir, &template, &branch);
-                            (git_root, worktree_path, wt_project_path)
-                        })
-                    };
+                    // ── Create worktree: run the blocking git off the reactor ────
+                    // `git fetch` + `git worktree add` are network/disk-heavy (up to
+                    // seconds on a cold fetch). Routing them through the synchronous
+                    // `execute_action` path holds the workspace lock the whole time,
+                    // stalling EVERY other daemon action. Split it (mirroring the
+                    // `CloseTerminal` busy-probe): resolve paths under a brief lock,
+                    // run the git on a blocking thread with NO lock held, then do the
+                    // fast workspace mutation (register project + fire on_worktree_create
+                    // + spawn PTYs) under the lock.
+                    ActionRequest::CreateWorktree {
+                        project_id,
+                        branch,
+                        create_branch,
+                    } => {
+                        // Phase 0: resolve paths. Read settings first, then the
+                        // workspace (settings-before-workspace lock order), and drop
+                        // both before the blocking git runs.
+                        let template = settings.lock().worktree.path_template.clone();
+                        let prepared = {
+                            let ws = workspace.lock();
+                            ws.project(&project_id).map(|p| {
+                                let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(
+                                    std::path::Path::new(&p.path),
+                                );
+                                let (worktree_path, wt_project_path) =
+                                    okena_git::compute_target_paths(
+                                        &git_root, &subdir, &template, &branch,
+                                    );
+                                (git_root, worktree_path, wt_project_path)
+                            })
+                        };
 
-                    match prepared {
-                        None => CommandResult::Err(format!("project not found: {project_id}")),
-                        Some((git_root, worktree_path, wt_project_path)) => {
-                            // OPTIMISTIC CREATE (symmetric with the optimistic close):
-                            // register the worktree row NOW — deferred hooks, no
-                            // terminals, layout stays None so the client renders the
-                            // "Setting up worktree…" placeholder — then return Ok and
-                            // run the slow `git worktree add` checkout in the
-                            // BACKGROUND. Previously the checkout was awaited before the
-                            // row was even created, so its (repo-scaling) duration WAS
-                            // the perceived latency. When the checkout finishes we seed
-                            // the layout + spawn the PTY + fire on_worktree_create; on
-                            // failure we roll the row back + toast.
-                            let app_settings = settings.lock().clone();
-                            let new_id = {
-                                let mut cx = DaemonWorkspaceCx::new(
-                                    &workspace_tick,
-                                    &hook_runner,
-                                    &hook_monitor,
-                                );
-                                let mut ws = workspace.lock();
-                                let registered = ws.register_worktree_project_deferred_hooks(
-                                    &project_id,
-                                    &branch,
-                                    &git_root,
-                                    &worktree_path,
-                                    &wt_project_path,
-                                    &app_settings.hooks,
-                                    WindowId::Main,
-                                    &mut cx,
-                                );
-                                // Mark creating only on success; propagate the
-                                // registration error (parent-missing OR the
-                                // same-branch/path dedupe) to the caller instead of
-                                // masking it as "project not found".
-                                if let Ok(id) = &registered {
-                                    ws.mark_creating_project(id);
-                                }
-                                registered
-                            };
-                            match new_id {
-                                Err(e) => CommandResult::Err(e),
-                                Ok(new_id) => {
-                                    let workspace = workspace.clone();
-                                    let workspace_tick = workspace_tick.clone();
-                                    let hook_runner = hook_runner.clone();
-                                    let hook_monitor = hook_monitor.clone();
-                                    let backend = backend.clone();
-                                    let terminals = terminals.clone();
-                                    let app_settings = app_settings.clone();
-                                    let git_root = git_root.clone();
-                                    let branch = branch.clone();
-                                    let worktree_path = worktree_path.clone();
-                                    let new_id_task = new_id.clone();
-                                    tokio::task::spawn_local(async move {
-                                        let git = {
-                                            let git_root = git_root.clone();
-                                            let branch = branch.clone();
-                                            let target = std::path::PathBuf::from(&worktree_path);
-                                            tokio::task::spawn_blocking(move || {
+                        match prepared {
+                            None => CommandResult::Err(format!("project not found: {project_id}")),
+                            Some((git_root, worktree_path, wt_project_path)) => {
+                                // OPTIMISTIC CREATE (symmetric with the optimistic close):
+                                // register the worktree row NOW — deferred hooks, no
+                                // terminals, layout stays None so the client renders the
+                                // "Setting up worktree…" placeholder — then return Ok and
+                                // run the slow `git worktree add` checkout in the
+                                // BACKGROUND. Previously the checkout was awaited before the
+                                // row was even created, so its (repo-scaling) duration WAS
+                                // the perceived latency. When the checkout finishes we seed
+                                // the layout + spawn the PTY + fire on_worktree_create; on
+                                // failure we roll the row back + toast.
+                                let app_settings = settings.lock().clone();
+                                let new_id = {
+                                    let mut cx = DaemonWorkspaceCx::new(
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                    );
+                                    let mut ws = workspace.lock();
+                                    let registered = ws.register_worktree_project_deferred_hooks(
+                                        &project_id,
+                                        &branch,
+                                        &git_root,
+                                        &worktree_path,
+                                        &wt_project_path,
+                                        &app_settings.hooks,
+                                        WindowId::Main,
+                                        &mut cx,
+                                    );
+                                    // Mark creating only on success; propagate the
+                                    // registration error (parent-missing OR the
+                                    // same-branch/path dedupe) to the caller instead of
+                                    // masking it as "project not found".
+                                    if let Ok(id) = &registered {
+                                        ws.mark_creating_project(id);
+                                    }
+                                    registered
+                                };
+                                match new_id {
+                                    Err(e) => CommandResult::Err(e),
+                                    Ok(new_id) => {
+                                        let workspace = workspace.clone();
+                                        let workspace_tick = workspace_tick.clone();
+                                        let hook_runner = hook_runner.clone();
+                                        let hook_monitor = hook_monitor.clone();
+                                        let backend = backend.clone();
+                                        let terminals = terminals.clone();
+                                        let app_settings = app_settings.clone();
+                                        let git_root = git_root.clone();
+                                        let branch = branch.clone();
+                                        let worktree_path = worktree_path.clone();
+                                        let new_id_task = new_id.clone();
+                                        tokio::task::spawn_local(async move {
+                                            let git = {
+                                                let git_root = git_root.clone();
+                                                let branch = branch.clone();
+                                                let target =
+                                                    std::path::PathBuf::from(&worktree_path);
+                                                tokio::task::spawn_blocking(move || {
                                                 // Record whether the target dir existed BEFORE our
                                                 // git ran, so the failure cleanup only ever deletes a
                                                 // checkout THIS attempt created — never a dir that
@@ -894,35 +924,46 @@ pub async fn daemon_command_loop(
                                                 (preexisting, result)
                                             })
                                             .await
-                                        };
-                                        match git {
-                                            Ok((_, Ok(()))) => {
-                                                {
-                                                    let mut cx = DaemonWorkspaceCx::new(
-                                                        &workspace_tick, &hook_runner, &hook_monitor,
-                                                    );
-                                                    let mut ws = workspace.lock();
-                                                    // Seeds the layout from the parent, then fires on_worktree_create.
-                                                    ws.fire_worktree_hooks(&new_id_task, &app_settings.hooks, &mut cx);
-                                                    // Clear creating BEFORE spawning — spawn_uninitialized_terminals
-                                                    // no-ops while is_creating (guards against spawning into a
-                                                    // not-yet-checked-out worktree). The checkout is done here, so the
-                                                    // dir exists and the PTYs must actually spawn.
-                                                    ws.finish_creating_project(&new_id_task);
-                                                    let _ = spawn_uninitialized_terminals(
-                                                        &mut ws, &new_id_task, &*backend, &terminals,
-                                                        &app_settings, None, &mut cx,
-                                                    );
-                                                    ws.notify_data(&mut cx);
+                                            };
+                                            match git {
+                                                Ok((_, Ok(()))) => {
+                                                    {
+                                                        let mut cx = DaemonWorkspaceCx::new(
+                                                            &workspace_tick,
+                                                            &hook_runner,
+                                                            &hook_monitor,
+                                                        );
+                                                        let mut ws = workspace.lock();
+                                                        // Seeds the layout from the parent, then fires on_worktree_create.
+                                                        ws.fire_worktree_hooks(
+                                                            &new_id_task,
+                                                            &app_settings.hooks,
+                                                            &mut cx,
+                                                        );
+                                                        // Clear creating BEFORE spawning — spawn_uninitialized_terminals
+                                                        // no-ops while is_creating (guards against spawning into a
+                                                        // not-yet-checked-out worktree). The checkout is done here, so the
+                                                        // dir exists and the PTYs must actually spawn.
+                                                        ws.finish_creating_project(&new_id_task);
+                                                        let _ = spawn_uninitialized_terminals(
+                                                            &mut ws,
+                                                            &new_id_task,
+                                                            &*backend,
+                                                            &terminals,
+                                                            &app_settings,
+                                                            None,
+                                                            &mut cx,
+                                                        );
+                                                        ws.notify_data(&mut cx);
+                                                    }
                                                 }
-                                            }
-                                            result => {
-                                                // is_collision = the target is ALREADY an active
-                                                // worktree; never clean that up (it belongs to
-                                                // someone else), only partial checkouts we started.
-                                                // preexisting = the target dir was on disk BEFORE our
-                                                // git ran, so it isn't ours to delete either.
-                                                let (msg, is_collision, preexisting) = match result {
+                                                result => {
+                                                    // is_collision = the target is ALREADY an active
+                                                    // worktree; never clean that up (it belongs to
+                                                    // someone else), only partial checkouts we started.
+                                                    // preexisting = the target dir was on disk BEFORE our
+                                                    // git ran, so it isn't ours to delete either.
+                                                    let (msg, is_collision, preexisting) = match result {
                                                     Ok((pre, Err(okena_git::GitError::WorktreeExists { path }))) => (
                                                         format!(
                                                             "Directory '{}' is already an active worktree",
@@ -937,135 +978,208 @@ pub async fn daemon_command_loop(
                                                     Err(join) => (format!("worktree creation task failed: {join}"), false, true),
                                                     Ok((_, Ok(()))) => unreachable!("success handled above"),
                                                 };
-                                                // Roll the optimistic row back. Clear creating
-                                                // FIRST — remove_stale_worktree skips creating
-                                                // projects.
-                                                {
-                                                    let mut cx = DaemonWorkspaceCx::new(
-                                                        &workspace_tick, &hook_runner, &hook_monitor,
-                                                    );
-                                                    let mut ws = workspace.lock();
-                                                    ws.finish_creating_project(&new_id_task);
-                                                    ws.remove_stale_worktree(&new_id_task);
-                                                    ws.notify_data(&mut cx);
-                                                }
-                                                log::error!("worktree-create: {branch} failed: {msg}");
-                                                if let Some(hm) = &hook_monitor {
-                                                    hm.push_toast(okena_state::Toast::error(msg));
-                                                }
-                                                // Clean up any partial checkout git left on disk
-                                                // (dir + stale registration) so a failed create
-                                                // never leaves an empty orphaned worktree folder —
-                                                // but ONLY a dir THIS attempt created: skip it when
-                                                // the target was already an active worktree
-                                                // (is_collision) or existed on disk before our git
-                                                // ran (preexisting). This makes the cleanup safe by
-                                                // construction — a losing create can never delete a
-                                                // dir it didn't create (e.g. a live checkout).
-                                                if !is_collision && !preexisting {
-                                                    let _ = tokio::task::spawn_blocking(move || {
-                                                        let _ = okena_git::remove_worktree_fast(
-                                                            std::path::Path::new(&worktree_path),
-                                                            &git_root,
+                                                    // Roll the optimistic row back. Clear creating
+                                                    // FIRST — remove_stale_worktree skips creating
+                                                    // projects.
+                                                    {
+                                                        let mut cx = DaemonWorkspaceCx::new(
+                                                            &workspace_tick,
+                                                            &hook_runner,
+                                                            &hook_monitor,
                                                         );
-                                                    })
-                                                    .await;
+                                                        let mut ws = workspace.lock();
+                                                        ws.finish_creating_project(&new_id_task);
+                                                        ws.remove_stale_worktree(&new_id_task);
+                                                        ws.notify_data(&mut cx);
+                                                    }
+                                                    log::error!(
+                                                        "worktree-create: {branch} failed: {msg}"
+                                                    );
+                                                    if let Some(hm) = &hook_monitor {
+                                                        hm.push_toast(okena_state::Toast::error(
+                                                            msg,
+                                                        ));
+                                                    }
+                                                    // Clean up any partial checkout git left on disk
+                                                    // (dir + stale registration) so a failed create
+                                                    // never leaves an empty orphaned worktree folder —
+                                                    // but ONLY a dir THIS attempt created: skip it when
+                                                    // the target was already an active worktree
+                                                    // (is_collision) or existed on disk before our git
+                                                    // ran (preexisting). This makes the cleanup safe by
+                                                    // construction — a losing create can never delete a
+                                                    // dir it didn't create (e.g. a live checkout).
+                                                    if !is_collision && !preexisting {
+                                                        let _ = tokio::task::spawn_blocking(
+                                                            move || {
+                                                                let _ =
+                                                                    okena_git::remove_worktree_fast(
+                                                                        std::path::Path::new(
+                                                                            &worktree_path,
+                                                                        ),
+                                                                        &git_root,
+                                                                    );
+                                                            },
+                                                        )
+                                                        .await;
+                                                    }
                                                 }
                                             }
-                                        }
-                                    });
-                                    // OPTIMISTIC reply: the row exists but the
-                                    // checkout is still running in the background,
-                                    // so `path` does NOT exist on disk yet.
-                                    // `pending: true` is the machine-readable signal
-                                    // that callers (REST/CLI/agents) must not treat
-                                    // this path as ready — it materializes when the
-                                    // background checkout finishes, or the row is
-                                    // removed from state (+ a toast) on failure. Old
-                                    // clients that ignore unknown fields keep working.
-                                    CommandResult::Ok(Some(serde_json::json!({
-                                        "project_id": new_id,
-                                        "path": wt_project_path,
-                                        "pending": true,
-                                    })))
+                                        });
+                                        // OPTIMISTIC reply: the row exists but the
+                                        // checkout is still running in the background,
+                                        // so `path` does NOT exist on disk yet.
+                                        // `pending: true` is the machine-readable signal
+                                        // that callers (REST/CLI/agents) must not treat
+                                        // this path as ready — it materializes when the
+                                        // background checkout finishes, or the row is
+                                        // removed from state (+ a toast) on failure. Old
+                                        // clients that ignore unknown fields keep working.
+                                        CommandResult::Ok(Some(serde_json::json!({
+                                            "project_id": new_id,
+                                            "path": wt_project_path,
+                                            "pending": true,
+                                        })))
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // ── Close worktree: run the blocking git removal off the reactor ─
-                // A plain (non-merge) close of a worktree with NO before_remove
-                // hook does a bare `git worktree remove`, whose expensive status
-                // checks + directory delete can block for SECONDS on a busy
-                // worktree (Docker holding files, a large tree), freezing the whole
-                // UI. Run that git off the command-loop thread: snapshot inputs +
-                // fire on_worktree_close under a brief lock, remove the git worktree
-                // on spawn_blocking with NO lock held, then finalize state under the
-                // lock. Merge closes run their whole Git pipeline in a detached
-                // task; before_remove-hook closes finish from the PTY-exit loop.
-                ActionRequest::CloseWorktree {
-                    project_id,
-                    merge,
-                    stash,
-                    fetch,
-                    push,
-                    delete_branch,
-                } => {
-                    let global_hooks = settings.lock().hooks.clone();
-                    if merge {
-                        spawn_merge_worktree_close(
-                            project_id,
-                            stash,
-                            fetch,
-                            push,
-                            delete_branch,
-                            global_hooks,
-                            &workspace,
-                            &workspace_tick,
-                            &hook_runner,
-                            &hook_monitor,
-                            &runtime,
-                            &backend,
-                            &terminals,
-                            &settings,
-                        )
-                    } else {
-                        let plan = {
-                            let mut cx = DaemonWorkspaceCx::new(
+                    // ── Close worktree: run the blocking git removal off the reactor ─
+                    // A plain (non-merge) close of a worktree with NO before_remove
+                    // hook does a bare `git worktree remove`, whose expensive status
+                    // checks + directory delete can block for SECONDS on a busy
+                    // worktree (Docker holding files, a large tree), freezing the whole
+                    // UI. Run that git off the command-loop thread: snapshot inputs +
+                    // fire on_worktree_close under a brief lock, remove the git worktree
+                    // on spawn_blocking with NO lock held, then finalize state under the
+                    // lock. Merge closes run their whole Git pipeline in a detached
+                    // task; before_remove-hook closes finish from the PTY-exit loop.
+                    ActionRequest::CloseWorktree {
+                        project_id,
+                        merge,
+                        stash,
+                        fetch,
+                        push,
+                        delete_branch,
+                    } => {
+                        let global_hooks = settings.lock().hooks.clone();
+                        if merge {
+                            spawn_merge_worktree_close(
+                                project_id,
+                                stash,
+                                fetch,
+                                push,
+                                delete_branch,
+                                global_hooks,
+                                &workspace,
                                 &workspace_tick,
                                 &hook_runner,
                                 &hook_monitor,
-                            );
-                            let mut ws = workspace.lock();
-                            let fast = ws.project(&project_id).is_some_and(|project| {
-                                project.worktree_info.is_some()
-                                    && project.hooks.worktree.before_remove.is_none()
-                                    && global_hooks.worktree.before_remove.is_none()
-                            });
-                            if fast {
-                                Some(ws.begin_worktree_removal(
-                                    &project_id,
+                                &runtime,
+                                &backend,
+                                &terminals,
+                                &settings,
+                            )
+                        } else {
+                            let plan = {
+                                let mut cx = DaemonWorkspaceCx::new(
+                                    &workspace_tick,
+                                    &hook_runner,
+                                    &hook_monitor,
+                                );
+                                let mut ws = workspace.lock();
+                                let fast = ws.project(&project_id).is_some_and(|project| {
+                                    project.worktree_info.is_some()
+                                        && project.hooks.worktree.before_remove.is_none()
+                                        && global_hooks.worktree.before_remove.is_none()
+                                });
+                                if fast {
+                                    Some(ws.begin_worktree_removal(
+                                        &project_id,
+                                        &global_hooks,
+                                        &mut cx,
+                                    ))
+                                } else {
+                                    None
+                                }
+                            };
+                            match plan {
+                                None => {
+                                    let app_settings = settings.lock().clone();
+                                    let mut ws = workspace.lock();
+                                    run_main_workspace_action(
+                                        ActionRequest::CloseWorktree {
+                                            project_id,
+                                            merge: false,
+                                            stash,
+                                            fetch,
+                                            push,
+                                            delete_branch,
+                                        },
+                                        &mut ws,
+                                        &mut focus_manager,
+                                        &backend,
+                                        &terminals,
+                                        &app_settings,
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                    )
+                                }
+                                Some(Err(error)) => CommandResult::Err(error),
+                                Some(Ok(plan)) => spawn_background_worktree_removal(
+                                    plan,
+                                    false,
                                     &global_hooks,
-                                    &mut cx,
-                                ))
-                            } else {
-                                None
+                                    &workspace,
+                                    &workspace_tick,
+                                    &hook_runner,
+                                    &hook_monitor,
+                                    &backend,
+                                    &terminals,
+                                    &settings,
+                                ),
                             }
+                        }
+                    }
+
+                    // ── Default: workspace-scoped action ─────────────────────────
+                    action => {
+                        let git_poll_trigger = git_poll_trigger_for_action(&action);
+                        let presentation_only_window =
+                            matches!(&action, ActionRequest::FocusTerminal { .. });
+                        // Resolve the action's explicit target window (if any)
+                        // BEFORE moving `action` into `execute_action`. The daemon
+                        // serves only the synthetic main window. FocusTerminal may
+                        // carry an extra UI window through daemon-side validation.
+                        let parsed_target = match action.target_window() {
+                            None => Ok(None),
+                            Some(s) => match parse_window_id(s) {
+                                Some(wid) => Ok(Some(wid)),
+                                None => Err(s.to_string()),
+                            },
                         };
-                        match plan {
-                            None => {
+                        match parsed_target {
+                            Err(bad) => {
+                                // Malformed window id: rejected up front.
+                                CommandResult::Err(format!("invalid window id: {bad}"))
+                            }
+                            Ok(Some(WindowId::Extra(uuid))) if !presentation_only_window => {
+                                CommandResult::Err(format!("window not found: {uuid}"))
+                            }
+                            Ok(_) => {
+                                // Snapshot app settings to thread into the gpui-free
+                                // `execute_action` (hooks / worktree template /
+                                // default shell). Read before locking the workspace.
+                                // The daemon always targets `WindowId::Main`; the
+                                // mutators notify via `cx` themselves, so there is no
+                                // separate `cx.notify()` like the GUI's view-refresh.
                                 let app_settings = settings.lock().clone();
                                 let mut ws = workspace.lock();
-                                run_main_workspace_action(
-                                    ActionRequest::CloseWorktree {
-                                        project_id,
-                                        merge: false,
-                                        stash,
-                                        fetch,
-                                        push,
-                                        delete_branch,
-                                    },
+                                let result = run_main_workspace_action(
+                                    action,
                                     &mut ws,
                                     &mut focus_manager,
                                     &backend,
@@ -1074,79 +1188,18 @@ pub async fn daemon_command_loop(
                                     &workspace_tick,
                                     &hook_runner,
                                     &hook_monitor,
-                                )
+                                );
+                                send_git_poll_trigger_after_success(
+                                    &result,
+                                    git_poll_trigger,
+                                    &git_poll_trigger_tx,
+                                );
+                                result
                             }
-                            Some(Err(error)) => CommandResult::Err(error),
-                            Some(Ok(plan)) => spawn_background_worktree_removal(
-                                plan,
-                                false,
-                                &global_hooks,
-                                &workspace,
-                                &workspace_tick,
-                                &hook_runner,
-                                &hook_monitor,
-                                &backend,
-                                &terminals,
-                                &settings,
-                            ),
                         }
                     }
                 }
-
-                // ── Default: workspace-scoped action ─────────────────────────
-                action => {
-                    let git_poll_trigger = git_poll_trigger_for_action(&action);
-                    let presentation_only_window =
-                        matches!(&action, ActionRequest::FocusTerminal { .. });
-                    // Resolve the action's explicit target window (if any)
-                    // BEFORE moving `action` into `execute_action`. The daemon
-                    // serves only the synthetic main window. FocusTerminal may
-                    // carry an extra UI window through daemon-side validation.
-                    let parsed_target = match action.target_window() {
-                        None => Ok(None),
-                        Some(s) => match parse_window_id(s) {
-                            Some(wid) => Ok(Some(wid)),
-                            None => Err(s.to_string()),
-                        },
-                    };
-                    match parsed_target {
-                        Err(bad) => {
-                            // Malformed window id: rejected up front.
-                            CommandResult::Err(format!("invalid window id: {bad}"))
-                        }
-                        Ok(Some(WindowId::Extra(uuid))) if !presentation_only_window => {
-                            CommandResult::Err(format!("window not found: {uuid}"))
-                        }
-                        Ok(_) => {
-                            // Snapshot app settings to thread into the gpui-free
-                            // `execute_action` (hooks / worktree template /
-                            // default shell). Read before locking the workspace.
-                            // The daemon always targets `WindowId::Main`; the
-                            // mutators notify via `cx` themselves, so there is no
-                            // separate `cx.notify()` like the GUI's view-refresh.
-                            let app_settings = settings.lock().clone();
-                            let mut ws = workspace.lock();
-                            let result = run_main_workspace_action(
-                                action,
-                                &mut ws,
-                                &mut focus_manager,
-                                &backend,
-                                &terminals,
-                                &app_settings,
-                                &workspace_tick,
-                                &hook_runner,
-                                &hook_monitor,
-                            );
-                            send_git_poll_trigger_after_success(
-                                &result,
-                                git_poll_trigger,
-                                &git_poll_trigger_tx,
-                            );
-                            result
-                        }
-                    }
-                }
-            },
+            }
 
             RemoteCommand::ResizeFromConnection {
                 terminal_id,
@@ -2125,9 +2178,10 @@ mod tests {
 
         // Restored project carries a PER-PROJECT on_open (global settings empty),
         // proving the fire resolves per-project hooks reloaded from workspace.json.
-        let workspace = Arc::new(Mutex::new(Workspace::new(
-            workspace_restored_with_on_open(tmp_path, "echo HOOK_MARKER"),
-        )));
+        let workspace = Arc::new(Mutex::new(Workspace::new(workspace_restored_with_on_open(
+            tmp_path,
+            "echo HOOK_MARKER",
+        ))));
         let settings = Arc::new(Mutex::new(default_settings()));
         let (workspace_tick, _wtrx) = watch::channel(0u64);
 
@@ -2144,7 +2198,13 @@ mod tests {
         // The restored terminal slot was materialized (boot path ran)...
         let assigned = {
             let ws = workspace.lock();
-            match ws.project("p1").expect("p1").layout.as_ref().expect("layout") {
+            match ws
+                .project("p1")
+                .expect("p1")
+                .layout
+                .as_ref()
+                .expect("layout")
+            {
                 LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
                 other => panic!("expected Terminal node, got {other:?}"),
             }
@@ -2167,7 +2227,12 @@ mod tests {
 
         // The fire registered a live hook terminal in the project's map.
         assert_eq!(
-            workspace.lock().project("p1").expect("p1").hook_terminals.len(),
+            workspace
+                .lock()
+                .project("p1")
+                .expect("p1")
+                .hook_terminals
+                .len(),
             1,
             "one live hook terminal registered after boot fire"
         );
@@ -2214,7 +2279,12 @@ mod tests {
             "no hook configured → nothing fires on restore"
         );
         assert!(
-            workspace.lock().project("p1").expect("p1").hook_terminals.is_empty(),
+            workspace
+                .lock()
+                .project("p1")
+                .expect("p1")
+                .hook_terminals
+                .is_empty(),
             "no hook terminals registered when no hook is configured"
         );
     }
@@ -2273,7 +2343,11 @@ mod tests {
             !hooks.contains_key("stale-dead-id"),
             "stale persisted hook terminal must be dropped on boot"
         );
-        assert_eq!(hooks.len(), 1, "exactly one live hook terminal after re-fire");
+        assert_eq!(
+            hooks.len(),
+            1,
+            "exactly one live hook terminal after re-fire"
+        );
     }
 
     /// CONTRAST (machinery works): calling `add_project` with the SAME real
@@ -2336,7 +2410,11 @@ mod tests {
         fn transport(&self) -> Arc<dyn TerminalTransport> {
             Arc::new(StubTransport)
         }
-        fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
             anyhow::bail!("recording backend: create_terminal not supported")
         }
         fn reconnect_terminal(
@@ -2373,7 +2451,11 @@ mod tests {
         fn transport(&self) -> Arc<dyn TerminalTransport> {
             Arc::new(StubTransport)
         }
-        fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
             Ok("restored-terminal".to_string())
         }
         fn reconnect_terminal(
@@ -2451,8 +2533,9 @@ mod tests {
     #[test]
     fn delete_project_drains_and_kills_queued_terminals() {
         let killed = Arc::new(Mutex::new(Vec::new()));
-        let backend: Arc<dyn TerminalBackend> =
-            Arc::new(RecordingBackend { killed: killed.clone() });
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingBackend {
+            killed: killed.clone(),
+        });
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
         let mut workspace = Workspace::new(workspace_with_initialized_terminal("t1"));
         let mut focus_manager = FocusManager::new();
@@ -2477,7 +2560,10 @@ mod tests {
             matches!(result, CommandResult::Ok(_)),
             "delete should succeed: {result:?}"
         );
-        assert!(workspace.project("p1").is_none(), "project removed from state");
+        assert!(
+            workspace.project("p1").is_none(),
+            "project removed from state"
+        );
         assert_eq!(
             &*killed.lock(),
             &vec!["t1".to_string()],
@@ -2625,8 +2711,7 @@ mod tests {
         let hook_runner = None;
         let (workspace_tick, _receiver) = watch::channel(0u64);
         let plan = {
-            let mut cx =
-                DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
             workspace
                 .lock()
                 .begin_worktree_removal("wt1", &Default::default(), &mut cx)
@@ -2666,7 +2751,9 @@ mod tests {
             .await;
 
         let workspace_guard = workspace.lock();
-        let project = workspace_guard.project("wt1").expect("project row retained");
+        let project = workspace_guard
+            .project("wt1")
+            .expect("project row retained");
         assert!(!project.is_closing);
         assert!(matches!(
             project.layout,
@@ -2677,7 +2764,10 @@ mod tests {
         ));
         drop(workspace_guard);
         assert!(terminals.lock().contains_key("restored-terminal"));
-        assert!(invalid_worktree.is_file(), "failed removal left source untouched");
+        assert!(
+            invalid_worktree.is_file(),
+            "failed removal left source untouched"
+        );
         assert_eq!(
             hook_monitor_service.drain_pending_toasts().len(),
             1,
@@ -2736,7 +2826,12 @@ mod tests {
                 .current_dir(&repo)
                 .output()
                 .expect("run git");
-            assert!(ok.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&ok.stderr));
+            assert!(
+                ok.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&ok.stderr)
+            );
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "proof@okena.test"]);
@@ -2749,11 +2844,13 @@ mod tests {
         // worktree branches on origin/{default}, so origin/main must exist.
         let origin = repo.with_extension("origin.git");
         std::fs::create_dir_all(&origin).expect("mk origin dir");
-        assert!(Command::new("git")
-            .args(["init", "-q", "--bare", origin.to_str().unwrap()])
-            .status()
-            .expect("git init bare")
-            .success());
+        assert!(
+            Command::new("git")
+                .args(["init", "-q", "--bare", origin.to_str().unwrap()])
+                .status()
+                .expect("git init bare")
+                .success()
+        );
         git(&["remote", "add", "origin", origin.to_str().unwrap()]);
         git(&["push", "-q", "-u", "origin", "main"]);
         git(&["remote", "set-head", "origin", "main"]);
@@ -2866,7 +2963,10 @@ mod tests {
         // (b) HOOK: on_worktree_create ran exactly once and a live hook terminal
         //     was registered on the new project.
         let history = hook_monitor.as_ref().unwrap().history();
-        let wt_hooks: Vec<_> = history.iter().filter(|h| h.hook_type == "on_worktree_create").collect();
+        let wt_hooks: Vec<_> = history
+            .iter()
+            .filter(|h| h.hook_type == "on_worktree_create")
+            .collect();
         assert_eq!(
             wt_hooks.len(),
             1,
@@ -2874,14 +2974,21 @@ mod tests {
             history.iter().map(|h| h.hook_type).collect::<Vec<_>>()
         );
         assert_eq!(
-            workspace.project(&new_id).expect("new project").hook_terminals.len(),
+            workspace
+                .project(&new_id)
+                .expect("new project")
+                .hook_terminals
+                .len(),
             1,
             "one live on_worktree_create hook terminal registered on the worktree project"
         );
 
         // The hook PTY is a SEPARATE terminal from the initial shell (both live in
         // the registry) — proving the hook does NOT consume the initial slot.
-        assert!(terminals.lock().len() >= 2, "initial terminal + hook terminal both in registry");
+        assert!(
+            terminals.lock().len() >= 2,
+            "initial terminal + hook terminal both in registry"
+        );
 
         // cleanup
         std::fs::remove_dir_all(&repo).ok();

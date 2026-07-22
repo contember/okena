@@ -29,8 +29,13 @@ pub struct ProjectOverlay {
 /// The specific overlay to show for a project.
 #[derive(Clone, Debug)]
 pub enum ProjectOverlayKind {
-    ContextMenu { position: gpui::Point<gpui::Pixels> },
-    ShellSelector { terminal_id: String, current_shell: okena_terminal::shell_config::ShellType },
+    ContextMenu {
+        position: gpui::Point<gpui::Pixels>,
+    },
+    ShellSelector {
+        terminal_id: String,
+        current_shell: okena_terminal::shell_config::ShellType,
+    },
     DiffViewer {
         file: Option<String>,
         mode: Option<okena_core::types::DiffMode>,
@@ -53,15 +58,25 @@ pub enum ProjectOverlayKind {
         layout_path: Vec<usize>,
         position: gpui::Point<gpui::Pixels>,
     },
-    ShowServiceLog { service_name: String },
-    ShowHookTerminal { terminal_id: String },
+    ShowServiceLog {
+        service_name: String,
+    },
+    ShowHookTerminal {
+        terminal_id: String,
+    },
     FileSearch,
     ContentSearch,
     FileBrowser,
     /// Open a specific file (project-relative path) in the file viewer.
-    FileViewer { relative_path: String },
-    ColorPicker { position: gpui::Point<gpui::Pixels> },
-    WorktreeList { position: gpui::Point<gpui::Pixels> },
+    FileViewer {
+        relative_path: String,
+    },
+    ColorPicker {
+        position: gpui::Point<gpui::Pixels>,
+    },
+    WorktreeList {
+        position: gpui::Point<gpui::Pixels>,
+    },
 }
 
 /// Folder-scoped overlay request. Carries a `folder_id` once;
@@ -75,8 +90,13 @@ pub struct FolderOverlay {
 /// The specific overlay to show for a folder.
 #[derive(Clone, Debug)]
 pub enum FolderOverlayKind {
-    ContextMenu { folder_name: String, position: gpui::Point<gpui::Pixels> },
-    ColorPicker { position: gpui::Point<gpui::Pixels> },
+    ContextMenu {
+        folder_name: String,
+        position: gpui::Point<gpui::Pixels>,
+    },
+    ColorPicker {
+        position: gpui::Point<gpui::Pixels>,
+    },
 }
 
 /// Requests consumed by WindowView::process_pending_requests().
@@ -104,7 +124,15 @@ pub enum OverlayRequest {
 /// Requests consumed by Sidebar::render()
 #[derive(Clone, Debug)]
 pub enum SidebarRequest {
-    RenameProject { project_id: String, project_name: String },
-    RenameFolder { folder_id: String, folder_name: String },
-    QuickCreateWorktree { project_id: String },
+    RenameProject {
+        project_id: String,
+        project_name: String,
+    },
+    RenameFolder {
+        folder_id: String,
+        folder_name: String,
+    },
+    QuickCreateWorktree {
+        project_id: String,
+    },
 }

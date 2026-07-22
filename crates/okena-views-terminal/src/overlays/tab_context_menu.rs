@@ -1,17 +1,29 @@
 //! Context menu for tab bar (right-click on a tab).
 
 use crate::actions::Cancel;
-use okena_ui::theme::theme;
-use okena_ui::menu::{context_menu_panel, menu_item, menu_item_disabled, menu_separator};
 use gpui::prelude::*;
 use gpui::*;
+use okena_ui::menu::{context_menu_panel, menu_item, menu_item_disabled, menu_separator};
+use okena_ui::theme::theme;
 
 /// Event emitted by TabContextMenu
 pub enum TabContextMenuEvent {
     Close,
-    CloseTab { project_id: String, layout_path: Vec<usize>, tab_index: usize },
-    CloseOtherTabs { project_id: String, layout_path: Vec<usize>, tab_index: usize },
-    CloseTabsToRight { project_id: String, layout_path: Vec<usize>, tab_index: usize },
+    CloseTab {
+        project_id: String,
+        layout_path: Vec<usize>,
+        tab_index: usize,
+    },
+    CloseOtherTabs {
+        project_id: String,
+        layout_path: Vec<usize>,
+        tab_index: usize,
+    },
+    CloseTabsToRight {
+        project_id: String,
+        layout_path: Vec<usize>,
+        tab_index: usize,
+    },
 }
 
 /// Context menu for tab bar
@@ -73,57 +85,85 @@ impl Render for TabContextMenu {
             .absolute()
             .inset_0()
             .id("tab-context-menu-backdrop")
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
             .child(deferred(
-                anchored()
-                    .position(position)
-                    .snap_to_window()
-                    .child(
-                        context_menu_panel("tab-context-menu", &t)
-                            // Close tab
-                            .child(
-                                menu_item("tab-ctx-close", "icons/close.svg", "Close", &t)
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.emit(TabContextMenuEvent::CloseTab {
-                                            project_id: this.project_id.clone(),
-                                            layout_path: this.layout_path.clone(),
-                                            tab_index: this.tab_index,
-                                        });
-                                    })),
+                anchored().position(position).snap_to_window().child(
+                    context_menu_panel("tab-context-menu", &t)
+                        // Close tab
+                        .child(
+                            menu_item("tab-ctx-close", "icons/close.svg", "Close", &t).on_click(
+                                cx.listener(|this, _, _window, cx| {
+                                    cx.emit(TabContextMenuEvent::CloseTab {
+                                        project_id: this.project_id.clone(),
+                                        layout_path: this.layout_path.clone(),
+                                        tab_index: this.tab_index,
+                                    });
+                                }),
+                            ),
+                        )
+                        .child(menu_separator(&t))
+                        // Close Others
+                        .child(if has_other_tabs {
+                            menu_item(
+                                "tab-ctx-close-others",
+                                "icons/close.svg",
+                                "Close Others",
+                                &t,
                             )
-                            .child(menu_separator(&t))
-                            // Close Others
-                            .child(if has_other_tabs {
-                                menu_item("tab-ctx-close-others", "icons/close.svg", "Close Others", &t)
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.emit(TabContextMenuEvent::CloseOtherTabs {
-                                            project_id: this.project_id.clone(),
-                                            layout_path: this.layout_path.clone(),
-                                            tab_index: this.tab_index,
-                                        });
-                                    }))
-                            } else {
-                                menu_item_disabled("tab-ctx-close-others", "icons/close.svg", "Close Others", &t)
-                            })
-                            // Close to Right
-                            .child(if has_tabs_to_right {
-                                menu_item("tab-ctx-close-to-right", "icons/chevron-right.svg", "Close to Right", &t)
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.emit(TabContextMenuEvent::CloseTabsToRight {
-                                            project_id: this.project_id.clone(),
-                                            layout_path: this.layout_path.clone(),
-                                            tab_index: this.tab_index,
-                                        });
-                                    }))
-                            } else {
-                                menu_item_disabled("tab-ctx-close-to-right", "icons/chevron-right.svg", "Close to Right", &t)
-                            }),
-                    ),
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    cx.emit(TabContextMenuEvent::CloseOtherTabs {
+                                        project_id: this.project_id.clone(),
+                                        layout_path: this.layout_path.clone(),
+                                        tab_index: this.tab_index,
+                                    });
+                                },
+                            ))
+                        } else {
+                            menu_item_disabled(
+                                "tab-ctx-close-others",
+                                "icons/close.svg",
+                                "Close Others",
+                                &t,
+                            )
+                        })
+                        // Close to Right
+                        .child(if has_tabs_to_right {
+                            menu_item(
+                                "tab-ctx-close-to-right",
+                                "icons/chevron-right.svg",
+                                "Close to Right",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    cx.emit(TabContextMenuEvent::CloseTabsToRight {
+                                        project_id: this.project_id.clone(),
+                                        layout_path: this.layout_path.clone(),
+                                        tab_index: this.tab_index,
+                                    });
+                                },
+                            ))
+                        } else {
+                            menu_item_disabled(
+                                "tab-ctx-close-to-right",
+                                "icons/chevron-right.svg",
+                                "Close to Right",
+                                &t,
+                            )
+                        }),
+                ),
             ))
     }
 }

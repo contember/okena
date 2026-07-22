@@ -1,6 +1,6 @@
 use crate::workspace::persistence::SessionInfo;
-use okena_core::api::ActionRequest;
 use gpui::*;
+use okena_core::api::ActionRequest;
 
 use super::{SessionManager, SessionManagerEvent};
 
@@ -58,7 +58,9 @@ impl SessionManager {
         // The daemon owns the authoritative workspace (local ids) + session
         // files; saving from the client mirror would persist prefixed-id garbage.
         // Dispatch SaveSession and let the daemon write its own data.
-        cx.emit(SessionManagerEvent::Action(ActionRequest::SaveSession { name }));
+        cx.emit(SessionManagerEvent::Action(ActionRequest::SaveSession {
+            name,
+        }));
         self.new_session_input.update(cx, |input, cx| {
             input.set_value("", cx);
         });
@@ -96,7 +98,8 @@ impl SessionManager {
     }
 
     pub(super) fn confirm_rename(&mut self, cx: &mut Context<Self>) {
-        let new_name = self.rename_input
+        let new_name = self
+            .rename_input
             .as_ref()
             .map(|input| input.read(cx).value().trim().to_string())
             .unwrap_or_default();
@@ -109,8 +112,7 @@ impl SessionManager {
                 return;
             }
 
-            if new_name != old_name
-                && self.sessions.iter().any(|session| session.name == new_name)
+            if new_name != old_name && self.sessions.iter().any(|session| session.name == new_name)
             {
                 self.error_message = Some(format!("Session '{}' already exists", new_name));
                 self.rename_input = None;
@@ -124,10 +126,7 @@ impl SessionManager {
                 let client = self.client.clone();
                 cx.spawn(async move |this, cx| {
                     let result = smol::unblock(move || {
-                        client.post_action(ActionRequest::RenameSession {
-                            old_name,
-                            new_name,
-                        })
+                        client.post_action(ActionRequest::RenameSession { old_name, new_name })
                     })
                     .await;
 
@@ -168,10 +167,9 @@ impl SessionManager {
         let client = self.client.clone();
         let name = name.to_string();
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
-                client.post_action(ActionRequest::DeleteSession { name })
-            })
-            .await;
+            let result =
+                smol::unblock(move || client.post_action(ActionRequest::DeleteSession { name }))
+                    .await;
 
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| match result {
@@ -196,7 +194,9 @@ impl SessionManager {
         }
 
         // Export the DAEMON's authoritative workspace (not the client mirror).
-        cx.emit(SessionManagerEvent::Action(ActionRequest::ExportWorkspace { path }));
+        cx.emit(SessionManagerEvent::Action(
+            ActionRequest::ExportWorkspace { path },
+        ));
         self.error_message = None;
         cx.notify();
     }
@@ -210,7 +210,9 @@ impl SessionManager {
         }
 
         // The daemon imports the file + swaps state; the result mirrors back.
-        cx.emit(SessionManagerEvent::Action(ActionRequest::ImportWorkspace { path }));
+        cx.emit(SessionManagerEvent::Action(
+            ActionRequest::ImportWorkspace { path },
+        ));
         self.error_message = None;
         cx.notify();
     }

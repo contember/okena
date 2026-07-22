@@ -47,13 +47,12 @@ where
                 let mut download = std::pin::pin!(download);
 
                 let download_result: anyhow::Result<std::path::PathBuf> = loop {
-                    let polled = std::future::poll_fn(|task_cx| {
-                        match download.as_mut().poll(task_cx) {
+                    let polled =
+                        std::future::poll_fn(|task_cx| match download.as_mut().poll(task_cx) {
                             std::task::Poll::Ready(r) => std::task::Poll::Ready(Some(r)),
                             std::task::Poll::Pending => std::task::Poll::Ready(None),
-                        }
-                    })
-                    .await;
+                        })
+                        .await;
                     match polled {
                         Some(r) => break r,
                         None => {

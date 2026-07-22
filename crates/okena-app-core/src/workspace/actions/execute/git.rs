@@ -36,23 +36,38 @@ where
 pub(super) fn status(ws: &Workspace, project_id: String) -> ActionResult {
     with_project_path(ws, project_id, |path| {
         let status = okena_git::get_git_status(path);
-        ActionResult::Ok(Some(serde_json::to_value(status).expect("BUG: GitStatus must serialize")))
+        ActionResult::Ok(Some(
+            serde_json::to_value(status).expect("BUG: GitStatus must serialize"),
+        ))
     })
 }
 
 pub(super) fn diff_summary(ws: &Workspace, project_id: String) -> ActionResult {
     with_project_path(ws, project_id, |path| {
         let summary = okena_git::get_diff_file_summary(path);
-        ActionResult::Ok(Some(serde_json::to_value(summary).expect("BUG: FileDiffSummary must serialize")))
+        ActionResult::Ok(Some(
+            serde_json::to_value(summary).expect("BUG: FileDiffSummary must serialize"),
+        ))
     })
 }
 
-pub(super) fn diff(ws: &Workspace, project_id: String, mode: DiffMode, ignore_whitespace: bool) -> ActionResult {
+pub(super) fn diff(
+    ws: &Workspace,
+    project_id: String,
+    mode: DiffMode,
+    ignore_whitespace: bool,
+) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            match okena_git::get_diff_with_options(std::path::Path::new(&path), mode, ignore_whitespace) {
-                Ok(diff) => ActionResult::Ok(Some(serde_json::to_value(diff).expect("BUG: DiffResult must serialize"))),
+            match okena_git::get_diff_with_options(
+                std::path::Path::new(&path),
+                mode,
+                ignore_whitespace,
+            ) {
+                Ok(diff) => ActionResult::Ok(Some(
+                    serde_json::to_value(diff).expect("BUG: DiffResult must serialize"),
+                )),
                 Err(e) => ActionResult::Err(e.to_string()),
             }
         }
@@ -63,15 +78,13 @@ pub(super) fn diff(ws: &Workspace, project_id: String, mode: DiffMode, ignore_wh
 pub(super) fn branches(ws: &Workspace, project_id: String) -> ActionResult {
     with_project_path(ws, project_id, |path| {
         let branches = okena_git::get_available_branches_for_worktree(path);
-        ActionResult::Ok(Some(serde_json::to_value(branches).expect("BUG: branches must serialize")))
+        ActionResult::Ok(Some(
+            serde_json::to_value(branches).expect("BUG: branches must serialize"),
+        ))
     })
 }
 
-pub(super) fn list_pull_requests(
-    ws: &Workspace,
-    project_id: String,
-    limit: usize,
-) -> ActionResult {
+pub(super) fn list_pull_requests(ws: &Workspace, project_id: String, limit: usize) -> ActionResult {
     with_project_path(ws, project_id, |path| {
         match okena_git::list_pull_requests(path, limit) {
             Ok(pull_requests) => ActionResult::Ok(Some(
@@ -83,7 +96,12 @@ pub(super) fn list_pull_requests(
     })
 }
 
-pub(super) fn file_contents(ws: &Workspace, project_id: String, file_path: String, mode: DiffMode) -> ActionResult {
+pub(super) fn file_contents(
+    ws: &Workspace,
+    project_id: String,
+    file_path: String,
+    mode: DiffMode,
+) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {
             let repo_path = p.path.clone();
@@ -101,21 +119,26 @@ pub(super) fn file_contents(ws: &Workspace, project_id: String, file_path: Strin
     }
 }
 
-pub(super) fn commit_graph(ws: &Workspace, project_id: String, count: usize, branch: Option<String>) -> ActionResult {
+pub(super) fn commit_graph(
+    ws: &Workspace,
+    project_id: String,
+    count: usize,
+    branch: Option<String>,
+) -> ActionResult {
     with_project_path(ws, project_id, |path| {
-        let entries = okena_git::fetch_commit_log(
-            path,
-            count,
-            branch.as_deref(),
-        );
-        ActionResult::Ok(Some(serde_json::to_value(entries).expect("BUG: CommitLogEntry must serialize")))
+        let entries = okena_git::fetch_commit_log(path, count, branch.as_deref());
+        ActionResult::Ok(Some(
+            serde_json::to_value(entries).expect("BUG: CommitLogEntry must serialize"),
+        ))
     })
 }
 
 pub(super) fn list_branches(ws: &Workspace, project_id: String) -> ActionResult {
     with_project_path(ws, project_id, |path| {
         let branches = okena_git::list_branches(path);
-        ActionResult::Ok(Some(serde_json::to_value(branches).expect("BUG: branches must serialize")))
+        ActionResult::Ok(Some(
+            serde_json::to_value(branches).expect("BUG: branches must serialize"),
+        ))
     })
 }
 
@@ -123,15 +146,15 @@ pub(super) fn list_worktrees(ws: &Workspace, project_id: String) -> ActionResult
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(std::path::Path::new(&path));
+            let (git_root, subdir) =
+                okena_git::resolve_git_root_and_subdir(std::path::Path::new(&path));
             let norm_git_root = okena_git::repository::normalize_path(&git_root);
             let worktrees = okena_git::repository::list_git_worktrees(&git_root);
             let entries: Vec<okena_core::api::ApiWorktreeEntry> = worktrees
                 .iter()
                 .map(|(worktree_path, branch)| {
-                    let normalized = okena_git::repository::normalize_path(
-                        std::path::Path::new(worktree_path),
-                    );
+                    let normalized =
+                        okena_git::repository::normalize_path(std::path::Path::new(worktree_path));
                     okena_core::api::ApiWorktreeEntry {
                         worktree_path: worktree_path.clone(),
                         project_path: okena_git::repository::project_path_in_worktree(
@@ -181,7 +204,8 @@ pub(super) fn generate_worktree_branch_name(ws: &Workspace, project_id: String) 
     match ws.project(&project_id) {
         Some(p) => {
             let path = p.path.clone();
-            let (git_root, _subdir) = okena_git::resolve_git_root_and_subdir(std::path::Path::new(&path));
+            let (git_root, _subdir) =
+                okena_git::resolve_git_root_and_subdir(std::path::Path::new(&path));
             let branch = okena_git::branch_names::generate_branch_name(&git_root);
             ActionResult::Ok(Some(serde_json::json!({ "branch": branch })))
         }
@@ -192,16 +216,30 @@ pub(super) fn generate_worktree_branch_name(ws: &Workspace, project_id: String) 
 pub(super) fn list_branches_classified(ws: &Workspace, project_id: String) -> ActionResult {
     with_project_path(ws, project_id, |path| {
         let branches = okena_git::list_branches_classified(path);
-        ActionResult::Ok(Some(serde_json::to_value(branches).expect("BUG: BranchList must serialize")))
+        ActionResult::Ok(Some(
+            serde_json::to_value(branches).expect("BUG: BranchList must serialize"),
+        ))
     })
 }
 
-pub(super) fn checkout_local_branch(ws: &Workspace, project_id: String, branch: String) -> ActionResult {
-    run_project_git_command(ws, project_id, |path| okena_git::checkout_local_branch(path, &branch))
+pub(super) fn checkout_local_branch(
+    ws: &Workspace,
+    project_id: String,
+    branch: String,
+) -> ActionResult {
+    run_project_git_command(ws, project_id, |path| {
+        okena_git::checkout_local_branch(path, &branch)
+    })
 }
 
-pub(super) fn checkout_remote_branch(ws: &Workspace, project_id: String, remote_branch: String) -> ActionResult {
-    run_project_git_command(ws, project_id, |path| okena_git::checkout_remote_branch(path, &remote_branch))
+pub(super) fn checkout_remote_branch(
+    ws: &Workspace,
+    project_id: String,
+    remote_branch: String,
+) -> ActionResult {
+    run_project_git_command(ws, project_id, |path| {
+        okena_git::checkout_remote_branch(path, &remote_branch)
+    })
 }
 
 pub(super) fn create_and_checkout_branch(
@@ -227,15 +265,21 @@ pub(super) fn create_and_checkout_branch(
 }
 
 pub(super) fn stage_file(ws: &Workspace, project_id: String, file_path: String) -> ActionResult {
-    run_project_git_command(ws, project_id, |path| okena_git::stage_file(path, &file_path))
+    run_project_git_command(ws, project_id, |path| {
+        okena_git::stage_file(path, &file_path)
+    })
 }
 
 pub(super) fn unstage_file(ws: &Workspace, project_id: String, file_path: String) -> ActionResult {
-    run_project_git_command(ws, project_id, |path| okena_git::unstage_file(path, &file_path))
+    run_project_git_command(ws, project_id, |path| {
+        okena_git::unstage_file(path, &file_path)
+    })
 }
 
 pub(super) fn discard_file(ws: &Workspace, project_id: String, file_path: String) -> ActionResult {
-    run_project_git_command(ws, project_id, |path| okena_git::discard_file_changes(path, &file_path))
+    run_project_git_command(ws, project_id, |path| {
+        okena_git::discard_file_changes(path, &file_path)
+    })
 }
 
 pub(super) fn blame(ws: &Workspace, project_id: String, relative_path: String) -> ActionResult {
@@ -246,21 +290,23 @@ pub(super) fn blame(ws: &Workspace, project_id: String, relative_path: String) -
                 Ok(lines) => {
                     let wire: Vec<_> = lines
                         .into_iter()
-                        .map(|l| serde_json::json!({
-                            "line_number": l.line_number,
-                            "commit": {
-                                "hash": l.commit.hash,
-                                "short_hash": l.commit.short_hash,
-                                "author": l.commit.author,
-                                "author_email": l.commit.author_email,
-                                "timestamp": l.commit.timestamp,
-                                "summary": l.commit.summary,
-                            },
-                            "kind": match l.kind {
-                                okena_git::BlameKind::Committed => "Committed",
-                                okena_git::BlameKind::Uncommitted => "Uncommitted",
-                            },
-                        }))
+                        .map(|l| {
+                            serde_json::json!({
+                                "line_number": l.line_number,
+                                "commit": {
+                                    "hash": l.commit.hash,
+                                    "short_hash": l.commit.short_hash,
+                                    "author": l.commit.author,
+                                    "author_email": l.commit.author_email,
+                                    "timestamp": l.commit.timestamp,
+                                    "summary": l.commit.summary,
+                                },
+                                "kind": match l.kind {
+                                    okena_git::BlameKind::Committed => "Committed",
+                                    okena_git::BlameKind::Uncommitted => "Uncommitted",
+                                },
+                            })
+                        })
                         .collect();
                     ActionResult::Ok(Some(serde_json::Value::Array(wire)))
                 }

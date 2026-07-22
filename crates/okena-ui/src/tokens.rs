@@ -3,7 +3,7 @@
 //! This module defines named constants for common UI values to ensure
 //! consistency across the application and make global adjustments easier.
 
-use gpui::{px, App, Global};
+use gpui::{App, Global, px};
 
 // =============================================================================
 // Global UI font size provider

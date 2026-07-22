@@ -16,8 +16,8 @@ use okena_ui::simple_input::InputChangedEvent;
 use std::ops::Range;
 use std::rc::Rc;
 
-use super::types::{DisplayItem, SideBySideSide};
 use super::DiffViewer;
+use super::types::{DisplayItem, SideBySideSide};
 
 impl DiffViewer {
     /// Open (or refocus) the in-page search bar.
@@ -87,7 +87,8 @@ impl DiffViewer {
             DiffViewMode::Unified => cell,
             DiffViewMode::SideBySide => cell / 2,
         };
-        self.scroll_handle.scroll_to_item(item, ScrollStrategy::Center);
+        self.scroll_handle
+            .scroll_to_item(item, ScrollStrategy::Center);
     }
 
     /// Recompute matches if content / query / case changed, then render the bar.
@@ -103,7 +104,11 @@ impl DiffViewer {
             .as_ref()
             .map(|s| (s.input.read(cx).value().to_string(), s.case_sensitive()))?;
 
-        let items_len = self.current_file.as_ref().map(|f| f.items.len()).unwrap_or(0);
+        let items_len = self
+            .current_file
+            .as_ref()
+            .map(|f| f.items.len())
+            .unwrap_or(0);
         let sbs_len = self.side_by_side_lines.len();
         let sig = (
             self.selected_file_index,
@@ -138,7 +143,12 @@ impl DiffViewer {
         ))
     }
 
-    fn compute_matches(&self, view_mode: DiffViewMode, query: &str, case: bool) -> Vec<SearchMatch> {
+    fn compute_matches(
+        &self,
+        view_mode: DiffViewMode,
+        query: &str,
+        case: bool,
+    ) -> Vec<SearchMatch> {
         match view_mode {
             DiffViewMode::Unified => {
                 let items = self
@@ -160,8 +170,14 @@ impl DiffViewer {
                 case,
                 self.side_by_side_lines.iter().flat_map(|sbs| {
                     [
-                        sbs.left.as_ref().map(|c| c.plain_text.as_str()).unwrap_or(""),
-                        sbs.right.as_ref().map(|c| c.plain_text.as_str()).unwrap_or(""),
+                        sbs.left
+                            .as_ref()
+                            .map(|c| c.plain_text.as_str())
+                            .unwrap_or(""),
+                        sbs.right
+                            .as_ref()
+                            .map(|c| c.plain_text.as_str())
+                            .unwrap_or(""),
                     ]
                 }),
             ),

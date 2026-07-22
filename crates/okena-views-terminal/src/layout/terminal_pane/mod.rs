@@ -1,13 +1,13 @@
 //! Terminal pane view - composition of child entity views.
 
-pub mod url_detector;
-mod scrollbar;
-mod search_bar;
-mod content;
 mod actions;
-mod zoom;
+mod content;
 mod navigation;
 mod render;
+mod scrollbar;
+mod search_bar;
+pub mod url_detector;
+mod zoom;
 
 use content::TerminalContentEvent;
 use search_bar::{SearchBar, SearchBarEvent};
@@ -16,14 +16,14 @@ pub use content::TerminalContent;
 
 use crate::ActionDispatch;
 use crate::terminal_view_settings;
+use gpui::*;
+use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_terminal::TerminalsRegistry;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{WindowId, Workspace};
-use gpui::*;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -103,7 +103,8 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
 
         let search_bar = cx.new(|cx| SearchBar::new(workspace.clone(), focus_manager.clone(), cx));
 
-        cx.subscribe(&search_bar, Self::handle_search_bar_event).detach();
+        cx.subscribe(&search_bar, Self::handle_search_bar_event)
+            .detach();
         cx.subscribe(&content, Self::handle_content_event).detach();
 
         let mut pane = Self {
@@ -136,7 +137,11 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             pane.create_new_terminal(cx);
         }
 
-        if pane.terminal_id.as_deref().is_some_and(|id| id.starts_with("remote:")) {
+        if pane
+            .terminal_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("remote:"))
+        {
             pane.start_remote_dirty_check_loop(cx);
         }
         pane.start_cursor_blink_loop(cx);
@@ -175,7 +180,11 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         cx: &mut Context<Self>,
     ) {
         match event {
-            TerminalContentEvent::RequestContextMenu { position, has_selection, link_url } => {
+            TerminalContentEvent::RequestContextMenu {
+                position,
+                has_selection,
+                link_url,
+            } => {
                 if let Some(ref terminal_id) = self.terminal_id {
                     self.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
@@ -204,7 +213,8 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 smol::Timer::after(interval).await;
                 let result = this.update(cx, |pane, cx| {
                     if let Some(terminal) = pane.terminal.as_ref()
-                        && terminal.take_dirty() {
+                        && terminal.take_dirty()
+                    {
                         // Parse the freshly-arrived bytes up front so derived
                         // state (bell, waiting) is current before the frame is
                         // built. Otherwise the lazy parse inside the content
@@ -315,7 +325,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     if was_waiting {
                         was_waiting = false;
                         terminal.set_waiting_for_input(false);
-                        let _ = this.update(cx, |_pane, cx| { cx.notify(); });
+                        let _ = this.update(cx, |_pane, cx| {
+                            cx.notify();
+                        });
                     }
                     continue;
                 }
@@ -354,7 +366,8 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         let settings = terminal_view_settings(cx);
         let ws = self.workspace.read(cx);
         let shell = self.shell_type.clone().resolve_default(
-            ws.project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
+            ws.project(&self.project_id)
+                .and_then(|p| p.default_shell.as_ref()),
             &settings.default_shell,
         );
 
@@ -369,7 +382,12 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         }
 
         let size = TerminalSize::default();
-        let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), self.project_path.clone()));
+        let terminal = Arc::new(Terminal::new(
+            terminal_id.clone(),
+            size,
+            self.backend.transport(),
+            self.project_path.clone(),
+        ));
         if let Some(pid) = self.backend.get_foreground_shell_pid(&terminal_id) {
             terminal.set_shell_pid(pid);
         }
@@ -387,10 +405,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     }
 
     fn update_child_terminals(&mut self, terminal: Arc<Terminal>, cx: &mut Context<Self>) {
-        crate::register_content_pane(
-            terminal.terminal_id.clone(),
-            self.content.downgrade(),
-        );
+        crate::register_content_pane(terminal.terminal_id.clone(), self.content.downgrade());
 
         self.content.update(cx, |content, cx| {
             content.set_terminal(Some(terminal.clone()), cx);
@@ -443,14 +458,17 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             )
         })
     }
-
 }
 
 impl<D: ActionDispatch> Drop for TerminalPane<D> {
     fn drop(&mut self) {
         // Remove this pane from the spatial navigation map so stale entries
         // don't linger after a terminal is closed.
-        crate::layout::navigation::deregister_pane_bounds(self.window_id, &self.project_id, &self.layout_path);
+        crate::layout::navigation::deregister_pane_bounds(
+            self.window_id,
+            &self.project_id,
+            &self.layout_path,
+        );
     }
 }
 

@@ -17,7 +17,8 @@ impl Terminal {
     /// covers both halves together.
     pub fn detect_hyperlinks(&self) -> Vec<DetectedLink> {
         let mut result = Vec::new();
-        let mut id_to_group: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut id_to_group: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         self.with_content(|term| {
             let grid = term.grid();
@@ -76,7 +77,10 @@ impl Terminal {
     ///
     /// Returns a list of `DetectedLink` for each match. File paths are validated
     /// for existence by the caller (UrlDetector).
-    #[allow(clippy::expect_used, reason = "literal regex, compilation checked by unit test")]
+    #[allow(
+        clippy::expect_used,
+        reason = "literal regex, compilation checked by unit test"
+    )]
     pub fn detect_urls(&self) -> Vec<DetectedLink> {
         static LINK_REGEX: OnceLock<Regex> = OnceLock::new();
         let regex = LINK_REGEX.get_or_init(|| {
@@ -89,7 +93,32 @@ impl Terminal {
 
         // Characters that can appear in a URL (for continuation detection)
         let url_char = |c: char| -> bool {
-            c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~' | ':' | '/' | '?' | '#' | '[' | ']' | '@' | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' | '%')
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '-' | '.'
+                        | '_'
+                        | '~'
+                        | ':'
+                        | '/'
+                        | '?'
+                        | '#'
+                        | '['
+                        | ']'
+                        | '@'
+                        | '!'
+                        | '$'
+                        | '&'
+                        | '\''
+                        | '('
+                        | ')'
+                        | '*'
+                        | '+'
+                        | ','
+                        | ';'
+                        | '='
+                        | '%'
+                )
         };
 
         let mut matches = Vec::new();
@@ -193,7 +222,8 @@ impl Terminal {
                         let seg_start = match_start.max(row_start_offset);
                         let seg_end = trimmed_end.min(row_end_offset);
 
-                        let col_start = combined_text[row_start_offset..seg_start].chars().count() + leading_stripped;
+                        let col_start = combined_text[row_start_offset..seg_start].chars().count()
+                            + leading_stripped;
                         let len = combined_text[seg_start..seg_end].chars().count();
 
                         if len > 0 {
@@ -238,9 +268,7 @@ impl Terminal {
 
                 // Advance to the last segment of this wrap_group.
                 let mut last_idx = idx;
-                while last_idx + 1 < phase1_len
-                    && matches[last_idx + 1].wrap_group == group
-                {
+                while last_idx + 1 < phase1_len && matches[last_idx + 1].wrap_group == group {
                     last_idx += 1;
                 }
                 let next_idx = last_idx + 1;
@@ -265,8 +293,7 @@ impl Terminal {
                 let m_col = matches[last_idx].col;
                 let m_len = matches[last_idx].len;
                 let match_buf_line = m_line - display_offset;
-                let match_last_cell =
-                    &grid[Point::new(Line(match_buf_line), last_col)];
+                let match_last_cell = &grid[Point::new(Line(match_buf_line), last_col)];
                 if match_last_cell.flags.contains(Flags::WRAPLINE) {
                     idx = next_idx;
                     continue;
@@ -330,10 +357,7 @@ impl Terminal {
                     }
 
                     // Take URL-compatible chars as extension.
-                    let ext_char_len = content
-                        .chars()
-                        .take_while(|c| url_char(*c))
-                        .count();
+                    let ext_char_len = content.chars().take_while(|c| url_char(*c)).count();
                     if ext_char_len == 0 {
                         break;
                     }
@@ -408,16 +432,11 @@ impl Terminal {
 
                     // Continue only if extension fills to near end of
                     // visible content on this row.
-                    let next_trimmed_len =
-                        next_rtrimmed.chars().count();
+                    let next_trimmed_len = next_rtrimmed.chars().count();
                     if indent + ext_char_len + 3 < next_trimmed_len {
                         break;
                     }
-                    if !remaining.is_empty()
-                        && remaining
-                            .chars()
-                            .any(|c| c.is_alphanumeric())
-                    {
+                    if !remaining.is_empty() && remaining.chars().any(|c| c.is_alphanumeric()) {
                         break;
                     }
 

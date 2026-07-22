@@ -1,14 +1,14 @@
 //! Re-pair dialog for existing remote connections.
 
 use crate::Cancel;
+use gpui::prelude::*;
+use gpui::*;
 use okena_ui::dialog_actions::dialog_actions;
 use okena_ui::input::{input_container, labeled_input};
 use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::simple_input::{SimpleInput, SimpleInputState};
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_md, ui_text_sm};
-use gpui::prelude::*;
-use gpui::*;
 
 pub struct RemotePairDialog {
     connection_id: String,
@@ -24,17 +24,15 @@ pub enum RemotePairDialogEvent {
 }
 
 impl okena_ui::overlay::CloseEvent for RemotePairDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 impl EventEmitter<RemotePairDialogEvent> for RemotePairDialog {}
 
 impl RemotePairDialog {
-    pub fn new(
-        connection_id: String,
-        connection_name: String,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(connection_id: String, connection_name: String, cx: &mut Context<Self>) -> Self {
         let code_input =
             cx.new(|cx| SimpleInputState::new(cx).placeholder("Pairing code from remote..."));
 

@@ -61,7 +61,11 @@ impl ContentSearchDialog {
                     div()
                         .text_size(ui_text_sm(cx))
                         .text_color(rgb(t.text_muted))
-                        .child(format!("{} match{}", match_count, if match_count == 1 { "" } else { "es" })),
+                        .child(format!(
+                            "{} match{}",
+                            match_count,
+                            if match_count == 1 { "" } else { "es" }
+                        )),
                 ),
         )
     }
@@ -76,32 +80,38 @@ impl ContentSearchDialog {
         t: &okena_core::theme::ThemeColors,
         cx: &App,
     ) -> Div {
-        let styled_text = if let Some(highlighted) = self.get_highlighted_line(file_path, line_number) {
-            if let Some(ranges) = match_ranges {
+        let styled_text =
+            if let Some(highlighted) = self.get_highlighted_line(file_path, line_number) {
+                if let Some(ranges) = match_ranges {
+                    let match_bg = search_match_bg(t.search_match_bg);
+                    let bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> = ranges
+                        .iter()
+                        .filter(|r| r.end <= highlighted.plain_text.len())
+                        .map(|r| (r.clone(), match_bg))
+                        .collect();
+                    build_styled_text_with_backgrounds(&highlighted.spans, &bg_ranges)
+                } else {
+                    build_styled_text_with_backgrounds(&highlighted.spans, &[])
+                }
+            } else if let Some(ranges) = match_ranges {
                 let match_bg = search_match_bg(t.search_match_bg);
-                let bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> = ranges
+                let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = ranges
                     .iter()
-                    .filter(|r| r.end <= highlighted.plain_text.len())
-                    .map(|r| (r.clone(), match_bg))
+                    .filter(|r| r.end <= line_content.len())
+                    .map(|r| {
+                        (
+                            r.clone(),
+                            HighlightStyle {
+                                background_color: Some(match_bg),
+                                ..Default::default()
+                            },
+                        )
+                    })
                     .collect();
-                build_styled_text_with_backgrounds(&highlighted.spans, &bg_ranges)
+                StyledText::new(line_content.to_string()).with_highlights(highlights)
             } else {
-                build_styled_text_with_backgrounds(&highlighted.spans, &[])
-            }
-        } else if let Some(ranges) = match_ranges {
-            let match_bg = search_match_bg(t.search_match_bg);
-            let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = ranges
-                .iter()
-                .filter(|r| r.end <= line_content.len())
-                .map(|r| (r.clone(), HighlightStyle {
-                    background_color: Some(match_bg),
-                    ..Default::default()
-                }))
-                .collect();
-            StyledText::new(line_content.to_string()).with_highlights(highlights)
-        } else {
-            StyledText::new(line_content.to_string())
-        };
+                StyledText::new(line_content.to_string())
+            };
 
         let is_context = match_ranges.is_none();
 
@@ -124,7 +134,11 @@ impl ContentSearchDialog {
                     .text_ellipsis()
                     .text_size(ui_text_ms(cx))
                     .font_family("monospace")
-                    .text_color(rgb(if is_context { t.text_muted } else { t.text_primary }))
+                    .text_color(rgb(if is_context {
+                        t.text_muted
+                    } else {
+                        t.text_primary
+                    }))
                     .child(styled_text),
             )
     }
@@ -160,7 +174,14 @@ impl ContentSearchDialog {
         )
         .gap(px(8.0))
         .pl(px(28.0))
-        .child(self.render_code_line(file_path, line_number, line_content, Some(match_ranges), &t, cx))
+        .child(self.render_code_line(
+            file_path,
+            line_number,
+            line_content,
+            Some(match_ranges),
+            &t,
+            cx,
+        ))
         .into_any_element()
     }
 }

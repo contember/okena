@@ -116,8 +116,7 @@ where
             .size_full()
             .bg(rgb(t.bg_primary))
             .child(
-                AnyView::from(self.content.clone())
-                    .cached(StyleRefinement::default().size_full()),
+                AnyView::from(self.content.clone()).cached(StyleRefinement::default().size_full()),
             )
             .into_any_element()
     }

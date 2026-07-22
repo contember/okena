@@ -58,56 +58,52 @@ impl GitHeader {
                         let supports_switch = self.git_provider.supports_mutations();
                         let has_ci = status.ci_checks.is_some();
                         let pr_url = status.pr_info.as_ref().map(|p| p.url.clone());
-                        let on_branch_click: project_header::ClickCallback =
-                            if supports_switch {
-                                Some(Arc::new(move |window, app| {
-                                    entity_for_branch_click.update(app, |this, cx| {
-                                        if this.branch_picker_visible {
-                                            this.hide_branch_picker(cx);
-                                        } else {
-                                            this.show_branch_picker(window, cx);
-                                        }
-                                    });
-                                }))
-                            } else {
-                                None
-                            };
+                        let on_branch_click: project_header::ClickCallback = if supports_switch {
+                            Some(Arc::new(move |window, app| {
+                                entity_for_branch_click.update(app, |this, cx| {
+                                    if this.branch_picker_visible {
+                                        this.hide_branch_picker(cx);
+                                    } else {
+                                        this.show_branch_picker(window, cx);
+                                    }
+                                });
+                            }))
+                        } else {
+                            None
+                        };
                         let on_pr_click: project_header::ClickCallback =
                             pr_url.map(|url| -> project_header::ClickHandler {
                                 Arc::new(move |_window, _app| {
                                     open_url(&url);
                                 })
                             });
-                        let on_ci_click: project_header::ClickCallback =
-                            if has_ci {
-                                Some(Arc::new(move |_window, app| {
-                                    entity_for_ci_click.update(app, |this, cx| {
-                                        this.toggle_ci_checks(cx);
-                                    });
-                                }))
-                            } else {
-                                None
-                            };
-                        let on_branch_bounds: project_header::BoundsCallback =
-                            if supports_switch {
-                                Some(Arc::new(move |bounds, app| {
-                                    entity_for_branch_bounds.update(app, |this, _cx| {
-                                        this.set_branch_chip_bounds(bounds);
-                                    });
-                                }))
-                            } else {
-                                None
-                            };
-                        let on_ci_bounds: project_header::BoundsCallback =
-                            if has_ci {
-                                Some(Arc::new(move |bounds, app| {
-                                    entity_for_ci_bounds.update(app, |this, _cx| {
-                                        this.set_ci_badge_bounds(bounds);
-                                    });
-                                }))
-                            } else {
-                                None
-                            };
+                        let on_ci_click: project_header::ClickCallback = if has_ci {
+                            Some(Arc::new(move |_window, app| {
+                                entity_for_ci_click.update(app, |this, cx| {
+                                    this.toggle_ci_checks(cx);
+                                });
+                            }))
+                        } else {
+                            None
+                        };
+                        let on_branch_bounds: project_header::BoundsCallback = if supports_switch {
+                            Some(Arc::new(move |bounds, app| {
+                                entity_for_branch_bounds.update(app, |this, _cx| {
+                                    this.set_branch_chip_bounds(bounds);
+                                });
+                            }))
+                        } else {
+                            None
+                        };
+                        let on_ci_bounds: project_header::BoundsCallback = if has_ci {
+                            Some(Arc::new(move |bounds, app| {
+                                entity_for_ci_bounds.update(app, |this, _cx| {
+                                    this.set_ci_badge_bounds(bounds);
+                                });
+                            }))
+                        } else {
+                            None
+                        };
                         project_header::render_branch_status(
                             &status,
                             project_header::BranchStatusCallbacks {
@@ -124,7 +120,9 @@ impl GitHeader {
                     .child({
                         let entity_for_bounds = entity_handle.clone();
                         div()
-                            .id(ElementId::Name(format!("commit-log-btn-{}", project_id).into()))
+                            .id(ElementId::Name(
+                                format!("commit-log-btn-{}", project_id).into(),
+                            ))
                             .relative()
                             .cursor_pointer()
                             .flex()
@@ -150,16 +148,21 @@ impl GitHeader {
                             .child(
                                 canvas(
                                     move |bounds, _window, app| {
-                                        entity_for_bounds.update(app, |this: &mut GitHeader, _cx| {
-                                            this.commit_log_bounds = bounds;
-                                        });
+                                        entity_for_bounds.update(
+                                            app,
+                                            |this: &mut GitHeader, _cx| {
+                                                this.commit_log_bounds = bounds;
+                                            },
+                                        );
                                     },
                                     |_, _, _, _| {},
                                 )
                                 .absolute()
                                 .size_full(),
                             )
-                            .tooltip(move |_window, cx| Tooltip::new("Commit Log").build(_window, cx))
+                            .tooltip(move |_window, cx| {
+                                Tooltip::new("Commit Log").build(_window, cx)
+                            })
                     })
                     // Diff stats (clickable, only if there are changes)
                     .when(has_changes, |d: Div| {
@@ -167,7 +170,9 @@ impl GitHeader {
                         let project_id_for_click = self.project_id.clone();
                         d.child(
                             project_header::render_diff_stats_badge(lines_added, lines_removed, t)
-                                .id(ElementId::Name(format!("git-diff-stats-{}", project_id).into()))
+                                .id(ElementId::Name(
+                                    format!("git-diff-stats-{}", project_id).into(),
+                                ))
                                 .relative()
                                 .cursor_pointer()
                                 .rounded(px(3.0))
@@ -186,30 +191,37 @@ impl GitHeader {
                                     cx.stop_propagation();
                                     this.hide_diff_popover(cx);
                                     request_broker.update(cx, |broker, cx| {
-                                        broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
-                                            project_id: project_id_for_click.clone(),
-                                            kind: ProjectOverlayKind::DiffViewer {
-                                                file: None,
-                                                mode: None,
-                                                commit_message: None,
-                                                commits: None,
-                                                commit_index: None,
-                                            },
-                                        }), cx);
+                                        broker.push_overlay_request(
+                                            OverlayRequest::Project(ProjectOverlay {
+                                                project_id: project_id_for_click.clone(),
+                                                kind: ProjectOverlayKind::DiffViewer {
+                                                    file: None,
+                                                    mode: None,
+                                                    commit_message: None,
+                                                    commits: None,
+                                                    commit_index: None,
+                                                },
+                                            }),
+                                            cx,
+                                        );
                                     });
                                 }))
                                 // Invisible canvas to capture bounds for popover positioning
-                                .child(canvas(
-                                    {
-                                        let entity_handle = entity_handle.clone();
-                                        move |bounds, _window, app| {
-                                            entity_handle.update(app, |this, _cx| {
-                                                this.diff_stats_bounds = bounds;
-                                            });
-                                        }
-                                    },
-                                    |_, _, _, _| {},
-                                ).absolute().size_full())
+                                .child(
+                                    canvas(
+                                        {
+                                            let entity_handle = entity_handle.clone();
+                                            move |bounds, _window, app| {
+                                                entity_handle.update(app, |this, _cx| {
+                                                    this.diff_stats_bounds = bounds;
+                                                });
+                                            }
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                ),
                         )
                     })
                     // Commits to push (vs origin/<branch>): the standard green
@@ -242,7 +254,9 @@ impl GitHeader {
                             let head = review_head.clone().unwrap_or_else(|| "HEAD".to_string());
                             d.child(
                                 h_flex()
-                                    .id(ElementId::Name(format!("git-review-{}", project_id).into()))
+                                    .id(ElementId::Name(
+                                        format!("git-review-{}", project_id).into(),
+                                    ))
                                     .cursor_pointer()
                                     .items_center()
                                     .gap(px(3.0))
@@ -258,16 +272,22 @@ impl GitHeader {
                                         let base = base.clone();
                                         let head = head.clone();
                                         request_broker.update(cx, |broker, cx| {
-                                            broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
-                                                project_id: project_id_for_review.clone(),
-                                                kind: ProjectOverlayKind::DiffViewer {
-                                                    file: None,
-                                                    mode: Some(DiffMode::BranchCompare { base, head }),
-                                                    commit_message: None,
-                                                    commits: None,
-                                                    commit_index: None,
-                                                },
-                                            }), cx);
+                                            broker.push_overlay_request(
+                                                OverlayRequest::Project(ProjectOverlay {
+                                                    project_id: project_id_for_review.clone(),
+                                                    kind: ProjectOverlayKind::DiffViewer {
+                                                        file: None,
+                                                        mode: Some(DiffMode::BranchCompare {
+                                                            base,
+                                                            head,
+                                                        }),
+                                                        commit_message: None,
+                                                        commits: None,
+                                                        commit_index: None,
+                                                    },
+                                                }),
+                                                cx,
+                                            );
                                         });
                                     }))
                                     .child(

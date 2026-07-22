@@ -28,7 +28,11 @@ pub fn status_label(status: &ServiceStatus) -> &'static str {
     match status {
         ServiceStatus::Running => "running",
         ServiceStatus::Crashed { exit_code } => {
-            if exit_code.is_some() { "exited" } else { "crashed" }
+            if exit_code.is_some() {
+                "exited"
+            } else {
+                "crashed"
+            }
         }
         ServiceStatus::Stopped => "stopped",
         ServiceStatus::Starting => "starting",

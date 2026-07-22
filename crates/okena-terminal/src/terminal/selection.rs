@@ -52,7 +52,13 @@ impl Terminal {
     /// Start selection with a specific type
     /// Note: row is the visual row on screen (0 to screen_lines-1)
     /// We convert it to buffer coordinates by accounting for display_offset
-    fn start_selection_with_type(&self, col: usize, row: i32, selection_type: SelectionType, side: Side) {
+    fn start_selection_with_type(
+        &self,
+        col: usize,
+        row: i32,
+        selection_type: SelectionType,
+        side: Side,
+    ) {
         let mut term = self.term.lock();
 
         // Convert visual row to buffer row
@@ -128,11 +134,12 @@ impl Terminal {
     pub fn selection_bounds(&self) -> Option<((usize, i32), (usize, i32))> {
         let term = self.term.lock();
         if let Some(ref selection) = term.selection
-            && let Some(range) = selection.to_range(&*term) {
-                let start = (range.start.column.0, range.start.line.0);
-                let end = (range.end.column.0, range.end.line.0);
-                return Some((start, end));
-            }
+            && let Some(range) = selection.to_range(&*term)
+        {
+            let start = (range.start.column.0, range.start.line.0);
+            let end = (range.end.column.0, range.end.line.0);
+            return Some((start, end));
+        }
         None
     }
 

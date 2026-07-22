@@ -62,7 +62,8 @@ pub async fn serve_dual_stack(
                 async move {
                     let mut req = req.map(Body::new);
                     req.extensions_mut().insert(ConnectInfo(peer));
-                    req.extensions_mut().insert(crate::routes::PeerInfo::Tcp(peer));
+                    req.extensions_mut()
+                        .insert(crate::routes::PeerInfo::Tcp(peer));
                     app.call(req).await
                 }
             });
@@ -127,7 +128,8 @@ pub async fn serve_tls(
                 async move {
                     let mut req = req.map(Body::new);
                     req.extensions_mut().insert(ConnectInfo(peer));
-                    req.extensions_mut().insert(crate::routes::PeerInfo::Tcp(peer));
+                    req.extensions_mut()
+                        .insert(crate::routes::PeerInfo::Tcp(peer));
                     app.call(req).await
                 }
             });
@@ -167,7 +169,8 @@ pub async fn serve_plain(
                 async move {
                     let mut req = req.map(Body::new);
                     req.extensions_mut().insert(ConnectInfo(peer));
-                    req.extensions_mut().insert(crate::routes::PeerInfo::Tcp(peer));
+                    req.extensions_mut()
+                        .insert(crate::routes::PeerInfo::Tcp(peer));
                     app.call(req).await
                 }
             });

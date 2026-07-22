@@ -1,9 +1,9 @@
 use crate::auth::TOKEN_TTL_SECS;
 use crate::routes::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 
 pub async fn post_refresh(
     State(state): State<AppState>,
@@ -20,7 +20,7 @@ pub async fn post_refresh(
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "missing or invalid authorization header"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 

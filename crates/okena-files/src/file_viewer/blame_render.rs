@@ -131,7 +131,8 @@ fn render_committed_cell(
     let author_color = mix_alpha(t.text_secondary, alpha);
     let date_color = mix_alpha(t.text_muted, alpha);
 
-    let element_id: ElementId = ElementId::Name(format!("blame-{}-{}", full_hash, entry.line_number).into());
+    let element_id: ElementId =
+        ElementId::Name(format!("blame-{}-{}", full_hash, entry.line_number).into());
 
     div()
         .id(element_id)
@@ -165,16 +166,8 @@ fn render_committed_cell(
                 .font_family("monospace")
                 .child(hash),
         )
-        .child(
-            div()
-                .text_color(author_color)
-                .child(author),
-        )
-        .child(
-            div()
-                .text_color(date_color)
-                .child(date),
-        )
+        .child(div().text_color(author_color).child(author))
+        .child(div().text_color(date_color).child(date))
         .into_any_element()
 }
 

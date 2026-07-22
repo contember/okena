@@ -2,20 +2,20 @@
 
 use super::types::{DiffViewMode, FileTreeNode};
 use super::{Cancel, DiffViewer};
+use gpui::prelude::*;
+use gpui::*;
+use gpui_component::h_flex;
 use okena_core::theme::ThemeColors;
 use okena_files::selection::Selection2DNonEmpty;
 use okena_files::theme::theme;
+use okena_git::DiffMode;
 use okena_ui::modal::{
     detached_needs_controls, fullscreen_overlay, fullscreen_panel, window_drag_spacer,
     window_min_max_controls,
 };
 use okena_ui::resizable_sidebar::resizable_sidebar;
 use okena_ui::toggle::segmented_toggle;
-use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl, ui_text};
-use okena_git::DiffMode;
-use gpui::prelude::*;
-use gpui::*;
-use gpui_component::h_flex;
+use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use std::sync::Arc;
 
 impl DiffViewer {
@@ -36,7 +36,10 @@ impl DiffViewer {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_working = *diff_mode == DiffMode::WorkingTree;
-        let hide_mode_toggle = matches!(diff_mode, DiffMode::Commit(_) | DiffMode::BranchCompare { .. });
+        let hide_mode_toggle = matches!(
+            diff_mode,
+            DiffMode::Commit(_) | DiffMode::BranchCompare { .. }
+        );
         let is_unified = self.view_mode == DiffViewMode::Unified;
         let detached = self.is_detached;
 
@@ -55,7 +58,9 @@ impl DiffViewer {
                     .child({
                         let title = match diff_mode {
                             DiffMode::Commit(_) => commit_message.unwrap_or("Commit").to_string(),
-                            DiffMode::BranchCompare { base, head } => format!("{base} \u{2192} {head}"),
+                            DiffMode::BranchCompare { base, head } => {
+                                format!("{base} \u{2192} {head}")
+                            }
                             _ => "Changes".to_string(),
                         };
                         div()
@@ -76,7 +81,11 @@ impl DiffViewer {
                             None
                         },
                         |d, hash| {
-                            let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
+                            let short = if hash.len() > 7 {
+                                hash[..7].to_string()
+                            } else {
+                                hash.clone()
+                            };
                             let hash_for_click = hash.clone();
                             let hash_for_rclick = hash.clone();
                             d.child(
@@ -91,15 +100,26 @@ impl DiffViewer {
                                     .rounded(px(4.0))
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
                                     .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(hash_for_click.clone()));
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            hash_for_click.clone(),
+                                        ));
                                     })
                                     .on_mouse_down(
                                         MouseButton::Right,
                                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                            this.open_commit_hash_menu(event.position, hash_for_rclick.clone(), cx);
+                                            this.open_commit_hash_menu(
+                                                event.position,
+                                                hash_for_rclick.clone(),
+                                                cx,
+                                            );
                                         }),
                                     )
-                                    .tooltip(|_window, cx| gpui_component::tooltip::Tooltip::new("Click: copy hash \u{00B7} Right-click: more").build(_window, cx))
+                                    .tooltip(|_window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(
+                                            "Click: copy hash \u{00B7} Right-click: more",
+                                        )
+                                        .build(_window, cx)
+                                    })
                                     .child(short),
                             )
                         },
@@ -161,9 +181,11 @@ impl DiffViewer {
                                 t.bg_secondary
                             }))
                             .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.toggle_ignore_whitespace(cx)
-                            }))
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| {
+                                    this.toggle_ignore_whitespace(cx)
+                                }),
+                            )
                             .child(
                                 div()
                                     .text_size(ui_text_md(cx))
@@ -176,13 +198,7 @@ impl DiffViewer {
                             ),
                     )
                     // Separator
-                    .child(
-                        div()
-                            .w(px(1.0))
-                            .h(px(20.0))
-                            .bg(rgb(t.border))
-                            .mx(px(4.0)),
-                    )
+                    .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
                     // View mode toggle
                     .child(
                         div()
@@ -208,13 +224,7 @@ impl DiffViewer {
                         )
                     })
                     // Separator
-                    .child(
-                        div()
-                            .w(px(1.0))
-                            .h(px(20.0))
-                            .bg(rgb(t.border))
-                            .mx(px(4.0)),
-                    )
+                    .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
                     // Window min/max controls (only when detached + client decorations)
                     .when(detached, |d| {
                         d.child(window_min_max_controls(needs_controls, is_maximized, t, cx))
@@ -233,9 +243,12 @@ impl DiffViewer {
                                 .rounded(px(6.0))
                                 .hover(|s| s.bg(rgb(t.bg_hover)))
                                 .tooltip(|window, cx| {
-                                    gpui_component::tooltip::Tooltip::new("Open in new window").build(window, cx)
+                                    gpui_component::tooltip::Tooltip::new("Open in new window")
+                                        .build(window, cx)
                                 })
-                                .on_click(cx.listener(|this, _, _window, cx| this.request_detach(cx)))
+                                .on_click(
+                                    cx.listener(|this, _, _window, cx| this.request_detach(cx)),
+                                )
                                 .child(
                                     svg()
                                         .path("icons/external-link.svg")
@@ -268,7 +281,11 @@ impl DiffViewer {
     }
 
     /// Commit navigation bar: prev/next arrows, author, date, hash, position indicator.
-    pub(super) fn render_commit_info_bar(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_commit_info_bar(
+        &self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         use gpui_component::tooltip::Tooltip;
 
         let commit = self.commits.get(self.commit_index);
@@ -288,7 +305,11 @@ impl DiffViewer {
             .child(
                 div()
                     .id("commit-nav-prev")
-                    .cursor(if can_prev { CursorStyle::PointingHand } else { CursorStyle::default() })
+                    .cursor(if can_prev {
+                        CursorStyle::PointingHand
+                    } else {
+                        CursorStyle::default()
+                    })
                     .w(px(24.0))
                     .h(px(22.0))
                     .flex()
@@ -297,12 +318,18 @@ impl DiffViewer {
                     .rounded(px(4.0))
                     .when(can_prev, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
                     .text_size(ui_text_md(cx))
-                    .text_color(rgb(if can_prev { t.text_secondary } else { t.text_muted }))
+                    .text_color(rgb(if can_prev {
+                        t.text_secondary
+                    } else {
+                        t.text_muted
+                    }))
                     .when(can_prev, |d| {
                         d.on_click(cx.listener(|this, _, _window, cx| this.prev_commit(cx)))
                     })
                     .child("\u{25C0}")
-                    .tooltip(move |_window, cx| Tooltip::new("Previous commit  [").build(_window, cx)),
+                    .tooltip(move |_window, cx| {
+                        Tooltip::new("Previous commit  [").build(_window, cx)
+                    }),
             )
             // Position
             .child(
@@ -317,7 +344,11 @@ impl DiffViewer {
             .child(
                 div()
                     .id("commit-nav-next")
-                    .cursor(if can_next { CursorStyle::PointingHand } else { CursorStyle::default() })
+                    .cursor(if can_next {
+                        CursorStyle::PointingHand
+                    } else {
+                        CursorStyle::default()
+                    })
                     .w(px(24.0))
                     .h(px(22.0))
                     .flex()
@@ -326,7 +357,11 @@ impl DiffViewer {
                     .rounded(px(4.0))
                     .when(can_next, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
                     .text_size(ui_text_md(cx))
-                    .text_color(rgb(if can_next { t.text_secondary } else { t.text_muted }))
+                    .text_color(rgb(if can_next {
+                        t.text_secondary
+                    } else {
+                        t.text_muted
+                    }))
                     .when(can_next, |d| {
                         d.on_click(cx.listener(|this, _, _window, cx| this.next_commit(cx)))
                     })
@@ -338,7 +373,11 @@ impl DiffViewer {
             // Commit metadata
             .when_some(commit.cloned(), |d, commit| {
                 let hash = commit.hash.clone();
-                let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
+                let short = if hash.len() > 7 {
+                    hash[..7].to_string()
+                } else {
+                    hash.clone()
+                };
                 let hash_for_click = hash.clone();
                 let hash_for_rclick = hash.clone();
                 let time_str = okena_git::format_relative_time(commit.timestamp);
@@ -356,15 +395,24 @@ impl DiffViewer {
                             .rounded(px(3.0))
                             .hover(|s| s.bg(rgb(t.bg_hover)))
                             .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(hash_for_click.clone()));
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    hash_for_click.clone(),
+                                ));
                             })
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    this.open_commit_hash_menu(event.position, hash_for_rclick.clone(), cx);
+                                    this.open_commit_hash_menu(
+                                        event.position,
+                                        hash_for_rclick.clone(),
+                                        cx,
+                                    );
                                 }),
                             )
-                            .tooltip(|_window, cx| Tooltip::new("Click: copy hash \u{00B7} Right-click: more").build(_window, cx))
+                            .tooltip(|_window, cx| {
+                                Tooltip::new("Click: copy hash \u{00B7} Right-click: more")
+                                    .build(_window, cx)
+                            })
                             .child(short),
                     )
                     // Author
@@ -407,37 +455,27 @@ impl DiffViewer {
             .min_h_0()
             .when(loading, |d| {
                 d.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_size(ui_text_xl(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child("Loading..."),
-                        ),
+                    div().flex_1().flex().items_center().justify_center().child(
+                        div()
+                            .text_size(ui_text_xl(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("Loading..."),
+                    ),
                 )
             })
             .when(!loading && has_error, |d| {
                 d.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_size(ui_text_xl(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child(error_message.unwrap_or_default()),
-                        ),
+                    div().flex_1().flex().items_center().justify_center().child(
+                        div()
+                            .text_size(ui_text_xl(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(error_message.unwrap_or_default()),
+                    ),
                 )
             })
             .when(!loading && !has_error && has_files, |d| {
-                d.child(self.render_sidebar(t, tree_elements, cx)).child(
-                    self.render_diff_pane(
+                d.child(self.render_sidebar(t, tree_elements, cx))
+                    .child(self.render_diff_pane(
                         t,
                         is_binary,
                         file_path,
@@ -445,8 +483,7 @@ impl DiffViewer {
                         gutter_width,
                         theme_colors,
                         cx,
-                    ),
-                )
+                    ))
             })
     }
 
@@ -555,17 +592,12 @@ impl DiffViewer {
             .children(search_bar)
             .when(is_binary, |d| {
                 d.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_size(ui_text_xl(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child("Binary file - cannot display diff"),
-                        ),
+                    div().flex_1().flex().items_center().justify_center().child(
+                        div()
+                            .text_size(ui_text_xl(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("Binary file - cannot display diff"),
+                    ),
                 )
             })
             .when(!is_binary, |d| {
@@ -582,14 +614,12 @@ impl DiffViewer {
                         .child(
                             uniform_list("diff-lines", item_count, move |range, _window, cx| {
                                 let tc = tc.clone();
-                                view.update(cx, |this, cx| {
-                                    match view_mode {
-                                        DiffViewMode::Unified => {
-                                            this.render_visible_lines(range, &tc, gutter_width, cx)
-                                        }
-                                        DiffViewMode::SideBySide => {
-                                            this.render_side_by_side_lines(range, &tc, cx)
-                                        }
+                                view.update(cx, |this, cx| match view_mode {
+                                    DiffViewMode::Unified => {
+                                        this.render_visible_lines(range, &tc, gutter_width, cx)
+                                    }
+                                    DiffViewMode::SideBySide => {
+                                        this.render_side_by_side_lines(range, &tc, cx)
                                     }
                                 })
                             })
@@ -603,9 +633,11 @@ impl DiffViewer {
                                 list.style().restrict_scroll_to_axis = Some(true);
                                 list
                             })
-                            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _window, cx| {
-                                this.handle_scroll_x(event, cx);
-                            }))
+                            .on_scroll_wheel(cx.listener(
+                                move |this, event: &ScrollWheelEvent, _window, cx| {
+                                    this.handle_scroll_x(event, cx);
+                                },
+                            ))
                             .track_scroll(&self.scroll_handle),
                         )
                         .when_some(scrollbar_geometry, |d, (_, _, thumb_y, thumb_height)| {
@@ -832,8 +864,8 @@ impl DiffViewer {
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        use okena_files::file_tree::{expandable_folder_row, expandable_file_row};
         use super::context_menu::DiffTargetKind;
+        use okena_files::file_tree::{expandable_file_row, expandable_folder_row};
 
         let mut elements: Vec<AnyElement> = Vec::new();
 
@@ -967,7 +999,11 @@ impl Render for DiffViewer {
         let current_stats = self.file_stats.get(self.selected_file_index);
         let file_path = current_stats.map(|f| f.path.clone()).unwrap_or_default();
         let is_binary = current_stats.map(|f| f.is_binary).unwrap_or(false);
-        let line_count = self.current_file.as_ref().map(|f| f.items.len()).unwrap_or(0);
+        let line_count = self
+            .current_file
+            .as_ref()
+            .map(|f| f.items.len())
+            .unwrap_or(0);
 
         let tree_elements = if has_files {
             self.render_tree_node(&self.file_tree.clone(), 0, "", &t, cx)
@@ -1078,13 +1114,38 @@ impl Render for DiffViewer {
             .child({
                 let needs_controls = self.is_detached && detached_needs_controls(window);
                 let is_maximized = window.is_maximized();
-                self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, &diff_mode, self.ignore_whitespace, self.commit_message.as_deref(), needs_controls, is_maximized, cx)
+                self.render_header(
+                    &t,
+                    has_files,
+                    self.file_stats.len(),
+                    total_added,
+                    total_removed,
+                    &diff_mode,
+                    self.ignore_whitespace,
+                    self.commit_message.as_deref(),
+                    needs_controls,
+                    is_maximized,
+                    cx,
+                )
             })
             // Commit info bar (when viewing a commit with navigation)
             .when(self.has_commits(), |d| {
                 d.child(self.render_commit_info_bar(&t, cx))
             })
-            .child(self.render_content(&t, self.loading, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
+            .child(self.render_content(
+                &t,
+                self.loading,
+                has_error,
+                error_message,
+                has_files,
+                is_binary,
+                file_path,
+                line_count,
+                gutter_width,
+                tree_elements,
+                theme_colors,
+                cx,
+            ))
             .child(self.render_footer(&t, cx))
             .children(self.render_context_overlays(&t, cx))
     }

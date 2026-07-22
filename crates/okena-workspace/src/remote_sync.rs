@@ -100,12 +100,13 @@ impl RemoteSyncState {
         name: &str,
         path: Option<&str>,
     ) {
-        self.pending_project_visibility.push(PendingRemoteProjectVisibility {
-            connection_id: connection_id.to_string(),
-            name: name.to_string(),
-            path: path.map(|path| path.to_string()),
-            window_id,
-        });
+        self.pending_project_visibility
+            .push(PendingRemoteProjectVisibility {
+                connection_id: connection_id.to_string(),
+                name: name.to_string(),
+                path: path.map(|path| path.to_string()),
+                window_id,
+            });
     }
 
     /// Take the spawning window for a newly materialized remote project.
@@ -139,15 +140,15 @@ impl RemoteSyncState {
         connection_id: &str,
         name: &str,
     ) -> Option<usize> {
-        let mut matches = self
-            .pending_project_visibility
-            .iter()
-            .enumerate()
-            .filter(|(_, pending)| {
-                pending.connection_id == connection_id
-                    && pending.name == name
-                    && pending.allows_name_only_match()
-            });
+        let mut matches =
+            self.pending_project_visibility
+                .iter()
+                .enumerate()
+                .filter(|(_, pending)| {
+                    pending.connection_id == connection_id
+                        && pending.name == name
+                        && pending.allows_name_only_match()
+                });
         let (index, _) = matches.next()?;
         if matches.next().is_none() {
             Some(index)
@@ -198,7 +199,8 @@ impl RemoteSyncState {
         for projects in self.pending_focus.values_mut() {
             projects.remove(project_id);
         }
-        self.pending_focus.retain(|_, projects| !projects.is_empty());
+        self.pending_focus
+            .retain(|_, projects| !projects.is_empty());
     }
 
     /// Drop cached project presentation after a connection disappears or a

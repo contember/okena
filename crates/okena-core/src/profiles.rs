@@ -19,23 +19,53 @@ pub struct ProfilePaths {
 }
 
 impl ProfilePaths {
-    pub fn workspace_json(&self)   -> PathBuf { self.root.join("workspace.json") }
-    pub fn settings_json(&self)    -> PathBuf { self.root.join("settings.json") }
-    pub fn keybindings_json(&self) -> PathBuf { self.root.join("keybindings.json") }
-    pub fn sessions_dir(&self)     -> PathBuf { self.root.join("sessions") }
-    pub fn themes_dir(&self)       -> PathBuf { self.root.join("themes") }
-    pub fn updates_dir(&self)      -> PathBuf { self.root.join("updates") }
-    pub fn lock_path(&self)        -> PathBuf { self.root.join("okena.lock") }
-    pub fn log_path(&self)         -> PathBuf { self.root.join("okena.log") }
-    pub fn cli_json(&self)         -> PathBuf { self.root.join("cli.json") }
-    pub fn remote_json(&self)      -> PathBuf { self.root.join("remote.json") }
-    pub fn remote_secret(&self)    -> PathBuf { self.root.join("remote_secret") }
-    pub fn remote_tokens(&self)    -> PathBuf { self.root.join("remote_tokens.json") }
-    pub fn pair_code(&self)        -> PathBuf { self.root.join("pair_code") }
+    pub fn workspace_json(&self) -> PathBuf {
+        self.root.join("workspace.json")
+    }
+    pub fn settings_json(&self) -> PathBuf {
+        self.root.join("settings.json")
+    }
+    pub fn keybindings_json(&self) -> PathBuf {
+        self.root.join("keybindings.json")
+    }
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.root.join("sessions")
+    }
+    pub fn themes_dir(&self) -> PathBuf {
+        self.root.join("themes")
+    }
+    pub fn updates_dir(&self) -> PathBuf {
+        self.root.join("updates")
+    }
+    pub fn lock_path(&self) -> PathBuf {
+        self.root.join("okena.lock")
+    }
+    pub fn log_path(&self) -> PathBuf {
+        self.root.join("okena.log")
+    }
+    pub fn cli_json(&self) -> PathBuf {
+        self.root.join("cli.json")
+    }
+    pub fn remote_json(&self) -> PathBuf {
+        self.root.join("remote.json")
+    }
+    pub fn remote_secret(&self) -> PathBuf {
+        self.root.join("remote_secret")
+    }
+    pub fn remote_tokens(&self) -> PathBuf {
+        self.root.join("remote_tokens.json")
+    }
+    pub fn pair_code(&self) -> PathBuf {
+        self.root.join("pair_code")
+    }
     /// Pristine pre-upgrade copies of config, one dir per outgoing version.
-    pub fn config_backups_dir(&self) -> PathBuf { self.root.join("config-backups") }
+    pub fn config_backups_dir(&self) -> PathBuf {
+        self.root.join("config-backups")
+    }
     /// Plain-text marker holding the last app version that ran on this profile.
-    pub fn app_version_marker(&self) -> PathBuf { self.root.join(".app-version") }
+    pub fn app_version_marker(&self) -> PathBuf {
+        self.root.join(".app-version")
+    }
 }
 
 /// Initialize the process-wide active profile. Must be called exactly once before
@@ -52,7 +82,9 @@ pub fn init_profile(paths: ProfilePaths) {
 pub fn current() -> &'static ProfilePaths {
     // Intentional panic: documented precondition that init_profile() ran first.
     #[allow(clippy::expect_used)]
-    PROFILE_PATHS.get().expect("profile not initialized — call init_profile() first")
+    PROFILE_PATHS
+        .get()
+        .expect("profile not initialized — call init_profile() first")
 }
 
 /// Returns the active profile paths, or `None` if `init_profile` was never called.
@@ -139,14 +171,15 @@ pub fn resolve_active_profile(flag_id: Option<String>) -> Result<ProfilePaths> {
             // Migration is handled by the caller (main.rs) after init_profile.
             let idx = bootstrap_default_profile(&root)?;
             if let Some(req) = &requested
-                && req != "default" {
-                    bail!(
-                        "Profile '{req}' not found. This appears to be a first launch; \
+                && req != "default"
+            {
+                bail!(
+                    "Profile '{req}' not found. This appears to be a first launch; \
                          the 'default' profile was just created.\n\
                          Run `okena --new-profile {req}` to create it, \
                          or omit --profile to use 'default'."
-                    );
-                }
+                );
+            }
             return make_profile_paths(&idx.profiles[0], &root);
         }
     };
@@ -182,9 +215,10 @@ fn pick_profile_id(index: &ProfileIndex) -> Result<String> {
     }
     // Use last_used if it still exists
     if let Some(last) = &index.last_used
-        && index.profiles.iter().any(|p| &p.id == last) {
-            return Ok(last.clone());
-        }
+        && index.profiles.iter().any(|p| &p.id == last)
+    {
+        return Ok(last.clone());
+    }
     // Ambiguous — give the user a clear error
     let mut msg = String::from(
         "Multiple profiles found. Specify one with --profile <id> or OKENA_PROFILE:\n",
@@ -196,7 +230,12 @@ fn pick_profile_id(index: &ProfileIndex) -> Result<String> {
 }
 
 fn validate_profile_id(id: &str) -> Result<()> {
-    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") || id.contains('\0') {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.contains('\0')
+    {
         bail!("Invalid profile id: '{id}'");
     }
     Ok(())
@@ -277,7 +316,10 @@ pub fn delete_profile(id: &str) -> Result<()> {
     let root = config_root();
     let mut index = ProfileIndex::load(&root)?;
 
-    let entry = index.profiles.iter().find(|p| p.id == id)
+    let entry = index
+        .profiles
+        .iter()
+        .find(|p| p.id == id)
         .ok_or_else(|| anyhow::anyhow!("Profile '{id}' does not exist"))?
         .clone();
 
@@ -285,9 +327,10 @@ pub fn delete_profile(id: &str) -> Result<()> {
         bail!("Cannot delete the default profile");
     }
     if let Some(active) = try_current()
-        && active.id == id {
-            bail!("Cannot delete the active profile — switch to another profile first");
-        }
+        && active.id == id
+    {
+        bail!("Cannot delete the active profile — switch to another profile first");
+    }
     let paths = make_profile_paths(&entry, &root)?;
     if is_profile_running(&paths) {
         bail!("Profile '{id}' is currently in use by another Okena instance");
@@ -305,8 +348,12 @@ pub fn delete_profile(id: &str) -> Result<()> {
 
 fn is_profile_running(paths: &ProfilePaths) -> bool {
     let remote = paths.remote_json();
-    let Ok(data) = std::fs::read_to_string(&remote) else { return false; };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) else { return false; };
+    let Ok(data) = std::fs::read_to_string(&remote) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return false;
+    };
     let pid = json.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     pid != 0 && is_process_alive(pid)
 }
@@ -317,7 +364,11 @@ pub fn list_profiles() {
     match ProfileIndex::load(&root) {
         Ok(index) => {
             for p in &index.profiles {
-                let marker = if index.last_used.as_deref() == Some(&p.id) { "*" } else { " " };
+                let marker = if index.last_used.as_deref() == Some(&p.id) {
+                    "*"
+                } else {
+                    " "
+                };
                 println!("{} {:<20} {}", marker, p.id, p.display_name);
             }
         }
@@ -348,24 +399,29 @@ pub fn migrate_legacy_layout_if_needed(paths: &ProfilePaths) -> Result<()> {
     if legacy_lock.exists() {
         if let Ok(content) = std::fs::read_to_string(&legacy_lock)
             && let Ok(pid) = content.trim().parse::<u32>()
-                && is_process_alive(pid) {
-                    bail!(
-                        "An older Okena instance is still running (PID {pid}). \
+            && is_process_alive(pid)
+        {
+            bail!(
+                "An older Okena instance is still running (PID {pid}). \
                          Quit it before upgrading to profiles."
-                    );
-                }
+            );
+        }
         let _ = std::fs::remove_file(&legacy_lock);
     }
 
     // Only migrate if there are legacy files to move
     let candidates = [
-        "workspace.json", "workspace.json.bak",
+        "workspace.json",
+        "workspace.json.bak",
         "settings.json",
         "keybindings.json",
         "cli.json",
         "remote.json",
-        "remote_secret", "remote_tokens.json", "pair_code",
-        "okena.log", "okena.log.1",
+        "remote_secret",
+        "remote_tokens.json",
+        "pair_code",
+        "okena.log",
+        "okena.log.1",
     ];
     let dir_candidates = ["sessions", "themes", "updates"];
 
@@ -577,7 +633,10 @@ fn read_app_version_marker(paths: &ProfilePaths) -> Option<String> {
 fn read_schema_version(path: &Path) -> Option<u32> {
     let content = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    value.get("version").and_then(|v| v.as_u64()).map(|n| n as u32)
+    value
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
 }
 
 /// Whether an existing config file is behind the build's schema version (and so
@@ -616,7 +675,13 @@ fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
 fn sanitize_key(s: &str) -> String {
     s.trim()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -688,7 +753,11 @@ fn unique_id(display_name: &str, index: &ProfileIndex) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string();
-    let slug = if slug.is_empty() { "profile".to_string() } else { slug };
+    let slug = if slug.is_empty() {
+        "profile".to_string()
+    } else {
+        slug
+    };
 
     if !index.profiles.iter().any(|p| p.id == slug) {
         return slug;
@@ -720,7 +789,9 @@ fn unix_days_to_ymd(mut n: u64) -> (u64, u64, u64) {
     loop {
         let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
         let days = if leap { 366 } else { 365 };
-        if n < days { break; }
+        if n < days {
+            break;
+        }
         n -= days;
         y += 1;
     }
@@ -732,7 +803,9 @@ fn unix_days_to_ymd(mut n: u64) -> (u64, u64, u64) {
     };
     let mut mo = 1u64;
     for &days in &months {
-        if n < days { break; }
+        if n < days {
+            break;
+        }
         n -= days;
         mo += 1;
     }
@@ -840,7 +913,10 @@ mod tests {
             root: root.join("profiles/work"),
             config_root: root.clone(),
         };
-        assert_eq!(paths.workspace_json(), root.join("profiles/work/workspace.json"));
+        assert_eq!(
+            paths.workspace_json(),
+            root.join("profiles/work/workspace.json")
+        );
         assert_eq!(paths.sessions_dir(), root.join("profiles/work/sessions"));
     }
 
@@ -870,7 +946,10 @@ mod tests {
         fs::write(paths.workspace_json(), r#"{"version":2,"hello":"world"}"#).unwrap();
         record_app_version(&paths, "0.27.0");
 
-        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let sv = [SchemaVersion {
+            file: "workspace.json",
+            current: 2,
+        }];
         let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
         assert_eq!(key.as_deref(), Some("0.27.0"));
 
@@ -886,10 +965,19 @@ mod tests {
         let paths = snap_paths(&dir);
         fs::write(paths.workspace_json(), r#"{"version":1}"#).unwrap();
         // No .app-version marker — first run of the feature on an existing config.
-        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let sv = [SchemaVersion {
+            file: "workspace.json",
+            current: 2,
+        }];
         let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
         assert_eq!(key.as_deref(), Some("pre-0.28.0"));
-        assert!(paths.config_backups_dir().join("pre-0.28.0").join("workspace.json").exists());
+        assert!(
+            paths
+                .config_backups_dir()
+                .join("pre-0.28.0")
+                .join("workspace.json")
+                .exists()
+        );
     }
 
     #[test]
@@ -898,7 +986,10 @@ mod tests {
         let paths = snap_paths(&dir);
         fs::write(paths.workspace_json(), r#"{"version":2}"#).unwrap();
         record_app_version(&paths, "0.28.0");
-        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let sv = [SchemaVersion {
+            file: "workspace.json",
+            current: 2,
+        }];
         let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
         assert_eq!(key, None);
         assert!(!paths.config_backups_dir().exists());
@@ -909,7 +1000,10 @@ mod tests {
         let dir = temp_root();
         let paths = snap_paths(&dir);
         // No config files at all.
-        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let sv = [SchemaVersion {
+            file: "workspace.json",
+            current: 2,
+        }];
         let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
         assert_eq!(key, None);
     }
@@ -921,7 +1015,10 @@ mod tests {
         fs::write(paths.workspace_json(), r#"{"version":2}"#).unwrap();
         record_app_version(&paths, "0.28.0");
         // Code schema bumped without an app-version bump (dev churn on a branch).
-        let sv = [SchemaVersion { file: "workspace.json", current: 3 }];
+        let sv = [SchemaVersion {
+            file: "workspace.json",
+            current: 3,
+        }];
         let key = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
         assert_eq!(key.as_deref(), Some("pre-0.28.0"));
     }
@@ -932,7 +1029,10 @@ mod tests {
         let paths = snap_paths(&dir);
         fs::write(paths.workspace_json(), r#"{"version":2,"n":1}"#).unwrap();
         record_app_version(&paths, "0.27.0");
-        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let sv = [SchemaVersion {
+            file: "workspace.json",
+            current: 2,
+        }];
 
         let k1 = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
         assert_eq!(k1.as_deref(), Some("0.27.0"));
@@ -942,10 +1042,17 @@ mod tests {
         let k2 = snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
         assert_eq!(k2, None, "must not re-snapshot an existing key");
 
-        let snap =
-            fs::read_to_string(paths.config_backups_dir().join("0.27.0").join("workspace.json"))
-                .unwrap();
-        assert!(snap.contains("\"n\":1"), "first snapshot must stay pristine");
+        let snap = fs::read_to_string(
+            paths
+                .config_backups_dir()
+                .join("0.27.0")
+                .join("workspace.json"),
+        )
+        .unwrap();
+        assert!(
+            snap.contains("\"n\":1"),
+            "first snapshot must stay pristine"
+        );
     }
 
     #[test]
@@ -957,14 +1064,19 @@ mod tests {
         fs::write(paths.themes_dir().join("custom.json"), "{}").unwrap();
         record_app_version(&paths, "0.27.0");
 
-        let sv = [SchemaVersion { file: "workspace.json", current: 2 }];
+        let sv = [SchemaVersion {
+            file: "workspace.json",
+            current: 2,
+        }];
         snapshot_configs_before_upgrade(&paths, "0.28.0", &sv).unwrap();
-        assert!(paths
-            .config_backups_dir()
-            .join("0.27.0")
-            .join("themes")
-            .join("custom.json")
-            .exists());
+        assert!(
+            paths
+                .config_backups_dir()
+                .join("0.27.0")
+                .join("themes")
+                .join("custom.json")
+                .exists()
+        );
     }
 
     #[test]
@@ -1007,8 +1119,20 @@ mod tests {
         let idx = ProfileIndex {
             version: 1,
             profiles: vec![
-                ProfileEntry { id: "default".into(), display_name: "Default".into(), created_at: "".into(), icon: None, color: None },
-                ProfileEntry { id: "work".into(), display_name: "Work".into(), created_at: "".into(), icon: None, color: None },
+                ProfileEntry {
+                    id: "default".into(),
+                    display_name: "Default".into(),
+                    created_at: "".into(),
+                    icon: None,
+                    color: None,
+                },
+                ProfileEntry {
+                    id: "work".into(),
+                    display_name: "Work".into(),
+                    created_at: "".into(),
+                    icon: None,
+                    color: None,
+                },
             ],
             last_used: Some("work".into()),
             default_profile: "default".into(),
@@ -1058,7 +1182,9 @@ mod tests {
 
         // Simulate the delete logic (no try_current guard needed — OnceLock is per-process)
         index.profiles.retain(|p| p.id != id);
-        if index.last_used.as_deref() == Some(id) { index.last_used = None; }
+        if index.last_used.as_deref() == Some(id) {
+            index.last_used = None;
+        }
         index.save(root).unwrap();
         let work_dir = root.join("profiles/work");
         fs::remove_dir_all(&work_dir).unwrap();
@@ -1079,7 +1205,9 @@ mod tests {
         assert_eq!(index.last_used.as_deref(), Some("work"));
 
         index.profiles.retain(|p| p.id != "work");
-        if index.last_used.as_deref() == Some("work") { index.last_used = None; }
+        if index.last_used.as_deref() == Some("work") {
+            index.last_used = None;
+        }
         index.save(root).unwrap();
 
         let reloaded = ProfileIndex::load(root).unwrap();

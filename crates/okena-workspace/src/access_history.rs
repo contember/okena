@@ -15,7 +15,8 @@ impl ProjectAccessHistory {
 
     /// Record that a project was just accessed.
     pub fn touch(&mut self, project_id: &str) {
-        self.access_times.insert(project_id.to_string(), Instant::now());
+        self.access_times
+            .insert(project_id.to_string(), Instant::now());
     }
 
     pub fn accessed_at(&self, project_id: &str) -> Option<Instant> {

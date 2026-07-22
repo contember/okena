@@ -21,7 +21,8 @@ pub fn list_branches(path: &Path) -> Vec<String> {
 /// Get branches that don't have a worktree yet
 pub fn get_available_branches_for_worktree(path: &Path) -> Vec<String> {
     let all_branches = list_branches(path);
-    let used_branches: std::collections::HashSet<_> = super::get_worktree_branches(path).into_iter().collect();
+    let used_branches: std::collections::HashSet<_> =
+        super::get_worktree_branches(path).into_iter().collect();
 
     all_branches
         .into_iter()
@@ -39,23 +40,31 @@ pub fn get_default_branch(repo_path: &Path) -> Option<String> {
     // at e.g. refs/remotes/origin/main. Ignore stale/dangling targets left by
     // renamed or deleted default branches.
     if let Ok(head_ref) = repo.find_reference("refs/remotes/origin/HEAD")
-        && let Some(target_name) = head_ref.target().try_name() {
-            let target = target_name.as_bstr().to_string();
-            if let Some(branch) = target.strip_prefix("refs/remotes/origin/")
-                && !branch.is_empty()
-                && repo.find_reference(target.as_str()).is_ok() {
-                    return Some(branch.to_string());
-                }
+        && let Some(target_name) = head_ref.target().try_name()
+    {
+        let target = target_name.as_bstr().to_string();
+        if let Some(branch) = target.strip_prefix("refs/remotes/origin/")
+            && !branch.is_empty()
+            && repo.find_reference(target.as_str()).is_ok()
+        {
+            return Some(branch.to_string());
         }
+    }
 
     // Fallback: check if main or master exists on origin, then locally.
     for candidate in ["main", "master"] {
-        if repo.find_reference(&format!("refs/remotes/origin/{}", candidate)).is_ok() {
+        if repo
+            .find_reference(&format!("refs/remotes/origin/{}", candidate))
+            .is_ok()
+        {
             return Some(candidate.to_string());
         }
     }
     for candidate in ["main", "master"] {
-        if repo.find_reference(&format!("refs/heads/{}", candidate)).is_ok() {
+        if repo
+            .find_reference(&format!("refs/heads/{}", candidate))
+            .is_ok()
+        {
             return Some(candidate.to_string());
         }
     }
@@ -76,7 +85,8 @@ pub fn resolve_review_base(repo_path: &Path) -> Option<String> {
 
     // Don't offer reviewing the default branch against itself.
     if let Some(current) = super::status::get_current_branch(repo_path)
-        && current == default {
+        && current == default
+    {
         return None;
     }
 
@@ -158,7 +168,8 @@ pub fn stage_file(repo_path: &Path, file_path: &str) -> GitResult<()> {
 /// Works for both modified and newly-added files.
 pub fn unstage_file(repo_path: &Path, file_path: &str) -> GitResult<()> {
     let p = path_str(repo_path)?;
-    let output = safe_output(command("git").args(["-C", p, "restore", "--staged", "--", file_path]))?;
+    let output =
+        safe_output(command("git").args(["-C", p, "restore", "--staged", "--", file_path]))?;
     require_success(output)
 }
 
@@ -205,7 +216,8 @@ pub fn delete_local_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
 pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
     let p = path_str(repo_path)?;
-    let output = safe_output(command("git").args(["-C", p, "push", "origin", "--delete", "--", branch]))?;
+    let output =
+        safe_output(command("git").args(["-C", p, "push", "origin", "--delete", "--", branch]))?;
     require_success(output)
 }
 
@@ -267,9 +279,10 @@ pub fn list_branches_classified(path: &Path) -> BranchList {
             }
             // Skip remote refs that have a corresponding local branch
             if let Some(stripped) = name.strip_prefix("origin/")
-                && local_names.contains(stripped) {
-                    continue;
-                }
+                && local_names.contains(stripped)
+            {
+                continue;
+            }
             remote.push(name);
         }
     }
@@ -426,8 +439,7 @@ mod tests {
     #[test]
     fn create_and_checkout_branch_switches_head() {
         let (_tmp, repo) = init_temp_repo();
-        create_and_checkout_branch(&repo, "feat/header-redesign", None)
-            .expect("create branch");
+        create_and_checkout_branch(&repo, "feat/header-redesign", None).expect("create branch");
         assert_eq!(
             get_current_branch(&repo).as_deref(),
             Some("feat/header-redesign")
@@ -508,11 +520,17 @@ mod tests {
 
         // Add an origin remote-tracking ref: now preferred over local.
         git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        assert_eq!(resolve_base_ref(&repo, "main").as_deref(), Some("origin/main"));
+        assert_eq!(
+            resolve_base_ref(&repo, "main").as_deref(),
+            Some("origin/main")
+        );
 
         // Add an upstream remote-tracking ref: fork workflow — upstream wins.
         git_in(&repo, &["update-ref", "refs/remotes/upstream/main", "HEAD"]);
-        assert_eq!(resolve_base_ref(&repo, "main").as_deref(), Some("upstream/main"));
+        assert_eq!(
+            resolve_base_ref(&repo, "main").as_deref(),
+            Some("upstream/main")
+        );
     }
 
     #[test]

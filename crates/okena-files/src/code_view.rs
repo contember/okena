@@ -9,7 +9,6 @@ use crate::selection::SelectionState;
 use crate::syntax::{HighlightedLine, HighlightedSpan};
 use gpui::*;
 
-
 /// Type alias for code selection (line index, column).
 pub type CodeSelection = SelectionState<(usize, usize)>;
 
@@ -89,7 +88,9 @@ pub fn update_scrollbar_drag(
     let new_scroll = (drag.start_scroll_y + delta_scroll).clamp(0.0, scrollable_content);
 
     let state = scroll_handle.0.borrow_mut();
-    state.base_handle.set_offset(point(px(0.0), px(-new_scroll)));
+    state
+        .base_handle
+        .set_offset(point(px(0.0), px(-new_scroll)));
 }
 
 /// Build a StyledText with optional background highlights (e.g. selection or word-level diff).
@@ -191,8 +192,16 @@ pub fn selection_bg_ranges(
     if line_index < start_line || line_index > end_line {
         return vec![];
     }
-    let sel_start = if line_index == start_line { start_col.min(line_len) } else { 0 };
-    let sel_end = if line_index == end_line { end_col.min(line_len) } else { line_len };
+    let sel_start = if line_index == start_line {
+        start_col.min(line_len)
+    } else {
+        0
+    };
+    let sel_end = if line_index == end_line {
+        end_col.min(line_len)
+    } else {
+        line_len
+    };
     if sel_start < sel_end {
         vec![(sel_start..sel_end, SELECTION_BG.into())]
     } else {
@@ -237,7 +246,11 @@ pub fn extract_selected_text<'a>(
         }
     }
 
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Get selected text from highlighted lines (convenience wrapper).

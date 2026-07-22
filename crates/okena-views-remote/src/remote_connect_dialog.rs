@@ -1,17 +1,17 @@
 //! Remote connection dialog overlay.
 
 use crate::Cancel;
-use okena_transport::client::tls::format_fingerprint;
-use okena_transport::client::RemoteConnectionConfig;
+use gpui::prelude::*;
+use gpui::*;
 use okena_remote_client::RemoteConnectionManager;
+use okena_transport::client::RemoteConnectionConfig;
+use okena_transport::client::tls::format_fingerprint;
 use okena_ui::button::{button, button_primary};
 use okena_ui::input::{input_container, labeled_input};
 use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::simple_input::{SimpleInput, SimpleInputState};
 use okena_ui::theme::theme;
-use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_sm};
-use gpui::prelude::*;
-use gpui::*;
+use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 use std::sync::Arc;
 
 pub struct RemoteConnectDialog {
@@ -70,17 +70,16 @@ async fn detect_scheme(
             .spawn(async move {
                 let scheme = if tls { "https" } else { "http" };
                 let base_url = format!("{}://{}:{}", scheme, host, port);
-                let resp = match okena_transport::client::tls::build_reqwest_client(
-                    tls, None, observed,
-                ) {
-                    Ok(client) => client
-                        .get(format!("{}/health", base_url))
-                        .timeout(std::time::Duration::from_secs(5))
-                        .send()
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
+                let resp =
+                    match okena_transport::client::tls::build_reqwest_client(tls, None, observed) {
+                        Ok(client) => client
+                            .get(format!("{}/health", base_url))
+                            .timeout(std::time::Duration::from_secs(5))
+                            .send()
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
                 (base_url, resp)
             })
             .await;
@@ -106,13 +105,13 @@ async fn detect_scheme(
 
 pub enum RemoteConnectDialogEvent {
     Close,
-    Connected {
-        config: RemoteConnectionConfig,
-    },
+    Connected { config: RemoteConnectionConfig },
 }
 
 impl okena_ui::overlay::CloseEvent for RemoteConnectDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 impl EventEmitter<RemoteConnectDialogEvent> for RemoteConnectDialog {}
@@ -245,17 +244,17 @@ impl RemoteConnectDialog {
             let mut config = config;
 
             // Auto-detect the scheme (TLS first, plain-http fallback) and adopt it.
-            let detected =
-                match detect_scheme(&runtime, host.clone(), port, observed.clone()).await {
-                    Ok(d) => d,
-                    Err(e) => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.status = ConnectionDialogStatus::ConnectFailed(e);
-                            cx.notify();
-                        });
-                        return;
-                    }
-                };
+            let detected = match detect_scheme(&runtime, host.clone(), port, observed.clone()).await
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.status = ConnectionDialogStatus::ConnectFailed(e);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
             let use_tls = detected.tls;
             let base_url = detected.base_url;
             config.tls = use_tls;
@@ -309,8 +308,7 @@ impl RemoteConnectDialog {
                                 // trust the pin and persist the connection.
                                 Some(fp) => {
                                     this.pending_config = Some(config);
-                                    this.status =
-                                        ConnectionDialogStatus::VerifyFingerprint(fp);
+                                    this.status = ConnectionDialogStatus::VerifyFingerprint(fp);
                                     cx.notify();
                                 }
                                 // Plain http (or no cert captured): nothing to

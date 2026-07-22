@@ -6,13 +6,13 @@
 //! - Key input handling
 //! - Focus management
 
+use crate::layout::terminal_pane::TerminalContent;
+use gpui::*;
+use okena_terminal::TerminalsRegistry;
 use okena_terminal::input::{KeyEvent, KeyModifiers, KittyKeyboardFlags, key_to_bytes};
 use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
-use okena_terminal::TerminalsRegistry;
-use crate::layout::terminal_pane::TerminalContent;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::Workspace;
-use gpui::*;
 use std::sync::Arc;
 
 /// Convert a GPUI key event to terminal input bytes.

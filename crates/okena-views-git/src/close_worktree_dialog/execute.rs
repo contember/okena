@@ -40,7 +40,12 @@ impl CloseWorktreeDialog {
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client.post_action(okena_core::api::ActionRequest::CloseWorktree {
-                    project_id, merge, stash, fetch, push, delete_branch,
+                    project_id,
+                    merge,
+                    stash,
+                    fetch,
+                    push,
+                    delete_branch,
                 })
             })
             .await;

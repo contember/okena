@@ -43,17 +43,14 @@ pub fn list_directory(
         canonical_root.clone()
     } else {
         let joined = canonical_root.join(relative_path);
-        let canonical = joined
-            .canonicalize()
-            .map_err(directory_read_error)?;
+        let canonical = joined.canonicalize().map_err(directory_read_error)?;
         if !canonical.starts_with(&canonical_root) {
             return Err("path traversal not allowed".to_string());
         }
         canonical
     };
 
-    let metadata = std::fs::metadata(&target)
-        .map_err(directory_read_error)?;
+    let metadata = std::fs::metadata(&target).map_err(directory_read_error)?;
     if !metadata.is_dir() {
         return Err(format!("Not a directory: {}", target.display()));
     }
@@ -148,7 +145,10 @@ mod tests {
         fs::create_dir(root.join("a_dir")).unwrap();
 
         let entries = list_directory(root, "", false).unwrap();
-        assert_eq!(names(&entries), vec!["a_dir", "z_dir", "a_file.txt", "z_file.txt"]);
+        assert_eq!(
+            names(&entries),
+            vec!["a_dir", "z_dir", "a_file.txt", "z_file.txt"]
+        );
         assert!(entries[0].is_dir && entries[1].is_dir);
         assert!(!entries[2].is_dir && !entries[3].is_dir);
     }

@@ -18,9 +18,9 @@ mod smoke_tests;
 use okena_app::{settings, workspace};
 
 use gpui::*;
-use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
 #[cfg(not(target_os = "linux"))]
 use gpui_component::Root;
+use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
 #[cfg(target_os = "linux")]
 use okena_app::simple_root::SimpleRoot as Root;
 
@@ -89,10 +89,13 @@ impl std::io::Write for TeeWriter {
     }
 }
 
-use okena_app::app::Okena;
 use crate::assets::{Assets, embedded_fonts};
+use okena_app::app::Okena;
 use okena_app::keybindings;
-use okena_app::keybindings::{About, NewWindow, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings, ShowProfileManager};
+use okena_app::keybindings::{
+    About, NewWindow, Quit, ShowCommandPalette, ShowKeybindings, ShowProfileManager, ShowSettings,
+    ShowThemeSelector,
+};
 use okena_app::logging;
 use okena_app::theme::{AppTheme, GlobalTheme, ThemeMode};
 use okena_app::views::panels::toast::ToastManager;
@@ -134,10 +137,20 @@ fn about(_: &About, _cx: &mut App) {
         fn msg_id(obj: *mut c_void, sel: *mut c_void, a: *mut c_void) -> *mut c_void;
 
         #[link_name = "objc_msgSend"]
-        fn msg_id2(obj: *mut c_void, sel: *mut c_void, a: *mut c_void, b: *mut c_void) -> *mut c_void;
+        fn msg_id2(
+            obj: *mut c_void,
+            sel: *mut c_void,
+            a: *mut c_void,
+            b: *mut c_void,
+        ) -> *mut c_void;
 
         #[link_name = "objc_msgSend"]
-        fn msg_bytes_len(obj: *mut c_void, sel: *mut c_void, bytes: *const u8, len: usize) -> *mut c_void;
+        fn msg_bytes_len(
+            obj: *mut c_void,
+            sel: *mut c_void,
+            bytes: *const u8,
+            len: usize,
+        ) -> *mut c_void;
     }
 
     unsafe {
@@ -146,9 +159,8 @@ fn about(_: &About, _cx: &mut App) {
         let ns_string = objc_getClass(b"NSString\0".as_ptr());
 
         // Helper: create NSString from null-terminated bytes
-        let nsstring = |s: &[u8]| -> *mut c_void {
-            msg_str(msg(ns_string, alloc), init_utf8, s.as_ptr())
-        };
+        let nsstring =
+            |s: &[u8]| -> *mut c_void { msg_str(msg(ns_string, alloc), init_utf8, s.as_ptr()) };
 
         // Build options dictionary with version
         let dict = msg(
@@ -253,7 +265,11 @@ fn set_app_menus(cx: &mut App) {
                 MenuItem::os_action("Cut", okena_app::keybindings::Copy, OsAction::Cut),
                 MenuItem::os_action("Copy", okena_app::keybindings::Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", okena_app::keybindings::Paste, OsAction::Paste),
-                MenuItem::os_action("Select All", okena_app::keybindings::Copy, OsAction::SelectAll),
+                MenuItem::os_action(
+                    "Select All",
+                    okena_app::keybindings::Copy,
+                    OsAction::SelectAll,
+                ),
             ],
         },
         Menu {
@@ -269,9 +285,7 @@ fn set_app_menus(cx: &mut App) {
         Menu {
             name: "Window".into(),
             disabled: false,
-            items: vec![
-                MenuItem::action("New Window", NewWindow),
-            ],
+            items: vec![MenuItem::action("New Window", NewWindow)],
         },
     ]);
 }
@@ -291,8 +305,8 @@ fn run_headless(listen_addr: Option<IpAddr>) -> anyhow::Result<()> {
     });
     let listen_addrs =
         okena_remote_server::local::resolve_daemon_listen_addrs(listen_addr, &app_settings);
-    let tls_enabled = listen_addrs.iter().any(|addr| !addr.is_loopback())
-        && app_settings.remote_tls_enabled;
+    let tls_enabled =
+        listen_addrs.iter().any(|addr| !addr.is_loopback()) && app_settings.remote_tls_enabled;
     let params = okena_daemon_core::DaemonParams {
         workspace_data,
         settings: app_settings,
@@ -398,11 +412,22 @@ fn main() {
     // upgrade can be reverted to an old-format config the previous binary reads.
     // Must run before load_settings()/load_workspace().
     {
-        use okena_workspace::persistence::{SETTINGS_VERSION, WINDOW_LAYOUT_VERSION, WORKSPACE_VERSION};
+        use okena_workspace::persistence::{
+            SETTINGS_VERSION, WINDOW_LAYOUT_VERSION, WORKSPACE_VERSION,
+        };
         let schema_versions = [
-            profiles::SchemaVersion { file: "workspace.json", current: WORKSPACE_VERSION },
-            profiles::SchemaVersion { file: "settings.json", current: SETTINGS_VERSION },
-            profiles::SchemaVersion { file: "window-layout.json", current: WINDOW_LAYOUT_VERSION },
+            profiles::SchemaVersion {
+                file: "workspace.json",
+                current: WORKSPACE_VERSION,
+            },
+            profiles::SchemaVersion {
+                file: "settings.json",
+                current: SETTINGS_VERSION,
+            },
+            profiles::SchemaVersion {
+                file: "window-layout.json",
+                current: WINDOW_LAYOUT_VERSION,
+            },
         ];
         if let Err(e) = profiles::snapshot_configs_before_upgrade(
             profiles::current(),
@@ -490,7 +515,8 @@ fn main() {
     // 2. Auto-detect on Linux: --listen provided but no DISPLAY/WAYLAND_DISPLAY
     let explicit_headless = args.iter().any(|a| a == "--headless");
     let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
-    let headless = explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
+    let headless =
+        explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
 
     if headless {
         // Self-restart handoff (single-binary `okena --headless` daemon): a
@@ -499,9 +525,7 @@ fn main() {
         // daemon to exit before acquiring the lock (fail-fast against a live PID)
         // and binding a port. Bounded; on timeout we proceed and let the lock
         // surface the real error.
-        if let Some(old_pid) =
-            okena_remote_server::local::parse_await_pid(std::env::args())
-        {
+        if let Some(old_pid) = okena_remote_server::local::parse_await_pid(std::env::args()) {
             log::info!("restart: waiting for outgoing daemon (pid {old_pid}) to exit");
             let _ = okena_remote_server::local::wait_for_pid_exit(
                 old_pid,

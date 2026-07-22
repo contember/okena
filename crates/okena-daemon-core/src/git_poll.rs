@@ -272,7 +272,10 @@ fn apply_github_result(
     } = result;
     let is_current = |id: &str| {
         let expected_generation = head_generations.get(id).copied().unwrap_or_default();
-        let current_generation = current_head_generations.get(id).copied().unwrap_or_default();
+        let current_generation = current_head_generations
+            .get(id)
+            .copied()
+            .unwrap_or_default();
         let expected_branch = branches.get(id);
         let current_branch = last.get(id).map(|status| &status.branch);
         expected_generation == current_generation && expected_branch == current_branch
@@ -483,7 +486,12 @@ pub async fn run_git_poll(
             let result_tx = github_result_tx.clone();
             let poll_generations = projects
                 .iter()
-                .map(|(id, _)| (id.clone(), head_generations.get(id).copied().unwrap_or_default()))
+                .map(|(id, _)| {
+                    (
+                        id.clone(),
+                        head_generations.get(id).copied().unwrap_or_default(),
+                    )
+                })
                 .collect();
             let poll_branches = new_statuses
                 .iter()

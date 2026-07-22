@@ -6,7 +6,12 @@ use std::sync::Arc;
 /// Helper: create a terminal and write text to it, returns detected URLs
 fn detect_urls_in(text: &str, cols: u16) -> Vec<DetectedLink> {
     let transport = Arc::new(NullTransport);
-    let size = TerminalSize { cols, rows: 24, cell_width: 8.0, cell_height: 16.0 };
+    let size = TerminalSize {
+        cols,
+        rows: 24,
+        cell_width: 8.0,
+        cell_height: 16.0,
+    };
     let terminal = Terminal::new("test".into(), size, transport, "/tmp".into());
     terminal.process_output(text.as_bytes());
     terminal.detect_urls()
@@ -20,10 +25,7 @@ fn detect_url_wrapped_with_padding() {
     // Row 1: "- https://claude.ai/code/sess_ABC" (33 chars)
     // Row 2: "  DEF123" + padding
     // cols=36 so row 1 is nearly full (33+3 >= 36).
-    let links = detect_urls_in(
-        "- https://claude.ai/code/sess_ABC\r\n  DEF123\r\n",
-        36,
-    );
+    let links = detect_urls_in("- https://claude.ai/code/sess_ABC\r\n  DEF123\r\n", 36);
     assert_eq!(links.len(), 2, "URL spans two rows: {:?}", links);
     assert_eq!(links[0].text, "https://claude.ai/code/sess_ABCDEF123");
     assert_eq!(links[0].col, 2);
@@ -38,10 +40,7 @@ fn detect_url_wrapped_with_leading_padding() {
     // Row 1: "  https://claude.ai/code/sess_ABC" (33 chars) + padding
     // Row 2: "  DEF123" + padding
     // cols=36 so row 1 is nearly full (33+3 >= 36).
-    let links = detect_urls_in(
-        "  https://claude.ai/code/sess_ABC\r\n  DEF123\r\n",
-        36,
-    );
+    let links = detect_urls_in("  https://claude.ai/code/sess_ABC\r\n  DEF123\r\n", 36);
     assert_eq!(links.len(), 2, "URL spans two rows: {:?}", links);
     assert_eq!(links[0].text, "https://claude.ai/code/sess_ABCDEF123");
     assert_eq!(links[0].col, 2); // starts after 2 spaces
@@ -59,17 +58,19 @@ fn detect_url_not_wrapped_when_next_line_more_indented() {
         "   1. text https://api.postmarkapp.com\r\n      (next line)\r\n",
         50,
     );
-    assert_eq!(links.len(), 1, "URL should NOT merge with next line: {:?}", links);
+    assert_eq!(
+        links.len(),
+        1,
+        "URL should NOT merge with next line: {:?}",
+        links
+    );
     assert_eq!(links[0].text, "https://api.postmarkapp.com");
 }
 
 #[test]
 fn detect_url_single_line_not_affected() {
     // Single-line URL should still work normally
-    let links = detect_urls_in(
-        "visit https://example.com/path here\r\n",
-        80,
-    );
+    let links = detect_urls_in("visit https://example.com/path here\r\n", 80);
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].text, "https://example.com/path");
     assert_eq!(links[0].col, 6);
@@ -124,19 +125,25 @@ fn detect_duplicate_url_wrapped_then_whole() {
         ),
         50,
     );
-    let url_links: Vec<&DetectedLink> = links.iter()
-        .filter(|l| l.text == url)
-        .collect();
+    let url_links: Vec<&DetectedLink> = links.iter().filter(|l| l.text == url).collect();
     // Wrapped URL produces 2 segments + standalone URL = 3 total
-    assert!(url_links.len() >= 3, "Expected wrapped (2 segments) + standalone (1): {:?}", url_links);
+    assert!(
+        url_links.len() >= 3,
+        "Expected wrapped (2 segments) + standalone (1): {:?}",
+        url_links
+    );
     let wrapped_group = url_links[0].wrap_group;
     // All wrapped segments share the same group
-    assert_eq!(url_links[0].wrap_group, url_links[1].wrap_group,
-        "Wrapped segments should share wrap_group");
+    assert_eq!(
+        url_links[0].wrap_group, url_links[1].wrap_group,
+        "Wrapped segments should share wrap_group"
+    );
     // Standalone URL has a different group
     let standalone = url_links.last().unwrap();
-    assert_ne!(wrapped_group, standalone.wrap_group,
-        "Standalone URL must have different wrap_group than wrapped one");
+    assert_ne!(
+        wrapped_group, standalone.wrap_group,
+        "Standalone URL must have different wrap_group than wrapped one"
+    );
 }
 
 #[test]
@@ -154,10 +161,13 @@ fn detect_duplicate_url_after_colon_prefix() {
         ),
         80,
     );
-    let url_links: Vec<&DetectedLink> = links.iter()
-        .filter(|l| l.text == url)
-        .collect();
-    assert_eq!(url_links.len(), 2, "Should have exactly 2 URL matches: {:?}", url_links);
+    let url_links: Vec<&DetectedLink> = links.iter().filter(|l| l.text == url).collect();
+    assert_eq!(
+        url_links.len(),
+        2,
+        "Should have exactly 2 URL matches: {:?}",
+        url_links
+    );
     assert_ne!(
         url_links[0].wrap_group, url_links[1].wrap_group,
         "URLs must have different wrap_groups even when preceded by colon"
@@ -189,14 +199,8 @@ fn detect_url_not_wrapped_when_next_line_word_after_wrapline() {
         &format!("{url}\r\nPress ENTER to open in the browser...\r\n"),
         60, // force URL to wrap via WRAPLINE
     );
-    let url_links: Vec<&DetectedLink> = links.iter()
-        .filter(|l| l.text == url)
-        .collect();
-    assert!(
-        !url_links.is_empty(),
-        "Should detect the URL: {:?}",
-        links
-    );
+    let url_links: Vec<&DetectedLink> = links.iter().filter(|l| l.text == url).collect();
+    assert!(!url_links.is_empty(), "Should detect the URL: {:?}", links);
     // "Press" should NOT be part of any detected link
     assert!(
         links.iter().all(|l| !l.text.contains("Press")),
@@ -214,7 +218,10 @@ fn detect_url_not_merged_with_remote_prefix() {
         80,
     );
     assert_eq!(links.len(), 1, "Should detect exactly one URL: {:?}", links);
-    assert_eq!(links[0].text, "https://github.com/contember/dotaz/pull/new/fixes");
+    assert_eq!(
+        links[0].text,
+        "https://github.com/contember/dotaz/pull/new/fixes"
+    );
 }
 
 #[test]
@@ -225,8 +232,16 @@ fn detect_url_not_merged_with_label_suffix() {
         "https://github.com/contember/dotaz/pull/new/fixes\r\nremote:\r\n",
         52, // URL is 50 chars, nearly fills 52-col terminal
     );
-    assert_eq!(links.len(), 1, "Label-like 'remote:' must not be merged: {:?}", links);
-    assert_eq!(links[0].text, "https://github.com/contember/dotaz/pull/new/fixes");
+    assert_eq!(
+        links.len(),
+        1,
+        "Label-like 'remote:' must not be merged: {:?}",
+        links
+    );
+    assert_eq!(
+        links[0].text,
+        "https://github.com/contember/dotaz/pull/new/fixes"
+    );
 }
 
 #[test]
@@ -239,7 +254,8 @@ fn detect_url_wrapped_with_trailing_text() {
         "    - #61 https://github.com/contember/npi-infrastru\r\n    cture/pull/61 \u{2014} S3 bucket\r\n",
         55,
     );
-    let url_links: Vec<&DetectedLink> = links.iter()
+    let url_links: Vec<&DetectedLink> = links
+        .iter()
         .filter(|l| l.text == "https://github.com/contember/npi-infrastructure/pull/61")
         .collect();
     assert!(
@@ -259,7 +275,8 @@ fn detect_url_wrapped_tui_narrow_layout() {
         "\u{2514}  https://github.com/NPI-Cloud/npi-inf\r\n   rastructure/pull/64\r\n",
         55,
     );
-    let url_links: Vec<&DetectedLink> = links.iter()
+    let url_links: Vec<&DetectedLink> = links
+        .iter()
         .filter(|l| l.text == "https://github.com/NPI-Cloud/npi-infrastructure/pull/64")
         .collect();
     assert!(
@@ -278,7 +295,12 @@ fn detect_url_not_extended_by_list_marker() {
         "  https://github.com/contember/dotaz/pull/2\r\n  - Format check passes\r\n",
         55,
     );
-    assert_eq!(links.len(), 1, "Should not extend into list marker: {:?}", links);
+    assert_eq!(
+        links.len(),
+        1,
+        "Should not extend into list marker: {:?}",
+        links
+    );
     assert_eq!(links[0].text, "https://github.com/contember/dotaz/pull/2");
 }
 
@@ -291,12 +313,14 @@ fn detect_url_extension_stops_after_trailing_trim() {
         "  https://github.com/NPI-Cloud/npi-inf\r\n  rastructure/pull/65)\r\n  2. next item\r\n",
         42,
     );
-    let url_links: Vec<&DetectedLink> = links.iter()
+    let url_links: Vec<&DetectedLink> = links
+        .iter()
         .filter(|l| l.text.starts_with("https://github.com/NPI-Cloud/npi-inf"))
         .collect();
     // Should have 2 segments (line 0 + line 1), NOT 3
     assert_eq!(
-        url_links.len(), 2,
+        url_links.len(),
+        2,
         "Should not extend past trimmed ')' into '2.': {:?}",
         links
     );
@@ -315,7 +339,8 @@ fn detect_url_not_extended_into_numbered_list_item() {
         46,
     );
     // First URL should be exactly pull/2, not pull/22
-    let first: Vec<&DetectedLink> = links.iter()
+    let first: Vec<&DetectedLink> = links
+        .iter()
         .filter(|l| l.text == "https://github.com/contember/dotaz/pull/2")
         .collect();
     assert!(
@@ -324,7 +349,8 @@ fn detect_url_not_extended_into_numbered_list_item() {
         links
     );
     // Second URL should also be detected
-    let second: Vec<&DetectedLink> = links.iter()
+    let second: Vec<&DetectedLink> = links
+        .iter()
         .filter(|l| l.text.contains("npi-infrastructure/pull/65"))
         .collect();
     assert!(
@@ -357,7 +383,8 @@ fn detect_url_uuid_continuation_with_trailing_prose() {
         "  http://localhost:19400/s/1f41d02d-6105-45fb-b3\r\n  b1-4b56ae4d869f \u{2014} take your time.\r\n",
         50,
     );
-    let url_links: Vec<&DetectedLink> = links.iter()
+    let url_links: Vec<&DetectedLink> = links
+        .iter()
         .filter(|l| l.text == "http://localhost:19400/s/1f41d02d-6105-45fb-b3b1-4b56ae4d869f")
         .collect();
     assert!(

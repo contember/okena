@@ -47,12 +47,24 @@ fn test_split_terminal_creates_split() {
     simulate_split(&mut layout, SplitDirection::Vertical);
 
     match &layout {
-        LayoutNode::Split { direction, children, sizes } => {
+        LayoutNode::Split {
+            direction,
+            children,
+            sizes,
+        } => {
             assert_eq!(*direction, SplitDirection::Vertical);
             assert_eq!(children.len(), 2);
             assert_eq!(sizes.len(), 2);
-            assert!(matches!(&children[0], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "t1"));
-            assert!(matches!(&children[1], LayoutNode::Terminal { terminal_id: None, .. }));
+            assert!(
+                matches!(&children[0], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "t1")
+            );
+            assert!(matches!(
+                &children[1],
+                LayoutNode::Terminal {
+                    terminal_id: None,
+                    ..
+                }
+            ));
         }
         _ => panic!("Expected split"),
     }
@@ -73,7 +85,11 @@ fn test_nested_split_normalizes() {
     layout.normalize();
 
     match &layout {
-        LayoutNode::Split { direction, children, .. } => {
+        LayoutNode::Split {
+            direction,
+            children,
+            ..
+        } => {
             assert_eq!(*direction, SplitDirection::Horizontal);
             // Should be flattened to 3 children
             assert_eq!(children.len(), 3);
@@ -88,7 +104,10 @@ fn test_add_tab_creates_tab_group() {
     simulate_add_tab(&mut layout);
 
     match &layout {
-        LayoutNode::Tabs { children, active_tab } => {
+        LayoutNode::Tabs {
+            children,
+            active_tab,
+        } => {
             assert_eq!(children.len(), 2);
             assert_eq!(*active_tab, 1);
         }
@@ -102,12 +121,19 @@ fn test_add_tab_to_existing_tabs() {
         children: vec![terminal_node("t1"), terminal_node("t2")],
         active_tab: 0,
     };
-    if let LayoutNode::Tabs { children, active_tab } = &mut layout {
+    if let LayoutNode::Tabs {
+        children,
+        active_tab,
+    } = &mut layout
+    {
         children.push(LayoutNode::new_terminal());
         *active_tab = children.len() - 1;
     }
     match &layout {
-        LayoutNode::Tabs { children, active_tab } => {
+        LayoutNode::Tabs {
+            children,
+            active_tab,
+        } => {
             assert_eq!(children.len(), 3);
             assert_eq!(*active_tab, 2);
         }
@@ -131,18 +157,30 @@ fn test_close_terminal_from_3_child_split() {
     let mut layout = LayoutNode::Split {
         direction: SplitDirection::Horizontal,
         sizes: vec![33.0, 33.0, 34.0],
-        children: vec![terminal_node("t1"), terminal_node("t2"), terminal_node("t3")],
+        children: vec![
+            terminal_node("t1"),
+            terminal_node("t2"),
+            terminal_node("t3"),
+        ],
     };
     simulate_close(&mut layout, &[1]);
     match &layout {
-        LayoutNode::Split { children, sizes, .. } => {
+        LayoutNode::Split {
+            children, sizes, ..
+        } => {
             assert_eq!(children.len(), 2);
             assert_eq!(sizes.len(), 2);
             // t1 and t3 remain
-            let ids: Vec<_> = children.iter().map(|c| match c {
-                LayoutNode::Terminal { terminal_id: Some(id), .. } => id.as_str(),
-                _ => "",
-            }).collect();
+            let ids: Vec<_> = children
+                .iter()
+                .map(|c| match c {
+                    LayoutNode::Terminal {
+                        terminal_id: Some(id),
+                        ..
+                    } => id.as_str(),
+                    _ => "",
+                })
+                .collect();
             assert_eq!(ids, vec!["t1", "t3"]);
         }
         _ => panic!("Expected split with 2 children"),
@@ -156,13 +194,19 @@ fn test_close_terminal_from_3_child_sizes_consistent() {
     let mut layout = LayoutNode::Split {
         direction: SplitDirection::Horizontal,
         sizes: vec![25.0, 50.0, 25.0],
-        children: vec![terminal_node("t1"), terminal_node("t2"), terminal_node("t3")],
+        children: vec![
+            terminal_node("t1"),
+            terminal_node("t2"),
+            terminal_node("t3"),
+        ],
     };
 
     // Close the middle terminal (index 1, size 50.0)
     simulate_close(&mut layout, &[1]);
     match &layout {
-        LayoutNode::Split { children, sizes, .. } => {
+        LayoutNode::Split {
+            children, sizes, ..
+        } => {
             assert_eq!(children.len(), 2);
             assert_eq!(sizes.len(), 2);
             assert_eq!(sizes, &vec![75.0, 25.0]);
@@ -174,11 +218,17 @@ fn test_close_terminal_from_3_child_sizes_consistent() {
     let mut layout = LayoutNode::Split {
         direction: SplitDirection::Vertical,
         sizes: vec![30.0, 40.0, 30.0],
-        children: vec![terminal_node("t1"), terminal_node("t2"), terminal_node("t3")],
+        children: vec![
+            terminal_node("t1"),
+            terminal_node("t2"),
+            terminal_node("t3"),
+        ],
     };
     simulate_close(&mut layout, &[0]);
     match &layout {
-        LayoutNode::Split { children, sizes, .. } => {
+        LayoutNode::Split {
+            children, sizes, ..
+        } => {
             assert_eq!(children.len(), 2);
             assert_eq!(sizes.len(), 2);
             assert_eq!(sizes, &vec![70.0, 30.0]);
@@ -190,22 +240,39 @@ fn test_close_terminal_from_3_child_sizes_consistent() {
 #[test]
 fn test_move_tab() {
     let mut layout = LayoutNode::Tabs {
-        children: vec![terminal_node("t1"), terminal_node("t2"), terminal_node("t3")],
+        children: vec![
+            terminal_node("t1"),
+            terminal_node("t2"),
+            terminal_node("t3"),
+        ],
         active_tab: 0,
     };
     // Move tab at index 0 to index 2
-    if let LayoutNode::Tabs { children, active_tab } = &mut layout {
+    if let LayoutNode::Tabs {
+        children,
+        active_tab,
+    } = &mut layout
+    {
         let tab = children.remove(0);
         children.insert(2.min(children.len()), tab);
         // active_tab was 0, which was the moved tab, so update
         *active_tab = 2.min(children.len() - 1);
     }
     match &layout {
-        LayoutNode::Tabs { children, active_tab } => {
-            let ids: Vec<_> = children.iter().map(|c| match c {
-                LayoutNode::Terminal { terminal_id: Some(id), .. } => id.as_str(),
-                _ => "",
-            }).collect();
+        LayoutNode::Tabs {
+            children,
+            active_tab,
+        } => {
+            let ids: Vec<_> = children
+                .iter()
+                .map(|c| match c {
+                    LayoutNode::Terminal {
+                        terminal_id: Some(id),
+                        ..
+                    } => id.as_str(),
+                    _ => "",
+                })
+                .collect();
             assert_eq!(ids, vec!["t2", "t3", "t1"]);
             assert_eq!(*active_tab, 2);
         }
@@ -225,10 +292,13 @@ fn test_equalize_parent_split_via_path() {
     // Focused terminal at path [1] → parent split at path []
     let parent_path: &[usize] = &[];
     if let Some(node) = layout.get_at_path_mut(parent_path)
-        && let LayoutNode::Split { sizes, children, .. } = node {
-            let n = children.len();
-            *sizes = vec![100.0 / n as f32; n];
-        }
+        && let LayoutNode::Split {
+            sizes, children, ..
+        } = node
+    {
+        let n = children.len();
+        *sizes = vec![100.0 / n as f32; n];
+    }
     if let LayoutNode::Split { sizes, .. } = &layout {
         assert_eq!(sizes, &vec![50.0, 50.0]);
     } else {
@@ -253,12 +323,18 @@ fn test_equalize_nested_parent_split_via_path() {
     };
     let parent_path: &[usize] = &[0];
     if let Some(node) = layout.get_at_path_mut(parent_path)
-        && let LayoutNode::Split { sizes, children, .. } = node {
-            let n = children.len();
-            *sizes = vec![100.0 / n as f32; n];
-        }
+        && let LayoutNode::Split {
+            sizes, children, ..
+        } = node
+    {
+        let n = children.len();
+        *sizes = vec![100.0 / n as f32; n];
+    }
     // Outer split unchanged
-    if let LayoutNode::Split { sizes, children, .. } = &layout {
+    if let LayoutNode::Split {
+        sizes, children, ..
+    } = &layout
+    {
         assert_eq!(sizes, &vec![60.0, 40.0]);
         // Inner split equalized
         if let LayoutNode::Split { sizes: inner, .. } = &children[0] {

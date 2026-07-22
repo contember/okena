@@ -171,6 +171,9 @@ mod tests {
 
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].0, "CLAUDE_CONFIG_DIR");
-        assert_eq!(env[0].1.as_deref(), Some(custom_dir.to_string_lossy().as_ref()));
+        assert_eq!(
+            env[0].1.as_deref(),
+            Some(custom_dir.to_string_lossy().as_ref())
+        );
     }
 }

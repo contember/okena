@@ -1,5 +1,5 @@
-use okena_terminal::terminal::Terminal;
 use gpui::*;
+use okena_terminal::terminal::Terminal;
 use std::ops::Range;
 use std::sync::Arc;
 

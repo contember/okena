@@ -4,6 +4,11 @@
 //! The desktop client publishes edits for its daemon to persist.
 
 #[cfg(feature = "gpui")]
+use crate::workspace::persistence::AppSettings;
+use crate::workspace::persistence::{get_settings_path, load_settings, save_settings};
+#[cfg(feature = "gpui")]
+use gpui::*;
+#[cfg(feature = "gpui")]
 use okena_terminal::session_backend::SessionBackend;
 #[cfg(feature = "gpui")]
 use okena_terminal::shell_config::ShellType;
@@ -11,11 +16,6 @@ use okena_terminal::shell_config::ShellType;
 use okena_theme::ThemeMode;
 #[cfg(feature = "gpui")]
 use okena_workspace::toast::ToastManager;
-use crate::workspace::persistence::{load_settings, save_settings, get_settings_path};
-#[cfg(feature = "gpui")]
-use crate::workspace::persistence::AppSettings;
-#[cfg(feature = "gpui")]
-use gpui::*;
 
 /// Global settings wrapper for app-wide access
 #[cfg(feature = "gpui")]
@@ -100,23 +100,41 @@ impl SettingsState {
     setting_setter!(set_ui_font_size, ui_font_size, f32, 8.0, 24.0);
     setting_setter!(set_file_font_size, file_font_size, f32, 8.0, 24.0);
     /// Set the cursor style (Block, Bar, Underline)
-    pub fn set_cursor_style(&mut self, value: crate::workspace::settings::CursorShape, cx: &mut Context<Self>) {
+    pub fn set_cursor_style(
+        &mut self,
+        value: crate::workspace::settings::CursorShape,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.cursor_style = value;
         self.save_and_notify(cx);
     }
 
     /// Set the project column header density (Compact, Comfortable)
-    pub fn set_header_density(&mut self, value: crate::workspace::settings::HeaderDensity, cx: &mut Context<Self>) {
+    pub fn set_header_density(
+        &mut self,
+        value: crate::workspace::settings::HeaderDensity,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.header_density = value;
         self.save_and_notify(cx);
     }
 
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
-    setting_setter!(set_terminal_close_grace_secs, terminal_close_grace_secs, u32, 0, 60);
+    setting_setter!(
+        set_terminal_close_grace_secs,
+        terminal_close_grace_secs,
+        u32,
+        0,
+        60
+    );
     setting_setter!(set_show_focused_border, show_focused_border, bool);
     setting_setter!(set_color_tinted_background, color_tinted_background, bool);
-    setting_setter!(set_detached_overlays_by_default, detached_overlays_by_default, bool);
+    setting_setter!(
+        set_detached_overlays_by_default,
+        detached_overlays_by_default,
+        bool
+    );
 
     /// Persist the most recent detached overlay window bounds.
     pub fn set_detached_overlay_bounds(
@@ -128,7 +146,11 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
     setting_setter!(set_show_shell_selector, show_shell_selector, bool);
-    setting_setter!(set_terminal_ctrl_c_copies_selection, terminal_ctrl_c_copies_selection, bool);
+    setting_setter!(
+        set_terminal_ctrl_c_copies_selection,
+        terminal_ctrl_c_copies_selection,
+        bool
+    );
     setting_setter!(set_blame_visible, blame_visible, bool);
 
     /// Master switch for native desktop notifications (opt-in).
@@ -190,17 +212,30 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-
     /// Set per-extension settings blob (opaque JSON value).
-    pub fn set_extension_setting(&mut self, extension_id: &str, value: serde_json::Value, cx: &mut Context<Self>) {
-        self.settings.extension_settings.insert(extension_id.to_string(), value);
+    pub fn set_extension_setting(
+        &mut self,
+        extension_id: &str,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings
+            .extension_settings
+            .insert(extension_id.to_string(), value);
         self.save_and_notify(cx);
     }
 
     /// Enable or disable an extension by ID.
-    pub fn set_extension_enabled(&mut self, extension_id: &str, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_extension_enabled(
+        &mut self,
+        extension_id: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
         if enabled {
-            self.settings.enabled_extensions.insert(extension_id.to_string());
+            self.settings
+                .enabled_extensions
+                .insert(extension_id.to_string());
         } else {
             self.settings.enabled_extensions.remove(extension_id);
         }
@@ -221,7 +256,7 @@ impl SettingsState {
 
     /// Set sidebar width (clamped to min/max bounds)
     pub fn set_sidebar_width(&mut self, value: f32, cx: &mut Context<Self>) {
-        use crate::workspace::persistence::{MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH};
+        use crate::workspace::persistence::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
         self.settings.sidebar.width = value.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
         self.save_and_notify(cx);
     }
@@ -266,7 +301,11 @@ impl SettingsState {
         self.settings.hooks.terminal.on_close = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_terminal_shell_wrapper(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_terminal_shell_wrapper(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.terminal.shell_wrapper = value;
         self.save_and_notify(cx);
     }
@@ -288,19 +327,35 @@ impl SettingsState {
         self.settings.hooks.worktree.post_merge = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_worktree_before_remove(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_worktree_before_remove(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.worktree.before_remove = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_worktree_after_remove(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_worktree_after_remove(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.worktree.after_remove = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_worktree_on_rebase_conflict(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_worktree_on_rebase_conflict(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.worktree.on_rebase_conflict = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_worktree_on_dirty_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_worktree_on_dirty_close(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.worktree.on_dirty_close = value;
         self.save_and_notify(cx);
     }
@@ -409,12 +464,15 @@ pub fn open_settings_file() {
 
     #[cfg(target_os = "linux")]
     {
-        let _ = okena_core::process::spawn_and_reap(okena_core::process::command("xdg-open").arg(&path));
+        let _ = okena_core::process::spawn_and_reap(
+            okena_core::process::command("xdg-open").arg(&path),
+        );
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = okena_core::process::spawn_and_reap(okena_core::process::command("notepad").arg(&path));
+        let _ =
+            okena_core::process::spawn_and_reap(okena_core::process::command("notepad").arg(&path));
     }
 }
 

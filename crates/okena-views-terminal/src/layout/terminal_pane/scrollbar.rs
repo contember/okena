@@ -1,8 +1,8 @@
 //! Scrollbar component for terminal pane.
 
-use okena_terminal::terminal::Terminal;
-use okena_files::theme::theme;
 use gpui::*;
+use okena_files::theme::theme;
+use okena_terminal::terminal::Terminal;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -180,11 +180,12 @@ impl Scrollbar {
                     cx.notify();
                 }
             } else if relative_y > content_height - zone
-                && let Some(ref terminal) = self.terminal {
-                    terminal.scroll_to(0);
-                    self.last_activity = Instant::now();
-                    cx.notify();
-                }
+                && let Some(ref terminal) = self.terminal
+            {
+                terminal.scroll_to(0);
+                self.last_activity = Instant::now();
+                cx.notify();
+            }
         }
     }
 
@@ -240,10 +241,11 @@ impl Render for Scrollbar {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if this.dragging
-                    && let Some(bounds) = this.element_bounds {
-                        let content_height = f32::from(bounds.size.height);
-                        this.update_drag(f32::from(event.position.y), content_height, cx);
-                    }
+                    && let Some(bounds) = this.element_bounds
+                {
+                    let content_height = f32::from(bounds.size.height);
+                    this.update_drag(f32::from(event.position.y), content_height, cx);
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -265,16 +267,22 @@ impl Render for Scrollbar {
                     },
                     {
                         let entity = cx.entity().downgrade();
-                        move |bounds: Bounds<Pixels>, _state: (), window: &mut Window, _cx: &mut App| {
+                        move |bounds: Bounds<Pixels>,
+                              _state: (),
+                              window: &mut Window,
+                              _cx: &mut App| {
                             if let Some(ref terminal) = terminal_clone {
-                                let (total_lines, visible_lines, display_offset) = terminal.scroll_info();
+                                let (total_lines, visible_lines, display_offset) =
+                                    terminal.scroll_info();
                                 if total_lines > visible_lines {
                                     let track_height = f32::from(bounds.size.height);
                                     let scrollable_lines = total_lines - visible_lines;
-                                    let thumb_height =
-                                        (visible_lines as f32 / total_lines as f32 * track_height).max(20.0);
+                                    let thumb_height = (visible_lines as f32 / total_lines as f32
+                                        * track_height)
+                                        .max(20.0);
                                     let available_scroll_space = track_height - thumb_height;
-                                    let scroll_ratio = display_offset as f32 / scrollable_lines as f32;
+                                    let scroll_ratio =
+                                        display_offset as f32 / scrollable_lines as f32;
                                     let thumb_y = (1.0 - scroll_ratio) * available_scroll_space;
 
                                     let thumb_color = if dragging {
@@ -284,10 +292,15 @@ impl Render for Scrollbar {
                                     };
 
                                     let thumb_bounds = Bounds {
-                                        origin: point(bounds.origin.x + px(2.0), bounds.origin.y + px(thumb_y)),
+                                        origin: point(
+                                            bounds.origin.x + px(2.0),
+                                            bounds.origin.y + px(thumb_y),
+                                        ),
                                         size: size(px(6.0), px(thumb_height)),
                                     };
-                                    window.paint_quad(fill(thumb_bounds, thumb_color).corner_radii(px(3.0)));
+                                    window.paint_quad(
+                                        fill(thumb_bounds, thumb_color).corner_radii(px(3.0)),
+                                    );
                                 }
                             }
 
@@ -302,21 +315,27 @@ impl Render for Scrollbar {
                                         }
                                         if let Some(entity) = entity.upgrade() {
                                             entity.update(cx, |this, cx| {
-                                                this.update_drag(f32::from(event.position.y), content_height, cx);
+                                                this.update_drag(
+                                                    f32::from(event.position.y),
+                                                    content_height,
+                                                    cx,
+                                                );
                                             });
                                         }
                                     }
                                 });
-                                window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, cx| {
-                                    if phase != DispatchPhase::Bubble {
-                                        return;
-                                    }
-                                    if let Some(entity) = entity.upgrade() {
-                                        entity.update(cx, |this, cx| {
-                                            this.end_drag(cx);
-                                        });
-                                    }
-                                });
+                                window.on_mouse_event(
+                                    move |_: &MouseUpEvent, phase, _window, cx| {
+                                        if phase != DispatchPhase::Bubble {
+                                            return;
+                                        }
+                                        if let Some(entity) = entity.upgrade() {
+                                            entity.update(cx, |this, cx| {
+                                                this.end_drag(cx);
+                                            });
+                                        }
+                                    },
+                                );
                             }
                         }
                     },

@@ -13,9 +13,17 @@ const MAX_HISTORY: usize = 50;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookStatus {
     Running,
-    Succeeded { duration: Duration },
-    Failed { duration: Duration, exit_code: i32, stderr: String },
-    SpawnError { message: String },
+    Succeeded {
+        duration: Duration,
+    },
+    Failed {
+        duration: Duration,
+        exit_code: i32,
+        stderr: String,
+    },
+    SpawnError {
+        message: String,
+    },
 }
 
 /// A single hook execution record.
@@ -68,7 +76,11 @@ impl HookExecution {
             HookStatus::Succeeded { duration } => ApiHookStatus::Succeeded {
                 duration_ms: duration.as_millis() as u64,
             },
-            HookStatus::Failed { duration, exit_code, stderr } => ApiHookStatus::Failed {
+            HookStatus::Failed {
+                duration,
+                exit_code,
+                stderr,
+            } => ApiHookStatus::Failed {
                 duration_ms: duration.as_millis() as u64,
                 exit_code: *exit_code,
                 stderr: stderr.clone(),
@@ -95,7 +107,11 @@ impl HookExecution {
             ApiHookStatus::Succeeded { duration_ms } => HookStatus::Succeeded {
                 duration: Duration::from_millis(*duration_ms),
             },
-            ApiHookStatus::Failed { duration_ms, exit_code, stderr } => HookStatus::Failed {
+            ApiHookStatus::Failed {
+                duration_ms,
+                exit_code,
+                stderr,
+            } => HookStatus::Failed {
                 duration: Duration::from_millis(*duration_ms),
                 exit_code: *exit_code,
                 stderr: stderr.clone(),
@@ -185,9 +201,10 @@ impl HookMonitor {
             let removed = inner.history.pop_front();
             // If we're removing a still-running entry (shouldn't normally happen), adjust count
             if let Some(entry) = removed
-                && matches!(entry.status, HookStatus::Running) {
-                    inner.running_count = inner.running_count.saturating_sub(1);
-                }
+                && matches!(entry.status, HookStatus::Running)
+            {
+                inner.running_count = inner.running_count.saturating_sub(1);
+            }
         }
 
         id
@@ -207,11 +224,8 @@ impl HookMonitor {
             match &status {
                 HookStatus::Failed { stderr, .. } => {
                     let first_line = stderr.lines().next().unwrap_or("(no output)");
-                    let msg = format!(
-                        "Hook `{}` failed: {}",
-                        hook_type,
-                        truncate(first_line, 120),
-                    );
+                    let msg =
+                        format!("Hook `{}` failed: {}", hook_type, truncate(first_line, 120),);
                     inner.pending_toasts.push(Toast::error(msg));
                 }
                 HookStatus::SpawnError { message } => {
@@ -304,8 +318,7 @@ impl HookMonitor {
     pub fn finish_by_terminal_id(&self, terminal_id: &str, exit_code: Option<u32>) -> bool {
         let mut inner = self.0.lock();
         if let Some(entry) = inner.history.iter_mut().find(|e| {
-            e.terminal_id.as_deref() == Some(terminal_id)
-                && matches!(e.status, HookStatus::Running)
+            e.terminal_id.as_deref() == Some(terminal_id) && matches!(e.status, HookStatus::Running)
         }) {
             let duration = entry.started_at.elapsed();
             let success = exit_code == Some(0);
@@ -358,9 +371,12 @@ mod tests {
         let id = monitor.record_start("on_project_open", "echo hi", "my-project", None);
         assert_eq!(monitor.running_count(), 1);
 
-        monitor.record_finish(id, HookStatus::Succeeded {
-            duration: Duration::from_millis(50),
-        });
+        monitor.record_finish(
+            id,
+            HookStatus::Succeeded {
+                duration: Duration::from_millis(50),
+            },
+        );
         assert_eq!(monitor.running_count(), 0);
 
         let history = monitor.history();
@@ -374,11 +390,14 @@ mod tests {
         let monitor = HookMonitor::new();
         let id = monitor.record_start("pre_merge", "exit 1", "test-project", None);
 
-        monitor.record_finish(id, HookStatus::Failed {
-            duration: Duration::from_millis(10),
-            exit_code: 1,
-            stderr: "something went wrong".to_string(),
-        });
+        monitor.record_finish(
+            id,
+            HookStatus::Failed {
+                duration: Duration::from_millis(10),
+                exit_code: 1,
+                stderr: "something went wrong".to_string(),
+            },
+        );
 
         let toasts = monitor.drain_pending_toasts();
         assert_eq!(toasts.len(), 1);
@@ -391,9 +410,12 @@ mod tests {
         let monitor = HookMonitor::new();
         for i in 0..60 {
             let id = monitor.record_start("test", &format!("cmd-{}", i), "proj", None);
-            monitor.record_finish(id, HookStatus::Succeeded {
-                duration: Duration::from_millis(1),
-            });
+            monitor.record_finish(
+                id,
+                HookStatus::Succeeded {
+                    duration: Duration::from_millis(1),
+                },
+            );
         }
         assert!(monitor.history().len() <= 50);
     }
@@ -402,9 +424,19 @@ mod tests {
     fn history_returned_newest_first() {
         let monitor = HookMonitor::new();
         let id1 = monitor.record_start("first", "echo 1", "proj", None);
-        monitor.record_finish(id1, HookStatus::Succeeded { duration: Duration::from_millis(1) });
+        monitor.record_finish(
+            id1,
+            HookStatus::Succeeded {
+                duration: Duration::from_millis(1),
+            },
+        );
         let id2 = monitor.record_start("second", "echo 2", "proj", None);
-        monitor.record_finish(id2, HookStatus::Succeeded { duration: Duration::from_millis(1) });
+        monitor.record_finish(
+            id2,
+            HookStatus::Succeeded {
+                duration: Duration::from_millis(1),
+            },
+        );
 
         let history = monitor.history();
         assert_eq!(history[0].hook_type, "second");
@@ -415,9 +447,12 @@ mod tests {
     fn spawn_error_queues_toast() {
         let monitor = HookMonitor::new();
         let id = monitor.record_start("on_project_open", "bad-cmd", "proj", None);
-        monitor.record_finish(id, HookStatus::SpawnError {
-            message: "command not found".to_string(),
-        });
+        monitor.record_finish(
+            id,
+            HookStatus::SpawnError {
+                message: "command not found".to_string(),
+            },
+        );
 
         let toasts = monitor.drain_pending_toasts();
         assert_eq!(toasts.len(), 1);
@@ -466,7 +501,11 @@ mod tests {
         assert_eq!(api.hook_type, "worktree_removed");
         assert!(matches!(
             api.status,
-            ApiHookStatus::Failed { duration_ms: 1234, exit_code: 3, .. }
+            ApiHookStatus::Failed {
+                duration_ms: 1234,
+                exit_code: 3,
+                ..
+            }
         ));
 
         let back = HookExecution::from_api(&api);
@@ -476,7 +515,11 @@ mod tests {
         assert_eq!(back.command, "echo bye");
         assert_eq!(back.terminal_id.as_deref(), Some("t9"));
         match back.status {
-            HookStatus::Failed { duration, exit_code, ref stderr } => {
+            HookStatus::Failed {
+                duration,
+                exit_code,
+                ref stderr,
+            } => {
                 assert_eq!(duration, Duration::from_millis(1234));
                 assert_eq!(exit_code, 3);
                 assert_eq!(stderr, "boom");
@@ -579,7 +622,10 @@ mod tests {
         monitor.replace_history(vec![api_exec(1, ApiHookStatus::Running)]);
         let v = monitor.version();
         // Same id, different status kind (Running → Succeeded) → must bump.
-        monitor.replace_history(vec![api_exec(1, ApiHookStatus::Succeeded { duration_ms: 9 })]);
+        monitor.replace_history(vec![api_exec(
+            1,
+            ApiHookStatus::Succeeded { duration_ms: 9 },
+        )]);
         assert!(monitor.version() > v);
     }
 

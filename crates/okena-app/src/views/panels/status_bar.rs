@@ -2,8 +2,8 @@ use crate::keybindings::ToggleSidebar;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::settings::settings_entity;
 use crate::theme::theme;
-use crate::workspace::state::Workspace;
 use crate::ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xl};
+use crate::workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -65,9 +65,13 @@ impl SystemInfoCache {
         self.system.refresh_memory();
 
         // Calculate average CPU usage across all cores
-        let cpu_usage = self.system.cpus().iter()
+        let cpu_usage = self
+            .system
+            .cpus()
+            .iter()
             .map(|cpu| cpu.cpu_usage())
-            .sum::<f32>() / self.system.cpus().len().max(1) as f32;
+            .sum::<f32>()
+            / self.system.cpus().len().max(1) as f32;
 
         let memory_used = self.system.used_memory() as f64 / 1_073_741_824.0; // bytes to GB
         let memory_total = self.system.total_memory() as f64 / 1_073_741_824.0;
@@ -101,7 +105,11 @@ pub struct StatusBar {
 }
 
 impl StatusBar {
-    pub fn new(workspace: Entity<Workspace>, focus_manager: Entity<crate::workspace::focus::FocusManager>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        focus_manager: Entity<crate::workspace::focus::FocusManager>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let cache = Arc::new(Mutex::new(SystemInfoCache::new()));
 
         // Initial refresh
@@ -125,19 +133,27 @@ impl StatusBar {
                     break; // View was dropped
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         // Clone activate functions from the global registry.
-        let activate_fns: Vec<_> = cx.try_global::<ExtensionRegistry>()
+        let activate_fns: Vec<_> = cx
+            .try_global::<ExtensionRegistry>()
             .map(|registry| {
-                registry.extensions().iter()
+                registry
+                    .extensions()
+                    .iter()
                     .map(|ext| (ext.manifest.id.to_string(), ext.activate.clone()))
                     .collect()
             })
             .unwrap_or_default();
 
         // Activate initially enabled extensions
-        let enabled = settings_entity(cx).read(cx).settings.enabled_extensions.clone();
+        let enabled = settings_entity(cx)
+            .read(cx)
+            .settings
+            .enabled_extensions
+            .clone();
         let active_extensions = Self::activate_extensions(&activate_fns, &enabled, cx);
 
         // Observe settings to sync extensions when enabled_extensions changes
@@ -145,7 +161,8 @@ impl StatusBar {
         cx.observe(&settings, |this, entity, cx| {
             let enabled = entity.read(cx).settings.enabled_extensions.clone();
             this.sync_extensions(&enabled, cx);
-        }).detach();
+        })
+        .detach();
 
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
@@ -171,7 +188,8 @@ impl StatusBar {
         enabled: &HashSet<String>,
         cx: &mut App,
     ) -> HashMap<String, ExtensionInstance> {
-        activate_fns.iter()
+        activate_fns
+            .iter()
             .filter(|(id, _)| enabled.contains(id.as_str()))
             .map(|(id, activate)| (id.clone(), activate(cx)))
             .collect()
@@ -182,7 +200,8 @@ impl StatusBar {
     /// (dropping the instance cancels background tasks and releases views).
     fn sync_extensions(&mut self, enabled: &HashSet<String>, cx: &mut Context<Self>) {
         // Deactivate disabled (drop instances → cancel tasks)
-        self.active_extensions.retain(|id, _| enabled.contains(id.as_str()));
+        self.active_extensions
+            .retain(|id, _| enabled.contains(id.as_str()));
 
         // Activate newly enabled
         for (id, activate) in &self.activate_fns {
@@ -201,7 +220,11 @@ impl StatusBar {
         }
     }
 
-    pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
+    pub fn set_remote_manager(
+        &mut self,
+        manager: Entity<RemoteConnectionManager>,
+        cx: &mut Context<Self>,
+    ) {
         self.remote_manager = Some(manager);
         cx.notify();
     }
@@ -222,12 +245,17 @@ impl StatusBar {
             return Vec::new();
         };
 
-        manager.read(cx).connections_with_system_stats().into_iter()
+        manager
+            .read(cx)
+            .connections_with_system_stats()
+            .into_iter()
             .filter(|(config, _, _, _)| config.id != LOCAL_DAEMON_CONNECTION_ID)
             .map(|(config, status, state, system_stats)| {
                 let (project_count, window_count, terminal_count) = match state {
                     Some(state) => {
-                        let terminals = state.projects.iter()
+                        let terminals = state
+                            .projects
+                            .iter()
                             .map(|project| Self::layout_terminal_count(project.layout.as_ref()))
                             .sum();
                         (state.projects.len(), state.windows.len(), terminals)
@@ -253,10 +281,14 @@ impl StatusBar {
 
     fn layout_terminal_count(node: Option<&ApiLayoutNode>) -> usize {
         match node {
-            Some(ApiLayoutNode::Terminal { terminal_id: Some(_), .. }) => 1,
+            Some(ApiLayoutNode::Terminal {
+                terminal_id: Some(_),
+                ..
+            }) => 1,
             Some(ApiLayoutNode::Terminal { .. }) => 0,
             Some(ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. }) => {
-                children.iter()
+                children
+                    .iter()
                     .map(|child| Self::layout_terminal_count(Some(child)))
                     .sum()
             }
@@ -342,8 +374,14 @@ impl StatusBar {
         )
     }
 
-    fn aggregate_remote_color(snapshots: &[RemoteStatusSnapshot], t: &okena_core::theme::ThemeColors) -> u32 {
-        if snapshots.iter().any(|snap| matches!(snap.status, ConnectionStatus::Error(_))) {
+    fn aggregate_remote_color(
+        snapshots: &[RemoteStatusSnapshot],
+        t: &okena_core::theme::ThemeColors,
+    ) -> u32 {
+        if snapshots
+            .iter()
+            .any(|snap| matches!(snap.status, ConnectionStatus::Error(_)))
+        {
             return t.term_red;
         }
         if snapshots.iter().any(|snap| {
@@ -356,7 +394,10 @@ impl StatusBar {
         }) {
             return t.term_yellow;
         }
-        if snapshots.iter().all(|snap| matches!(snap.status, ConnectionStatus::Connected)) {
+        if snapshots
+            .iter()
+            .all(|snap| matches!(snap.status, ConnectionStatus::Connected))
+        {
             return t.term_green;
         }
         t.text_muted
@@ -373,7 +414,10 @@ impl StatusBar {
         }
 
         let bounds = self.remote_status_bounds;
-        let position = point(bounds.origin.x + bounds.size.width, bounds.origin.y - px(6.0));
+        let position = point(
+            bounds.origin.x + bounds.size.width,
+            bounds.origin.y - px(6.0),
+        );
 
         let mut rows = Vec::new();
         for snapshot in snapshots {
@@ -394,7 +438,9 @@ impl StatusBar {
 
             rows.push(
                 div()
-                    .id(ElementId::Name(format!("remote-status-row-{}", snapshot.id).into()))
+                    .id(ElementId::Name(
+                        format!("remote-status-row-{}", snapshot.id).into(),
+                    ))
                     .py(px(6.0))
                     .border_t_1()
                     .border_color(rgb(t.border))
@@ -433,7 +479,11 @@ impl StatusBar {
                                         div()
                                             .flex_shrink_0()
                                             .text_size(ui_text_sm(cx))
-                                            .text_color(rgb(if snapshot.tls { t.text_muted } else { t.term_yellow }))
+                                            .text_color(rgb(if snapshot.tls {
+                                                t.text_muted
+                                            } else {
+                                                t.term_yellow
+                                            }))
                                             .child(security),
                                     ),
                             )
@@ -481,7 +531,10 @@ impl StatusBar {
                                                             stats.cpu_usage,
                                                             t,
                                                         )))
-                                                        .child(format!("{:02.0}%", stats.cpu_usage)),
+                                                        .child(format!(
+                                                            "{:02.0}%",
+                                                            stats.cpu_usage
+                                                        )),
                                                 ),
                                         )
                                         .child(
@@ -557,7 +610,10 @@ impl Render for StatusBar {
         let time_str = Self::format_time();
 
         // Format memory
-        let memory_str = format!("{:.1}/{:.1} GB", stats.memory_used_gb, stats.memory_total_gb);
+        let memory_str = format!(
+            "{:.1}/{:.1} GB",
+            stats.memory_used_gb, stats.memory_total_gb
+        );
         let memory_percent = if stats.memory_total_gb > 0.0 {
             (stats.memory_used_gb / stats.memory_total_gb * 100.0) as u32
         } else {
@@ -581,12 +637,16 @@ impl Render for StatusBar {
         };
 
         // Collect widgets in stable registry order from active extensions
-        let left_widgets: Vec<&Vec<AnyView>> = self.activate_fns.iter()
+        let left_widgets: Vec<&Vec<AnyView>> = self
+            .activate_fns
+            .iter()
             .filter_map(|(id, _)| self.active_extensions.get(id))
             .map(|inst| &inst.status_bar_widgets)
             .filter(|w| !w.is_empty())
             .collect();
-        let right_widgets: Vec<&Vec<AnyView>> = self.activate_fns.iter()
+        let right_widgets: Vec<&Vec<AnyView>> = self
+            .activate_fns
+            .iter()
             .filter_map(|(id, _)| self.active_extensions.get(id))
             .map(|inst| &inst.status_bar_right_widgets)
             .filter(|w| !w.is_empty())
@@ -605,7 +665,8 @@ impl Render for StatusBar {
             .text_size(ui_text_ms(cx))
             // Left side - sidebar toggle (macOS only) + system stats
             .child({
-                let mut left = h_flex().gap(px(16.0))
+                let mut left = h_flex()
+                    .gap(px(16.0))
                     // On macOS, sidebar toggle lives in the status bar footer
                     .when(cfg!(target_os = "macos"), |d| {
                         d.child(
@@ -632,31 +693,19 @@ impl Render for StatusBar {
                     .child(
                         h_flex()
                             .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_color(rgb(t.text_muted))
-                                    .child("CPU")
-                            )
+                            .child(div().text_color(rgb(t.text_muted)).child("CPU"))
                             .child(
                                 div()
                                     .text_color(rgb(cpu_color))
-                                    .child(format!("{:02.0}%", stats.cpu_usage))
-                            )
+                                    .child(format!("{:02.0}%", stats.cpu_usage)),
+                            ),
                     )
                     // Memory
                     .child(
                         h_flex()
                             .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_color(rgb(t.text_muted))
-                                    .child("MEM")
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(mem_color))
-                                    .child(memory_str)
-                            )
+                            .child(div().text_color(rgb(t.text_muted)).child("MEM"))
+                            .child(div().text_color(rgb(mem_color)).child(memory_str)),
                     );
 
                 // Left-side extension widgets
@@ -670,8 +719,7 @@ impl Render for StatusBar {
             })
             // Right side - remote info + version + time
             .child({
-                let mut right = h_flex()
-                    .gap(px(8.0));
+                let mut right = h_flex().gap(px(8.0));
 
                 // Right-side extension widgets
                 for widgets in &right_widgets {
@@ -697,7 +745,7 @@ impl Render for StatusBar {
                                     // not a terminal ANSI accent — the accent read
                                     // inconsistent in themes like Pastel.
                                     .text_color(rgb(t.text_secondary))
-                                    .child(format!("REMOTE :{}", port))
+                                    .child(format!("REMOTE :{}", port)),
                             )
                             .child(
                                 div()
@@ -718,8 +766,8 @@ impl Render for StatusBar {
                                             Box::new(crate::keybindings::ShowPairingDialog),
                                             cx,
                                         );
-                                    })
-                            )
+                                    }),
+                            ),
                     );
                 }
 
@@ -754,11 +802,7 @@ impl Render for StatusBar {
                                     .rounded_full()
                                     .bg(rgb(status_color)),
                             )
-                            .child(
-                                div()
-                                    .text_color(rgb(t.text_secondary))
-                                    .child("REMOTES"),
-                            )
+                            .child(div().text_color(rgb(t.text_secondary)).child("REMOTES"))
                             .child(
                                 div()
                                     .text_color(rgb(status_color))
@@ -768,9 +812,12 @@ impl Render for StatusBar {
                             .child(
                                 canvas(
                                     move |bounds, _window, app| {
-                                        entity_for_bounds.update(app, |this: &mut StatusBar, _cx| {
-                                            this.remote_status_bounds = bounds;
-                                        });
+                                        entity_for_bounds.update(
+                                            app,
+                                            |this: &mut StatusBar, _cx| {
+                                                this.remote_status_bounds = bounds;
+                                            },
+                                        );
                                     },
                                     |_, _, _, _| {},
                                 )
@@ -831,7 +878,7 @@ impl Render for StatusBar {
                                             cx.notify();
                                         });
                                     }),
-                            )
+                            ),
                     );
                 }
 
@@ -840,14 +887,10 @@ impl Render for StatusBar {
                         el.child(
                             div()
                                 .text_color(rgb(t.text_muted))
-                                .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
                         )
                     })
-                    .child(
-                        div()
-                            .text_color(rgb(t.text_secondary))
-                            .child(time_str)
-                    )
+                    .child(div().text_color(rgb(t.text_secondary)).child(time_str))
                     .child(self.render_remote_status_popover(&remote_snapshots, &t, cx))
             })
     }

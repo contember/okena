@@ -13,13 +13,13 @@ use crate::diff_viewer::provider::GitProvider;
 use crate::watcher::GitStatusWatcher;
 
 use gpui::*;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 mod branch_picker;
+mod ci_checks_popover;
 mod commit_log;
 mod diff_popover;
-mod ci_checks_popover;
 mod status_pill;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -153,9 +153,8 @@ impl GitHeader {
                 .placeholder("Filter branches\u{2026}")
                 .icon("icons/search.svg")
         });
-        let branch_picker_create_name = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("New branch name")
-        });
+        let branch_picker_create_name =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("New branch name"));
         // Re-filter the branch list (and reset the keyboard selection) as the
         // user types. Without this the parent `GitHeader` wouldn't re-run its
         // own filtering when only the child input entity notifies.

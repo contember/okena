@@ -15,14 +15,14 @@
 
 use super::{ActionResult, spawn_uninitialized_terminals};
 use crate::workspace::focus::FocusManager;
+use crate::workspace::persistence::AppSettings;
 use crate::workspace::persistence::{
     delete_session, export_workspace, import_workspace, list_sessions, load_session,
     rename_session, save_session, session_exists,
 };
-use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{Workspace, WorkspaceData};
-use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
 use okena_workspace::context::WorkspaceCx;
 
 /// Kill every live PTY, swap the workspace to `data`, then respawn terminals for
@@ -127,7 +127,10 @@ pub(super) fn import_workspace_action(
 }
 
 pub(super) fn export_workspace_action(ws: &Workspace, path: String) -> ActionResult {
-    match export_workspace(&ws.data().without_remote_projects(), std::path::Path::new(&path)) {
+    match export_workspace(
+        &ws.data().without_remote_projects(),
+        std::path::Path::new(&path),
+    ) {
         Ok(()) => ActionResult::Ok(None),
         Err(e) => ActionResult::Err(format!("failed to export to '{path}': {e}")),
     }

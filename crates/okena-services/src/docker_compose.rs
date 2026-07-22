@@ -1,5 +1,5 @@
-use okena_core::process;
 use crate::manager::ServiceStatus;
+use okena_core::process;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -33,7 +33,11 @@ pub fn is_docker_compose_available() -> bool {
     let cached = || {
         AVAILABLE_CACHE.lock().ok().and_then(|g| {
             g.and_then(|(ts, ok)| {
-                let ttl = if ok { AVAILABLE_TTL_OK } else { AVAILABLE_TTL_FAIL };
+                let ttl = if ok {
+                    AVAILABLE_TTL_OK
+                } else {
+                    AVAILABLE_TTL_FAIL
+                };
                 (ts.elapsed() < ttl).then_some(ok)
             })
         })
@@ -42,7 +46,9 @@ pub fn is_docker_compose_available() -> bool {
     if let Some(ok) = cached() {
         return ok;
     }
-    let _flight = AVAILABLE_REFRESH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _flight = AVAILABLE_REFRESH_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ok) = cached() {
         return ok;
     }
@@ -147,8 +153,8 @@ pub fn list_services(project_path: &str, compose_file: &str) -> crate::ServiceRe
 fn parse_compose_config_services(json: &str) -> crate::ServiceResult<Vec<String>> {
     use crate::error::ServiceError;
 
-    let config: ComposeConfig = serde_json::from_str(json)
-        .map_err(|e| ServiceError::ParseError {
+    let config: ComposeConfig =
+        serde_json::from_str(json).map_err(|e| ServiceError::ParseError {
             context: "docker compose config JSON".to_string(),
             detail: e.to_string(),
         })?;
@@ -156,9 +162,7 @@ fn parse_compose_config_services(json: &str) -> crate::ServiceResult<Vec<String>
     Ok(config
         .services
         .into_iter()
-        .filter(|(_, svc)| {
-            !matches!(svc.deploy, Some(DeployConfig { replicas: Some(0) }))
-        })
+        .filter(|(_, svc)| !matches!(svc.deploy, Some(DeployConfig { replicas: Some(0) })))
         .map(|(name, _)| name)
         .collect())
 }
@@ -260,9 +264,11 @@ struct DockerPsAEntry {
 /// Value of `key` in docker's flattened `k=v,k=v` label string. Robust to
 /// commas inside *other* values (those fragments simply lack `=` for `key`).
 fn label_value<'a>(labels: &'a str, key: &str) -> Option<&'a str> {
-    labels
-        .split(',')
-        .find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v))
+    labels.split(',').find_map(|kv| {
+        kv.split_once('=')
+            .filter(|(k, _)| *k == key)
+            .map(|(_, v)| v)
+    })
 }
 
 /// Parse the exit code out of a `docker ps` Status like "Exited (137) 2h ago".
@@ -326,7 +332,11 @@ fn refresh_ps_snapshot() -> crate::ServiceResult<Vec<ContainerSnapshot>> {
             service: service.to_string(),
             state,
             exit_code,
-            ports: entry.ports.as_deref().map(parse_published_ports).unwrap_or_default(),
+            ports: entry
+                .ports
+                .as_deref()
+                .map(parse_published_ports)
+                .unwrap_or_default(),
         });
     }
     Ok(containers)
@@ -368,7 +378,10 @@ fn ps_snapshot() -> crate::ServiceResult<Vec<ContainerSnapshot>> {
 /// Reads from the shared `docker ps -a` snapshot and filters to the containers
 /// whose compose project working-dir matches `project_path` — so no per-project
 /// `docker compose ps` spawn.
-pub fn poll_status(project_path: &str, _compose_file: &str) -> crate::ServiceResult<Vec<DockerServiceStatus>> {
+pub fn poll_status(
+    project_path: &str,
+    _compose_file: &str,
+) -> crate::ServiceResult<Vec<DockerServiceStatus>> {
     let project_canon = std::path::Path::new(project_path)
         .canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(project_path));
@@ -403,43 +416,44 @@ pub fn parse_docker_ps_output(output: &str) -> crate::ServiceResult<Vec<DockerSe
 
     let entries: Vec<DockerPsEntry> = if trimmed.starts_with('[') {
         // JSON array format
-        serde_json::from_str(trimmed)
-            .map_err(|e| ServiceError::ParseError {
-                context: "docker ps JSON array".to_string(),
-                detail: e.to_string(),
-            })?
+        serde_json::from_str(trimmed).map_err(|e| ServiceError::ParseError {
+            context: "docker ps JSON array".to_string(),
+            detail: e.to_string(),
+        })?
     } else {
         // NDJSON format (one JSON object per line)
         trimmed
             .lines()
             .filter(|l| !l.trim().is_empty())
             .map(|line| {
-                serde_json::from_str::<DockerPsEntry>(line)
-                    .map_err(|e| ServiceError::ParseError {
-                        context: "docker ps line".to_string(),
-                        detail: e.to_string(),
-                    })
+                serde_json::from_str::<DockerPsEntry>(line).map_err(|e| ServiceError::ParseError {
+                    context: "docker ps line".to_string(),
+                    detail: e.to_string(),
+                })
             })
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    Ok(entries.into_iter().map(|e| {
-        let ports = extract_ports(&e.publishers);
-        let name = e.service_name
-            .or(e.container_name)
-            .unwrap_or_default();
-        DockerServiceStatus {
-            name,
-            state: e.state.unwrap_or_else(|| "unknown".to_string()),
-            exit_code: e.exit_code,
-            ports,
-        }
-    }).collect())
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let ports = extract_ports(&e.publishers);
+            let name = e.service_name.or(e.container_name).unwrap_or_default();
+            DockerServiceStatus {
+                name,
+                state: e.state.unwrap_or_else(|| "unknown".to_string()),
+                exit_code: e.exit_code,
+                ports,
+            }
+        })
+        .collect())
 }
 
 /// Extract published host ports from the Publishers array.
 fn extract_ports(publishers: &Option<Vec<Publisher>>) -> Vec<u16> {
-    let Some(pubs) = publishers else { return Vec::new() };
+    let Some(pubs) = publishers else {
+        return Vec::new();
+    };
     let mut ports: Vec<u16> = pubs
         .iter()
         .filter_map(|p| p.published_port)
@@ -515,7 +529,10 @@ mod tests {
     fn test_map_docker_state() {
         assert_eq!(map_docker_state("running", None), ServiceStatus::Running);
         assert_eq!(map_docker_state("Running", None), ServiceStatus::Running);
-        assert_eq!(map_docker_state("restarting", None), ServiceStatus::Restarting);
+        assert_eq!(
+            map_docker_state("restarting", None),
+            ServiceStatus::Restarting
+        );
         assert_eq!(map_docker_state("paused", None), ServiceStatus::Running);
         assert_eq!(map_docker_state("created", None), ServiceStatus::Stopped);
         assert_eq!(map_docker_state("exited", Some(0)), ServiceStatus::Stopped);
@@ -529,19 +546,34 @@ mod tests {
         );
         assert_eq!(
             map_docker_state("dead", Some(137)),
-            ServiceStatus::Crashed { exit_code: Some(137) }
+            ServiceStatus::Crashed {
+                exit_code: Some(137)
+            }
         );
-        assert_eq!(map_docker_state("unknown_state", None), ServiceStatus::Stopped);
+        assert_eq!(
+            map_docker_state("unknown_state", None),
+            ServiceStatus::Stopped
+        );
     }
 
     #[test]
     fn test_parse_publishers_ports() {
         let pubs = vec![
-            Publisher { published_port: Some(8080) },
-            Publisher { published_port: Some(0) },
-            Publisher { published_port: None },
-            Publisher { published_port: Some(3000) },
-            Publisher { published_port: Some(8080) }, // duplicate
+            Publisher {
+                published_port: Some(8080),
+            },
+            Publisher {
+                published_port: Some(0),
+            },
+            Publisher {
+                published_port: None,
+            },
+            Publisher {
+                published_port: Some(3000),
+            },
+            Publisher {
+                published_port: Some(8080),
+            }, // duplicate
         ];
         let ports = extract_ports(&Some(pubs));
         assert_eq!(ports, vec![3000, 8080]);
@@ -576,8 +608,3 @@ mod tests {
         assert_eq!(result, vec!["db", "redis", "web"]);
     }
 }
-
-
-
-
-

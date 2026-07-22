@@ -229,7 +229,10 @@ mod tests {
         assert_eq!(reloaded.project_widths, original.project_widths);
         assert_eq!(reloaded.project_layout, original.project_layout);
         assert_eq!(reloaded.project_sort_mode, original.project_sort_mode);
-        assert_eq!(reloaded.show_attention_section, original.show_attention_section);
+        assert_eq!(
+            reloaded.show_attention_section,
+            original.show_attention_section
+        );
         assert_eq!(reloaded.folder_collapsed, original.folder_collapsed);
         assert_eq!(reloaded.os_bounds, original.os_bounds);
         assert_eq!(reloaded.sidebar_open, original.sidebar_open);
@@ -287,8 +290,7 @@ mod tests {
     #[test]
     fn rows_present_canonical_splits_on_the_opposite_axis() {
         assert_eq!(
-            ProjectLayoutMode::Columns
-                .presented_split_direction(SplitDirection::Horizontal),
+            ProjectLayoutMode::Columns.presented_split_direction(SplitDirection::Horizontal),
             SplitDirection::Horizontal
         );
         assert_eq!(

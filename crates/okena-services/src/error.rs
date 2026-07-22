@@ -11,10 +11,7 @@ pub enum ServiceError {
 
     /// Failed to parse JSON or YAML output.
     #[error("{context}: {detail}")]
-    ParseError {
-        context: String,
-        detail: String,
-    },
+    ParseError { context: String, detail: String },
 
     /// Failed to read a config file.
     #[error("failed to read {path}: {source}")]

@@ -188,8 +188,14 @@ impl CiCheckSummary {
     pub fn tooltip_text(&self) -> String {
         match self.status {
             CiStatus::Success => format!("{}/{} checks passed", self.passed, self.total),
-            CiStatus::Failure => format!("{} failed, {} passed of {} checks", self.failed, self.passed, self.total),
-            CiStatus::Pending => format!("{} pending, {} passed of {} checks", self.pending, self.passed, self.total),
+            CiStatus::Failure => format!(
+                "{} failed, {} passed of {} checks",
+                self.failed, self.passed, self.total
+            ),
+            CiStatus::Pending => format!(
+                "{} pending, {} passed of {} checks",
+                self.pending, self.passed, self.total
+            ),
         }
     }
 }
@@ -396,9 +402,17 @@ pub struct ApiHookTerminalEntry {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ApiHookStatus {
     Running,
-    Succeeded { duration_ms: u64 },
-    Failed { duration_ms: u64, exit_code: i32, stderr: String },
-    SpawnError { message: String },
+    Succeeded {
+        duration_ms: u64,
+    },
+    Failed {
+        duration_ms: u64,
+        exit_code: i32,
+        stderr: String,
+    },
+    SpawnError {
+        message: String,
+    },
 }
 
 /// Wire mirror of `okena_hooks::HookExecution` — one row in the hook log.
@@ -1087,10 +1101,16 @@ impl ActionRequest {
     }
 }
 
-fn default_search_mode() -> String { "literal".to_string() }
-fn default_max_results() -> usize { 1000 }
+fn default_search_mode() -> String {
+    "literal".to_string()
+}
+fn default_max_results() -> usize {
+    1000
+}
 
-fn default_pull_request_limit() -> usize { 20 }
+fn default_pull_request_limit() -> usize {
+    20
+}
 
 /// POST /v1/pair request
 #[derive(Serialize, Deserialize)]
@@ -1262,7 +1282,10 @@ mod tests {
             parsed.projects[0].hooks.terminal.shell_wrapper.as_deref(),
             Some("devcontainer exec -- {shell}")
         );
-        assert_eq!(parsed.projects[0].hooks.worktree, ApiWorktreeHooks::default());
+        assert_eq!(
+            parsed.projects[0].hooks.worktree,
+            ApiWorktreeHooks::default()
+        );
         assert!(parsed.fullscreen_terminal.is_none());
         assert_eq!(parsed.project_order, vec!["folder1", "p1"]);
         assert_eq!(parsed.folders.len(), 1);
@@ -1278,12 +1301,15 @@ mod tests {
         assert_eq!(win.fullscreen.as_ref().unwrap().terminal_id, "t1");
         assert_eq!(win.visible_project_ids, vec!["p1", "p2"]);
         assert_eq!(win.folder_filter.as_deref(), Some("folder1"));
-        assert_eq!(win.bounds, Some(ApiWindowBounds {
-            x: 10.0,
-            y: 20.0,
-            width: 800.0,
-            height: 600.0,
-        }));
+        assert_eq!(
+            win.bounds,
+            Some(ApiWindowBounds {
+                x: 10.0,
+                y: 20.0,
+                width: 800.0,
+                height: 600.0,
+            })
+        );
         assert_eq!(win.sidebar_open, Some(true));
     }
 
@@ -1295,7 +1321,10 @@ mod tests {
         assert_eq!(parsed.project_order.len(), 0);
         assert_eq!(parsed.folders.len(), 0);
         assert!(parsed.windows.is_empty());
-        assert!(matches!(parsed.projects[0].folder_color, FolderColor::Default));
+        assert!(matches!(
+            parsed.projects[0].folder_color,
+            FolderColor::Default
+        ));
     }
 
     #[test]
@@ -1341,7 +1370,10 @@ mod tests {
         assert_eq!(parsed.review_base.as_deref(), Some("origin/main"));
         assert_eq!(parsed.default_branch.as_deref(), Some("main"));
         assert_eq!(parsed.unpushed, Some(2));
-        assert_eq!(parsed.ci_checks.as_ref().unwrap().checks[0].elapsed_label(), "1m5s");
+        assert_eq!(
+            parsed.ci_checks.as_ref().unwrap().checks[0].elapsed_label(),
+            "1m5s"
+        );
     }
 
     #[test]
@@ -1633,15 +1665,25 @@ mod tests {
                 color: Some(FolderColor::Blue),
             },
             ActionRequest::ListSessions,
-            ActionRequest::LoadSession { name: "work".into() },
-            ActionRequest::SaveSession { name: "work".into() },
+            ActionRequest::LoadSession {
+                name: "work".into(),
+            },
+            ActionRequest::SaveSession {
+                name: "work".into(),
+            },
             ActionRequest::RenameSession {
                 old_name: "work".into(),
                 new_name: "renamed".into(),
             },
-            ActionRequest::DeleteSession { name: "work".into() },
-            ActionRequest::ImportWorkspace { path: "/tmp/ws.json".into() },
-            ActionRequest::ExportWorkspace { path: "/tmp/ws.json".into() },
+            ActionRequest::DeleteSession {
+                name: "work".into(),
+            },
+            ActionRequest::ImportWorkspace {
+                path: "/tmp/ws.json".into(),
+            },
+            ActionRequest::ExportWorkspace {
+                path: "/tmp/ws.json".into(),
+            },
         ];
         for action in actions {
             let json = serde_json::to_string(&action).unwrap();

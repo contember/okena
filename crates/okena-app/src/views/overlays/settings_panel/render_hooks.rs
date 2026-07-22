@@ -2,8 +2,8 @@ use crate::theme::theme;
 use crate::ui::tokens::ui_text_sm;
 use gpui::*;
 
-use super::components::*;
 use super::SettingsPanel;
+use super::components::*;
 
 impl SettingsPanel {
     pub(super) fn render_hooks(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -44,9 +44,14 @@ impl SettingsPanel {
             )
         };
 
-        let scope_label = if is_project { "Project Hooks (override global)" } else { "Global Hooks" };
+        let scope_label = if is_project {
+            "Project Hooks (override global)"
+        } else {
+            "Global Hooks"
+        };
         let env_note = "Available env: $OKENA_PROJECT_ID, $OKENA_PROJECT_NAME, $OKENA_PROJECT_PATH";
-        let merge_env_note = "Extra env: $OKENA_BRANCH, $OKENA_TARGET_BRANCH, $OKENA_MAIN_REPO_PATH";
+        let merge_env_note =
+            "Extra env: $OKENA_BRANCH, $OKENA_TARGET_BRANCH, $OKENA_MAIN_REPO_PATH";
         let multiline_hint = "Use multiple lines to chain actions. Prefix with terminal: to open in a terminal pane.";
 
         div()

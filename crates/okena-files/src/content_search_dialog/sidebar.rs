@@ -112,23 +112,32 @@ impl ContentSearchDialog {
                     // Scope button
                     .child(
                         div()
-                            .id(ElementId::Name(format!("scope-folder-{}", folder_path).into()))
+                            .id(ElementId::Name(
+                                format!("scope-folder-{}", folder_path).into(),
+                            ))
                             .cursor_pointer()
                             .px(px(4.0))
                             .py(px(2.0))
                             .rounded(px(3.0))
                             .text_size(ui_text_sm(cx))
-                            .text_color(rgb(if is_scoped { t.text_primary } else { t.text_muted }))
+                            .text_color(rgb(if is_scoped {
+                                t.text_primary
+                            } else {
+                                t.text_muted
+                            }))
                             .when(is_scoped, |d| d.bg(rgb(t.border_active)))
                             .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
                             .flex_shrink_0()
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
-                                if this.scope_path.as_ref() == Some(&fp_scope) {
-                                    this.set_scope(None, cx);
-                                } else {
-                                    this.set_scope(Some(fp_scope.clone()), cx);
-                                }
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    if this.scope_path.as_ref() == Some(&fp_scope) {
+                                        this.set_scope(None, cx);
+                                    } else {
+                                        this.set_scope(Some(fp_scope.clone()), cx);
+                                    }
+                                }),
+                            )
                             .child(if is_scoped { "scoped" } else { "scope" }),
                     )
                     .into_any_element(),

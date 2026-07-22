@@ -1,7 +1,7 @@
 use crate::resolve;
 use crate::{api_action, api_get, discover_server, ensure_token};
-use okena_remote_server::auth::{generate_pairing_code, pair_code_path};
 use okena_core::api::{ApiProject, StateResponse};
+use okena_remote_server::auth::{generate_pairing_code, pair_code_path};
 
 /// The agent skill, embedded so `skill show`/`install` always match this build.
 const SKILL_MD: &str = include_str!("skill.md");
@@ -15,10 +15,11 @@ pub fn cli_pair() -> i32 {
     let path = pair_code_path();
 
     if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("Failed to create config directory: {e}");
-            return 1;
-        }
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("Failed to create config directory: {e}");
+        return 1;
+    }
 
     if let Err(e) = std::fs::write(&path, &code) {
         eprintln!("Failed to write pairing code: {e}");
@@ -45,7 +46,10 @@ pub fn cli_pair() -> i32 {
         eprintln!(
             "TLS certificate fingerprint (SHA-256) — verify it matches the connecting client:"
         );
-        eprintln!("  {}", okena_transport::client::tls::format_fingerprint(&fp));
+        eprintln!(
+            "  {}",
+            okena_transport::client::tls::format_fingerprint(&fp)
+        );
     }
     eprintln!("Expires in 60s — run `okena pair` again for a fresh code.");
     0
@@ -93,8 +97,12 @@ pub fn cli_health(json_mode: bool) -> i32 {
         // tab-separated: status version uptime
         println!(
             "{}\t{}\t{}",
-            v.get("status").and_then(|s| s.as_str()).unwrap_or("unknown"),
-            v.get("version").and_then(|s| s.as_str()).unwrap_or("unknown"),
+            v.get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown"),
+            v.get("version")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown"),
             v.get("uptime_secs").and_then(|s| s.as_u64()).unwrap_or(0),
         );
     } else {
@@ -294,7 +302,10 @@ pub fn cli_service(
     if let Some(project) = state.projects.iter().find(|p| p.id == project_id)
         && !project.services.iter().any(|s| s.name == service_name)
     {
-        eprintln!("No service named '{service_name}' in project '{}'.", project.name);
+        eprintln!(
+            "No service named '{service_name}' in project '{}'.",
+            project.name
+        );
         let available: Vec<&str> = project.services.iter().map(|s| s.name.as_str()).collect();
         if available.is_empty() {
             eprintln!("That project has no services.");
@@ -429,10 +440,7 @@ pub fn cli_whoami(json_mode: bool) -> i32 {
         Ok(t) => t,
         Err(e) => {
             if json_mode {
-                println!(
-                    "{}",
-                    serde_json::json!({ "terminal_id": terminal_id })
-                );
+                println!("{}", serde_json::json!({ "terminal_id": terminal_id }));
             } else {
                 println!("{terminal_id}");
             }
@@ -473,10 +481,7 @@ pub fn cli_whoami(json_mode: bool) -> i32 {
 
             // Terminal not found in any project
             if json_mode {
-                println!(
-                    "{}",
-                    serde_json::json!({ "terminal_id": terminal_id })
-                );
+                println!("{}", serde_json::json!({ "terminal_id": terminal_id }));
             } else {
                 println!("{terminal_id}");
             }
@@ -484,10 +489,7 @@ pub fn cli_whoami(json_mode: bool) -> i32 {
         }
         Err(e) => {
             if json_mode {
-                println!(
-                    "{}",
-                    serde_json::json!({ "terminal_id": terminal_id })
-                );
+                println!("{}", serde_json::json!({ "terminal_id": terminal_id }));
             } else {
                 println!("{terminal_id}");
             }
@@ -1697,8 +1699,7 @@ fn fetch_terminal_content(token: &str, terminal_id: &str) -> Result<String, Stri
     let resp = api_action(token, &body.to_string())?;
     let v: serde_json::Value =
         serde_json::from_str(&resp).map_err(|e| format!("bad read response: {e}"))?;
-    Ok(v
-        .get("content")
+    Ok(v.get("content")
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string())
@@ -1766,7 +1767,10 @@ fn post_action_body(body: &serde_json::Value) -> Result<String, String> {
 fn print_json_pretty(raw: &str) {
     match serde_json::from_str::<serde_json::Value>(raw) {
         Ok(v) => {
-            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw.to_string()))
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw.to_string())
+            )
         }
         Err(_) => println!("{}", raw.trim()),
     }
@@ -1829,7 +1833,10 @@ pub fn cli_settings_show(key: Option<&str>) -> i32 {
             };
             match navigate_json(&v, k) {
                 Some(found) => {
-                    println!("{}", serde_json::to_string_pretty(found).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(found).unwrap_or_default()
+                    );
                     0
                 }
                 None => {
@@ -1893,7 +1900,14 @@ pub fn cli_theme_list(json_mode: bool) -> i32 {
                 ""
             };
             // id \t name \t kind \t is_dark \t active
-            println!("{}\t{}\t{}\t{}\t{}", s("id"), s("name"), s("kind"), s("is_dark"), active);
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                s("id"),
+                s("name"),
+                s("kind"),
+                s("is_dark"),
+                active
+            );
         }
     }
     0
@@ -2071,7 +2085,10 @@ mod tests {
         assert_eq!(parse_done_marker(echo, tag), None);
         // The actual printf output carries digits — matches.
         assert_eq!(parse_done_marker("OKENADONE_42:0:END", tag), Some(0));
-        assert_eq!(parse_done_marker("noise\nOKENADONE_42:130:END\n$", tag), Some(130));
+        assert_eq!(
+            parse_done_marker("noise\nOKENADONE_42:130:END\n$", tag),
+            Some(130)
+        );
         // Echo line followed by the real result line: still resolves the result.
         let both = format!("{echo}\nOKENADONE_42:7:END\nokena $ ");
         assert_eq!(parse_done_marker(&both, tag), Some(7));

@@ -28,7 +28,10 @@ fn main() {
                 eprintln!("Warning: Failed to set Windows icon: {}", e);
             }
         } else {
-            println!("cargo:warning=Icon file not found at {}, skipping Windows icon embedding", icon_path);
+            println!(
+                "cargo:warning=Icon file not found at {}, skipping Windows icon embedding",
+                icon_path
+            );
         }
     }
 

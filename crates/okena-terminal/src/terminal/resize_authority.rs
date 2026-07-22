@@ -77,12 +77,16 @@ pub fn claim_remote_resize_if_allowed(terminal_id: &str, owner_id: &str) -> bool
         authority.seq += 1;
         authority.last_remote_seq = authority.seq;
         authority.remote_owner_id = Some(owner_id.to_string());
-        log::debug!("resize_authority: resize from {owner_id} ADOPTS unclaimed (terminal={terminal_id})");
+        log::debug!(
+            "resize_authority: resize from {owner_id} ADOPTS unclaimed (terminal={terminal_id})"
+        );
         return true;
     }
 
     if authority.last_local_seq > authority.last_remote_seq {
-        log::debug!("resize_authority: resize from {owner_id} DENIED, local owns (terminal={terminal_id})");
+        log::debug!(
+            "resize_authority: resize from {owner_id} DENIED, local owns (terminal={terminal_id})"
+        );
         return false;
     }
 
@@ -97,7 +101,9 @@ pub fn claim_remote_resize_if_allowed(terminal_id: &str, owner_id: &str) -> bool
         }
         None => {
             authority.remote_owner_id = Some(owner_id.to_string());
-            log::debug!("resize_authority: resize from {owner_id} ADOPTS ownerless remote (terminal={terminal_id})");
+            log::debug!(
+                "resize_authority: resize from {owner_id} ADOPTS ownerless remote (terminal={terminal_id})"
+            );
             true
         }
     }

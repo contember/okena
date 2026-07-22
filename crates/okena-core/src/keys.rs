@@ -117,7 +117,10 @@ mod tests {
             SpecialKey::Ctrl('l').to_bytes()
         );
         // Equivalent to the named CtrlC variant.
-        assert_eq!(SpecialKey::Ctrl('c').to_bytes(), SpecialKey::CtrlC.to_bytes());
+        assert_eq!(
+            SpecialKey::Ctrl('c').to_bytes(),
+            SpecialKey::CtrlC.to_bytes()
+        );
 
         // Wire form: {"Ctrl":"l"} round-trips.
         let json = serde_json::to_string(&SpecialKey::Ctrl('l')).unwrap();

@@ -5,10 +5,7 @@ mod types;
 use gpui::*;
 use parking_lot::RwLock;
 
-pub use config::{
-    get_keybindings_path, load_keybindings, save_keybindings,
-    KeybindingConfig,
-};
+pub use config::{KeybindingConfig, get_keybindings_path, load_keybindings, save_keybindings};
 pub use descriptions::get_action_descriptions;
 #[allow(unused_imports)]
 pub use types::{ActionDescription, KeybindingConflict, KeybindingEntry};
@@ -62,19 +59,16 @@ actions!(
 
 // Terminal-specific actions (defined in okena-views-terminal crate)
 pub use okena_views_terminal::actions::{
-    SendEscape, SplitVertical, SplitHorizontal, AddTab, CloseTerminal,
-    MinimizeTerminal, FocusNextTerminal, FocusPrevTerminal,
-    FocusLeft, FocusRight, FocusUp, FocusDown,
-    Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch,
-    SendTab, SendBacktab, ZoomIn, ZoomOut, ResetZoom,
-    ToggleFullscreen, FullscreenNextTerminal, FullscreenPrevTerminal,
-    JumpToPreviousPrompt, JumpToNextPrompt,
-    JumpToPreviousFailedCommand, JumpToNextFailedCommand,
+    AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
+    FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
+    JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt,
+    MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendEscape,
+    SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen, ZoomIn, ZoomOut,
 };
 
 // Sidebar-specific actions (defined in okena-views-sidebar crate)
 pub use okena_views_sidebar::{
-    SidebarUp, SidebarDown, SidebarConfirm, SidebarToggleExpand, SidebarEscape,
+    SidebarConfirm, SidebarDown, SidebarEscape, SidebarToggleExpand, SidebarUp,
 };
 
 /// Global keybinding configuration (thread-safe)
@@ -108,16 +102,18 @@ pub fn reset_to_defaults() -> anyhow::Result<()> {
 pub fn keystroke_to_config_string(keystroke: &gpui::Keystroke) -> String {
     let unparsed = keystroke.unparse();
     // Normalize platform modifier names to "cmd-" for config consistency
-    unparsed
-        .replace("super-", "cmd-")
-        .replace("win-", "cmd-")
+    unparsed.replace("super-", "cmd-").replace("win-", "cmd-")
 }
 
 /// Reload keybindings: update global config, save to disk, and re-register with GPUI.
 /// Call this after modifying the config via get_config_mut() or update_config().
 pub fn reload_keybindings(cx: &mut App) {
     let config = {
-        KEYBINDING_CONFIG.read().as_ref().cloned().unwrap_or_default()
+        KEYBINDING_CONFIG
+            .read()
+            .as_ref()
+            .cloned()
+            .unwrap_or_default()
     };
 
     // Save to disk
@@ -152,20 +148,64 @@ pub fn reload_keybindings(cx: &mut App) {
         KeyBinding::new("escape", Cancel, None),
         KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
         KeyBinding::new("escape", CloseSearch, Some("SearchBar")),
-        KeyBinding::new("escape", okena_views_terminal::actions::Cancel, Some("TerminalRename")),
-        KeyBinding::new("escape", okena_files::file_search::Cancel, Some("FileSearchDialog")),
-        KeyBinding::new("escape", okena_files::file_search::Cancel, Some("FileViewer")),
+        KeyBinding::new(
+            "escape",
+            okena_views_terminal::actions::Cancel,
+            Some("TerminalRename"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_files::file_search::Cancel,
+            Some("FileSearchDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_files::file_search::Cancel,
+            Some("FileViewer"),
+        ),
         KeyBinding::new("escape", okena_views_git::Cancel, Some("WorktreeDialog")),
-        KeyBinding::new("escape", okena_views_git::Cancel, Some("CloseWorktreeDialog")),
-        KeyBinding::new("escape", okena_views_git::diff_viewer::Cancel, Some("DiffViewer")),
+        KeyBinding::new(
+            "escape",
+            okena_views_git::Cancel,
+            Some("CloseWorktreeDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_git::diff_viewer::Cancel,
+            Some("DiffViewer"),
+        ),
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("ContextMenu")),
-        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("FolderContextMenu")),
-        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("RenameDirectoryDialog")),
+        KeyBinding::new(
+            "escape",
+            okena_views_sidebar::Cancel,
+            Some("FolderContextMenu"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_sidebar::Cancel,
+            Some("RenameDirectoryDialog"),
+        ),
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("HookLog")),
-        KeyBinding::new("escape", okena_views_terminal::actions::Cancel, Some("ShellSelectorOverlay")),
-        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemoteConnectDialog")),
-        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemotePairDialog")),
-        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemoteContextMenu")),
+        KeyBinding::new(
+            "escape",
+            okena_views_terminal::actions::Cancel,
+            Some("ShellSelectorOverlay"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_remote::Cancel,
+            Some("RemoteConnectDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_remote::Cancel,
+            Some("RemotePairDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_remote::Cancel,
+            Some("RemoteContextMenu"),
+        ),
     ]);
 }
 
@@ -226,25 +266,69 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
         KeyBinding::new("escape", CloseSearch, Some("SearchBar")),
         // Terminal rename uses the crate's Cancel action
-        KeyBinding::new("escape", okena_views_terminal::actions::Cancel, Some("TerminalRename")),
+        KeyBinding::new(
+            "escape",
+            okena_views_terminal::actions::Cancel,
+            Some("TerminalRename"),
+        ),
         // okena-files crate Cancel action for file search/viewer
-        KeyBinding::new("escape", okena_files::file_search::Cancel, Some("FileSearchDialog")),
-        KeyBinding::new("escape", okena_files::file_search::Cancel, Some("FileViewer")),
+        KeyBinding::new(
+            "escape",
+            okena_files::file_search::Cancel,
+            Some("FileSearchDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_files::file_search::Cancel,
+            Some("FileViewer"),
+        ),
         // okena-views-git crate Cancel actions for git overlays
         KeyBinding::new("escape", okena_views_git::Cancel, Some("WorktreeDialog")),
-        KeyBinding::new("escape", okena_views_git::Cancel, Some("CloseWorktreeDialog")),
-        KeyBinding::new("escape", okena_views_git::diff_viewer::Cancel, Some("DiffViewer")),
+        KeyBinding::new(
+            "escape",
+            okena_views_git::Cancel,
+            Some("CloseWorktreeDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_git::diff_viewer::Cancel,
+            Some("DiffViewer"),
+        ),
         // okena-views-sidebar crate Cancel actions for context menus
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("ContextMenu")),
-        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("FolderContextMenu")),
-        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("RenameDirectoryDialog")),
+        KeyBinding::new(
+            "escape",
+            okena_views_sidebar::Cancel,
+            Some("FolderContextMenu"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_sidebar::Cancel,
+            Some("RenameDirectoryDialog"),
+        ),
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("HookLog")),
         // okena-views-terminal crate Cancel for shell selector
-        KeyBinding::new("escape", okena_views_terminal::actions::Cancel, Some("ShellSelectorOverlay")),
+        KeyBinding::new(
+            "escape",
+            okena_views_terminal::actions::Cancel,
+            Some("ShellSelectorOverlay"),
+        ),
         // okena-views-remote crate Cancel actions
-        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemoteConnectDialog")),
-        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemotePairDialog")),
-        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemoteContextMenu")),
+        KeyBinding::new(
+            "escape",
+            okena_views_remote::Cancel,
+            Some("RemoteConnectDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_remote::Cancel,
+            Some("RemotePairDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_remote::Cancel,
+            Some("RemoteContextMenu"),
+        ),
     ]);
 }
 
@@ -282,8 +366,12 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ToggleSidebar" => Some(KeyBinding::new(keystroke, ToggleSidebar, context)),
         "ToggleSidebarAutoHide" => Some(KeyBinding::new(keystroke, ToggleSidebarAutoHide, context)),
         "ToggleFullscreen" => Some(KeyBinding::new(keystroke, ToggleFullscreen, context)),
-        "FullscreenNextTerminal" => Some(KeyBinding::new(keystroke, FullscreenNextTerminal, context)),
-        "FullscreenPrevTerminal" => Some(KeyBinding::new(keystroke, FullscreenPrevTerminal, context)),
+        "FullscreenNextTerminal" => {
+            Some(KeyBinding::new(keystroke, FullscreenNextTerminal, context))
+        }
+        "FullscreenPrevTerminal" => {
+            Some(KeyBinding::new(keystroke, FullscreenPrevTerminal, context))
+        }
         "SplitVertical" => Some(KeyBinding::new(keystroke, SplitVertical, context)),
         "SplitHorizontal" => Some(KeyBinding::new(keystroke, SplitHorizontal, context)),
         "AddTab" => Some(KeyBinding::new(keystroke, AddTab, context)),
@@ -308,8 +396,14 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "SearchPrev" => Some(KeyBinding::new(keystroke, SearchPrev, context)),
         "JumpToPreviousPrompt" => Some(KeyBinding::new(keystroke, JumpToPreviousPrompt, context)),
         "JumpToNextPrompt" => Some(KeyBinding::new(keystroke, JumpToNextPrompt, context)),
-        "JumpToPreviousFailedCommand" => Some(KeyBinding::new(keystroke, JumpToPreviousFailedCommand, context)),
-        "JumpToNextFailedCommand" => Some(KeyBinding::new(keystroke, JumpToNextFailedCommand, context)),
+        "JumpToPreviousFailedCommand" => Some(KeyBinding::new(
+            keystroke,
+            JumpToPreviousFailedCommand,
+            context,
+        )),
+        "JumpToNextFailedCommand" => {
+            Some(KeyBinding::new(keystroke, JumpToNextFailedCommand, context))
+        }
         "CloseSearch" => Some(KeyBinding::new(keystroke, CloseSearch, context)),
         "ShowKeybindings" => Some(KeyBinding::new(keystroke, ShowKeybindings, context)),
         "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),

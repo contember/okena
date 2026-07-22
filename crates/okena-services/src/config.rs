@@ -57,11 +57,10 @@ pub fn load_project_config(project_path: &str) -> crate::ServiceResult<Option<Ok
     if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| ServiceError::ReadError {
-            path: path.display().to_string(),
-            source: e,
-        })?;
+    let content = std::fs::read_to_string(&path).map_err(|e| ServiceError::ReadError {
+        path: path.display().to_string(),
+        source: e,
+    })?;
     let config: OkenaProjectConfig =
         serde_yaml_ng::from_str(&content).map_err(|e| ServiceError::ParseError {
             context: path.display().to_string(),

@@ -21,4 +21,4 @@ pub mod remote_action;
 #[cfg(any(feature = "client", feature = "blocking-http"))]
 pub mod remote_http;
 
-pub use connection_config::{LocalEndpoint, RemoteConnectionConfig, LOCAL_DAEMON_CONNECTION_ID};
+pub use connection_config::{LOCAL_DAEMON_CONNECTION_ID, LocalEndpoint, RemoteConnectionConfig};
