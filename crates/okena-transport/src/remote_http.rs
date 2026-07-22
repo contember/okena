@@ -4,7 +4,7 @@ use crate::RemoteConnectionConfig;
 
 /// Build an async HTTP client and URL using the connection's complete
 /// transport policy: local socket, plain TCP, or pinned TLS.
-#[cfg(feature = "client")]
+#[cfg(any(feature = "client", feature = "cancellable-http"))]
 pub fn async_client_and_url(
     config: &RemoteConnectionConfig,
     path: &str,
@@ -73,7 +73,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "client")]
+    #[cfg(any(feature = "client", feature = "cancellable-http"))]
     #[test]
     fn async_remote_url_uses_tls_from_connection_config() {
         let (_, url) = async_client_and_url(&config(true, None), "/v1/actions").unwrap();

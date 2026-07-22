@@ -213,7 +213,8 @@ impl ProjectFs for RemoteProjectFs {
             show_ignored: config.show_ignored,
         };
         let value = self
-            .post_action(action)?
+            .client
+            .post_action_cancellable(action, cancelled)?
             .ok_or_else(|| "Missing content search response".to_string())?;
         let results: Vec<FileSearchResult> = serde_json::from_value(value)
             .map_err(|error| format!("Invalid content search response: {error}"))?;
