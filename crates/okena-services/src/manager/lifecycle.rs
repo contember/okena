@@ -316,6 +316,7 @@ impl ServiceManager {
                 self.terminals.lock().remove(terminal_id);
                 self.terminal_to_service.remove(terminal_id);
             }
+            self.invalidate_okena_launch(&key);
             self.instances.remove(&key);
         }
 
@@ -414,6 +415,7 @@ impl ServiceManager {
                 self.terminals.lock().remove(terminal_id);
                 self.terminal_to_service.remove(terminal_id);
             }
+            self.invalidate_okena_launch(&key);
             self.instances.remove(&key);
         }
 
@@ -441,8 +443,7 @@ impl ServiceManager {
         self.configs
             .insert(project_id.to_string(), new_config.services.clone());
 
-        // Reload invalidates every async callback from the previous incarnation.
-        // Re-arm the ongoing Okena runtime work that survives definition merging.
+        // Re-arm project-scoped work; pending launches carry their own reload-safe token.
         let runtime_to_rearm: Vec<(String, ServiceStatus, u64)> = self
             .instances
             .iter()
