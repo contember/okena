@@ -112,19 +112,21 @@ fn publish_config_change_after_success(result: &CommandResult, state_version: &w
     }
 }
 
-/// Run destructive cleanup only while the workspace still has no project that
-/// owns `project_path`. The workspace guard fences replacement registration
-/// against the check-to-delete window.
-fn with_unclaimed_project_path<R>(
+/// Run destructive cleanup only while no current project occupies the physical
+/// worktree root or one of its subdirectories. The workspace guard fences
+/// replacement registration against the check-to-delete window.
+fn with_unclaimed_worktree_root<R>(
     workspace: &Arc<Mutex<Workspace>>,
-    project_path: &str,
+    worktree_path: &std::path::Path,
     cleanup: impl FnOnce() -> R,
 ) -> Option<R> {
     let workspace = workspace.lock();
+    let normalized_root = okena_git::repository::normalize_path(worktree_path);
     if workspace
         .projects()
         .iter()
-        .any(|project| project.path == project_path)
+        .map(|project| okena_git::repository::normalize_path(std::path::Path::new(&project.path)))
+        .any(|project_path| project_path.starts_with(&normalized_root))
     {
         return None;
     }
@@ -133,11 +135,10 @@ fn with_unclaimed_project_path<R>(
 
 fn cleanup_created_worktree_if_unclaimed(
     workspace: &Arc<Mutex<Workspace>>,
-    project_path: &str,
     worktree_path: &std::path::Path,
     git_root: &std::path::Path,
 ) {
-    let result = with_unclaimed_project_path(workspace, project_path, || {
+    let result = with_unclaimed_worktree_root(workspace, worktree_path, || {
         okena_git::remove_worktree_fast(worktree_path, git_root)
     });
     match result {
@@ -146,7 +147,8 @@ fn cleanup_created_worktree_if_unclaimed(
             worktree_path.display()
         ),
         None => log::info!(
-            "worktree-create: retained checkout now claimed by project path {project_path}"
+            "worktree-create: retained checkout now claimed at or below {}",
+            worktree_path.display()
         ),
         Some(Ok(())) => {}
     }
@@ -1099,7 +1101,6 @@ pub async fn daemon_command_loop(
                                         let git_root = git_root.clone();
                                         let branch = branch.clone();
                                         let worktree_path = worktree_path.clone();
-                                        let wt_project_path_task = wt_project_path.clone();
                                         let new_id_task = new_id.clone();
                                         tokio::task::spawn_local(async move {
                                             let git = {
@@ -1146,7 +1147,6 @@ pub async fn daemon_command_loop(
                                                         tokio::task::spawn_blocking(move || {
                                                             cleanup_created_worktree_if_unclaimed(
                                                                 &workspace,
-                                                                &wt_project_path_task,
                                                                 std::path::Path::new(
                                                                     &worktree_path,
                                                                 ),
@@ -1585,8 +1585,9 @@ pub async fn daemon_command_loop(
 
             // ── RenderSnapshot ───────────────────────────────────────────────
             RemoteCommand::RenderSnapshot { terminal_id } => {
+                let app_settings = settings.lock().clone();
                 let ws = workspace.lock();
-                match ensure_terminal(&terminal_id, &terminals, &*backend, &ws) {
+                match ensure_terminal(&terminal_id, &terminals, &*backend, &ws, &app_settings) {
                     Some(term) => {
                         let (data, sequence) = term.render_snapshot_with_sequence();
                         CommandResult::OkSnapshot { data, sequence }
@@ -1597,8 +1598,9 @@ pub async fn daemon_command_loop(
 
             // ── PastePath ────────────────────────────────────────────────────
             RemoteCommand::PastePath { terminal_id, text } => {
+                let app_settings = settings.lock().clone();
                 let ws = workspace.lock();
-                match ensure_terminal(&terminal_id, &terminals, &*backend, &ws) {
+                match ensure_terminal(&terminal_id, &terminals, &*backend, &ws, &app_settings) {
                     Some(term) => {
                         term.send_paste(&text);
                         CommandResult::Ok(None)
@@ -1954,14 +1956,30 @@ mod tests {
     }
 
     #[test]
-    fn stale_create_cleanup_skips_path_claimed_by_replacement_project() {
-        let claimed_path = "/replacement/worktree/project";
+    fn stale_create_cleanup_skips_root_claimed_by_replacement_project() {
+        let claimed_root = std::env::temp_dir().join("replacement-worktree");
         let mut data = workspace_with_worktree_child();
-        data.projects[1].path = claimed_path.to_string();
+        data.projects[1].path = claimed_root.to_string_lossy().into_owned();
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let unnormalized_root = claimed_root.join("subdir").join("..");
+
+        let result = with_unclaimed_worktree_root(&workspace, &unnormalized_root, || {
+            panic!("claimed replacement root must not be cleaned")
+        });
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn stale_create_cleanup_skips_descendant_claimed_by_replacement_project() {
+        let worktree_root = std::env::temp_dir().join("replacement-worktree");
+        let claimed_project = worktree_root.join("packages").join("app");
+        let mut data = workspace_with_worktree_child();
+        data.projects[1].path = claimed_project.to_string_lossy().into_owned();
         let workspace = Arc::new(Mutex::new(Workspace::new(data)));
 
-        let result = with_unclaimed_project_path(&workspace, claimed_path, || {
-            panic!("claimed replacement path must not be cleaned")
+        let result = with_unclaimed_worktree_root(&workspace, &worktree_root, || {
+            panic!("replacement project below the checkout root must prevent cleanup")
         });
 
         assert!(result.is_none());
@@ -1970,8 +1988,9 @@ mod tests {
     #[test]
     fn stale_create_cleanup_holds_ownership_guard_through_delete() {
         let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
+        let worktree_root = std::env::temp_dir().join("unclaimed-worktree");
 
-        let result = with_unclaimed_project_path(&workspace, "/unclaimed/worktree", || {
+        let result = with_unclaimed_worktree_root(&workspace, &worktree_root, || {
             assert!(
                 workspace.try_lock().is_none(),
                 "replacement registration must not interleave after the ownership check"
