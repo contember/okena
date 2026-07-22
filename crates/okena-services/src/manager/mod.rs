@@ -333,18 +333,22 @@ impl ServiceManager {
 
     /// Reload an existing project's service lifecycle after an on-disk rename.
     /// Projects that have not been loaded yet pick up their path during load.
+    /// Returns whether the manager has converged on `new_path`.
     pub fn update_project_path(
         &mut self,
         project_id: &str,
         new_path: &str,
         cx: &mut impl ServiceCx,
-    ) {
-        if self
-            .project_paths
-            .get(project_id)
-            .is_some_and(|path| path != new_path)
-        {
-            self.reload_project_services(project_id, new_path, cx);
+    ) -> bool {
+        match self.project_paths.get(project_id) {
+            None => true,
+            Some(path) if path == new_path => true,
+            Some(_) => {
+                self.reload_project_services(project_id, new_path, cx);
+                self.project_paths
+                    .get(project_id)
+                    .is_some_and(|path| path == new_path)
+            }
         }
     }
 

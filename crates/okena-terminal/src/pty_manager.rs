@@ -1112,7 +1112,7 @@ impl PtyManager {
     /// Kill a terminal
     /// Also kills the underlying tmux/screen session if applicable
     pub fn kill(&self, terminal_id: &str) {
-        let handle = {
+        let (handle, exited) = {
             let mut instances = self.instances.lock();
             while instances.creating.contains_key(terminal_id) {
                 self.instance_changed.wait(&mut instances);
@@ -1122,11 +1122,11 @@ impl PtyManager {
             if let Some(handle) = handle.as_ref() {
                 instances.remove_current(terminal_id, handle.generation);
             }
-            instances.exited.remove(terminal_id);
+            let exited = instances.exited.remove(terminal_id);
             instances.queue_session_kill(terminal_id);
-            handle
+            (handle, exited)
         };
-        self.enqueue_session_kill(terminal_id, handle, None);
+        self.enqueue_session_kill(terminal_id, handle, exited);
     }
 
     /// Kill the persistent session only if this exact exited generation still
@@ -1162,19 +1162,8 @@ impl PtyManager {
 
         // Read WSL info before moving the handle
         #[cfg(windows)]
-        let wsl_distro = handle
-            .as_ref()
-            .and_then(|h| h.wsl_distro.clone())
-            .or_else(|| {
-                _exited
-                    .as_ref()
-                    .and_then(|exited| exited.wsl_distro.clone())
-            });
-        #[cfg(windows)]
-        let wsl_backend = handle
-            .as_ref()
-            .and_then(|h| h.wsl_backend)
-            .or_else(|| _exited.as_ref().and_then(|exited| exited.wsl_backend));
+        let (wsl_distro, wsl_backend) =
+            Self::wsl_teardown_target(handle.as_ref(), _exited.as_ref());
 
         let job = TeardownJob {
             handle,
@@ -1193,6 +1182,20 @@ impl PtyManager {
             }),
         };
         self.enqueue_teardown(job);
+    }
+
+    #[cfg(windows)]
+    fn wsl_teardown_target(
+        handle: Option<&PtyHandle>,
+        exited: Option<&ExitedPty>,
+    ) -> (Option<String>, Option<ResolvedBackend>) {
+        let distro = handle
+            .and_then(|handle| handle.wsl_distro.clone())
+            .or_else(|| exited.and_then(|exited| exited.wsl_distro.clone()));
+        let backend = handle
+            .and_then(|handle| handle.wsl_backend)
+            .or_else(|| exited.and_then(|exited| exited.wsl_backend));
+        (distro, backend)
     }
 
     /// Hand a teardown job to the shared worker pool. If the channel is closed
@@ -1969,6 +1972,10 @@ mod tests {
 
         assert_eq!(exited.wsl_distro.as_deref(), Some("Ubuntu"));
         assert_eq!(exited.wsl_backend, Some(ResolvedBackend::Dtach));
+        assert_eq!(
+            PtyManager::wsl_teardown_target(None, Some(&exited)),
+            (Some("Ubuntu".to_string()), Some(ResolvedBackend::Dtach))
+        );
     }
 
     #[test]

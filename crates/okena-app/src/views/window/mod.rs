@@ -732,10 +732,8 @@ impl WindowView {
             .collect();
 
         if changed.is_empty() {
-            // Still drop entries for projects that no longer exist
-            if current.len() != self.last_project_paths.len() {
-                self.last_project_paths = current;
-            }
+            self.last_project_paths
+                .retain(|id, _| current.contains_key(id));
             return;
         }
 
@@ -745,14 +743,20 @@ impl WindowView {
             {
                 column.update(cx, |col, cx| col.set_git_provider(provider, cx));
             }
-            if let Some(sm) = self.service_manager.clone() {
+            let services_converged = if let Some(sm) = self.service_manager.clone() {
                 let id = id.clone();
                 let new_path = new_path.clone();
-                sm.update(cx, move |sm, cx| sm.update_project_path(&id, &new_path, cx));
+                sm.update(cx, move |sm, cx| sm.update_project_path(&id, &new_path, cx))
+            } else {
+                true
+            };
+            if services_converged {
+                self.last_project_paths.insert(id.clone(), new_path.clone());
             }
         }
 
-        self.last_project_paths = current;
+        self.last_project_paths
+            .retain(|id, _| current.contains_key(id));
     }
 
     /// Ensure project columns exist for all visible projects
