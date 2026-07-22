@@ -15,6 +15,50 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+#[derive(Default)]
+struct WindowLayoutSaveTracker {
+    pending: parking_lot::Mutex<usize>,
+    drained: parking_lot::Condvar,
+}
+
+impl WindowLayoutSaveTracker {
+    fn start(self: &Arc<Self>) -> WindowLayoutSaveJob {
+        *self.pending.lock() += 1;
+        WindowLayoutSaveJob {
+            tracker: Arc::clone(self),
+        }
+    }
+
+    fn flush(&self) {
+        let mut pending = self.pending.lock();
+        while *pending != 0 {
+            self.drained.wait(&mut pending);
+        }
+    }
+}
+
+struct WindowLayoutSaveJob {
+    tracker: Arc<WindowLayoutSaveTracker>,
+}
+
+impl Drop for WindowLayoutSaveJob {
+    fn drop(&mut self) {
+        let mut pending = self.tracker.pending.lock();
+        *pending = pending.saturating_sub(1);
+        if *pending == 0 {
+            self.tracker.drained.notify_all();
+        }
+    }
+}
+
+fn flush_window_layout_saves_before_final<R>(
+    tracker: &WindowLayoutSaveTracker,
+    save_final: impl FnOnce() -> R,
+) -> R {
+    tracker.flush();
+    save_final()
+}
+
 /// Identity guard for [`kill_process_by_pid`]: OS pids recycle, so a pid taken
 /// from a possibly-stale `remote.json` may now belong to an unrelated process.
 /// Only a process whose name or executable file name starts with "okena" (the
@@ -379,6 +423,8 @@ impl Okena {
         })
         .detach();
 
+        let window_layout_saves = Arc::new(WindowLayoutSaveTracker::default());
+
         // Flush soft-closed terminals on quit. Their grace timer can't fire once
         // the app is gone, so tear the PTYs down here — otherwise a terminal
         // closed seconds before quitting would leak its persistent (dtach/tmux)
@@ -397,6 +443,7 @@ impl Okena {
 
         // Hand UI-owned lifecycle to the daemon on quit. It exits after the
         // final client disconnects; standalone daemons are left running.
+        let final_window_layout_saves = window_layout_saves.clone();
         cx.on_app_quit(move |this: &mut Self, cx| {
             // Stop any recovery from resurrecting the connection or spawning a
             // daemon while we tear down (esp. the remove_connection just below).
@@ -418,12 +465,15 @@ impl Okena {
             } else {
                 hand_off_ui_owned_daemon(this.spawned_daemon.take());
             }
+            let window_layout_saves = final_window_layout_saves.clone();
             async move {
                 if let Err(error) = smol::unblock(move || {
-                    crate::workspace::persistence::save_window_layout(
-                        &final_layout,
-                        project_layouts,
-                    )
+                    flush_window_layout_saves_before_final(&window_layout_saves, || {
+                        crate::workspace::persistence::save_window_layout(
+                            &final_layout,
+                            project_layouts,
+                        )
+                    })
                 })
                 .await
                 {
@@ -461,6 +511,7 @@ impl Okena {
             let save_pending = Arc::new(AtomicBool::new(false));
             let last_saved_version = Arc::new(AtomicU64::new(0));
             let workspace_for_save = workspace.clone();
+            let window_layout_saves = window_layout_saves.clone();
             cx.observe(&workspace, move |_this, ws_entity, cx| {
                 let current_version = ws_entity.read(cx).data_version();
                 if current_version == last_saved_version.load(Ordering::Relaxed) {
@@ -471,6 +522,7 @@ impl Okena {
                 let save_pending = save_pending.clone();
                 let last_saved = last_saved_version.clone();
                 let workspace = workspace_for_save.clone();
+                let window_layout_saves = window_layout_saves.clone();
                 cx.spawn(async move |_, cx| {
                     smol::Timer::after(Duration::from_millis(500)).await;
                     if save_pending.swap(false, Ordering::Relaxed) {
@@ -482,7 +534,11 @@ impl Okena {
                                 ws.data_version(),
                             )
                         });
+                        // Register after the snapshot but before the first yield,
+                        // so quit cannot miss a stale snapshot queued for blocking I/O.
+                        let save_job = window_layout_saves.start();
                         let save_result = smol::unblock(move || {
+                            let _save_job = save_job;
                             crate::workspace::persistence::save_window_layout(
                                 &data,
                                 project_layouts,
@@ -835,10 +891,57 @@ impl Okena {
 #[cfg(test)]
 mod tests {
     use super::{
-        RECOVERY_ESCALATE_AFTER_ATTEMPTS, RECOVERY_TOAST_AFTER_ATTEMPTS, is_okena_process,
-        recovery_backoff_delay, should_escalate_recovery,
+        RECOVERY_ESCALATE_AFTER_ATTEMPTS, RECOVERY_TOAST_AFTER_ATTEMPTS, WindowLayoutSaveTracker,
+        flush_window_layout_saves_before_final, is_okena_process, recovery_backoff_delay,
+        should_escalate_recovery,
     };
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    #[test]
+    fn final_window_layout_save_waits_for_older_snapshot() {
+        let tracker = Arc::new(WindowLayoutSaveTracker::default());
+        let old_job = tracker.start();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (old_started_tx, old_started_rx) = std::sync::mpsc::channel();
+        let (release_old_tx, release_old_rx) = std::sync::mpsc::channel();
+        let (flush_started_tx, flush_started_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let old_writes = writes.clone();
+            scope.spawn(move || {
+                let _old_job = old_job;
+                old_started_tx.send(()).expect("signal old save");
+                release_old_rx.recv().expect("release old save");
+                old_writes.lock().expect("writes lock").push("old");
+            });
+            old_started_rx.recv().expect("old save started");
+
+            let tracker = tracker.clone();
+            let final_writes = writes.clone();
+            let final_thread = scope.spawn(move || {
+                flush_started_tx.send(()).expect("signal final flush");
+                flush_window_layout_saves_before_final(&tracker, || {
+                    assert_eq!(
+                        *final_writes.lock().expect("writes lock"),
+                        ["old"],
+                        "the older snapshot must finish before the final write"
+                    );
+                    final_writes.lock().expect("writes lock").push("final");
+                });
+            });
+
+            flush_started_rx.recv().expect("final flush started");
+            assert!(
+                writes.lock().expect("writes lock").is_empty(),
+                "the final write must remain behind the older snapshot"
+            );
+            release_old_tx.send(()).expect("release old save");
+            final_thread.join().expect("final save thread");
+        });
+
+        assert_eq!(*writes.lock().expect("writes lock"), ["old", "final"]);
+    }
 
     #[test]
     fn okena_process_identity_guard() {
