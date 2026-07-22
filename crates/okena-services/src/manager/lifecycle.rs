@@ -19,6 +19,39 @@ impl ServiceManager {
         saved_terminal_ids: &HashMap<String, String>,
         cx: &mut impl ServiceCx,
     ) -> ServiceLoadStatus {
+        self.load_project_services_with_auto_start(
+            project_id,
+            project_path,
+            saved_terminal_ids,
+            true,
+            cx,
+        )
+    }
+
+    /// Reload definitions for a backend migration, preserving explicit stopped state.
+    pub fn load_project_services_for_backend_migration(
+        &mut self,
+        project_id: &str,
+        project_path: &str,
+        cx: &mut impl ServiceCx,
+    ) -> ServiceLoadStatus {
+        self.load_project_services_with_auto_start(
+            project_id,
+            project_path,
+            &HashMap::new(),
+            false,
+            cx,
+        )
+    }
+
+    fn load_project_services_with_auto_start(
+        &mut self,
+        project_id: &str,
+        project_path: &str,
+        saved_terminal_ids: &HashMap<String, String>,
+        start_auto_services: bool,
+        cx: &mut impl ServiceCx,
+    ) -> ServiceLoadStatus {
         let prepared = match load_project_config(project_path) {
             Ok(config) => {
                 let detected_compose_file =
@@ -30,11 +63,12 @@ impl ServiceManager {
             }
             Err(error) => PreparedProjectConfig::Failed(error.to_string()),
         };
-        self.load_project_services_prepared(
+        self.load_project_services_prepared_with_auto_start(
             project_id,
             project_path,
             saved_terminal_ids,
             prepared,
+            start_auto_services,
             cx,
         )
     }
@@ -46,6 +80,25 @@ impl ServiceManager {
         project_path: &str,
         saved_terminal_ids: &HashMap<String, String>,
         prepared: PreparedProjectConfig,
+        cx: &mut impl ServiceCx,
+    ) -> ServiceLoadStatus {
+        self.load_project_services_prepared_with_auto_start(
+            project_id,
+            project_path,
+            saved_terminal_ids,
+            prepared,
+            true,
+            cx,
+        )
+    }
+
+    fn load_project_services_prepared_with_auto_start(
+        &mut self,
+        project_id: &str,
+        project_path: &str,
+        saved_terminal_ids: &HashMap<String, String>,
+        prepared: PreparedProjectConfig,
+        start_auto_services: bool,
         cx: &mut impl ServiceCx,
     ) -> ServiceLoadStatus {
         log::info!(
@@ -103,12 +156,16 @@ impl ServiceManager {
             .insert(project_id.to_string(), project_path.to_string());
 
         let (config, detected_compose_file) = config;
-        let auto_start_names: Vec<String> = config
-            .services
-            .iter()
-            .filter(|s| s.auto_start)
-            .map(|s| s.name.clone())
-            .collect();
+        let auto_start_names: Vec<String> = if start_auto_services {
+            config
+                .services
+                .iter()
+                .filter(|s| s.auto_start)
+                .map(|s| s.name.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         for def in &config.services {
             let key = (project_id.to_string(), def.name.clone());

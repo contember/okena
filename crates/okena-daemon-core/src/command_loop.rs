@@ -206,6 +206,36 @@ fn recover_project_services(
     manager.load_project_services(project_id, &project_path, &HashMap::new(), &mut cx);
 }
 
+fn recover_project_services_for_backend_migration(
+    project_id: &str,
+    workspace: &Arc<Mutex<Workspace>>,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+) {
+    let project_owner = {
+        let workspace = workspace.lock();
+        workspace
+            .project(project_id)
+            .map(|project| (project.path.clone(), workspace.data_replacement_epoch()))
+    };
+    let Some((project_path, data_replacement_epoch)) = project_owner else {
+        return;
+    };
+    if !std::path::Path::new(&project_path).exists() {
+        return;
+    }
+    let reactor_ref = ServiceReactorRef::new(
+        service_manager.clone(),
+        runtime.clone(),
+        service_tick.clone(),
+    );
+    let mut manager = service_manager.lock();
+    let mut cx = reactor_ref.cx();
+    manager.set_project_writeback_owner(project_id, &project_path, data_replacement_epoch);
+    manager.load_project_services_for_backend_migration(project_id, &project_path, &mut cx);
+}
+
 struct TerminalBackendMigrationGuard {
     workspace: Arc<Mutex<Workspace>>,
     workspace_tick: watch::Sender<u64>,
@@ -298,7 +328,7 @@ fn rematerialize_terminal_backend_migration(
     }
 
     for project_id in &migration.project_ids {
-        recover_project_services(
+        recover_project_services_for_backend_migration(
             project_id,
             workspace,
             service_manager,

@@ -455,6 +455,28 @@ fn empty_loaded_project_publishes_an_explicit_empty_writeback() {
 }
 
 #[test]
+fn backend_migration_reload_does_not_restart_a_stopped_auto_start_service() {
+    let project = ProjectDir::with_config(
+        "services:\n  - name: web\n    command: echo web\n    auto_start: true\n",
+    );
+    let path = project.path();
+    let mut manager = manager();
+    let mut cx = RecordingCx::default();
+
+    let status = manager.load_project_services_for_backend_migration("project", &path, &mut cx);
+
+    assert_eq!(status, ServiceLoadStatus::Loaded);
+    assert_eq!(
+        manager
+            .instances()
+            .get(&("project".to_string(), "web".to_string()))
+            .map(|instance| &instance.status),
+        Some(&ServiceStatus::Stopped)
+    );
+    assert_eq!(cx.spawned.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn successful_reload_rearms_restart_and_port_detection() {
     let project = ProjectDir::with_config(
         "services:\n  - name: running\n    command: echo running\n  - name: restarting\n    command: echo restarting\n    restart_on_crash: true\n    restart_delay_ms: 25\n",
