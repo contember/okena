@@ -54,11 +54,35 @@ impl ServiceManager {
         ) else {
             return;
         };
+        let scope = first.scope();
         let runner = self.docker_mutation_runner.clone();
 
         cx.spawn_main(async move |this, cx| {
             let mut current = Some(first);
             while let Some(mutation) = current {
+                let key = (mutation.project_id.clone(), mutation.service_name.clone());
+                let is_current = this
+                    .update(cx, |this, _| {
+                        mutation
+                            .project_incarnation
+                            .as_ref()
+                            .is_some_and(|incarnation| {
+                                this.is_project_incarnation_current(
+                                    &mutation.project_id,
+                                    incarnation,
+                                )
+                            })
+                    })
+                    .unwrap_or(false);
+                if !is_current {
+                    current = this
+                        .update(cx, |this, _| {
+                            this.docker_mutations.finish(&scope, mutation.generation)
+                        })
+                        .flatten();
+                    continue;
+                }
+
                 let run = mutation.clone();
                 let runner = runner.clone();
                 let result = cx.spawn_blocking(async move { runner.run(&run) }).await;
@@ -79,12 +103,15 @@ impl ServiceManager {
                                 .project_incarnation
                                 .as_ref()
                                 .is_some_and(|incarnation| {
-                                    this.is_project_incarnation_current(&key.0, incarnation)
+                                    this.is_project_incarnation_current(
+                                        &mutation.project_id,
+                                        incarnation,
+                                    )
                                 });
-                        let next = this.docker_mutations.finish(&key, mutation.generation);
+                        let next = this.docker_mutations.finish(&scope, mutation.generation);
                         if is_current {
                             if failed
-                                && next.is_none()
+                                && !this.docker_mutations.has_service_mutation(&key.0, &key.1)
                                 && let Some(instance) = this.instances.get_mut(&key)
                                 && matches!(
                                     instance.status,

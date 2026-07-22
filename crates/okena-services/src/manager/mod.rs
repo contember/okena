@@ -82,25 +82,41 @@ impl DockerMutationKind {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct DockerMutationScope {
+    project_path: String,
+    compose_file: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DockerMutation {
     generation: u64,
     project_incarnation: Option<ProjectIncarnation>,
+    project_id: String,
     project_path: String,
     compose_file: String,
     service_name: String,
     kind: DockerMutationKind,
 }
 
+impl DockerMutation {
+    fn scope(&self) -> DockerMutationScope {
+        DockerMutationScope {
+            project_path: self.project_path.clone(),
+            compose_file: self.compose_file.clone(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ActiveDockerMutation {
-    generation: u64,
+    current: DockerMutation,
     pending: VecDeque<DockerMutation>,
 }
 
 #[derive(Default)]
 struct DockerMutationQueue {
-    active: HashMap<(String, String), ActiveDockerMutation>,
+    active: HashMap<DockerMutationScope, ActiveDockerMutation>,
     next_generation: u64,
 }
 
@@ -120,40 +136,55 @@ impl DockerMutationQueue {
         let mutation = DockerMutation {
             generation,
             project_incarnation,
+            project_id: key.0,
             project_path,
             compose_file,
-            service_name: key.1.clone(),
+            service_name: key.1,
             kind,
         };
+        let scope = mutation.scope();
 
-        if let Some(active) = self.active.get_mut(&key) {
+        if let Some(active) = self.active.get_mut(&scope) {
             active.pending.push_back(mutation);
             return None;
         }
 
         self.active.insert(
-            key,
+            scope,
             ActiveDockerMutation {
-                generation,
+                current: mutation.clone(),
                 pending: VecDeque::new(),
             },
         );
         Some(mutation)
     }
 
-    fn finish(&mut self, key: &(String, String), generation: u64) -> Option<DockerMutation> {
-        let active = self.active.get_mut(key)?;
-        if active.generation != generation {
+    fn finish(&mut self, scope: &DockerMutationScope, generation: u64) -> Option<DockerMutation> {
+        let active = self.active.get_mut(scope)?;
+        if active.current.generation != generation {
             return None;
         }
 
         if let Some(next) = active.pending.pop_front() {
-            active.generation = next.generation;
+            active.current = next.clone();
             return Some(next);
         }
 
-        self.active.remove(key);
+        self.active.remove(scope);
         None
+    }
+
+    fn active_service_names<'a>(&'a self, project_id: &'a str) -> impl Iterator<Item = &'a str> {
+        self.active
+            .values()
+            .flat_map(|active| std::iter::once(&active.current).chain(active.pending.iter()))
+            .filter(move |mutation| mutation.project_id == project_id)
+            .map(|mutation| mutation.service_name.as_str())
+    }
+
+    fn has_service_mutation(&self, project_id: &str, service_name: &str) -> bool {
+        self.active_service_names(project_id)
+            .any(|active_name| active_name == service_name)
     }
 }
 
