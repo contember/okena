@@ -6,6 +6,7 @@ use super::{
 };
 use crate::port_detect;
 use okena_core::process::is_process_alive;
+use okena_terminal::backend::TerminalLaunchPlan;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::path::Path;
@@ -273,7 +274,8 @@ impl ServiceManager {
             .to_string_lossy()
             .to_string();
 
-        let shell = ShellType::for_command(command);
+        let launch_plan = TerminalLaunchPlan::for_shell(ShellType::for_command(command))
+            .with_environment(instance.definition.env.clone().into_iter().collect());
 
         instance.status = ServiceStatus::Starting;
         instance.terminal_id = Some(terminal_id.clone());
@@ -292,7 +294,11 @@ impl ServiceManager {
             let result = cx
                 .spawn_blocking(async move {
                     smol::unblock(move || {
-                        launch_backend.reconnect_terminal(&launch_id, &launch_cwd, Some(&shell))
+                        launch_backend.reconnect_terminal_with_plan(
+                            &launch_id,
+                            &launch_cwd,
+                            &launch_plan,
+                        )
                     })
                     .await
                 })

@@ -1,9 +1,11 @@
 use super::commands::OkenaLaunchFailure;
 use super::*;
 use crate::config::{OkenaProjectConfig, PreparedProjectConfig, ServiceDefinition};
-use okena_terminal::backend::LocalBackend;
+use okena_terminal::backend::{LocalBackend, TerminalBackend, TerminalLaunchPlan};
 use okena_terminal::pty_manager::PtyManager;
 use okena_terminal::session_backend::SessionBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::TerminalTransport;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::{Future, ready};
@@ -147,6 +149,66 @@ struct BarrierDockerRunner {
     release_start: async_channel::Receiver<()>,
 }
 
+struct RecordingTerminalBackend {
+    local: LocalBackend,
+    plans: async_channel::Sender<TerminalLaunchPlan>,
+}
+
+impl TerminalBackend for RecordingTerminalBackend {
+    fn transport(&self) -> Arc<dyn TerminalTransport> {
+        self.local.transport()
+    }
+
+    fn create_terminal(&self, cwd: &str, shell: Option<&ShellType>) -> anyhow::Result<String> {
+        self.local.create_terminal(cwd, shell)
+    }
+
+    fn reconnect_terminal(
+        &self,
+        terminal_id: &str,
+        _cwd: &str,
+        _shell: Option<&ShellType>,
+    ) -> anyhow::Result<String> {
+        Ok(terminal_id.to_string())
+    }
+
+    fn reconnect_terminal_with_plan(
+        &self,
+        terminal_id: &str,
+        _cwd: &str,
+        plan: &TerminalLaunchPlan,
+    ) -> anyhow::Result<String> {
+        self.plans
+            .send_blocking(plan.clone())
+            .expect("record terminal launch plan");
+        Ok(terminal_id.to_string())
+    }
+
+    fn kill(&self, terminal_id: &str) {
+        self.local.kill(terminal_id);
+    }
+
+    fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf> {
+        self.local.capture_buffer(terminal_id)
+    }
+
+    fn supports_buffer_capture(&self) -> bool {
+        self.local.supports_buffer_capture()
+    }
+
+    fn is_remote(&self) -> bool {
+        self.local.is_remote()
+    }
+
+    fn get_shell_pid(&self, terminal_id: &str) -> Option<u32> {
+        self.local.get_shell_pid(terminal_id)
+    }
+
+    fn get_service_pids(&self, terminal_id: &str) -> Vec<u32> {
+        self.local.get_service_pids(terminal_id)
+    }
+}
+
 impl commands::DockerMutationRunner for BarrierDockerRunner {
     fn run(&self, mutation: &DockerMutation) -> crate::ServiceResult<()> {
         self.events
@@ -196,6 +258,18 @@ fn manager() -> ServiceManager {
     let backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
     let terminals: okena_terminal::TerminalsRegistry = Arc::new(Default::default());
     ServiceManager::new(backend, terminals)
+}
+
+fn recording_manager() -> (ServiceManager, async_channel::Receiver<TerminalLaunchPlan>) {
+    let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+    let local = LocalBackend::new(Arc::new(pty_manager));
+    let (plans_tx, plans_rx) = async_channel::unbounded();
+    let backend = Arc::new(RecordingTerminalBackend {
+        local,
+        plans: plans_tx,
+    });
+    let terminals: okena_terminal::TerminalsRegistry = Arc::new(Default::default());
+    (ServiceManager::new(backend, terminals), plans_rx)
 }
 
 fn make_instance(
@@ -766,6 +840,56 @@ fn backend_migration_reload_does_not_restart_a_stopped_auto_start_service() {
         Some(&ServiceStatus::Stopped)
     );
     assert_eq!(cx.spawned.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn initial_okena_launch_applies_service_environment() {
+    let path = "/project";
+    let (service_manager, plans) = recording_manager();
+    let executor = Rc::new(smol::LocalExecutor::new());
+    let service_manager = Rc::new(RefCell::new(service_manager));
+    let handle = ExecutingHandle {
+        manager: Rc::downgrade(&service_manager),
+        executor: executor.clone(),
+        notifications: Arc::new(AtomicUsize::new(0)),
+    };
+
+    smol::block_on(executor.run(async {
+        let mut cx = ExecutingCx { handle };
+        service_manager.borrow_mut().load_project_services_prepared(
+            "project",
+            path,
+            &HashMap::new(),
+            PreparedProjectConfig::Loaded {
+                config: Some(OkenaProjectConfig {
+                    services: vec![ServiceDefinition {
+                        name: "web".into(),
+                        command: "bun run dev".into(),
+                        cwd: ".".into(),
+                        env: HashMap::from([
+                            ("PORT".into(), "4100".into()),
+                            ("NODE_ENV".into(), "development".into()),
+                        ]),
+                        auto_start: true,
+                        restart_on_crash: false,
+                        restart_delay_ms: 1000,
+                    }],
+                    docker_compose: None,
+                }),
+                detected_compose_file: None,
+            },
+            &mut cx,
+        );
+
+        let plan = plans.recv().await.expect("initial service launch plan");
+        assert_eq!(
+            plan.environment,
+            vec![
+                ("NODE_ENV".into(), "development".into()),
+                ("PORT".into(), "4100".into()),
+            ]
+        );
+    }));
 }
 
 #[test]
