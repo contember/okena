@@ -748,7 +748,7 @@ impl WindowView {
             if let Some(sm) = self.service_manager.clone() {
                 let id = id.clone();
                 let new_path = new_path.clone();
-                sm.update(cx, move |sm, _cx| sm.update_project_path(&id, &new_path));
+                sm.update(cx, move |sm, cx| sm.update_project_path(&id, &new_path, cx));
             }
         }
 

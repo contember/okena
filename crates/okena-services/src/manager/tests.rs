@@ -1,6 +1,101 @@
 use super::*;
 use crate::config::ServiceDefinition;
+use okena_terminal::backend::LocalBackend;
+use okena_terminal::pty_manager::PtyManager;
+use okena_terminal::session_backend::SessionBackend;
 use std::collections::HashMap;
+use std::future::{Future, ready};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
+
+#[derive(Clone)]
+struct NoopHandle;
+
+struct NoopAsyncCx;
+
+#[derive(Clone, Default)]
+struct RecordingCx {
+    spawned: Arc<AtomicUsize>,
+}
+
+impl ServiceCx for RecordingCx {
+    type Handle = NoopHandle;
+    type AsyncCx = NoopAsyncCx;
+
+    fn notify(&mut self) {}
+
+    fn spawn_main<F>(&self, _f: F)
+    where
+        F: AsyncFnOnce(Self::Handle, &mut Self::AsyncCx) + 'static,
+    {
+        self.spawned.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl ServiceHandle for NoopHandle {
+    type AsyncCx = NoopAsyncCx;
+
+    fn update<R>(
+        &self,
+        _cx: &mut Self::AsyncCx,
+        _f: impl FnOnce(&mut ServiceManager, &mut <Self::AsyncCx as ServiceAsyncCx>::ReentryCx<'_>) -> R,
+    ) -> Option<R> {
+        None
+    }
+}
+
+impl ServiceAsyncCx for NoopAsyncCx {
+    type ReentryCx<'a> = RecordingCx;
+
+    fn spawn_blocking<T>(
+        &self,
+        future: impl Future<Output = T> + Send + 'static,
+    ) -> impl Future<Output = T>
+    where
+        T: Send + 'static,
+    {
+        future
+    }
+
+    fn timer(&self, _duration: Duration) -> impl Future<Output = ()> {
+        ready(())
+    }
+}
+
+struct ProjectDir(PathBuf);
+
+impl ProjectDir {
+    fn with_config(config: &str) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "okena-services-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create test project");
+        std::fs::write(path.join("okena.yaml"), config).expect("write test config");
+        Self(path)
+    }
+
+    fn path(&self) -> String {
+        self.0.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for ProjectDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).expect("remove test project");
+    }
+}
+
+fn manager() -> ServiceManager {
+    let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+    let backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
+    let terminals: okena_terminal::TerminalsRegistry = Arc::new(Default::default());
+    ServiceManager::new(backend, terminals)
+}
 
 fn make_instance(
     project_id: &str,
@@ -294,4 +389,90 @@ fn project_unload_invalidates_delayed_callbacks() {
 
     assert!(!lifecycles.is_current("project", &loaded));
     assert!(lifecycles.get("project", "/repo").is_none());
+}
+
+#[test]
+fn malformed_reload_preserves_current_incarnation() {
+    let project = ProjectDir::with_config("services: [");
+    let path = project.path();
+    let mut manager = manager();
+    manager.project_paths.insert("project".into(), path.clone());
+    let incarnation = manager.begin_project_incarnation("project", &path);
+    let mut cx = RecordingCx::default();
+
+    manager.reload_project_services("project", &path, &mut cx);
+
+    assert_eq!(
+        manager.project_incarnation("project", &path),
+        Some(incarnation)
+    );
+    assert_eq!(cx.spawned.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn successful_reload_rearms_restart_and_port_detection() {
+    let project = ProjectDir::with_config(
+        "services:\n  - name: running\n    command: echo running\n  - name: restarting\n    command: echo restarting\n    restart_on_crash: true\n    restart_delay_ms: 25\n",
+    );
+    let path = project.path();
+    let mut manager = manager();
+    manager.project_paths.insert("project".into(), path.clone());
+    let old_incarnation = manager.begin_project_incarnation("project", &path);
+    let (running_key, running) =
+        make_instance("project", "running", false, 0, ServiceStatus::Running);
+    let (restarting_key, mut restarting) =
+        make_instance("project", "restarting", true, 1, ServiceStatus::Restarting);
+    restarting.terminal_id = None;
+    manager.instances.insert(running_key.clone(), running);
+    manager.instances.insert(restarting_key.clone(), restarting);
+    let mut cx = RecordingCx::default();
+
+    manager.reload_project_services("project", &path, &mut cx);
+
+    let new_incarnation = manager
+        .project_incarnation("project", &path)
+        .expect("replacement incarnation");
+    assert_ne!(new_incarnation, old_incarnation);
+    assert_eq!(
+        manager
+            .port_detection_active
+            .get(&running_key)
+            .map(|state| &state.project_incarnation),
+        Some(&new_incarnation)
+    );
+    assert_eq!(
+        manager.instances[&restarting_key].status,
+        ServiceStatus::Restarting
+    );
+    assert_eq!(cx.spawned.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn project_path_update_reloads_runtime_under_new_path() {
+    let project = ProjectDir::with_config("services:\n  - name: web\n    command: echo web\n");
+    let new_path = project.path();
+    let mut manager = manager();
+    manager
+        .project_paths
+        .insert("project".into(), "/old/project/path".into());
+    let old_incarnation = manager.begin_project_incarnation("project", "/old/project/path");
+    let (key, instance) = make_instance("project", "web", false, 0, ServiceStatus::Running);
+    manager.instances.insert(key.clone(), instance);
+    let mut cx = RecordingCx::default();
+
+    manager.update_project_path("project", &new_path, &mut cx);
+
+    let new_incarnation = manager
+        .project_incarnation("project", &new_path)
+        .expect("new-path incarnation");
+    assert_ne!(new_incarnation, old_incarnation);
+    assert_eq!(manager.project_path("project"), Some(&new_path));
+    assert_eq!(
+        manager
+            .port_detection_active
+            .get(&key)
+            .map(|state| &state.project_incarnation),
+        Some(&new_incarnation)
+    );
+    assert_eq!(cx.spawned.load(Ordering::Relaxed), 1);
 }

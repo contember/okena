@@ -13,6 +13,32 @@ use std::sync::Arc;
 use std::time::Duration;
 
 impl ServiceManager {
+    pub(super) fn schedule_okena_restart(
+        &self,
+        project_id: &str,
+        service_name: &str,
+        project_path: &str,
+        restart_delay_ms: u64,
+        cx: &mut impl ServiceCx,
+    ) {
+        let Some(project_incarnation) = self.project_incarnation(project_id, project_path) else {
+            return;
+        };
+        let project_id = project_id.to_string();
+        let service_name = service_name.to_string();
+        let project_path = project_path.to_string();
+        let delay = Duration::from_millis(restart_delay_ms);
+
+        cx.spawn_main(async move |this, cx| {
+            cx.timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.is_project_incarnation_current(&project_id, &project_incarnation) {
+                    this.start_service(&project_id, &service_name, &project_path, cx);
+                }
+            });
+        });
+    }
+
     /// Start a service by spawning a PTY (Okena) or running `docker compose start` (Docker).
     pub fn start_service(
         &mut self,
@@ -440,9 +466,6 @@ impl ServiceManager {
 
         let (project_id, service_name) = key.clone();
         let project_path = self.project_paths.get(&project_id).cloned();
-        let project_incarnation = project_path
-            .as_deref()
-            .and_then(|path| self.project_incarnation(&project_id, path));
 
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
@@ -468,19 +491,16 @@ impl ServiceManager {
             instance.status = ServiceStatus::Restarting;
             instance.restart_count += 1;
 
-            let delay = Duration::from_millis(instance.definition.restart_delay_ms);
-
-            cx.spawn_main(async move |this, cx| {
-                cx.timer(delay).await;
-                let _ = this.update(cx, |this, cx| {
-                    if let (Some(project_path), Some(incarnation)) =
-                        (project_path, project_incarnation)
-                        && this.is_project_incarnation_current(&project_id, &incarnation)
-                    {
-                        this.start_service(&project_id, &service_name, &project_path, cx);
-                    }
-                });
-            });
+            let restart_delay_ms = instance.definition.restart_delay_ms;
+            if let Some(project_path) = project_path {
+                self.schedule_okena_restart(
+                    &project_id,
+                    &service_name,
+                    &project_path,
+                    restart_delay_ms,
+                    cx,
+                );
+            }
         } else {
             // Crash without restart: keep terminal_id and Terminal in registry
             // so the user can see the crash output until they manually restart.
