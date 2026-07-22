@@ -562,11 +562,19 @@ impl Workspace {
     }
 
     pub fn project_runtime_quiesce_is_current(&self, snapshot: &ProjectRuntimeQuiesce) -> bool {
+        self.project_runtime_quiesce_is_current_at(snapshot, &snapshot.project_path)
+    }
+
+    pub fn project_runtime_quiesce_is_current_at(
+        &self,
+        snapshot: &ProjectRuntimeQuiesce,
+        project_path: &str,
+    ) -> bool {
         self.data_replacement_epoch == snapshot.data_replacement_epoch
             && self.lifecycle.is_closing(&snapshot.project_id)
             && self
                 .project(&snapshot.project_id)
-                .is_some_and(|project| project.path == snapshot.project_path)
+                .is_some_and(|project| project.path == project_path)
     }
 
     /// Restore terminal metadata after empty layout slots have been materialized.

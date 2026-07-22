@@ -57,6 +57,7 @@ use okena_services::config::{PreparedProjectConfig, prepare_project_config};
 use okena_services::manager::{ServiceLoadStatus, ServiceManager, ServiceProjectStateToken};
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalSessionTeardown};
+use okena_workspace::actions::project::ProjectDirectoryRenamePlan;
 use okena_workspace::actions::soft_close::{
     begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow,
 };
@@ -367,7 +368,7 @@ async fn recover_quiesced_project_runtime(
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(), String> {
-    {
+    let terminal_error = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
         if !workspace.project_runtime_quiesce_is_current(&quiesced.workspace) {
@@ -376,20 +377,19 @@ async fn recover_quiesced_project_runtime(
                 quiesced.workspace.project_id
             ));
         }
-        if let okena_app_core::workspace::actions::execute::ActionResult::Err(error) =
-            spawn_uninitialized_terminals(
-                &mut workspace,
-                &quiesced.workspace.project_id,
-                backend.as_ref(),
-                terminals,
-                settings,
-                None,
-                &mut cx,
-            )
-        {
-            return Err(error);
+        match spawn_uninitialized_terminals(
+            &mut workspace,
+            &quiesced.workspace.project_id,
+            backend.as_ref(),
+            terminals,
+            settings,
+            None,
+            &mut cx,
+        ) {
+            okena_app_core::workspace::actions::execute::ActionResult::Ok(_) => None,
+            okena_app_core::workspace::actions::execute::ActionResult::Err(error) => Some(error),
         }
-    }
+    };
     recover_project_services(
         &quiesced.workspace.project_id,
         &quiesced.active_service_names,
@@ -410,7 +410,10 @@ async fn recover_quiesced_project_runtime(
         }
         workspace.finish_project_runtime_recovery(&quiesced.workspace, &mut cx);
     }
-    Ok(())
+    match terminal_error {
+        Some(error) => Err(format!("terminal recovery failed: {error}")),
+        None => Ok(()),
+    }
 }
 
 struct PreparedServiceOwner {
@@ -1206,6 +1209,244 @@ where
         terminals.lock().remove(&terminal_id);
     }
     CommandResult::Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rename_project_directory_off_reactor_with<Move>(
+    project_id: String,
+    new_name: String,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+    move_directory: Move,
+) -> CommandResult
+where
+    Move: FnOnce(
+            &ProjectDirectoryRenamePlan,
+        )
+            -> Result<okena_workspace::actions::project::ProjectDirectoryRenameResult, String>
+        + Send
+        + 'static,
+{
+    let (workspace_data, owner_epoch, old_path, new_path) = {
+        let workspace = workspace.lock();
+        if workspace.is_creating_project(&project_id) {
+            return CommandResult::Err("project is still being created".to_string());
+        }
+        if workspace.is_project_closing(&project_id) {
+            return CommandResult::Err("project operation is already in progress".to_string());
+        }
+        let Some(project) = workspace.project(&project_id) else {
+            return CommandResult::Err(format!("project not found: {project_id}"));
+        };
+        let old_path = std::path::PathBuf::from(&project.path);
+        let Some(parent) = old_path.parent() else {
+            return CommandResult::Err("cannot determine parent directory".to_string());
+        };
+        (
+            workspace.data().clone(),
+            workspace.data_replacement_epoch(),
+            old_path.clone(),
+            parent.join(&new_name),
+        )
+    };
+    let plan_project_id = project_id.clone();
+    let plan_new_name = new_name.clone();
+    let plan_new_path = new_path.to_string_lossy().into_owned();
+    let plan = match runtime
+        .spawn_blocking(move || {
+            let active_projects: Vec<(String, bool, bool)> = workspace_data
+                .projects
+                .iter()
+                .map(|project| (project.id.clone(), project.is_creating, project.is_closing))
+                .collect();
+            let mut planning_workspace = Workspace::new(workspace_data);
+            for (project_id, is_creating, is_closing) in active_projects {
+                if is_creating {
+                    planning_workspace.mark_creating_project(&project_id);
+                }
+                if is_closing {
+                    planning_workspace.mark_closing_project_authoritative(&project_id);
+                }
+            }
+            planning_workspace.prepare_project_directory_rename(
+                &plan_project_id,
+                plan_new_path,
+                plan_new_name,
+            )
+        })
+        .await
+    {
+        Ok(Ok(plan)) => plan,
+        Ok(Err(error)) => return CommandResult::Err(error),
+        Err(error) => {
+            return CommandResult::Err(format!("directory rename preparation failed: {error}"));
+        }
+    };
+
+    {
+        let workspace = workspace.lock();
+        if workspace.data_replacement_epoch() != owner_epoch
+            || workspace
+                .project(&project_id)
+                .is_none_or(|project| std::path::Path::new(&project.path) != old_path)
+        {
+            return CommandResult::Err(format!(
+                "project changed while its directory rename was being prepared: {project_id}"
+            ));
+        }
+    }
+    let quiesced = match begin_project_runtime_quiesce(
+        &project_id,
+        true,
+        workspace,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+        settings,
+        service_manager,
+        service_tick,
+        runtime,
+        terminals,
+    ) {
+        Ok(quiesced) => quiesced,
+        Err(error) => return CommandResult::Err(error),
+    };
+    if let Err(error) = flush_project_runtime_teardown(&quiesced.workspace, backend, runtime).await
+    {
+        let recovery = recover_quiesced_project_runtime(
+            &quiesced,
+            workspace,
+            workspace_tick,
+            hook_runner,
+            hook_monitor,
+            settings,
+            backend,
+            terminals,
+            service_manager,
+            service_tick,
+            runtime,
+        )
+        .await;
+        return CommandResult::Err(match recovery {
+            Ok(()) => error,
+            Err(recovery_error) => format!("{error}; recovery failed: {recovery_error}"),
+        });
+    }
+
+    let moved = {
+        let plan = plan.clone();
+        runtime
+            .spawn_blocking(move || move_directory(&plan).map(|result| (plan, result)))
+            .await
+    };
+    let (plan, move_result) = match moved {
+        Ok(Ok(moved)) => moved,
+        Ok(Err(error)) => {
+            let recovery = recover_quiesced_project_runtime(
+                &quiesced,
+                workspace,
+                workspace_tick,
+                hook_runner,
+                hook_monitor,
+                settings,
+                backend,
+                terminals,
+                service_manager,
+                service_tick,
+                runtime,
+            )
+            .await;
+            return CommandResult::Err(match recovery {
+                Ok(()) => error,
+                Err(recovery_error) => format!("{error}; recovery failed: {recovery_error}"),
+            });
+        }
+        Err(error) => {
+            let error = format!("directory rename task failed: {error}");
+            let recovery = recover_quiesced_project_runtime(
+                &quiesced,
+                workspace,
+                workspace_tick,
+                hook_runner,
+                hook_monitor,
+                settings,
+                backend,
+                terminals,
+                service_manager,
+                service_tick,
+                runtime,
+            )
+            .await;
+            return CommandResult::Err(match recovery {
+                Ok(()) => error,
+                Err(recovery_error) => format!("{error}; recovery failed: {recovery_error}"),
+            });
+        }
+    };
+
+    let (new_project_path, terminal_error) = {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut workspace = workspace.lock();
+        if !workspace.project_runtime_quiesce_is_current(&quiesced.workspace) {
+            return CommandResult::Err(format!(
+                "workspace changed while project directory was being renamed: {project_id}"
+            ));
+        }
+        if let Err(error) = workspace.finish_project_directory_rename(&plan, move_result, &mut cx) {
+            return CommandResult::Err(error);
+        }
+        let new_project_path = workspace
+            .project(&project_id)
+            .map(|project| project.path.clone())
+            .unwrap_or_default();
+        let terminal_error = match spawn_uninitialized_terminals(
+            &mut workspace,
+            &project_id,
+            backend.as_ref(),
+            terminals,
+            settings,
+            None,
+            &mut cx,
+        ) {
+            okena_app_core::workspace::actions::execute::ActionResult::Ok(_) => None,
+            okena_app_core::workspace::actions::execute::ActionResult::Err(error) => Some(error),
+        };
+        (new_project_path, terminal_error)
+    };
+    recover_project_services(
+        &project_id,
+        &quiesced.active_service_names,
+        workspace,
+        service_manager,
+        service_tick,
+        runtime,
+    )
+    .await;
+    {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut workspace = workspace.lock();
+        if !workspace.project_runtime_quiesce_is_current_at(&quiesced.workspace, &new_project_path)
+        {
+            return CommandResult::Err(format!(
+                "project changed while renamed runtimes were recovering: {project_id}"
+            ));
+        }
+        workspace.finish_project_runtime_recovery(&quiesced.workspace, &mut cx);
+    }
+    match terminal_error {
+        Some(error) => CommandResult::Err(format!(
+            "directory renamed, but terminal rematerialization failed: {error}"
+        )),
+        None => CommandResult::Ok(None),
+    }
 }
 
 /// Run physical worktree removal off the reactor while the daemon keeps the
@@ -2513,6 +2754,36 @@ pub async fn daemon_command_loop(
                             &service_tick,
                             &runtime,
                             |plan, force| plan.remove(force),
+                        )
+                        .await;
+                        send_git_poll_trigger_after_success(&result, trigger, &git_poll_trigger_tx);
+                        result
+                    }
+
+                    ActionRequest::RenameProjectDirectory {
+                        project_id,
+                        new_name,
+                    } => {
+                        let trigger =
+                            git_poll_trigger_for_action(&ActionRequest::RenameProjectDirectory {
+                                project_id: project_id.clone(),
+                                new_name: new_name.clone(),
+                            });
+                        let app_settings = settings.lock().clone();
+                        let result = rename_project_directory_off_reactor_with(
+                            project_id,
+                            new_name,
+                            &workspace,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                            &backend,
+                            &terminals,
+                            &app_settings,
+                            &service_manager,
+                            &service_tick,
+                            &runtime,
+                            |plan| plan.execute(),
                         )
                         .await;
                         send_git_poll_trigger_after_success(&result, trigger, &git_poll_trigger_tx);
@@ -5431,6 +5702,62 @@ mod tests {
         release: Mutex<std::sync::mpsc::Receiver<()>>,
     }
 
+    struct RenameRecordingBackend {
+        events: Arc<Mutex<Vec<String>>>,
+        next_id: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TerminalBackend for RenameRecordingBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(&self, cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
+            self.events.lock().push(format!("create:{cwd}"));
+            let id = self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(format!("replacement-{id}"))
+        }
+
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("rename backend does not reconnect terminals")
+        }
+
+        fn kill(&self, terminal_id: &str) {
+            self.events.lock().push(format!("kill:{terminal_id}"));
+        }
+
+        fn flush_teardown(&self) {
+            self.events.lock().push("flush".to_string());
+        }
+
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+
+        fn is_remote(&self) -> bool {
+            false
+        }
+
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
     impl TerminalBackend for RemovalBarrierBackend {
         fn transport(&self) -> Arc<dyn TerminalTransport> {
             Arc::new(StubTransport)
@@ -5857,6 +6184,163 @@ mod tests {
             })
             .await;
         std::fs::remove_dir_all(fixture).expect("remove fixture");
+    }
+
+    fn rename_runtime_fixture(label: &str) -> (std::path::PathBuf, Arc<Mutex<Workspace>>) {
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-rename-runtime-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let old_path = fixture.join("old");
+        std::fs::create_dir_all(old_path.join("nested")).expect("create rename fixture");
+        let mut data = workspace_with_initialized_terminal("live-in-old-directory");
+        data.projects[0].path = old_path.to_string_lossy().into_owned();
+        let mut nested = data.projects[0].clone();
+        nested.id = "nested".to_string();
+        nested.name = "Nested".to_string();
+        nested.path = old_path.join("nested").to_string_lossy().into_owned();
+        nested.layout = None;
+        data.projects.push(nested);
+        data.project_order.push("nested".to_string());
+        (fixture, Arc::new(Mutex::new(Workspace::new(data))))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn directory_rename_flushes_runtimes_then_materializes_new_path() {
+        let (fixture, workspace) = rename_runtime_fixture("success");
+        let old_path = fixture.join("old");
+        let new_path = fixture.join("renamed");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RenameRecordingBackend {
+            events: events.clone(),
+            next_id: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let runtime = tokio::runtime::Handle::current();
+        let settings = default_settings();
+
+        let result = tokio::task::LocalSet::new()
+            .run_until(rename_project_directory_off_reactor_with(
+                "p1".to_string(),
+                "renamed".to_string(),
+                &workspace,
+                &workspace_tick,
+                &None,
+                &None,
+                &backend,
+                &terminals,
+                &settings,
+                &service_manager,
+                &service_tick,
+                &runtime,
+                {
+                    let events = events.clone();
+                    move |plan| {
+                        assert_eq!(
+                            events.lock().as_slice(),
+                            &["kill:live-in-old-directory", "flush"]
+                        );
+                        plan.execute()
+                    }
+                },
+            ))
+            .await;
+
+        assert!(matches!(result, CommandResult::Ok(None)), "{result:?}");
+        assert!(!old_path.exists());
+        assert!(new_path.exists());
+        let workspace = workspace.lock();
+        assert_eq!(
+            workspace.project("p1").map(|project| project.path.as_str()),
+            Some(new_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            workspace
+                .project("nested")
+                .map(|project| project.path.as_str()),
+            Some(new_path.join("nested").to_string_lossy().as_ref())
+        );
+        assert!(!workspace.is_project_closing("p1"));
+        assert!(matches!(
+            workspace.project("p1").and_then(|project| project.layout.as_ref()),
+            Some(LayoutNode::Terminal { terminal_id: Some(id), .. }) if id == "replacement-1"
+        ));
+        drop(workspace);
+        assert_eq!(
+            events.lock().as_slice(),
+            &[
+                "kill:live-in-old-directory".to_string(),
+                "flush".to_string(),
+                format!("create:{}", new_path.display()),
+            ]
+        );
+        std::fs::remove_dir_all(fixture).expect("remove rename fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_directory_rename_recovers_old_path_runtime() {
+        let (fixture, workspace) = rename_runtime_fixture("failure");
+        let old_path = fixture.join("old");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RenameRecordingBackend {
+            events: events.clone(),
+            next_id: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let runtime = tokio::runtime::Handle::current();
+        let settings = default_settings();
+
+        let result = tokio::task::LocalSet::new()
+            .run_until(rename_project_directory_off_reactor_with(
+                "p1".to_string(),
+                "renamed".to_string(),
+                &workspace,
+                &workspace_tick,
+                &None,
+                &None,
+                &backend,
+                &terminals,
+                &settings,
+                &service_manager,
+                &service_tick,
+                &runtime,
+                |_plan| Err("injected move failure".to_string()),
+            ))
+            .await;
+
+        assert!(
+            matches!(result, CommandResult::Err(ref error) if error == "injected move failure"),
+            "{result:?}"
+        );
+        let workspace = workspace.lock();
+        assert_eq!(
+            workspace.project("p1").map(|project| project.path.as_str()),
+            Some(old_path.to_string_lossy().as_ref())
+        );
+        assert!(!workspace.is_project_closing("p1"));
+        assert!(matches!(
+            workspace.project("p1").and_then(|project| project.layout.as_ref()),
+            Some(LayoutNode::Terminal { terminal_id: Some(id), .. }) if id == "replacement-1"
+        ));
+        drop(workspace);
+        assert_eq!(
+            events.lock().last(),
+            Some(&format!("create:{}", old_path.display()))
+        );
+        std::fs::remove_dir_all(fixture).expect("remove rename fixture");
     }
 
     /// A worktree row whose optimistic create is still in flight (`is_creating`)

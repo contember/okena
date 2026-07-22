@@ -10,6 +10,60 @@ use crate::state::{LayoutNode, ProjectData, WindowId, Workspace};
 use okena_core::theme::FolderColor;
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone)]
+pub struct ProjectDirectoryRenamePlan {
+    project_id: String,
+    old_path: std::path::PathBuf,
+    new_name: String,
+    translated_paths: Vec<(String, String)>,
+    move_kind: ProjectDirectoryMove,
+}
+
+#[derive(Clone)]
+enum ProjectDirectoryMove {
+    Directory {
+        old_path: std::path::PathBuf,
+        new_path: std::path::PathBuf,
+    },
+    Worktree {
+        verified: okena_git::VerifiedWorktree,
+        new_path: std::path::PathBuf,
+    },
+}
+
+pub struct ProjectDirectoryRenameResult {
+    moved_worktree_root: Option<String>,
+}
+
+impl ProjectDirectoryRenamePlan {
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub fn old_path(&self) -> &std::path::Path {
+        &self.old_path
+    }
+
+    pub fn execute(&self) -> Result<ProjectDirectoryRenameResult, String> {
+        match &self.move_kind {
+            ProjectDirectoryMove::Directory { old_path, new_path } => {
+                std::fs::rename(old_path, new_path)
+                    .map_err(|error| format!("Failed to rename: {error}"))?;
+                Ok(ProjectDirectoryRenameResult {
+                    moved_worktree_root: None,
+                })
+            }
+            ProjectDirectoryMove::Worktree { verified, new_path } => {
+                let moved = okena_git::move_worktree(verified, new_path)
+                    .map_err(|error| error.to_string())?;
+                Ok(ProjectDirectoryRenameResult {
+                    moved_worktree_root: Some(moved.checkout_path().to_string_lossy().into_owned()),
+                })
+            }
+        }
+    }
+}
+
 /// Pick a replacement focus target after hiding `hidden_id`.
 ///
 /// Walks `visible_before` starting from the hidden project's position to find
@@ -395,6 +449,25 @@ impl Workspace {
         new_name: String,
         cx: &mut impl WorkspaceCx,
     ) -> Result<(), String> {
+        let plan = self.prepare_project_directory_rename(project_id, new_path, new_name)?;
+        let result = plan.execute()?;
+        self.finish_project_directory_rename(&plan, result, cx)
+    }
+
+    /// Validate and snapshot a directory rename without changing the filesystem.
+    pub fn prepare_project_directory_rename(
+        &self,
+        project_id: &str,
+        new_path: String,
+        new_name: String,
+    ) -> Result<ProjectDirectoryRenamePlan, String> {
+        if new_name.is_empty() {
+            return Err("name must not be empty".to_string());
+        }
+        if new_name.contains('/') || new_name.contains('\\') || new_name == "." || new_name == ".."
+        {
+            return Err("name must not contain path separators".to_string());
+        }
         let new_path_buf = std::path::PathBuf::from(&new_path);
         self.ensure_project_path_mutation_allowed(project_id, &new_path_buf)?;
         if new_path_buf.exists() {
@@ -422,14 +495,16 @@ impl Workspace {
                 );
             }
             let translated_paths = self.translate_local_project_paths(&old_path, &new_path_buf)?;
-            std::fs::rename(&old_path, &new_path_buf)
-                .map_err(|error| format!("Failed to rename: {error}"))?;
-            self.apply_translated_project_paths(translated_paths);
-            self.with_project(project_id, cx, |project| {
-                project.name = new_name;
-                true
+            return Ok(ProjectDirectoryRenamePlan {
+                project_id: project_id.to_string(),
+                old_path: old_path.clone(),
+                new_name,
+                translated_paths,
+                move_kind: ProjectDirectoryMove::Directory {
+                    old_path,
+                    new_path: new_path_buf,
+                },
             });
-            return Ok(());
         };
 
         let parent_path = self
@@ -458,33 +533,61 @@ impl Workspace {
                 return Err("renamed project path must stay inside its linked worktree".to_string());
             }
             let translated_paths = self.translate_local_project_paths(&old_path, &new_path_buf)?;
-            std::fs::rename(&old_path, &new_path_buf)
-                .map_err(|error| format!("Failed to rename: {error}"))?;
-            self.apply_translated_project_paths(translated_paths);
-            self.with_project(project_id, cx, |project| {
-                project.name = new_name;
-                true
+            return Ok(ProjectDirectoryRenamePlan {
+                project_id: project_id.to_string(),
+                old_path: old_path.clone(),
+                new_name,
+                translated_paths,
+                move_kind: ProjectDirectoryMove::Directory {
+                    old_path,
+                    new_path: new_path_buf,
+                },
             });
-            return Ok(());
         }
 
         let translated_paths =
             self.translate_local_project_paths(verified.checkout_path(), &new_path_buf)?;
+        Ok(ProjectDirectoryRenamePlan {
+            project_id: project_id.to_string(),
+            old_path,
+            new_name,
+            translated_paths,
+            move_kind: ProjectDirectoryMove::Worktree {
+                verified,
+                new_path: new_path_buf,
+            },
+        })
+    }
 
-        let moved = okena_git::move_worktree(&verified, &new_path_buf)
-            .map_err(|error| error.to_string())?;
-        let moved_root = moved.checkout_path().to_string_lossy().into_owned();
-        self.apply_translated_project_paths(translated_paths);
+    /// Publish the state translation after the off-reactor move succeeds.
+    pub fn finish_project_directory_rename(
+        &mut self,
+        plan: &ProjectDirectoryRenamePlan,
+        result: ProjectDirectoryRenameResult,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<(), String> {
+        if self
+            .project(&plan.project_id)
+            .is_none_or(|project| std::path::Path::new(&project.path) != plan.old_path)
+        {
+            return Err(format!(
+                "project changed while its directory was being renamed: {}",
+                plan.project_id
+            ));
+        }
+        self.apply_translated_project_paths(plan.translated_paths.clone());
         if let Some(project) = self
             .data
             .projects
             .iter_mut()
-            .find(|project| project.id == project_id)
+            .find(|project| project.id == plan.project_id)
         {
-            project.path = moved_root.clone();
-            project.name = new_name;
-            if let Some(metadata) = &mut project.worktree_info {
-                metadata.worktree_path = moved_root;
+            project.name = plan.new_name.clone();
+            if let Some(moved_root) = result.moved_worktree_root {
+                project.path = moved_root.clone();
+                if let Some(metadata) = &mut project.worktree_info {
+                    metadata.worktree_path = moved_root;
+                }
             }
         }
         self.notify_data(cx);
@@ -519,9 +622,14 @@ impl Workspace {
                         descendant.name
                     )
                 })?;
+            let translated_path = if suffix.as_os_str().is_empty() {
+                new_root.to_path_buf()
+            } else {
+                new_root.join(suffix)
+            };
             translated_paths.push((
                 descendant.id.clone(),
-                new_root.join(suffix).to_string_lossy().into_owned(),
+                translated_path.to_string_lossy().into_owned(),
             ));
         }
         Ok(translated_paths)
