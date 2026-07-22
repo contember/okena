@@ -64,8 +64,28 @@ pub struct PtyGeneration(u64);
 struct PtyInstances {
     current: HashMap<String, PtyGeneration>,
     creating: HashMap<String, PtyGeneration>,
-    exited: HashMap<String, PtyGeneration>,
+    exited: HashMap<String, ExitedPty>,
     pending_session_kills: HashMap<String, usize>,
+}
+
+struct ExitedPty {
+    generation: PtyGeneration,
+    #[cfg(windows)]
+    wsl_distro: Option<String>,
+    #[cfg(windows)]
+    wsl_backend: Option<ResolvedBackend>,
+}
+
+impl ExitedPty {
+    fn new(generation: PtyGeneration) -> Self {
+        Self {
+            generation,
+            #[cfg(windows)]
+            wsl_distro: None,
+            #[cfg(windows)]
+            wsl_backend: None,
+        }
+    }
 }
 
 impl PtyInstances {
@@ -93,8 +113,25 @@ impl PtyInstances {
             return false;
         }
         self.current.remove(terminal_id);
-        self.exited.insert(terminal_id.to_string(), generation);
+        self.exited
+            .insert(terminal_id.to_string(), ExitedPty::new(generation));
         true
+    }
+
+    #[cfg(windows)]
+    fn record_exited_wsl_metadata(
+        &mut self,
+        terminal_id: &str,
+        generation: PtyGeneration,
+        wsl_distro: Option<String>,
+        wsl_backend: Option<ResolvedBackend>,
+    ) {
+        if let Some(exited) = self.exited.get_mut(terminal_id)
+            && exited.generation == generation
+        {
+            exited.wsl_distro = wsl_distro;
+            exited.wsl_backend = wsl_backend;
+        }
     }
 
     fn cancel_creation(&mut self, terminal_id: &str, generation: PtyGeneration) {
@@ -109,12 +146,11 @@ impl PtyInstances {
         }
     }
 
-    fn claim_exited(&mut self, terminal_id: &str, generation: PtyGeneration) -> bool {
-        if self.exited.get(terminal_id).copied() != Some(generation) {
-            return false;
+    fn claim_exited(&mut self, terminal_id: &str, generation: PtyGeneration) -> Option<ExitedPty> {
+        if self.exited.get(terminal_id)?.generation != generation {
+            return None;
         }
-        self.exited.remove(terminal_id);
-        true
+        self.exited.remove(terminal_id)
     }
 
     fn queue_session_kill(&mut self, terminal_id: &str) {
@@ -1090,18 +1126,18 @@ impl PtyManager {
             instances.queue_session_kill(terminal_id);
             handle
         };
-        self.enqueue_session_kill(terminal_id, handle);
+        self.enqueue_session_kill(terminal_id, handle, None);
     }
 
     /// Kill the persistent session only if this exact exited generation still
     /// owns the logical terminal ID. A reconnect either replaces the exit claim
     /// or waits for the queued backend kill to finish.
     pub fn kill_exited(&self, terminal_id: &str, generation: PtyGeneration) -> bool {
-        let handle = {
+        let (handle, exited) = {
             let mut instances = self.instances.lock();
-            if !instances.claim_exited(terminal_id, generation) {
+            let Some(exited) = instances.claim_exited(terminal_id, generation) else {
                 return false;
-            }
+            };
             let mut terminals = self.terminals.lock();
             let handle = terminals
                 .get(terminal_id)
@@ -1109,21 +1145,36 @@ impl PtyManager {
                 .then(|| terminals.remove(terminal_id))
                 .flatten();
             instances.queue_session_kill(terminal_id);
-            handle
+            (handle, exited)
         };
-        self.enqueue_session_kill(terminal_id, handle);
+        self.enqueue_session_kill(terminal_id, handle, Some(exited));
         true
     }
 
-    fn enqueue_session_kill(&self, terminal_id: &str, handle: Option<PtyHandle>) {
+    fn enqueue_session_kill(
+        &self,
+        terminal_id: &str,
+        handle: Option<PtyHandle>,
+        _exited: Option<ExitedPty>,
+    ) {
         let session_backend = self.session_backend;
         let session_name = session_backend.session_name(terminal_id);
 
         // Read WSL info before moving the handle
         #[cfg(windows)]
-        let wsl_distro = handle.as_ref().and_then(|h| h.wsl_distro.clone());
+        let wsl_distro = handle
+            .as_ref()
+            .and_then(|h| h.wsl_distro.clone())
+            .or_else(|| {
+                _exited
+                    .as_ref()
+                    .and_then(|exited| exited.wsl_distro.clone())
+            });
         #[cfg(windows)]
-        let wsl_backend = handle.as_ref().and_then(|h| h.wsl_backend);
+        let wsl_backend = handle
+            .as_ref()
+            .and_then(|h| h.wsl_backend)
+            .or_else(|| _exited.as_ref().and_then(|exited| exited.wsl_backend));
 
         let job = TeardownJob {
             handle,
@@ -1571,6 +1622,15 @@ impl PtyManager {
                 None
             }
         };
+        #[cfg(windows)]
+        if let Some(handle) = handle.as_ref() {
+            instances.record_exited_wsl_metadata(
+                terminal_id,
+                generation,
+                handle.wsl_distro.clone(),
+                handle.wsl_backend,
+            );
+        }
         drop(instances);
         if let Some(handle) = handle {
             // Process already EOF'd — only reap the reader/writer threads. The later
@@ -1887,6 +1947,28 @@ mod tests {
         assert!(instances.is_current("t1", current));
         assert!(instances.claim_exit("t1", current));
         assert!(!instances.claim_exit("t1", current));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exited_generation_retains_wsl_teardown_target() {
+        let mut instances = PtyInstances::default();
+        let generation = PtyGeneration(1);
+        instances.publish("wsl-terminal", generation);
+        assert!(instances.claim_exit("wsl-terminal", generation));
+
+        instances.record_exited_wsl_metadata(
+            "wsl-terminal",
+            generation,
+            Some("Ubuntu".to_string()),
+            Some(ResolvedBackend::Dtach),
+        );
+        let exited = instances
+            .claim_exited("wsl-terminal", generation)
+            .expect("exited generation");
+
+        assert_eq!(exited.wsl_distro.as_deref(), Some("Ubuntu"));
+        assert_eq!(exited.wsl_backend, Some(ResolvedBackend::Dtach));
     }
 
     #[test]

@@ -331,13 +331,20 @@ impl ServiceManager {
         self.project_paths.get(project_id)
     }
 
-    /// Update the stored on-disk path for a project (e.g. after directory rename).
-    /// Only updates existing entries — projects that haven't been loaded yet will
-    /// pick up the new path when `load_project_services` is next called.
-    pub fn update_project_path(&mut self, project_id: &str, new_path: &str) {
-        if let Some(entry) = self.project_paths.get_mut(project_id) {
-            *entry = new_path.to_string();
-            self.begin_project_incarnation(project_id, new_path);
+    /// Reload an existing project's service lifecycle after an on-disk rename.
+    /// Projects that have not been loaded yet pick up their path during load.
+    pub fn update_project_path(
+        &mut self,
+        project_id: &str,
+        new_path: &str,
+        cx: &mut impl ServiceCx,
+    ) {
+        if self
+            .project_paths
+            .get(project_id)
+            .is_some_and(|path| path != new_path)
+        {
+            self.reload_project_services(project_id, new_path, cx);
         }
     }
 

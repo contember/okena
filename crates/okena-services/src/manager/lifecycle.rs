@@ -4,7 +4,7 @@ use super::{ServiceCx, ServiceInstance, ServiceKind, ServiceManager, ServiceStat
 use crate::config::load_project_config;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -184,6 +184,27 @@ impl ServiceManager {
 
     /// Stop all running services for a project and remove all instances/configs.
     pub fn unload_project_services(&mut self, project_id: &str, cx: &mut impl ServiceCx) {
+        self.unload_project_services_inner(project_id, &HashSet::new(), cx);
+    }
+
+    /// Unload manager state while leaving selected persistent backend sessions alive.
+    /// Used only while reconciling a replacement workspace snapshot that will
+    /// immediately reconnect those same terminal IDs.
+    pub fn unload_project_services_preserving(
+        &mut self,
+        project_id: &str,
+        preserved_terminal_ids: &HashSet<String>,
+        cx: &mut impl ServiceCx,
+    ) {
+        self.unload_project_services_inner(project_id, preserved_terminal_ids, cx);
+    }
+
+    fn unload_project_services_inner(
+        &mut self,
+        project_id: &str,
+        preserved_terminal_ids: &HashSet<String>,
+        cx: &mut impl ServiceCx,
+    ) {
         self.invalidate_project_incarnation(project_id);
 
         // Stop Docker status poller
@@ -202,7 +223,9 @@ impl ServiceManager {
             if let Some(instance) = self.instances.get(&key)
                 && let Some(terminal_id) = &instance.terminal_id
             {
-                self.backend.kill(terminal_id);
+                if !preserved_terminal_ids.contains(terminal_id) {
+                    self.backend.kill(terminal_id);
+                }
                 self.terminals.lock().remove(terminal_id);
                 self.terminal_to_service.remove(terminal_id);
             }
@@ -224,11 +247,11 @@ impl ServiceManager {
         project_path: &str,
         cx: &mut impl ServiceCx,
     ) {
-        self.begin_project_incarnation(project_id, project_path);
         let new_config = match load_project_config(project_path) {
             Ok(Some(config)) => config,
             Ok(None) => {
                 self.unload_project_services(project_id, cx);
+                self.load_project_services(project_id, project_path, &HashMap::new(), cx);
                 return;
             }
             Err(e) => {
@@ -240,6 +263,8 @@ impl ServiceManager {
                 return;
             }
         };
+
+        self.begin_project_incarnation(project_id, project_path);
 
         self.project_paths
             .insert(project_id.to_string(), project_path.to_string());
@@ -296,6 +321,38 @@ impl ServiceManager {
 
         self.configs
             .insert(project_id.to_string(), new_config.services.clone());
+
+        // Reload invalidates every async callback from the previous incarnation.
+        // Re-arm the ongoing Okena runtime work that survives definition merging.
+        let runtime_to_rearm: Vec<(String, ServiceStatus, u64)> = self
+            .instances
+            .iter()
+            .filter(|((pid, _), instance)| pid == project_id && instance.kind == ServiceKind::Okena)
+            .map(|((_, name), instance)| {
+                (
+                    name.clone(),
+                    instance.status.clone(),
+                    instance.definition.restart_delay_ms,
+                )
+            })
+            .collect();
+        for (service_name, status, restart_delay_ms) in runtime_to_rearm {
+            match status {
+                ServiceStatus::Running => {
+                    self.start_port_detection(project_id, &service_name, cx);
+                }
+                ServiceStatus::Restarting => {
+                    self.schedule_okena_restart(
+                        project_id,
+                        &service_name,
+                        project_path,
+                        restart_delay_ms,
+                        cx,
+                    );
+                }
+                _ => {}
+            }
+        }
 
         // Reload Docker Compose services
         self.reload_docker_compose_services(
