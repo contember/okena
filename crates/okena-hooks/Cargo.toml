@@ -19,3 +19,4 @@ gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", option
 parking_lot = "0.12"
 log = "0.4"
 libc = "0.2"
+base64 = "0.22"

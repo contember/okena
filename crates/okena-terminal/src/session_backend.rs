@@ -625,10 +625,28 @@ pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> Reso
     }
     drop(cache);
 
-    let result = match preference {
+    let result =
+        resolve_wsl_backend_with_probe(preference, |tool| is_wsl_tool_available(distro, tool));
+
+    CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| {
+            log::warn!("WSL backend cache mutex was poisoned, recovering");
+            poisoned.into_inner()
+        })
+        .insert(key, result);
+    result
+}
+
+#[cfg(windows)]
+fn resolve_wsl_backend_with_probe(
+    preference: SessionBackend,
+    mut available: impl FnMut(&str) -> bool,
+) -> ResolvedBackend {
+    match preference {
         SessionBackend::None => ResolvedBackend::None,
         SessionBackend::Tmux => {
-            if is_wsl_tool_available(distro, "tmux") {
+            if available("tmux") {
                 ResolvedBackend::Tmux
             } else {
                 log::warn!("tmux requested but not available in WSL, falling back to none");
@@ -636,7 +654,7 @@ pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> Reso
             }
         }
         SessionBackend::Screen => {
-            if is_wsl_tool_available(distro, "screen") {
+            if available("screen") {
                 ResolvedBackend::Screen
             } else {
                 log::warn!("screen requested but not available in WSL, falling back to none");
@@ -644,23 +662,25 @@ pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> Reso
             }
         }
         SessionBackend::Dtach => {
-            if is_wsl_tool_available(distro, "dtach") {
+            if wsl_dtach_available(&mut available) {
                 ResolvedBackend::Dtach
             } else {
-                log::warn!("dtach requested but not available in WSL, falling back to none");
+                log::warn!(
+                    "dtach requested but its WSL teardown tools are unavailable, falling back to none"
+                );
                 ResolvedBackend::None
             }
         }
         SessionBackend::Psmux => {
             // psmux is a host-Windows backend; WSL terminals need a Unix tool inside the
             // distro. Pick the best available there instead of refusing persistence.
-            if is_wsl_tool_available(distro, "dtach") {
+            if wsl_dtach_available(&mut available) {
                 log::info!("psmux requested but inside WSL — using dtach instead");
                 ResolvedBackend::Dtach
-            } else if is_wsl_tool_available(distro, "tmux") {
+            } else if available("tmux") {
                 log::info!("psmux requested but inside WSL — using tmux instead");
                 ResolvedBackend::Tmux
-            } else if is_wsl_tool_available(distro, "screen") {
+            } else if available("screen") {
                 log::info!("psmux requested but inside WSL — using screen instead");
                 ResolvedBackend::Screen
             } else {
@@ -671,13 +691,13 @@ pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> Reso
             }
         }
         SessionBackend::Auto => {
-            if is_wsl_tool_available(distro, "dtach") {
+            if wsl_dtach_available(&mut available) {
                 log::info!("Auto-detected dtach in WSL for session persistence");
                 ResolvedBackend::Dtach
-            } else if is_wsl_tool_available(distro, "tmux") {
+            } else if available("tmux") {
                 log::info!("Auto-detected tmux in WSL for session persistence");
                 ResolvedBackend::Tmux
-            } else if is_wsl_tool_available(distro, "screen") {
+            } else if available("screen") {
                 log::info!("Auto-detected screen in WSL for session persistence");
                 ResolvedBackend::Screen
             } else {
@@ -685,16 +705,12 @@ pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> Reso
                 ResolvedBackend::None
             }
         }
-    };
+    }
+}
 
-    CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| {
-            log::warn!("WSL backend cache mutex was poisoned, recovering");
-            poisoned.into_inner()
-        })
-        .insert(key, result);
-    result
+#[cfg(windows)]
+fn wsl_dtach_available(available: &mut impl FnMut(&str) -> bool) -> bool {
+    available("dtach") && available("lsof") && available("xargs")
 }
 
 /// Check if a tool is available inside a WSL distro using `command -v`.
@@ -741,6 +757,7 @@ impl ResolvedBackend {
         session_name: &str,
         wsl_cwd: &str,
         command: Option<SessionCommand<'_>>,
+        environment: &[(String, Option<String>)],
     ) -> Option<(String, Vec<String>)> {
         let inner_cmd = match self {
             // psmux runs on the Windows host, never inside WSL. resolve_for_wsl
@@ -749,7 +766,7 @@ impl ResolvedBackend {
             Self::Tmux => {
                 // Tmux doesn't reference host paths or $SHELL, so delegate to build_command
                 let (_program, inner_args) =
-                    self.build_command_with_custom(session_name, wsl_cwd, command, &[])?;
+                    self.build_command_with_custom(session_name, wsl_cwd, command, environment)?;
                 inner_args.last()?.to_string()
             }
             Self::Screen => {
@@ -791,12 +808,20 @@ impl ResolvedBackend {
             args.push("-d".to_string());
             args.push(d.to_string());
         }
-        args.extend([
-            "--".to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            inner_cmd,
-        ]);
+        args.push("--".to_string());
+        if !environment.is_empty() {
+            args.push("env".to_string());
+            for (key, value) in environment {
+                match value {
+                    Some(value) => args.push(format!("{key}={value}")),
+                    None => {
+                        args.push("-u".to_string());
+                        args.push(key.clone());
+                    }
+                }
+            }
+        }
+        args.extend(["sh".to_string(), "-c".to_string(), inner_cmd]);
 
         Some(("wsl.exe".to_string(), args))
     }
@@ -1451,6 +1476,7 @@ mod tests {
             "tm-12345678",
             "/home/user/project",
             None,
+            &[],
         );
         assert!(result.is_some());
         let (program, args) = result.unwrap();
@@ -1489,6 +1515,26 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    fn wsl_dtach_requires_teardown_dependencies() {
+        let resolved = resolve_wsl_backend_with_probe(SessionBackend::Dtach, |tool| {
+            matches!(tool, "dtach" | "xargs")
+        });
+
+        assert_eq!(resolved, ResolvedBackend::None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn wsl_auto_skips_unteardownable_dtach() {
+        let resolved = resolve_wsl_backend_with_probe(SessionBackend::Auto, |tool| {
+            matches!(tool, "dtach" | "tmux" | "xargs")
+        });
+
+        assert_eq!(resolved, ResolvedBackend::Tmux);
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn test_build_wsl_session_command_tmux() {
         let backend = ResolvedBackend::Tmux;
         let result = backend.build_wsl_session_command(
@@ -1496,6 +1542,7 @@ mod tests {
             "tm-12345678",
             "/home/user/project",
             None,
+            &[],
         );
         assert!(result.is_some());
         let (program, args) = result.unwrap();
@@ -1515,6 +1562,28 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    fn wsl_session_environment_stays_in_argv() {
+        let backend = ResolvedBackend::Tmux;
+        let hostile = "quote\" & %PATH% !bang!\r\nnext".to_string();
+        let (_, args) = backend
+            .build_wsl_session_command(
+                Some("Ubuntu"),
+                "tm-12345678",
+                "/home/user/project",
+                None,
+                &[("OKENA_PROJECT_NAME".to_string(), Some(hostile.clone()))],
+            )
+            .expect("WSL command");
+
+        let env_index = args.iter().position(|arg| arg == "env").expect("env argv");
+        assert_eq!(
+            args.get(env_index + 1),
+            Some(&format!("OKENA_PROJECT_NAME={hostile}"))
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn test_build_wsl_session_command_preserves_custom_argv() {
         let backend = ResolvedBackend::Tmux;
         let command_args = vec!["-lc".to_string(), "printf '%s' \"hello world\"".to_string()];
@@ -1527,6 +1596,7 @@ mod tests {
                     program: "/bin/bash",
                     args: &command_args,
                 }),
+                &[],
             )
             .unwrap();
 
@@ -1546,6 +1616,7 @@ mod tests {
             "tm-12345678",
             "/home/user/project",
             None,
+            &[],
         );
         assert!(result.is_none());
     }
@@ -1559,6 +1630,7 @@ mod tests {
             "tm-12345678",
             "/home/user/project",
             None,
+            &[],
         );
         assert!(result.is_some());
         let (program, args) = result.unwrap();

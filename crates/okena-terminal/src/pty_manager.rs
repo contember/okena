@@ -16,6 +16,25 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
+#[cfg(windows)]
+fn append_wsl_environment(cmd: &mut CommandBuilder, environment: &[(String, Option<String>)]) {
+    if environment.is_empty() {
+        return;
+    }
+    cmd.arg("env");
+    for (key, value) in environment {
+        match value {
+            Some(value) => {
+                cmd.arg(format!("{key}={value}"));
+            }
+            None => {
+                cmd.arg("-u");
+                cmd.arg(key);
+            }
+        }
+    }
+}
+
 /// Trait for broadcasting PTY output to external consumers (e.g. remote WebSocket clients).
 /// Implementations must be thread-safe as this is called from PTY reader threads.
 pub trait PtyOutputSink: Send + Sync {
@@ -636,18 +655,20 @@ impl PtyManager {
             pixel_height: 0,
         })?;
 
+        let launch_environment = self.launch_environment(plan);
+
         // Build command based on session backend and shell config
         #[cfg(unix)]
-        let mut cmd = self.build_terminal_command(terminal_id, cwd, plan);
+        let mut cmd = self.build_terminal_command(terminal_id, cwd, plan, &launch_environment);
         #[cfg(windows)]
         let (mut cmd, wsl_distro, wsl_backend) =
-            self.build_terminal_command(terminal_id, cwd, plan);
+            self.build_terminal_command(terminal_id, cwd, plan, &launch_environment);
 
         // Apply caller-configured env overrides to the PTY unconditionally.
         // These are profile-scoped values (e.g. CLAUDE_CONFIG_DIR) that must
         // override whatever the user's shell rc or the parent process has set.
         // `None` removes the variable so a stale inherited value cannot leak in.
-        for (key, val) in &*self.extra_env.lock() {
+        for (key, val) in &launch_environment {
             match val {
                 Some(val) => cmd.env(key, val),
                 None => cmd.env_remove(key),
@@ -781,6 +802,15 @@ impl PtyManager {
         Ok(())
     }
 
+    fn launch_environment(&self, plan: &TerminalLaunchPlan) -> Vec<(String, Option<String>)> {
+        let mut environment = self.extra_env.lock().clone();
+        for (key, value) in &plan.environment {
+            environment.retain(|(existing, _)| existing != key);
+            environment.push((key.clone(), Some(value.clone())));
+        }
+        environment
+    }
+
     /// Build the command to run in the terminal.
     /// On Unix, returns just the CommandBuilder.
     /// On Windows, also returns WSL distro/backend info for session persistence.
@@ -790,6 +820,7 @@ impl PtyManager {
         terminal_id: &str,
         cwd: &str,
         plan: &TerminalLaunchPlan,
+        launch_environment: &[(String, Option<String>)],
     ) -> CommandBuilder {
         // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
         // so it can be passed to the session backend
@@ -810,12 +841,11 @@ impl PtyManager {
             },
         );
 
-        let extra_env = self.extra_env.lock().clone();
         let mut cmd = if let Some((program, args)) = self.session_backend.build_command_with_custom(
             &self.session_backend.session_name(terminal_id),
             cwd,
             custom_command,
-            &extra_env,
+            launch_environment,
         ) {
             let mut cmd = CommandBuilder::new(program);
             for arg in args {
@@ -853,6 +883,7 @@ impl PtyManager {
         terminal_id: &str,
         cwd: &str,
         plan: &TerminalLaunchPlan,
+        launch_environment: &[(String, Option<String>)],
     ) -> (CommandBuilder, Option<String>, Option<ResolvedBackend>) {
         use crate::session_backend::resolve_for_wsl;
         use crate::shell_config::windows_path_to_wsl;
@@ -883,12 +914,11 @@ impl PtyManager {
                 return fallback;
             }
             let session_name = self.session_backend.session_name(terminal_id);
-            let extra_env = self.extra_env.lock().clone();
             match self.session_backend.build_command_with_custom(
                 &session_name,
                 cwd,
                 custom_command,
-                &extra_env,
+                launch_environment,
             ) {
                 Some((program, args)) => {
                     let mut cmd = CommandBuilder::new(program);
@@ -913,6 +943,7 @@ impl PtyManager {
                     &session_name,
                     &wsl_cwd,
                     custom_command,
+                    launch_environment,
                 ) {
                     let mut cmd = CommandBuilder::new(program);
                     for arg in args {
@@ -926,6 +957,7 @@ impl PtyManager {
                     .build_command(cwd);
                     if let Some(command) = &plan.initial_command {
                         cmd.arg("--");
+                        append_wsl_environment(&mut cmd, launch_environment);
                         cmd.arg(&command.program);
                         for arg in &command.args {
                             cmd.arg(arg);

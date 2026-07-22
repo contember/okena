@@ -98,7 +98,7 @@ impl HookRunner {
         keep_alive: bool,
     ) -> Result<(String, String), String> {
         // Store an independently rerunnable command, including persistent env setup.
-        let full_cmd = format!("{}{}", build_export_prefix(env_vars), command);
+        let full_cmd = rerunnable_hook_command(command, env_vars);
 
         let cwd = if project_path.is_empty() {
             "."
@@ -106,15 +106,18 @@ impl HookRunner {
             project_path
         };
 
-        let terminal_id = if keep_alive {
-            let shell = keep_alive_hook_shell(&full_cmd);
-            self.backend.create_terminal(cwd, Some(&shell))
+        let shell = if keep_alive {
+            keep_alive_hook_shell(&full_cmd)
         } else {
             // Use sh -c so the PTY exits when the command completes.
-            let shell = ShellType::for_command(full_cmd.clone());
-            self.backend.create_terminal(cwd, Some(&shell))
-        }
-        .map_err(|e| format!("Failed to create hook terminal: {}", e))?;
+            ShellType::for_command(full_cmd.clone())
+        };
+        let plan =
+            TerminalLaunchPlan::for_shell(shell).with_environment(safe_hook_environment(env_vars));
+        let terminal_id = self
+            .backend
+            .create_terminal_with_plan(cwd, &plan)
+            .map_err(|e| format!("Failed to create hook terminal: {}", e))?;
 
         let transport = self.backend.transport();
         let terminal = Arc::new(Terminal::new(
@@ -167,9 +170,8 @@ fn is_valid_env_key(key: &str) -> bool {
         .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// Build shell export statements from a HashMap of env vars.
-/// POSIX: `export KEY='value'; ` with single-quote escaping.
-/// Windows: `set "KEY=value" && ` with cmd.exe escaping.
+/// Build POSIX shell export statements from a HashMap of env vars.
+#[cfg(not(windows))]
 fn build_export_prefix(env_vars: &HashMap<String, String>) -> String {
     let safe_env: Vec<_> = env_vars
         .iter()
@@ -211,6 +213,55 @@ fn build_export_prefix(env_vars: &HashMap<String, String>) -> String {
             .map(|(k, v)| format!("export {}='{}'; ", k, v.replace('\'', "'\\''")))
             .collect();
         parts.join("")
+    }
+}
+
+#[cfg(windows)]
+fn build_export_prefix(_env_vars: &HashMap<String, String>) -> String {
+    // Windows callers that need environment propagation must use TerminalLaunchPlan.
+    String::new()
+}
+
+#[cfg(windows)]
+fn windows_encoded_hook_command(command: &str, env_vars: &HashMap<String, String>) -> String {
+    use base64::Engine;
+
+    let mut script = String::new();
+    for (key, value) in safe_hook_environment(env_vars) {
+        let value = base64::engine::general_purpose::STANDARD.encode(value.as_bytes());
+        script.push_str(&format!(
+            "$env:{key}=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{value}'));"
+        ));
+    }
+    let command = base64::engine::general_purpose::STANDARD.encode(command.as_bytes());
+    script.push_str(&format!(
+        "$okenaCommand=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{command}'));"
+    ));
+    script.push_str("& $env:ComSpec /D /S /C $okenaCommand;exit $LASTEXITCODE");
+
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    format!("powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}")
+}
+
+fn safe_hook_environment(env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
+    let mut environment: Vec<_> = env_vars
+        .iter()
+        .filter(|(key, _)| is_valid_env_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    environment.sort_by(|a, b| a.0.cmp(&b.0));
+    environment
+}
+
+fn rerunnable_hook_command(command: &str, env_vars: &HashMap<String, String>) -> String {
+    #[cfg(windows)]
+    {
+        return windows_encoded_hook_command(command, env_vars);
+    }
+    #[cfg(not(windows))]
+    {
+        format!("{}{}", build_export_prefix(env_vars), command)
     }
 }
 
@@ -1412,7 +1463,8 @@ pub fn resolve_terminal_on_create_simple(
 
 /// Apply the `terminal.on_create` command by wrapping the shell to run
 /// the command first, then `exec` into the original shell.
-/// Environment variables are exported so they persist in the shell session.
+/// On POSIX, environment variables are exported so they persist in the shell session.
+/// Windows callers must use [`terminal_launch_plan`] to propagate environment safely.
 /// Produces: `sh -c 'export K=V; ...; <on_create_cmd>; exec <shell_cmd>'`
 pub fn apply_on_create(
     shell: &ShellType,
@@ -1436,16 +1488,15 @@ pub fn terminal_launch_plan(
         return TerminalLaunchPlan::for_shell(shell);
     }
 
-    let (program, args, handoff, prefix, separator, needs_handoff) =
-        terminal_launch_parts(&shell, env_vars);
+    let (program, args, handoff, separator, needs_handoff) = terminal_launch_parts(&shell);
     let wrapped = shell_wrapper
         .map(|wrapper| wrapper.replace("{shell}", &handoff))
         .unwrap_or_else(|| handoff.clone());
     let body = match (on_create, shell_wrapper, needs_handoff) {
-        (Some(command), _, true) => format!("{prefix}{command}{separator}{wrapped}"),
-        (Some(command), None, false) => format!("{prefix}{command}"),
-        (Some(command), Some(_), false) => format!("{prefix}{command}{separator}{wrapped}"),
-        (None, Some(_), _) => format!("{prefix}{wrapped}"),
+        (Some(command), _, true) => format!("{command}{separator}{wrapped}"),
+        (Some(command), None, false) => command.to_string(),
+        (Some(command), Some(_), false) => format!("{command}{separator}{wrapped}"),
+        (None, Some(_), _) => wrapped,
         (None, None, _) => unreachable!("empty hooks returned above"),
     };
     let mut command_args = args;
@@ -1456,13 +1507,11 @@ pub fn terminal_launch_plan(
             program,
             args: command_args,
         }),
+        environment: safe_hook_environment(env_vars),
     }
 }
 
-fn terminal_launch_parts(
-    shell: &ShellType,
-    env_vars: &HashMap<String, String>,
-) -> (String, Vec<String>, String, String, &'static str, bool) {
+fn terminal_launch_parts(shell: &ShellType) -> (String, Vec<String>, String, &'static str, bool) {
     #[cfg(windows)]
     match shell {
         ShellType::Cmd | ShellType::Default => {
@@ -1470,7 +1519,6 @@ fn terminal_launch_parts(
                 "cmd.exe".to_string(),
                 vec!["/D".to_string(), "/S".to_string(), "/C".to_string()],
                 "cmd.exe /K".to_string(),
-                build_cmd_env_prefix(env_vars),
                 " & ",
                 true,
             );
@@ -1485,7 +1533,6 @@ fn terminal_launch_parts(
                     "-Command".to_string(),
                 ],
                 format!("{program} -NoLogo -NoExit"),
-                build_powershell_env_prefix(env_vars),
                 "; ",
                 false,
             );
@@ -1495,7 +1542,6 @@ fn terminal_launch_parts(
                 "sh".to_string(),
                 vec!["-lc".to_string()],
                 "exec \"${SHELL:-sh}\"".to_string(),
-                build_posix_env_prefix(env_vars),
                 "; ",
                 true,
             );
@@ -1507,7 +1553,6 @@ fn terminal_launch_parts(
                 path.clone(),
                 command_args,
                 format!("exec {}", shell.to_command_string()),
-                build_posix_env_prefix(env_vars),
                 "; ",
                 true,
             );
@@ -1528,41 +1573,10 @@ fn terminal_launch_parts(
             program,
             args,
             format!("exec {}", shell.to_command_string()),
-            build_posix_env_prefix(env_vars),
             "; ",
             true,
         )
     }
-}
-
-fn safe_hook_env(env_vars: &HashMap<String, String>) -> Vec<(&String, &String)> {
-    env_vars
-        .iter()
-        .filter(|(key, _)| is_valid_env_key(key))
-        .collect()
-}
-
-fn build_posix_env_prefix(env_vars: &HashMap<String, String>) -> String {
-    safe_hook_env(env_vars)
-        .into_iter()
-        .map(|(key, value)| format!("export {key}='{}'; ", value.replace('\'', "'\\''")))
-        .collect()
-}
-
-#[cfg(windows)]
-fn build_cmd_env_prefix(env_vars: &HashMap<String, String>) -> String {
-    safe_hook_env(env_vars)
-        .into_iter()
-        .map(|(key, value)| format!("set \"{key}={}\" & ", value.replace('%', "%%")))
-        .collect()
-}
-
-#[cfg(windows)]
-fn build_powershell_env_prefix(env_vars: &HashMap<String, String>) -> String {
-    safe_hook_env(env_vars)
-        .into_iter()
-        .map(|(key, value)| format!("$env:{key}='{}'; ", value.replace('\'', "''")))
-        .collect()
 }
 
 /// Fire the `terminal.on_close` hook after a terminal PTY exits, taking the
@@ -1682,7 +1696,8 @@ pub fn resolve_shell_wrapper(
 
 /// Apply shell_wrapper to a ShellType, producing a new ShellType.
 /// The wrapper template uses `{shell}` as a placeholder for the resolved shell command.
-/// Environment variables are exported so they persist in the shell session.
+/// On POSIX, environment variables are exported so they persist in the shell session.
+/// Windows callers must use [`terminal_launch_plan`] to propagate environment safely.
 ///
 /// If the result contains shell metacharacters (`&&`, `||`, `;`, `|`), it is wrapped
 /// in `sh -c` for proper execution. Otherwise, it is split into executable + args directly,
@@ -2040,6 +2055,7 @@ mod tests {
         assert!(!is_valid_env_key("FOO=BAR"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn apply_shell_wrapper_simple() {
         use super::apply_shell_wrapper;
@@ -2063,6 +2079,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn apply_shell_wrapper_with_metacharacters() {
         use super::apply_shell_wrapper;
@@ -2095,11 +2112,13 @@ mod tests {
         assert_eq!(shell.to_command_string(), "/usr/bin/fish");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn build_export_prefix_empty() {
         assert_eq!(build_export_prefix(&HashMap::new()), "");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn build_export_prefix_single_var() {
         let mut env = HashMap::new();
@@ -2114,6 +2133,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn build_export_prefix_escapes_single_quotes() {
         let mut env = HashMap::new();
@@ -2129,6 +2149,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn build_export_prefix_filters_invalid_keys() {
         let mut env = HashMap::new();
@@ -2171,6 +2192,7 @@ mod tests {
         assert!(!args[2].contains("${SHELL:-sh}"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn apply_on_create_with_env_vars() {
         let shell = ShellType::Custom {
@@ -2202,6 +2224,47 @@ mod tests {
         assert_eq!(&command.args[..3], ["/D", "/S", "/C"]);
         assert!(command.args[3].contains("echo ready & cmd.exe /K"));
         assert!(!command.args[3].contains("; exec"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_launch_keeps_hostile_environment_out_of_script() {
+        let hostile = "quote\" & echo owned>%TEMP%\\okena-sentinel !bang!\r\nnext".to_string();
+        let env = HashMap::from([("OKENA_PROJECT_NAME".to_string(), hostile.clone())]);
+        let plan = terminal_launch_plan(ShellType::Cmd, None, Some("echo ready"), &env);
+        let command = plan.initial_command.expect("create command");
+
+        assert_eq!(
+            plan.environment,
+            vec![("OKENA_PROJECT_NAME".to_string(), hostile.clone())]
+        );
+        assert!(!command.args.iter().any(|arg| arg.contains(&hostile)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rerunnable_cmd_hook_encodes_environment_and_command() {
+        use base64::Engine;
+
+        let hostile = "quote\" & %PATH% !bang!\r\nnext";
+        let env = HashMap::from([("OKENA_PROJECT_NAME".to_string(), hostile.to_string())]);
+        let rerunnable = windows_encoded_hook_command("echo ready", &env);
+        let encoded = rerunnable
+            .split_whitespace()
+            .last()
+            .expect("encoded command");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("base64 command");
+        let utf16: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let script = String::from_utf16(&utf16).expect("UTF-16LE command");
+
+        assert!(!script.contains(hostile));
+        assert!(script.contains(&base64::engine::general_purpose::STANDARD.encode(hostile)));
+        assert!(script.contains(&base64::engine::general_purpose::STANDARD.encode("echo ready")));
     }
 
     #[cfg(windows)]
@@ -2242,6 +2305,7 @@ mod tests {
         assert!(!command.args[1].contains("cmd.exe"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn apply_shell_wrapper_with_env_vars() {
         let shell = ShellType::Custom {
