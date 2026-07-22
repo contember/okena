@@ -154,6 +154,14 @@ struct RecordingTerminalBackend {
     plans: async_channel::Sender<TerminalLaunchPlan>,
 }
 
+struct BarrierRestartBackend {
+    local: LocalBackend,
+    pid_lookups: async_channel::Sender<String>,
+    release_pid_lookup: async_channel::Receiver<()>,
+    kills: async_channel::Sender<String>,
+    plans: async_channel::Sender<TerminalLaunchPlan>,
+}
+
 impl TerminalBackend for RecordingTerminalBackend {
     fn transport(&self) -> Arc<dyn TerminalTransport> {
         self.local.transport()
@@ -206,6 +214,69 @@ impl TerminalBackend for RecordingTerminalBackend {
 
     fn get_service_pids(&self, terminal_id: &str) -> Vec<u32> {
         self.local.get_service_pids(terminal_id)
+    }
+}
+
+impl TerminalBackend for BarrierRestartBackend {
+    fn transport(&self) -> Arc<dyn TerminalTransport> {
+        self.local.transport()
+    }
+
+    fn create_terminal(&self, cwd: &str, shell: Option<&ShellType>) -> anyhow::Result<String> {
+        self.local.create_terminal(cwd, shell)
+    }
+
+    fn reconnect_terminal(
+        &self,
+        terminal_id: &str,
+        _cwd: &str,
+        _shell: Option<&ShellType>,
+    ) -> anyhow::Result<String> {
+        Ok(terminal_id.to_string())
+    }
+
+    fn reconnect_terminal_with_plan(
+        &self,
+        terminal_id: &str,
+        _cwd: &str,
+        plan: &TerminalLaunchPlan,
+    ) -> anyhow::Result<String> {
+        self.plans
+            .send_blocking(plan.clone())
+            .expect("record terminal launch plan");
+        Ok(terminal_id.to_string())
+    }
+
+    fn kill(&self, terminal_id: &str) {
+        self.kills
+            .send_blocking(terminal_id.to_string())
+            .expect("record terminal kill");
+    }
+
+    fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf> {
+        self.local.capture_buffer(terminal_id)
+    }
+
+    fn supports_buffer_capture(&self) -> bool {
+        self.local.supports_buffer_capture()
+    }
+
+    fn is_remote(&self) -> bool {
+        self.local.is_remote()
+    }
+
+    fn get_shell_pid(&self, terminal_id: &str) -> Option<u32> {
+        self.local.get_shell_pid(terminal_id)
+    }
+
+    fn get_service_pids(&self, terminal_id: &str) -> Vec<u32> {
+        self.pid_lookups
+            .send_blocking(terminal_id.to_string())
+            .expect("record PID lookup");
+        self.release_pid_lookup
+            .recv_blocking()
+            .expect("release PID lookup");
+        Vec::new()
     }
 }
 
@@ -1044,6 +1115,110 @@ fn starting_launch_completes_after_same_project_reload() {
     assert!(manager.terminals.lock().contains_key(&terminal_id));
     assert_eq!(manager.terminal_to_service.get(&terminal_id), Some(&key));
     assert!(!manager.pending_okena_launches.contains_key(&key));
+}
+
+#[test]
+fn reload_drains_restart_while_pid_lookup_is_pending() {
+    let path = "/project";
+    let key = ("project".to_string(), "web".to_string());
+    let old_terminal_id = "old-service-terminal".to_string();
+    let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+    let (pid_lookups_tx, pid_lookups_rx) = async_channel::unbounded();
+    let (release_pid_lookup_tx, release_pid_lookup_rx) = async_channel::bounded(1);
+    let (kills_tx, kills_rx) = async_channel::unbounded();
+    let (plans_tx, plans_rx) = async_channel::unbounded();
+    let backend = Arc::new(BarrierRestartBackend {
+        local: LocalBackend::new(Arc::new(pty_manager)),
+        pid_lookups: pid_lookups_tx,
+        release_pid_lookup: release_pid_lookup_rx,
+        kills: kills_tx,
+        plans: plans_tx,
+    });
+    let terminals: okena_terminal::TerminalsRegistry = Arc::new(Default::default());
+    let mut manager = ServiceManager::new(backend, terminals);
+    manager.project_paths.insert(key.0.clone(), path.into());
+    manager.begin_project_incarnation(&key.0, path);
+    let (_, mut instance) = make_instance(&key.0, &key.1, false, 0, ServiceStatus::Running);
+    instance.terminal_id = Some(old_terminal_id.clone());
+    manager.instances.insert(key.clone(), instance);
+    manager
+        .terminal_to_service
+        .insert(old_terminal_id.clone(), key.clone());
+
+    let executor = Rc::new(smol::LocalExecutor::new());
+    let service_manager = Rc::new(RefCell::new(manager));
+    let handle = ExecutingHandle {
+        manager: Rc::downgrade(&service_manager),
+        executor: executor.clone(),
+        notifications: Arc::new(AtomicUsize::new(0)),
+    };
+
+    smol::block_on(executor.run(async {
+        let mut cx = ExecutingCx { handle };
+        service_manager
+            .borrow_mut()
+            .restart_service(&key.0, &key.1, path, &mut cx);
+
+        assert_eq!(pid_lookups_rx.recv().await, Ok(old_terminal_id.clone()));
+        assert!(
+            service_manager
+                .borrow()
+                .pending_okena_restarts
+                .contains_key(&key)
+        );
+        assert!(
+            !service_manager
+                .borrow()
+                .terminal_to_service
+                .contains_key(&old_terminal_id),
+            "the pending restart ledger must own the old mapping"
+        );
+
+        service_manager
+            .borrow_mut()
+            .reload_project_services_prepared(
+                &key.0,
+                path,
+                PreparedProjectConfig::Loaded {
+                    config: Some(OkenaProjectConfig {
+                        services: vec![ServiceDefinition {
+                            name: key.1.clone(),
+                            command: "echo web".into(),
+                            cwd: ".".into(),
+                            env: HashMap::new(),
+                            auto_start: false,
+                            restart_on_crash: false,
+                            restart_delay_ms: 60_000,
+                        }],
+                        docker_compose: None,
+                    }),
+                    detected_compose_file: None,
+                },
+                &mut cx,
+            );
+
+        assert_eq!(kills_rx.recv().await, Ok(old_terminal_id.clone()));
+        assert!(
+            !service_manager
+                .borrow()
+                .pending_okena_restarts
+                .contains_key(&key)
+        );
+
+        release_pid_lookup_tx
+            .send(())
+            .await
+            .expect("release pending PID lookup");
+        smol::Timer::after(Duration::from_millis(5)).await;
+        assert!(
+            kills_rx.try_recv().is_err(),
+            "the stale callback must not kill a replacement reusing the drained ID"
+        );
+        assert!(
+            plans_rx.try_recv().is_err(),
+            "the stale manual restart must not launch a duplicate service"
+        );
+    }));
 }
 
 #[test]
