@@ -40,10 +40,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use okena_app_core::remote_snapshot::build_state_response;
+#[cfg(test)]
+use okena_app_core::workspace::actions::execute::apply_loaded_session;
 use okena_app_core::workspace::actions::execute::{
-    apply_imported_workspace, apply_loaded_session, ensure_terminal,
-    ensure_workspace_replacement_allowed, execute_action, import_workspace_data,
-    load_session_data_for_shell, spawn_uninitialized_terminals,
+    begin_workspace_replacement, cleanup_stale_workspace_replacement, ensure_terminal,
+    ensure_workspace_replacement_allowed, execute_action, fail_workspace_replacement,
+    finish_workspace_replacement, import_workspace_data, load_session_data_for_shell,
+    materialize_workspace_replacement, prepare_workspace_replacement,
+    spawn_uninitialized_terminals,
 };
 use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
@@ -1476,55 +1480,40 @@ pub async fn daemon_command_loop(
                         let app_settings = settings.lock().clone();
                         let session_backend = app_settings.session_backend;
                         let default_shell = app_settings.default_shell.clone();
-                        load_workspace_off_reactor(
+                        replace_workspace_off_reactor(
                             &workspace,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                            &backend,
+                            &terminals,
+                            &mut focus_manager,
                             &runtime,
+                            app_settings,
                             move || {
-                                load_session_data_for_shell(&name, session_backend, &default_shell)
-                            },
-                            |ws, loaded| {
-                                let mut cx = DaemonWorkspaceCx::new(
-                                    &workspace_tick,
-                                    &hook_runner,
-                                    &hook_monitor,
-                                );
-                                apply_loaded_session(
-                                    ws,
-                                    &mut focus_manager,
-                                    loaded,
-                                    &*backend,
-                                    &terminals,
-                                    &app_settings,
-                                    &mut cx,
-                                )
-                                .into_command_result()
+                                let loaded = load_session_data_for_shell(
+                                    &name,
+                                    session_backend,
+                                    &default_shell,
+                                )?;
+                                Ok((loaded.data, loaded.stale_terminal_ids))
                             },
                         )
                         .await
                     }
                     ActionRequest::ImportWorkspace { path } => {
                         let app_settings = settings.lock().clone();
-                        load_workspace_off_reactor(
+                        replace_workspace_off_reactor(
                             &workspace,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                            &backend,
+                            &terminals,
+                            &mut focus_manager,
                             &runtime,
-                            move || import_workspace_data(&path),
-                            |ws, data| {
-                                let mut cx = DaemonWorkspaceCx::new(
-                                    &workspace_tick,
-                                    &hook_runner,
-                                    &hook_monitor,
-                                );
-                                apply_imported_workspace(
-                                    ws,
-                                    &mut focus_manager,
-                                    data,
-                                    &*backend,
-                                    &terminals,
-                                    &app_settings,
-                                    &mut cx,
-                                )
-                                .into_command_result()
-                            },
+                            app_settings,
+                            move || import_workspace_data(&path).map(|data| (data, Vec::new())),
                         )
                         .await
                     }
@@ -2281,6 +2270,7 @@ pub async fn daemon_command_loop(
 }
 
 /// Load replacement data on the blocking pool, then atomically apply it.
+#[cfg(test)]
 async fn load_workspace_off_reactor<T, Load, Apply>(
     workspace: &Arc<Mutex<Workspace>>,
     runtime: &tokio::runtime::Handle,
@@ -2307,6 +2297,117 @@ where
     // `apply` repeats the conflict check while this guard is held, closing the
     // race with worktree operations that started while loading was in flight.
     apply(&mut workspace.lock(), loaded)
+}
+
+/// Load, reserve, publish, and materialize a workspace without blocking the reactor.
+#[allow(clippy::too_many_arguments)]
+async fn replace_workspace_off_reactor<Load>(
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    focus_manager: &mut FocusManager,
+    runtime: &tokio::runtime::Handle,
+    app_settings: AppSettings,
+    loader: Load,
+) -> CommandResult
+where
+    Load: FnOnce() -> Result<
+            (
+                okena_workspace::state::WorkspaceData,
+                Vec<TerminalSessionTeardown>,
+            ),
+            String,
+        > + Send
+        + 'static,
+{
+    if let Err(error) = ensure_workspace_replacement_allowed(&workspace.lock()) {
+        return CommandResult::Err(error);
+    }
+
+    let prepare_settings = app_settings.clone();
+    let prepared = match runtime
+        .spawn_blocking(move || {
+            let (data, stale_terminal_ids) = loader()?;
+            Ok::<_, String>((
+                prepare_workspace_replacement(data, &prepare_settings),
+                stale_terminal_ids,
+            ))
+        })
+        .await
+    {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) => return CommandResult::Err(error),
+        Err(error) => {
+            return CommandResult::Err(format!("workspace loader task failed: {error}"));
+        }
+    };
+
+    let plan = {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut workspace = workspace.lock();
+        match begin_workspace_replacement(
+            &mut workspace,
+            focus_manager,
+            prepared.0,
+            prepared.1,
+            terminals,
+            backend.as_ref(),
+            &mut cx,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => return CommandResult::Err(error),
+        }
+    };
+
+    // The owned local task keeps finalization alive if the request future is
+    // cancelled. Daemon shutdown observes the transition gate and polls the
+    // command loop until this task releases it.
+    let task_workspace = workspace.clone();
+    let task_tick = workspace_tick.clone();
+    let task_runner = hook_runner.clone();
+    let task_monitor = hook_monitor.clone();
+    let task_backend = backend.clone();
+    let task_runtime = runtime.clone();
+    let task = tokio::task::spawn_local(async move {
+        let materialization_backend = task_backend.clone();
+        let recovery_plan = plan.clone();
+        let completion = match task_runtime
+            .spawn_blocking(move || {
+                materialize_workspace_replacement(plan, materialization_backend.as_ref())
+            })
+            .await
+        {
+            Ok(completion) => completion,
+            Err(error) => fail_workspace_replacement(
+                recovery_plan,
+                format!("workspace materialization task failed: {error}"),
+            ),
+        };
+        let mut cx = DaemonWorkspaceCx::new(&task_tick, &task_runner, &task_monitor);
+        let stale = {
+            let workspace = task_workspace.lock();
+            workspace.terminal_backend_migration_epoch() != Some(completion.epoch())
+                || workspace.data_replacement_epoch() != completion.epoch()
+        };
+        if stale {
+            let cleanup_backend = task_backend.clone();
+            let _ = task_runtime
+                .spawn_blocking(move || {
+                    cleanup_stale_workspace_replacement(completion, cleanup_backend.as_ref());
+                })
+                .await;
+            return CommandResult::Err("stale workspace replacement completion".to_string());
+        }
+        let mut workspace = task_workspace.lock();
+        finish_workspace_replacement(&mut workspace, completion, &mut cx).into_command_result()
+    });
+    match task.await {
+        Ok(result) => result,
+        Err(error) => CommandResult::Err(format!("workspace replacement task failed: {error}")),
+    }
 }
 
 /// Materialize the PTYs for every restored project's uninitialized terminal
@@ -2986,6 +3087,118 @@ mod tests {
                     load.await.expect("workspace loader task joined"),
                     CommandResult::Ok(_)
                 ));
+            })
+            .await;
+    }
+
+    struct BlockingReplacementBackend {
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl TerminalBackend for BlockingReplacementBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("replacement must launch its reserved id")
+        }
+
+        fn reconnect_terminal(
+            &self,
+            terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            self.release
+                .lock()
+                .recv()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(terminal_id.to_string())
+        }
+
+        fn kill(&self, _terminal_id: &str) {}
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_replacement_materialization_keeps_localset_and_workspace_live() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
+                let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+                let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+                let (started_tx, started_rx) = oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let backend: Arc<dyn TerminalBackend> = Arc::new(BlockingReplacementBackend {
+                    started: Mutex::new(Some(started_tx)),
+                    release: Mutex::new(release_rx),
+                });
+                let runtime = tokio::runtime::Handle::current();
+                let mut incoming = workspace_with_uninitialized_terminal("/replacement");
+                incoming.projects[0].hooks = Default::default();
+
+                let task_workspace = workspace.clone();
+                let task_tick = workspace_tick.clone();
+                let task_backend = backend.clone();
+                let task_terminals = terminals.clone();
+                let task_runtime = runtime.clone();
+                let replacement = tokio::task::spawn_local(async move {
+                    let mut focus_manager = FocusManager::new();
+                    replace_workspace_off_reactor(
+                        &task_workspace,
+                        &task_tick,
+                        &None,
+                        &None,
+                        &task_backend,
+                        &task_terminals,
+                        &mut focus_manager,
+                        &task_runtime,
+                        default_settings(),
+                        move || Ok((incoming, Vec::new())),
+                    )
+                    .await
+                });
+
+                started_rx.await.expect("reserved reconnect started");
+                let reader_workspace = workspace.clone();
+                let reader = tokio::task::spawn_local(async move {
+                    tokio::task::yield_now().await;
+                    let workspace = reader_workspace.lock();
+                    assert!(workspace.project("p1").is_some());
+                    assert!(workspace.terminal_backend_migration_epoch().is_some());
+                });
+                reader.await.expect("workspace reader progressed");
+
+                release_tx.send(()).expect("release reconnect");
+                assert!(matches!(
+                    replacement.await.expect("replacement task joined"),
+                    CommandResult::Ok(_)
+                ));
+                assert_eq!(workspace.lock().terminal_backend_migration_epoch(), None);
             })
             .await;
     }

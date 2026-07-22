@@ -486,6 +486,46 @@ impl Workspace {
         self.terminal_backend_migration_epoch
     }
 
+    /// Atomically publish replacement data behind the transient terminal gate.
+    ///
+    /// Callers finish terminal teardown/materialization before releasing the
+    /// gate, so observers never persist partially materialized ownership.
+    pub fn begin_workspace_replacement_transition(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        data: WorkspaceData,
+    ) -> Result<u64, String> {
+        if self.terminal_backend_migration_epoch.is_some() {
+            return Err("a terminal ownership transition is already in progress".to_string());
+        }
+        self.data_replacement_epoch = self
+            .data_replacement_epoch
+            .checked_add(1)
+            .ok_or_else(|| "workspace replacement epoch exhausted".to_string())?;
+        let epoch = self.data_replacement_epoch;
+        self.terminal_backend_migration_epoch = Some(epoch);
+        self.data = data;
+        for project in &mut self.data.projects {
+            project.is_closing = false;
+        }
+        self.lifecycle = ProjectLifecycleTracker::new();
+        self.pending_closes.clear();
+        self.restored_closes.clear();
+        self.closing_terminal_owners.clear();
+        focus_manager.clear_all();
+        self.data_version = self.data_version.wrapping_add(1);
+        Ok(epoch)
+    }
+
+    /// Publish one consolidated change after replacement materialization.
+    pub fn finish_workspace_replacement_transition(
+        &mut self,
+        epoch: u64,
+        cx: &mut impl WorkspaceCx,
+    ) -> bool {
+        self.finish_terminal_backend_migration(epoch, cx)
+    }
+
     /// Clear only the migration that owns `epoch` and wake skipped observers.
     pub fn finish_terminal_backend_migration(
         &mut self,
