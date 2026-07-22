@@ -544,6 +544,7 @@ fn run_hook_sync(
         let exit_code = match rx.recv_timeout(std::time::Duration::from_secs(300)) {
             Ok(exit_code) => exit_code,
             Err(error) => {
+                monitor.cancel_exit_waiter(&terminal_id);
                 runner.backend.kill(&terminal_id);
                 runner.terminals.lock().remove(&terminal_id);
                 monitor.finish_by_terminal_id(&terminal_id, None);

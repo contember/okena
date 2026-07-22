@@ -417,6 +417,13 @@ impl HookMonitor {
         }
     }
 
+    /// Cancel a waiter after its synchronous hook stops waiting.
+    pub fn cancel_exit_waiter(&self, terminal_id: &str) {
+        let mut inner = self.0.lock();
+        inner.exit_waiters.remove(terminal_id);
+        inner.early_exits.retain(|(id, _, _)| id != terminal_id);
+    }
+
     /// Find and finish a hook execution by its terminal ID.
     /// Returns `true` if a matching running execution was found and finished.
     pub fn finish_by_terminal_id(&self, terminal_id: &str, exit_code: Option<u32>) -> bool {
@@ -614,6 +621,19 @@ mod tests {
         let rx = monitor.register_exit_waiter("term-2");
         monitor.notify_exit("term-2", None);
         assert_eq!(rx.recv().unwrap(), None);
+    }
+
+    #[test]
+    fn cancel_exit_waiter_drops_bound_sender() {
+        let monitor = HookMonitor::new();
+        let rx = monitor.reserve_exit_waiter().bind("term-timeout");
+
+        monitor.cancel_exit_waiter("term-timeout");
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
     }
 
     #[test]
