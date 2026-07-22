@@ -139,13 +139,21 @@ pub fn save_session(name: &str, data: &WorkspaceData) -> Result<()> {
     Ok(())
 }
 
-fn prepare_loaded_session(mut data: WorkspaceData, backend: SessionBackend) -> LoadedWorkspace {
+fn prepare_loaded_session(
+    mut data: WorkspaceData,
+    backend: SessionBackend,
+    global_default_shell: &okena_terminal::shell_config::ShellType,
+) -> LoadedWorkspace {
     data = migrate_workspace(data);
 
     let session_backend = backend.resolve();
     let clear_ids = !session_backend.supports_persistence();
     validate_workspace_data(&mut data, clear_ids, backend);
-    let stale_terminal_ids = super::persistence::sync_worktrees_with_backend(&mut data, backend);
+    let stale_terminal_ids = super::persistence::sync_worktrees_with_backend_and_shell(
+        &mut data,
+        backend,
+        global_default_shell,
+    );
 
     LoadedWorkspace {
         data,
@@ -160,6 +168,19 @@ pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData
 
 /// Load a named session while retaining ids removed with stale worktree rows.
 pub fn load_session_with_cleanup(name: &str, backend: SessionBackend) -> Result<LoadedWorkspace> {
+    load_session_with_cleanup_for_shell(
+        name,
+        backend,
+        &okena_terminal::shell_config::ShellType::Default,
+    )
+}
+
+/// Load a named session with the transient global shell used for stale cleanup routes.
+pub fn load_session_with_cleanup_for_shell(
+    name: &str,
+    backend: SessionBackend,
+    global_default_shell: &okena_terminal::shell_config::ShellType,
+) -> Result<LoadedWorkspace> {
     let path = get_session_path(name);
 
     if !path.exists() {
@@ -173,7 +194,7 @@ pub fn load_session_with_cleanup(name: &str, backend: SessionBackend) -> Result<
     let data: WorkspaceData = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse session file: {}", path.display()))?;
 
-    Ok(prepare_loaded_session(data, backend))
+    Ok(prepare_loaded_session(data, backend, global_default_shell))
 }
 
 /// Delete a named session
@@ -474,7 +495,11 @@ mod tests {
         }))
         .expect("build session fixture");
 
-        let loaded = prepare_loaded_session(data, SessionBackend::None);
+        let loaded = prepare_loaded_session(
+            data,
+            SessionBackend::None,
+            &okena_terminal::shell_config::ShellType::Default,
+        );
         let worktree = loaded
             .data
             .projects

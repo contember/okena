@@ -160,7 +160,10 @@ fn main() -> anyhow::Result<()> {
     //    default workspace on error, logging like the GUI's `run_headless`.
     let settings = load_settings();
     let session_backend = settings.session_backend; // `Copy`
-    let loaded_workspace = persistence::load_workspace_with_cleanup(session_backend).unwrap_or_else(|e| {
+    let loaded_workspace = persistence::load_workspace_with_cleanup_for_shell(
+        session_backend,
+        &settings.default_shell,
+    ).unwrap_or_else(|e| {
         log::error!(
             "Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.",
             e,
