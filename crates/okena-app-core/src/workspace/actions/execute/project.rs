@@ -556,8 +556,7 @@ pub(super) fn rerun_hook(
     };
     backend.kill(&terminal_id);
     if let Some(monitor) = monitor.as_ref() {
-        monitor.finish_by_terminal_id(&terminal_id, None);
-        monitor.notify_exit(&terminal_id, None);
+        monitor.cancel_by_terminal_id(&terminal_id);
     }
     let transport = backend.transport();
     let terminal = Arc::new(Terminal::new(
@@ -596,8 +595,7 @@ pub(super) fn dismiss_hook(
 
     backend.kill(&terminal_id);
     if let Some(monitor) = cx.hook_monitor() {
-        monitor.finish_by_terminal_id(&terminal_id, None);
-        monitor.notify_exit(&terminal_id, None);
+        monitor.cancel_by_terminal_id(&terminal_id);
     }
     ws.cancel_pending_worktree_close(&terminal_id);
     ws.remove_hook_terminal(&terminal_id, cx);
@@ -831,11 +829,10 @@ mod hook_action_tests {
         assert!(args.iter().any(|arg| arg.contains("__okena_hook_exit")));
 
         let history = monitor.history();
-        assert_eq!(history.len(), 2);
+        assert_eq!(history.len(), 1);
         assert_eq!(history[0].terminal_id.as_deref(), Some("rerun-0"));
         assert!(matches!(history[0].status, HookStatus::Running));
-        assert_eq!(history[1].terminal_id.as_deref(), Some("old-hook"));
-        assert!(matches!(history[1].status, HookStatus::Failed { .. }));
+        assert!(monitor.drain_pending_toasts().is_empty());
     }
 
     #[test]
@@ -872,7 +869,7 @@ mod hook_action_tests {
     }
 
     #[test]
-    fn dismiss_hook_finishes_running_execution_before_removing_owner() {
+    fn dismiss_hook_cancels_running_execution_before_removing_owner() {
         let mut workspace = workspace_with_hook("hook-1");
         let backend = RecordingBackend::default();
         let terminals: TerminalsRegistry = Default::default();
@@ -898,8 +895,8 @@ mod hook_action_tests {
 
         assert!(matches!(result, ActionResult::Ok(None)));
         assert!(workspace.project("p1").unwrap().hook_terminals.is_empty());
-        let history = monitor.history();
-        assert!(matches!(history[0].status, HookStatus::Failed { .. }));
+        assert!(monitor.history().is_empty());
+        assert!(monitor.drain_pending_toasts().is_empty());
         assert_eq!(backend.killed.lock().unwrap().as_slice(), ["hook-1"]);
     }
 
@@ -992,7 +989,7 @@ mod hook_action_tests {
     }
 
     #[test]
-    fn project_delete_finishes_owned_hook_executions_before_removal() {
+    fn project_delete_cancels_owned_hook_executions_before_removal() {
         let mut workspace = workspace_with_hook("hook-1");
         let mut focus_manager = FocusManager::default();
         let monitor = HookMonitor::new();
@@ -1009,10 +1006,8 @@ mod hook_action_tests {
         workspace.delete_project(&mut focus_manager, "p1", &HooksConfig::default(), &mut cx);
 
         assert!(workspace.project("p1").is_none());
-        assert!(matches!(
-            monitor.history()[0].status,
-            HookStatus::Failed { .. }
-        ));
+        assert!(monitor.history().is_empty());
+        assert!(monitor.drain_pending_toasts().is_empty());
     }
 }
 
