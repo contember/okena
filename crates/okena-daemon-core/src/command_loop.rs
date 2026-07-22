@@ -42,8 +42,8 @@ use std::sync::Arc;
 use okena_app_core::remote_snapshot::build_state_response;
 use okena_app_core::workspace::actions::execute::{
     apply_imported_workspace, apply_loaded_session, ensure_terminal,
-    ensure_workspace_replacement_allowed, execute_action, import_workspace_data, load_session_data,
-    spawn_uninitialized_terminals,
+    ensure_workspace_replacement_allowed, execute_action, import_workspace_data,
+    load_session_data_for_shell, spawn_uninitialized_terminals,
 };
 use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
@@ -877,10 +877,13 @@ pub async fn daemon_command_loop(
                     ActionRequest::LoadSession { name } => {
                         let app_settings = settings.lock().clone();
                         let session_backend = app_settings.session_backend;
+                        let default_shell = app_settings.default_shell.clone();
                         load_workspace_off_reactor(
                             &workspace,
                             &runtime,
-                            move || load_session_data(&name, session_backend),
+                            move || {
+                                load_session_data_for_shell(&name, session_backend, &default_shell)
+                            },
                             |ws, loaded| {
                                 let mut cx = DaemonWorkspaceCx::new(
                                     &workspace_tick,
