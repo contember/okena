@@ -53,7 +53,7 @@ use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, Co
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
 use okena_services::config::{PreparedProjectConfig, prepare_project_config};
-use okena_services::manager::{ServiceManager, ServiceProjectStateToken};
+use okena_services::manager::{ServiceLoadStatus, ServiceManager, ServiceProjectStateToken};
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalSessionTeardown};
 use okena_workspace::actions::soft_close::{
@@ -270,8 +270,23 @@ where
         service_tick.clone(),
     );
     let mut cx = reactor_ref.cx();
-    manager.reload_project_services_prepared(project_id, &owner.project_path, prepared, &mut cx);
-    CommandResult::Ok(None)
+    let status = manager.reload_project_services_prepared(
+        project_id,
+        &owner.project_path,
+        prepared,
+        &mut cx,
+    );
+    manager.set_project_writeback_owner(
+        project_id,
+        &owner.project_path,
+        owner.data_replacement_epoch,
+    );
+    match status {
+        ServiceLoadStatus::Loaded => CommandResult::Ok(None),
+        ServiceLoadStatus::Failed => CommandResult::Err(format!(
+            "failed to reload services for project: {project_id}"
+        )),
+    }
 }
 
 async fn reload_project_services_off_reactor(
@@ -3391,6 +3406,79 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn service_reload_preserves_writeback_owner_and_reports_prepare_failure() {
+        let project_path = "/project";
+        let workspace = Arc::new(Mutex::new(Workspace::new(
+            workspace_with_uninitialized_terminal(project_path),
+        )));
+        let current_epoch = workspace.lock().data_replacement_epoch();
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(backend, terminals)));
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let runtime = tokio::runtime::Handle::current();
+        {
+            let reactor_ref = ServiceReactorRef::new(
+                service_manager.clone(),
+                runtime.clone(),
+                service_tick.clone(),
+            );
+            let mut manager = service_manager.lock();
+            let mut cx = reactor_ref.cx();
+            manager.load_project_services_prepared(
+                "p1",
+                project_path,
+                &HashMap::new(),
+                PreparedProjectConfig::Loaded {
+                    config: None,
+                    detected_compose_file: None,
+                },
+                &mut cx,
+            );
+            manager.set_project_writeback_owner("p1", project_path, current_epoch);
+        }
+
+        let result = reload_project_services_off_reactor_with_preparer(
+            "p1",
+            &workspace,
+            &service_manager,
+            &service_tick,
+            &runtime,
+            |_| PreparedProjectConfig::Loaded {
+                config: None,
+                detected_compose_file: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(result, CommandResult::Ok(None)));
+        assert_eq!(
+            service_manager.lock().service_terminal_writebacks(),
+            vec![okena_services::manager::ServiceTerminalWriteback {
+                project_id: "p1".to_string(),
+                project_path: project_path.to_string(),
+                data_replacement_epoch: current_epoch,
+                terminal_ids: HashMap::new(),
+            }]
+        );
+
+        let result = reload_project_services_off_reactor_with_preparer(
+            "p1",
+            &workspace,
+            &service_manager,
+            &service_tick,
+            &runtime,
+            |_| PreparedProjectConfig::Failed("invalid config".to_string()),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            CommandResult::Err(ref error) if error == "failed to reload services for project: p1"
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
