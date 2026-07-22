@@ -46,6 +46,13 @@ pub(super) struct ProjectIncarnation {
     path: String,
 }
 
+/// Opaque fence for preparing service state without holding the manager lock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceProjectStateToken {
+    incarnation: Option<ProjectIncarnation>,
+    next_generation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServiceTerminalWriteback {
     pub project_id: String,
@@ -396,6 +403,24 @@ impl ServiceManager {
     /// Get the stored project path for a project.
     pub fn project_path(&self, project_id: &str) -> Option<&String> {
         self.project_paths.get(project_id)
+    }
+
+    /// Capture the lifecycle state that must still own an async service apply.
+    pub fn project_state_token(&self, project_id: &str) -> ServiceProjectStateToken {
+        ServiceProjectStateToken {
+            incarnation: self.project_lifecycles.current.get(project_id).cloned(),
+            next_generation: self.project_lifecycles.next_generation,
+        }
+    }
+
+    /// Revalidate a lifecycle snapshot after filesystem preparation completes.
+    pub fn is_project_state_token_current(
+        &self,
+        project_id: &str,
+        token: &ServiceProjectStateToken,
+    ) -> bool {
+        self.project_lifecycles.current.get(project_id) == token.incarnation.as_ref()
+            && self.project_lifecycles.next_generation == token.next_generation
     }
 
     /// Reload an existing project's service lifecycle after an on-disk rename.

@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::ServiceDefinition;
+use crate::config::{OkenaProjectConfig, PreparedProjectConfig, ServiceDefinition};
 use okena_terminal::backend::LocalBackend;
 use okena_terminal::pty_manager::PtyManager;
 use okena_terminal::session_backend::SessionBackend;
@@ -414,6 +414,43 @@ fn malformed_reload_preserves_current_incarnation() {
         Some(incarnation)
     );
     assert_eq!(cx.spawned.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn prepared_reload_does_not_probe_the_project_path() {
+    let path = "/path/that/does/not/exist";
+    let mut manager = manager();
+    manager.project_paths.insert("project".into(), path.into());
+    manager.begin_project_incarnation("project", path);
+    let mut cx = RecordingCx::default();
+
+    let status = manager.reload_project_services_prepared(
+        "project",
+        path,
+        PreparedProjectConfig::Loaded {
+            config: Some(OkenaProjectConfig {
+                services: vec![ServiceDefinition {
+                    name: "prepared".into(),
+                    command: "echo prepared".into(),
+                    cwd: ".".into(),
+                    env: HashMap::new(),
+                    auto_start: false,
+                    restart_on_crash: false,
+                    restart_delay_ms: 1000,
+                }],
+                docker_compose: None,
+            }),
+            detected_compose_file: None,
+        },
+        &mut cx,
+    );
+
+    assert_eq!(status, ServiceLoadStatus::Loaded);
+    assert!(
+        manager
+            .instances()
+            .contains_key(&("project".into(), "prepared".into()))
+    );
 }
 
 #[test]

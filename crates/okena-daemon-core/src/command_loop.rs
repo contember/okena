@@ -48,7 +48,8 @@ use okena_app_core::workspace::actions::execute::{
 use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
-use okena_services::manager::ServiceManager;
+use okena_services::config::{PreparedProjectConfig, prepare_project_config};
+use okena_services::manager::{ServiceManager, ServiceProjectStateToken};
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalSessionTeardown};
 use okena_workspace::actions::soft_close::{
@@ -174,23 +175,151 @@ fn unload_project_services(
     manager.unload_project_services(project_id, &mut cx);
 }
 
-fn recover_project_services(
+struct PreparedServiceOwner {
+    project_path: String,
+    data_replacement_epoch: u64,
+    service_state: ServiceProjectStateToken,
+}
+
+fn snapshot_service_owner(
+    project_id: &str,
+    workspace: &Arc<Mutex<Workspace>>,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+) -> Option<PreparedServiceOwner> {
+    let (project_path, data_replacement_epoch) = {
+        let workspace = workspace.lock();
+        workspace.project(project_id).and_then(|project| {
+            (!project.is_remote).then(|| (project.path.clone(), workspace.data_replacement_epoch()))
+        })
+    }?;
+    let service_state = service_manager.lock().project_state_token(project_id);
+    Some(PreparedServiceOwner {
+        project_path,
+        data_replacement_epoch,
+        service_state,
+    })
+}
+
+fn service_owner_is_current(
+    project_id: &str,
+    owner: &PreparedServiceOwner,
+    workspace: &Workspace,
+    service_manager: &ServiceManager,
+) -> bool {
+    workspace.data_replacement_epoch() == owner.data_replacement_epoch
+        && workspace
+            .project(project_id)
+            .is_some_and(|project| !project.is_remote && project.path == owner.project_path)
+        && service_manager.is_project_state_token_current(project_id, &owner.service_state)
+}
+
+async fn prepare_services_off_reactor<Prepare>(
+    owner: PreparedServiceOwner,
+    runtime: &tokio::runtime::Handle,
+    prepare: Prepare,
+) -> Result<(PreparedServiceOwner, PreparedProjectConfig), String>
+where
+    Prepare: FnOnce(&str) -> PreparedProjectConfig + Send + 'static,
+{
+    let project_path = owner.project_path.clone();
+    let prepared = runtime
+        .spawn_blocking(move || prepare(&project_path))
+        .await
+        .map_err(|error| format!("service config preparation failed: {error}"))?;
+    Ok((owner, prepared))
+}
+
+async fn reload_project_services_off_reactor_with_preparer<Prepare>(
     project_id: &str,
     workspace: &Arc<Mutex<Workspace>>,
     service_manager: &Arc<Mutex<ServiceManager>>,
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
-) {
-    let project_owner = {
-        let workspace = workspace.lock();
-        workspace
-            .project(project_id)
-            .map(|project| (project.path.clone(), workspace.data_replacement_epoch()))
+    prepare: Prepare,
+) -> CommandResult
+where
+    Prepare: FnOnce(&str) -> PreparedProjectConfig + Send + 'static,
+{
+    let Some(owner) = snapshot_service_owner(project_id, workspace, service_manager) else {
+        return CommandResult::Err(format!("project not found: {project_id}"));
     };
-    let Some((project_path, data_replacement_epoch)) = project_owner else {
+    if service_manager.lock().project_path(project_id) != Some(&owner.project_path) {
+        return CommandResult::Err(format!("project not found: {project_id}"));
+    }
+    let (owner, prepared) = match prepare_services_off_reactor(owner, runtime, prepare).await {
+        Ok(prepared) => prepared,
+        Err(error) => return CommandResult::Err(error),
+    };
+
+    let workspace = workspace.lock();
+    let mut manager = service_manager.lock();
+    if !service_owner_is_current(project_id, &owner, &workspace, &manager)
+        || manager.project_path(project_id) != Some(&owner.project_path)
+    {
+        return CommandResult::Err(format!(
+            "project changed while services were being prepared: {project_id}"
+        ));
+    }
+    let reactor_ref = ServiceReactorRef::new(
+        service_manager.clone(),
+        runtime.clone(),
+        service_tick.clone(),
+    );
+    let mut cx = reactor_ref.cx();
+    manager.reload_project_services_prepared(project_id, &owner.project_path, prepared, &mut cx);
+    CommandResult::Ok(None)
+}
+
+async fn reload_project_services_off_reactor(
+    project_id: &str,
+    workspace: &Arc<Mutex<Workspace>>,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+) -> CommandResult {
+    reload_project_services_off_reactor_with_preparer(
+        project_id,
+        workspace,
+        service_manager,
+        service_tick,
+        runtime,
+        prepare_project_config,
+    )
+    .await
+}
+
+async fn recover_project_services_with_preparer<Prepare>(
+    project_id: &str,
+    workspace: &Arc<Mutex<Workspace>>,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+    prepare: Prepare,
+) where
+    Prepare: FnOnce(&str) -> PreparedProjectConfig + Send + 'static,
+{
+    let Some(owner) = snapshot_service_owner(project_id, workspace, service_manager) else {
         return;
     };
-    if !std::path::Path::new(&project_path).exists() {
+    if service_manager.lock().project_path(project_id).is_some() {
+        return;
+    }
+    let (owner, prepared) = match prepare_services_off_reactor(owner, runtime, prepare).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            log::error!("Failed to prepare recovered services for {project_id}: {error}");
+            return;
+        }
+    };
+    if matches!(prepared, PreparedProjectConfig::Missing) {
+        return;
+    }
+
+    let workspace = workspace.lock();
+    let mut manager = service_manager.lock();
+    if !service_owner_is_current(project_id, &owner, &workspace, &manager)
+        || manager.project_path(project_id).is_some()
+    {
         return;
     }
     let reactor_ref = ServiceReactorRef::new(
@@ -198,12 +327,39 @@ fn recover_project_services(
         runtime.clone(),
         service_tick.clone(),
     );
-    let mut manager = service_manager.lock();
     let mut cx = reactor_ref.cx();
-    manager.set_project_writeback_owner(project_id, &project_path, data_replacement_epoch);
+    manager.set_project_writeback_owner(
+        project_id,
+        &owner.project_path,
+        owner.data_replacement_epoch,
+    );
     // The old persistent sessions were intentionally killed before removal;
     // reconnecting their ids here would race their asynchronous teardown.
-    manager.load_project_services(project_id, &project_path, &HashMap::new(), &mut cx);
+    manager.load_project_services_prepared(
+        project_id,
+        &owner.project_path,
+        &HashMap::new(),
+        prepared,
+        &mut cx,
+    );
+}
+
+async fn recover_project_services(
+    project_id: &str,
+    workspace: &Arc<Mutex<Workspace>>,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+) {
+    recover_project_services_with_preparer(
+        project_id,
+        workspace,
+        service_manager,
+        service_tick,
+        runtime,
+        prepare_project_config,
+    )
+    .await;
 }
 
 fn recover_project_services_for_backend_migration(
@@ -744,7 +900,8 @@ pub(crate) fn spawn_background_worktree_removal(
                             &service_manager,
                             &service_tick,
                             &runtime,
-                        );
+                        )
+                        .await;
                     }
                 }
             }
@@ -781,7 +938,8 @@ pub(crate) fn spawn_background_worktree_removal(
                     &service_manager,
                     &service_tick,
                     &runtime,
-                );
+                )
+                .await;
             }
         }
     });
@@ -1200,9 +1358,14 @@ pub async fn daemon_command_loop(
                         sm.stop_all_action(&project_id, &mut cx)
                     }
                     ActionRequest::ReloadServices { project_id } => {
-                        let mut sm = service_manager.lock();
-                        let mut cx = service_reactor.cx();
-                        sm.reload_services_action(&project_id, &mut cx)
+                        reload_project_services_off_reactor(
+                            &project_id,
+                            &workspace,
+                            &service_manager,
+                            &service_tick,
+                            &runtime,
+                        )
+                        .await
                     }
 
                     // ── App-scoped: settings / theme ─────────────────────────────
@@ -2668,7 +2831,7 @@ mod tests {
                 .is_empty()
         );
 
-        recover_project_services("p1", &workspace, &service_manager, &service_tick, &runtime);
+        recover_project_services("p1", &workspace, &service_manager, &service_tick, &runtime).await;
 
         let writebacks = service_manager.lock().service_terminal_writebacks();
         assert_eq!(writebacks.len(), 1);
@@ -2743,6 +2906,103 @@ mod tests {
                     load.await.expect("workspace loader task joined"),
                     CommandResult::Ok(_)
                 ));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_service_reload_keeps_localset_live_and_discards_stale_owner() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let project_path = "/captured/project";
+                let workspace = Arc::new(Mutex::new(Workspace::new(
+                    workspace_with_uninitialized_terminal(project_path),
+                )));
+                let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+                let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+                let service_manager = Arc::new(Mutex::new(ServiceManager::new(backend, terminals)));
+                let (service_tick, _service_rx) = watch::channel(0u64);
+                let runtime = tokio::runtime::Handle::current();
+                {
+                    let reactor_ref = ServiceReactorRef::new(
+                        service_manager.clone(),
+                        runtime.clone(),
+                        service_tick.clone(),
+                    );
+                    let mut manager = service_manager.lock();
+                    let mut cx = reactor_ref.cx();
+                    manager.load_project_services_prepared(
+                        "p1",
+                        project_path,
+                        &HashMap::new(),
+                        PreparedProjectConfig::Loaded {
+                            config: None,
+                            detected_compose_file: None,
+                        },
+                        &mut cx,
+                    );
+                }
+
+                let (started_tx, started_rx) = oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let task_workspace = workspace.clone();
+                let task_manager = service_manager.clone();
+                let task_tick = service_tick.clone();
+                let task_runtime = runtime.clone();
+                let reload = tokio::task::spawn_local(async move {
+                    reload_project_services_off_reactor_with_preparer(
+                        "p1",
+                        &task_workspace,
+                        &task_manager,
+                        &task_tick,
+                        &task_runtime,
+                        move |_| {
+                            let _ = started_tx.send(());
+                            release_rx.recv().expect("release service preparation");
+                            PreparedProjectConfig::Loaded {
+                                config: None,
+                                detected_compose_file: None,
+                            }
+                        },
+                    )
+                    .await
+                });
+
+                started_rx.await.expect("service preparation started");
+                let progressed = Arc::new(AtomicBool::new(false));
+                let progressed_task = progressed.clone();
+                let progress_manager = service_manager.clone();
+                tokio::task::spawn_local(async move {
+                    let _manager = progress_manager.lock();
+                    progressed_task.store(true, Ordering::Release);
+                })
+                .await
+                .expect("sibling LocalSet task completed");
+
+                {
+                    let mut workspace = workspace.lock();
+                    let mut replacement = workspace.data().clone();
+                    replacement.projects[0].path = "/replacement/project".to_string();
+                    let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &None, &None);
+                    workspace.replace_data(&mut FocusManager::new(), replacement, &mut cx);
+                }
+                release_tx.send(()).expect("release service preparation");
+
+                let result = reload.await.expect("reload task completed");
+                assert!(progressed.load(Ordering::Acquire));
+                assert!(matches!(
+                    result,
+                    CommandResult::Err(ref error) if error.contains("project changed")
+                ));
+                assert_eq!(
+                    service_manager
+                        .lock()
+                        .project_path("p1")
+                        .map(String::as_str),
+                    Some(project_path)
+                );
             })
             .await;
     }

@@ -4,7 +4,7 @@ use super::{
     ServiceCx, ServiceInstance, ServiceKind, ServiceLoadStatus, ServiceManager, ServiceStatus,
     commands::OkenaLaunchFailure,
 };
-use crate::config::{PreparedProjectConfig, load_project_config};
+use crate::config::{PreparedProjectConfig, load_project_config, prepare_project_config};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
@@ -336,20 +336,50 @@ impl ServiceManager {
         project_path: &str,
         cx: &mut impl ServiceCx,
     ) {
-        let new_config = match load_project_config(project_path) {
-            Ok(Some(config)) => config,
-            Ok(None) => {
+        let prepared = prepare_project_config(project_path);
+        self.reload_project_services_prepared(project_id, project_path, prepared, cx);
+    }
+
+    /// Apply a reload snapshot prepared away from the owning reactor.
+    pub fn reload_project_services_prepared(
+        &mut self,
+        project_id: &str,
+        project_path: &str,
+        prepared: PreparedProjectConfig,
+        cx: &mut impl ServiceCx,
+    ) -> ServiceLoadStatus {
+        let (new_config, detected_compose_file) = match prepared {
+            PreparedProjectConfig::Loaded {
+                config: Some(config),
+                detected_compose_file,
+            } => (config, detected_compose_file),
+            PreparedProjectConfig::Loaded {
+                config: None,
+                detected_compose_file,
+            } => {
                 self.unload_project_services(project_id, cx);
-                self.load_project_services(project_id, project_path, &HashMap::new(), cx);
-                return;
+                return self.load_project_services_prepared(
+                    project_id,
+                    project_path,
+                    &HashMap::new(),
+                    PreparedProjectConfig::Loaded {
+                        config: None,
+                        detected_compose_file,
+                    },
+                    cx,
+                );
             }
-            Err(e) => {
+            PreparedProjectConfig::Missing => {
+                log::warn!("Project path disappeared before service reload: {project_path}");
+                return ServiceLoadStatus::Failed;
+            }
+            PreparedProjectConfig::Failed(error) => {
                 log::error!(
                     "Failed to reload okena.yaml for project {}: {}",
                     project_id,
-                    e
+                    error
                 );
-                return;
+                return ServiceLoadStatus::Failed;
             }
         };
 
@@ -444,13 +474,15 @@ impl ServiceManager {
         }
 
         // Reload Docker Compose services
-        self.reload_docker_compose_services(
+        self.reload_docker_compose_services_prepared(
             project_id,
             project_path,
             new_config.docker_compose.as_ref(),
+            detected_compose_file,
             cx,
         );
 
         cx.notify();
+        ServiceLoadStatus::Loaded
     }
 }

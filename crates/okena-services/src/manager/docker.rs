@@ -14,28 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 impl ServiceManager {
-    /// Load Docker Compose services for a project.
-    /// If `docker_config` is None, auto-detects compose file.
-    /// If `docker_config.enabled` is explicitly false, skips.
-    pub(super) fn load_docker_compose_services(
-        &mut self,
-        project_id: &str,
-        project_path: &str,
-        docker_config: Option<&crate::config::DockerComposeConfig>,
-        cx: &mut impl ServiceCx,
-    ) {
-        let detected_compose_file = docker_config
-            .and_then(|config| config.file.clone())
-            .or_else(|| docker_compose::detect_compose_file(project_path));
-        self.load_docker_compose_services_prepared(
-            project_id,
-            project_path,
-            docker_config,
-            detected_compose_file,
-            cx,
-        );
-    }
-
+    /// Load Docker Compose services from an off-reactor filesystem snapshot.
     pub(super) fn load_docker_compose_services_prepared(
         &mut self,
         project_id: &str,
@@ -140,12 +119,13 @@ impl ServiceManager {
         });
     }
 
-    /// Reload Docker Compose services on config reload.
-    pub(super) fn reload_docker_compose_services(
+    /// Reload Docker Compose services from an off-reactor filesystem snapshot.
+    pub(super) fn reload_docker_compose_services_prepared(
         &mut self,
         project_id: &str,
         project_path: &str,
         docker_config: Option<&crate::config::DockerComposeConfig>,
+        detected_compose_file: Option<String>,
         cx: &mut impl ServiceCx,
     ) {
         // Stop existing poller
@@ -175,7 +155,13 @@ impl ServiceManager {
         }
 
         // Reload
-        self.load_docker_compose_services(project_id, project_path, docker_config, cx);
+        self.load_docker_compose_services_prepared(
+            project_id,
+            project_path,
+            docker_config,
+            detected_compose_file,
+            cx,
+        );
     }
 
     /// Spawn a PTY running `docker compose logs -f --tail 200 <name>`.
