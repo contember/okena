@@ -6163,6 +6163,7 @@ dependencies = [
  "okena-core",
  "okena-files",
  "okena-git",
+ "okena-hooks",
  "okena-terminal",
  "okena-theme",
  "okena-workspace",

@@ -13,7 +13,9 @@
 // more than it clarifies here.
 #![allow(clippy::too_many_arguments)]
 
-use super::{ActionResult, ensure_terminal, spawn_uninitialized_terminals};
+use super::{
+    ActionResult, effective_terminal_launch, ensure_terminal, spawn_uninitialized_terminals,
+};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::persistence::{
@@ -23,9 +25,12 @@ use crate::workspace::persistence::{
 };
 use crate::workspace::state::{Workspace, WorkspaceData};
 use okena_terminal::TerminalsRegistry;
-use okena_terminal::backend::{TerminalBackend, TerminalSessionTeardown};
+use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan, TerminalSessionTeardown};
+use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_workspace::context::WorkspaceCx;
+use okena_workspace::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 fn ordinary_terminal_ids(data: &WorkspaceData) -> HashSet<String> {
     data.projects
@@ -107,6 +112,472 @@ pub fn load_session_data_for_shell(
 pub fn import_workspace_data(path: &str) -> Result<WorkspaceData, String> {
     import_workspace(std::path::Path::new(path))
         .map_err(|error| format!("failed to import '{path}': {error}"))
+}
+
+#[derive(Clone)]
+struct PreparedOrdinaryTerminal {
+    terminal_id: String,
+    cwd: String,
+    launch_plan: TerminalLaunchPlan,
+}
+
+/// Disk-loaded workspace data with every PTY launch resolved and reserved.
+pub struct PreparedWorkspaceReplacement {
+    data: WorkspaceData,
+    ordinary: Vec<PreparedOrdinaryTerminal>,
+    hooks: Vec<okena_hooks::PreparedHookTerminal>,
+}
+
+/// Immutable replacement work published behind the workspace transition gate.
+#[derive(Clone)]
+pub struct WorkspaceReplacementPlan {
+    epoch: u64,
+    ordinary: Vec<PreparedOrdinaryTerminal>,
+    hooks: Vec<okena_hooks::PreparedHookTerminal>,
+    kill_ids: Vec<String>,
+    stale_sessions: Vec<TerminalSessionTeardown>,
+    terminals: TerminalsRegistry,
+    hook_runner: Option<okena_hooks::HookRunner>,
+    hook_monitor: Option<okena_hooks::HookMonitor>,
+}
+
+pub struct WorkspaceReplacementCompletion {
+    plan: WorkspaceReplacementPlan,
+    failed_ordinary: Vec<String>,
+    failed_hooks: Vec<String>,
+    errors: Vec<String>,
+}
+
+impl WorkspaceReplacementCompletion {
+    pub fn epoch(&self) -> u64 {
+        self.plan.epoch
+    }
+}
+
+fn prepare_layout_terminals(
+    node: &mut LayoutNode,
+    cwd: &str,
+    project_default_shell: Option<&okena_terminal::shell_config::ShellType>,
+    settings: &AppSettings,
+    shell_wrapper: Option<&str>,
+    on_create: Option<&str>,
+    env: &std::collections::HashMap<String, String>,
+    launches: &mut Vec<PreparedOrdinaryTerminal>,
+) {
+    match node {
+        LayoutNode::Terminal {
+            terminal_id,
+            shell_type,
+            ..
+        } => {
+            let persisted = terminal_id.is_some();
+            let id = terminal_id
+                .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+                .clone();
+            let launch_plan = if persisted {
+                TerminalLaunchPlan::for_shell(
+                    shell_type
+                        .clone()
+                        .resolve_default(project_default_shell, &settings.default_shell),
+                )
+            } else {
+                effective_terminal_launch(
+                    shell_type.clone(),
+                    project_default_shell,
+                    &settings.default_shell,
+                    shell_wrapper,
+                    on_create,
+                    env,
+                )
+            };
+            launches.push(PreparedOrdinaryTerminal {
+                terminal_id: id,
+                cwd: cwd.to_string(),
+                launch_plan,
+            });
+        }
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for child in children {
+                prepare_layout_terminals(
+                    child,
+                    cwd,
+                    project_default_shell,
+                    settings,
+                    shell_wrapper,
+                    on_create,
+                    env,
+                    launches,
+                );
+            }
+        }
+    }
+}
+
+/// Resolve terminal and project-open hook launches before taking the live lock.
+pub fn prepare_workspace_replacement(
+    mut data: WorkspaceData,
+    settings: &AppSettings,
+) -> PreparedWorkspaceReplacement {
+    for project in &mut data.projects {
+        let stale: HashSet<String> = project.hook_terminals.keys().cloned().collect();
+        if !stale.is_empty() {
+            let stale_refs: HashSet<&str> = stale.iter().map(String::as_str).collect();
+            LayoutNode::remove_terminal_ids(&mut project.layout, &stale_refs);
+            project
+                .terminal_names
+                .retain(|terminal_id, _| !stale.contains(terminal_id));
+            project
+                .hidden_terminals
+                .retain(|terminal_id, _| !stale.contains(terminal_id));
+            project.hook_terminals.clear();
+        }
+    }
+
+    let lookup = Workspace::new(data.clone());
+    let mut ordinary = Vec::new();
+    let mut prepared_hooks = Vec::new();
+    for project in &mut data.projects {
+        let parent_hooks = project
+            .worktree_info
+            .as_ref()
+            .and_then(|worktree| lookup.project(&worktree.parent_project_id))
+            .map(|parent| parent.hooks.clone());
+        let shell_wrapper = crate::workspace::hooks::resolve_shell_wrapper(
+            &project.hooks,
+            parent_hooks.as_ref(),
+            &settings.hooks,
+        );
+        let on_create = crate::workspace::hooks::resolve_terminal_on_create_simple(
+            &project.hooks,
+            parent_hooks.as_ref(),
+            &settings.hooks,
+        );
+        let folder = lookup.folder_for_project_or_parent(&project.id);
+        let env = crate::workspace::hooks::terminal_hook_env(
+            &project.id,
+            &project.name,
+            &project.path,
+            project.worktree_info.is_some(),
+            folder.map(|folder| folder.id.as_str()),
+            folder.map(|folder| folder.name.as_str()),
+        );
+        if let Some(layout) = &mut project.layout {
+            prepare_layout_terminals(
+                layout,
+                &project.path,
+                project.default_shell.as_ref(),
+                settings,
+                shell_wrapper.as_deref(),
+                on_create.as_deref(),
+                &env,
+                &mut ordinary,
+            );
+        }
+        if let Some(prepared) = okena_hooks::prepare_project_open_hook(
+            uuid::Uuid::new_v4().to_string(),
+            &project.hooks,
+            &project.id,
+            &project.name,
+            &project.path,
+            folder.map(|folder| folder.id.as_str()),
+            folder.map(|folder| folder.name.as_str()),
+            &settings.hooks,
+        ) {
+            prepared_hooks.push(prepared);
+        }
+    }
+    ordinary.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+    PreparedWorkspaceReplacement {
+        data,
+        ordinary,
+        hooks: prepared_hooks,
+    }
+}
+
+/// Atomically publish all incoming logical owners without notifying observers.
+#[allow(clippy::too_many_arguments)]
+pub fn begin_workspace_replacement(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    prepared: PreparedWorkspaceReplacement,
+    stale_terminal_ids: Vec<TerminalSessionTeardown>,
+    terminals: &TerminalsRegistry,
+    backend: &dyn TerminalBackend,
+    cx: &mut impl WorkspaceCx,
+) -> Result<WorkspaceReplacementPlan, String> {
+    ensure_workspace_replacement_allowed(ws)?;
+    if ws.terminal_backend_migration_epoch().is_some() {
+        return Err("a terminal ownership transition is already in progress".to_string());
+    }
+
+    let incoming_ids: HashSet<String> = prepared
+        .ordinary
+        .iter()
+        .map(|terminal| terminal.terminal_id.clone())
+        .chain(
+            prepared
+                .data
+                .projects
+                .iter()
+                .flat_map(|project| project.service_terminals.values().cloned()),
+        )
+        .collect();
+    let outgoing_hook_ids: Vec<String> = ws
+        .projects()
+        .iter()
+        .flat_map(|project| project.hook_terminals.keys().cloned())
+        .collect();
+    let mut kill_ids: HashSet<String> = terminals.lock().keys().cloned().collect();
+    kill_ids.extend(project_owned_terminal_ids(ws.data()));
+    kill_ids.retain(|id| !incoming_ids.contains(id));
+    kill_ids.retain(|id| {
+        !stale_terminal_ids
+            .iter()
+            .any(|session| session.terminal_id == *id)
+    });
+    let mut kill_ids: Vec<String> = kill_ids.into_iter().collect();
+    kill_ids.sort();
+
+    let hook_runner = cx.hook_runner();
+    let hook_monitor = cx.hook_monitor();
+    if let Some(monitor) = &hook_monitor {
+        for terminal_id in outgoing_hook_ids {
+            monitor.finish_by_terminal_id(&terminal_id, None);
+            monitor.notify_exit(&terminal_id, None);
+        }
+    }
+
+    terminals.lock().clear();
+    let epoch = ws.begin_workspace_replacement_transition(focus_manager, prepared.data)?;
+    for prepared_hook in &prepared.hooks {
+        let result = prepared_hook.result();
+        let Some(project) = ws
+            .data
+            .projects
+            .iter_mut()
+            .find(|project| project.id == result.project_id)
+        else {
+            continue;
+        };
+        project.hook_terminals.insert(
+            result.terminal_id.clone(),
+            HookTerminalEntry {
+                label: result.label.clone(),
+                status: HookTerminalStatus::Running,
+                hook_type: result.hook_type.to_string(),
+                command: result.command.clone(),
+                cwd: result.cwd.clone(),
+            },
+        );
+        project
+            .terminal_names
+            .insert(result.terminal_id.clone(), result.label.clone());
+        prepared_hook.publish_monitor(hook_monitor.as_ref());
+    }
+
+    let transport = backend.transport();
+    {
+        let mut registry = terminals.lock();
+        for terminal in &prepared.ordinary {
+            registry.insert(
+                terminal.terminal_id.clone(),
+                Arc::new(Terminal::new(
+                    terminal.terminal_id.clone(),
+                    TerminalSize::default(),
+                    transport.clone(),
+                    terminal.cwd.clone(),
+                )),
+            );
+        }
+    }
+    if let Some(runner) = &hook_runner {
+        for prepared_hook in &prepared.hooks {
+            runner.publish_prepared_terminal(prepared_hook);
+        }
+    }
+
+    Ok(WorkspaceReplacementPlan {
+        epoch,
+        ordinary: prepared.ordinary,
+        hooks: prepared.hooks,
+        kill_ids,
+        stale_sessions: stale_terminal_ids,
+        terminals: terminals.clone(),
+        hook_runner,
+        hook_monitor,
+    })
+}
+
+/// Run all potentially blocking PTY operations without the workspace lock.
+pub fn materialize_workspace_replacement(
+    plan: WorkspaceReplacementPlan,
+    backend: &dyn TerminalBackend,
+) -> WorkspaceReplacementCompletion {
+    for terminal_id in &plan.kill_ids {
+        backend.kill(terminal_id);
+    }
+    for session in &plan.stale_sessions {
+        backend.kill_session(session);
+    }
+    backend.flush_teardown();
+
+    let mut failed_ordinary = Vec::new();
+    let mut failed_hooks = Vec::new();
+    let mut errors = Vec::new();
+    for terminal in &plan.ordinary {
+        match backend.reconnect_terminal_with_plan(
+            &terminal.terminal_id,
+            &terminal.cwd,
+            &terminal.launch_plan,
+        ) {
+            Ok(id) if id == terminal.terminal_id => {}
+            Ok(id) => {
+                backend.kill(&id);
+                failed_ordinary.push(terminal.terminal_id.clone());
+                errors.push(format!(
+                    "backend returned unexpected terminal id {id} for {}",
+                    terminal.terminal_id
+                ));
+            }
+            Err(error) => {
+                failed_ordinary.push(terminal.terminal_id.clone());
+                errors.push(format!(
+                    "failed to materialize terminal {}: {error}",
+                    terminal.terminal_id
+                ));
+            }
+        }
+    }
+    for prepared_hook in &plan.hooks {
+        let result = prepared_hook.result();
+        let launch = plan
+            .hook_runner
+            .as_ref()
+            .ok_or_else(|| "hook runner unavailable".to_string())
+            .and_then(|runner| runner.launch_prepared_terminal(prepared_hook));
+        if let Err(error) = launch {
+            prepared_hook.finish_failed_monitor(plan.hook_monitor.as_ref());
+            failed_hooks.push(result.terminal_id.clone());
+            errors.push(format!("{}: {error}", result.project_id));
+        }
+    }
+    WorkspaceReplacementCompletion {
+        plan,
+        failed_ordinary,
+        failed_hooks,
+        errors,
+    }
+}
+
+/// Convert an aborted blocking task into a deterministic all-launches failure.
+pub fn fail_workspace_replacement(
+    plan: WorkspaceReplacementPlan,
+    error: String,
+) -> WorkspaceReplacementCompletion {
+    WorkspaceReplacementCompletion {
+        failed_ordinary: plan
+            .ordinary
+            .iter()
+            .map(|terminal| terminal.terminal_id.clone())
+            .collect(),
+        failed_hooks: plan
+            .hooks
+            .iter()
+            .map(|hook| hook.result().terminal_id.clone())
+            .collect(),
+        plan,
+        errors: vec![error],
+    }
+}
+
+/// Tear down launches whose completion lost the workspace epoch.
+pub fn cleanup_stale_workspace_replacement(
+    completion: WorkspaceReplacementCompletion,
+    backend: &dyn TerminalBackend,
+) {
+    for terminal in &completion.plan.ordinary {
+        backend.kill(&terminal.terminal_id);
+        completion
+            .plan
+            .terminals
+            .lock()
+            .remove(&terminal.terminal_id);
+    }
+    for hook in &completion.plan.hooks {
+        backend.kill(&hook.result().terminal_id);
+        hook.finish_failed_monitor(completion.plan.hook_monitor.as_ref());
+        if let Some(runner) = &completion.plan.hook_runner {
+            runner.remove_prepared_terminal(hook);
+        }
+    }
+    backend.flush_teardown();
+}
+
+fn clear_layout_terminal_id(node: &mut LayoutNode, target: &str) -> bool {
+    match node {
+        LayoutNode::Terminal { terminal_id, .. } if terminal_id.as_deref() == Some(target) => {
+            *terminal_id = None;
+            true
+        }
+        LayoutNode::Terminal { .. } => false,
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children
+            .iter_mut()
+            .any(|child| clear_layout_terminal_id(child, target)),
+    }
+}
+
+/// Commit materialization results if the replacement still owns its epoch.
+pub fn finish_workspace_replacement(
+    ws: &mut Workspace,
+    completion: WorkspaceReplacementCompletion,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let plan = completion.plan;
+    if ws.terminal_backend_migration_epoch() != Some(plan.epoch)
+        || ws.data_replacement_epoch() != plan.epoch
+    {
+        for terminal in &plan.ordinary {
+            plan.terminals.lock().remove(&terminal.terminal_id);
+        }
+        for hook in &plan.hooks {
+            if let Some(runner) = &plan.hook_runner {
+                runner.remove_prepared_terminal(hook);
+            }
+        }
+        return ActionResult::Err("stale workspace replacement completion".to_string());
+    }
+
+    for terminal_id in &completion.failed_ordinary {
+        for project in &mut ws.data.projects {
+            if project
+                .layout
+                .as_mut()
+                .is_some_and(|layout| clear_layout_terminal_id(layout, terminal_id))
+            {
+                break;
+            }
+        }
+        plan.terminals.lock().remove(terminal_id);
+    }
+    for terminal_id in &completion.failed_hooks {
+        for project in &mut ws.data.projects {
+            if project.hook_terminals.remove(terminal_id).is_some() {
+                project.terminal_names.remove(terminal_id);
+                project.hidden_terminals.remove(terminal_id);
+                break;
+            }
+        }
+        plan.terminals.lock().remove(terminal_id);
+    }
+    ws.finish_workspace_replacement_transition(plan.epoch, cx);
+    if completion.errors.is_empty() {
+        ActionResult::Ok(None)
+    } else {
+        ActionResult::Err(format!(
+            "workspace loaded with terminal materialization errors: {}",
+            completion.errors.join("; ")
+        ))
+    }
 }
 
 /// Kill outgoing-only PTYs, swap the workspace, then restore incoming terminals.
@@ -396,6 +867,57 @@ mod tests {
         fail_next_cwds: Mutex<HashSet<String>>,
     }
 
+    struct OwnershipCheckingBackend {
+        workspace: Arc<Mutex<Workspace>>,
+        launches_with_owner: AtomicUsize,
+    }
+
+    impl TerminalBackend for OwnershipCheckingBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("reserved launches must reconnect by id")
+        }
+
+        fn reconnect_terminal(
+            &self,
+            terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            let workspace = self.workspace.lock().unwrap();
+            if workspace.find_project_for_terminal(terminal_id).is_some()
+                || workspace.is_hook_terminal(terminal_id).is_some()
+            {
+                self.launches_with_owner.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(terminal_id.to_string())
+        }
+
+        fn kill(&self, _terminal_id: &str) {}
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
     impl TerminalBackend for RecordingBackend {
         fn transport(&self) -> Arc<dyn TerminalTransport> {
             Arc::new(StubTransport)
@@ -415,6 +937,9 @@ mod tests {
             cwd: &str,
             _shell: Option<&ShellType>,
         ) -> anyhow::Result<String> {
+            if self.fail_next_cwds.lock().unwrap().remove(cwd) {
+                anyhow::bail!("requested failure for {cwd}");
+            }
             self.reconnected
                 .lock()
                 .unwrap()
@@ -520,6 +1045,114 @@ mod tests {
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
         }
+    }
+
+    #[test]
+    fn prepared_replacement_publishes_reserved_ordinary_and_hook_owners_before_launch() {
+        let workspace = Arc::new(Mutex::new(Workspace::new(WorkspaceData::empty())));
+        let backend = Arc::new(OwnershipCheckingBackend {
+            workspace: workspace.clone(),
+            launches_with_owner: AtomicUsize::new(0),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let runner = HookRunner::new(backend.clone(), terminals.clone());
+        let monitor = HookMonitor::new();
+        let mut cx = TestCx {
+            runner,
+            monitor: monitor.clone(),
+        };
+        let mut incoming = project("incoming", "stale-hook", Some("echo opened"));
+        incoming.layout = Some(LayoutNode::new_terminal());
+        let prepared = prepare_workspace_replacement(data(incoming), &AppSettings::default());
+        assert_eq!(prepared.ordinary.len(), 1);
+        assert_eq!(prepared.hooks.len(), 1);
+        let ordinary_id = prepared.ordinary[0].terminal_id.clone();
+        let hook_id = prepared.hooks[0].result().terminal_id.clone();
+        let mut focus = FocusManager::default();
+        let plan = begin_workspace_replacement(
+            &mut workspace.lock().unwrap(),
+            &mut focus,
+            prepared,
+            Vec::new(),
+            &terminals,
+            backend.as_ref(),
+            &mut cx,
+        )
+        .expect("begin replacement");
+
+        {
+            let workspace = workspace.lock().unwrap();
+            assert!(workspace.terminal_backend_migration_epoch().is_some());
+            assert!(workspace.find_project_for_terminal(&ordinary_id).is_some());
+            assert!(workspace.is_hook_terminal(&hook_id).is_some());
+        }
+        assert!(terminals.lock().contains_key(&ordinary_id));
+        assert!(terminals.lock().contains_key(&hook_id));
+        assert!(
+            monitor
+                .history()
+                .iter()
+                .any(|entry| entry.terminal_id.as_deref() == Some(&hook_id))
+        );
+
+        let completion = materialize_workspace_replacement(plan, backend.as_ref());
+        let result =
+            finish_workspace_replacement(&mut workspace.lock().unwrap(), completion, &mut cx);
+        assert!(matches!(result, ActionResult::Ok(_)));
+        assert_eq!(backend.launches_with_owner.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            workspace.lock().unwrap().terminal_backend_migration_epoch(),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_reserved_launch_clears_provisional_owner_and_releases_gate() {
+        let failed_cwd = std::env::temp_dir().join("okena-prepared-session-failure");
+        let backend = Arc::new(RecordingBackend {
+            next_id: AtomicUsize::new(1),
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::from([failed_cwd.to_string_lossy().into_owned()])),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let runner = HookRunner::new(backend.clone(), terminals.clone());
+        let mut cx = TestCx {
+            runner,
+            monitor: HookMonitor::new(),
+        };
+        let mut incoming = project("incoming", "stale-hook", None);
+        incoming.path = failed_cwd.to_string_lossy().into_owned();
+        incoming.layout = Some(LayoutNode::new_terminal());
+        let prepared = prepare_workspace_replacement(data(incoming), &AppSettings::default());
+        let reserved_id = prepared.ordinary[0].terminal_id.clone();
+        let mut workspace = Workspace::new(WorkspaceData::empty());
+        let mut focus = FocusManager::default();
+        let plan = begin_workspace_replacement(
+            &mut workspace,
+            &mut focus,
+            prepared,
+            Vec::new(),
+            &terminals,
+            backend.as_ref(),
+            &mut cx,
+        )
+        .expect("begin replacement");
+
+        let completion = materialize_workspace_replacement(plan, backend.as_ref());
+        let result = finish_workspace_replacement(&mut workspace, completion, &mut cx);
+        assert!(matches!(result, ActionResult::Err(_)));
+        assert_eq!(workspace.terminal_backend_migration_epoch(), None);
+        assert!(!terminals.lock().contains_key(&reserved_id));
+        assert!(workspace.project("incoming").is_some_and(|project| {
+            matches!(
+                project.layout,
+                Some(LayoutNode::Terminal {
+                    terminal_id: None,
+                    ..
+                })
+            )
+        }));
     }
 
     #[test]

@@ -82,6 +82,39 @@ pub struct HookTerminalResult {
     pub cwd: String,
 }
 
+/// Immutable terminal-backed hook launch with caller-reserved ownership.
+#[derive(Clone)]
+pub struct PreparedHookTerminal {
+    result: HookTerminalResult,
+    launch_plan: TerminalLaunchPlan,
+    monitor_command: String,
+    project_name: String,
+}
+
+impl PreparedHookTerminal {
+    pub fn result(&self) -> &HookTerminalResult {
+        &self.result
+    }
+
+    /// Publish monitor ownership before a fast PTY can emit its exit event.
+    pub fn publish_monitor(&self, monitor: Option<&HookMonitor>) {
+        if let Some(monitor) = monitor {
+            let _ = monitor.record_start(
+                self.result.hook_type,
+                &self.monitor_command,
+                &self.project_name,
+                Some(self.result.terminal_id.clone()),
+            );
+        }
+    }
+
+    pub fn finish_failed_monitor(&self, monitor: Option<&HookMonitor>) {
+        if let Some(monitor) = monitor {
+            monitor.finish_by_terminal_id(&self.result.terminal_id, None);
+        }
+    }
+}
+
 impl HookRunner {
     /// Create a PTY-backed terminal for a hook command.
     /// Returns (terminal_id, full_cmd). The terminal is registered in the TerminalsRegistry.
@@ -130,6 +163,84 @@ impl HookRunner {
 
         Ok((terminal_id, full_cmd))
     }
+
+    /// Publish the UI terminal before launching a prepared hook PTY.
+    pub fn publish_prepared_terminal(&self, prepared: &PreparedHookTerminal) {
+        let terminal = Arc::new(Terminal::new(
+            prepared.result.terminal_id.clone(),
+            TerminalSize::default(),
+            self.backend.transport(),
+            prepared.result.cwd.clone(),
+        ));
+        self.terminals
+            .lock()
+            .insert(prepared.result.terminal_id.clone(), terminal);
+    }
+
+    /// Launch a prepared hook using its already-published logical id.
+    pub fn launch_prepared_terminal(&self, prepared: &PreparedHookTerminal) -> Result<(), String> {
+        let terminal_id = self
+            .backend
+            .reconnect_terminal_with_plan(
+                &prepared.result.terminal_id,
+                &prepared.result.cwd,
+                &prepared.launch_plan,
+            )
+            .map_err(|error| format!("Failed to create hook terminal: {error}"))?;
+        if terminal_id != prepared.result.terminal_id {
+            self.backend.kill(&terminal_id);
+            return Err(format!(
+                "hook backend returned unexpected terminal id {terminal_id}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn remove_prepared_terminal(&self, prepared: &PreparedHookTerminal) {
+        self.terminals.lock().remove(&prepared.result.terminal_id);
+    }
+}
+
+/// Resolve one project-open hook without launching its PTY.
+pub fn prepare_project_open_hook(
+    terminal_id: String,
+    project_hooks: &HooksConfig,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    global_hooks: &HooksConfig,
+) -> Option<PreparedHookTerminal> {
+    let command = resolve_hook(project_hooks, global_hooks, |hooks| &hooks.project.on_open)?;
+    let env_vars = project_env(
+        project_id,
+        project_name,
+        project_path,
+        folder_id,
+        folder_name,
+    );
+    let full_command = rerunnable_hook_command(&command, &env_vars);
+    let cwd = if project_path.is_empty() {
+        ".".to_string()
+    } else {
+        project_path.to_string()
+    };
+    let launch_plan = TerminalLaunchPlan::for_shell(keep_alive_hook_shell(&full_command))
+        .with_environment(safe_hook_environment(&env_vars));
+    Some(PreparedHookTerminal {
+        result: HookTerminalResult {
+            terminal_id,
+            label: build_hook_label("on_project_open", &env_vars, project_name),
+            hook_type: "on_project_open",
+            project_id: project_id.to_string(),
+            command: full_command,
+            cwd,
+        },
+        launch_plan,
+        monitor_command: command,
+        project_name: project_name.to_string(),
+    })
 }
 
 /// Wrap a rerunnable hook command so it reports completion and stays interactive.
