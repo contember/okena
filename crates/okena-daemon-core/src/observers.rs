@@ -353,6 +353,9 @@ fn apply_service_terminal_writebacks(
     writebacks: Vec<ServiceTerminalWriteback>,
 ) {
     let mut ws = workspace.lock();
+    if ws.terminal_backend_migration_epoch().is_some() {
+        return;
+    }
     let current_epoch = ws.data_replacement_epoch();
     let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
     for writeback in writebacks {
@@ -402,7 +405,13 @@ async fn autosave(
     tracker: &Arc<AutosaveTracker>,
 ) {
     // Skip UI-only changes: the persistent `data_version` is unchanged.
-    let current_version = workspace.lock().data_version();
+    let current_version = {
+        let workspace = workspace.lock();
+        if workspace.terminal_backend_migration_epoch().is_some() {
+            return;
+        }
+        workspace.data_version()
+    };
     if current_version == last_saved_version.load(Ordering::Relaxed) {
         return;
     }
@@ -414,6 +423,9 @@ async fn autosave(
     // latest under a short lock and DROP it before the blocking I/O.
     let (data, version) = {
         let ws = workspace.lock();
+        if ws.terminal_backend_migration_epoch().is_some() {
+            return;
+        }
         (ws.data().clone(), ws.data_version())
     };
 
@@ -476,20 +488,26 @@ async fn run_services_sync_with_preparer<Prepare>(
     Prepare: FnOnce(Vec<ProjectSnapshot>) -> Vec<PreparedProjectSnapshot> + Send + 'static,
 {
     // Lock scope 1: snapshot the projects, then drop the workspace lock.
-    let projects: Vec<ProjectSnapshot> = {
+    let (projects, snapshot_epoch): (Vec<ProjectSnapshot>, u64) = {
         let ws = workspace.lock();
+        if ws.terminal_backend_migration_epoch().is_some() {
+            return;
+        }
         let data_replacement_epoch = ws.data_replacement_epoch();
-        ws.data()
-            .projects
-            .iter()
-            .map(|p| ProjectSnapshot {
-                id: p.id.clone(),
-                path: p.path.clone(),
-                is_remote: p.is_remote,
-                service_terminals: p.service_terminals.clone(),
-                data_replacement_epoch,
-            })
-            .collect()
+        (
+            ws.data()
+                .projects
+                .iter()
+                .map(|p| ProjectSnapshot {
+                    id: p.id.clone(),
+                    path: p.path.clone(),
+                    is_remote: p.is_remote,
+                    service_terminals: p.service_terminals.clone(),
+                    data_replacement_epoch,
+                })
+                .collect(),
+            data_replacement_epoch,
+        )
     };
 
     let expected_project_count = projects.iter().filter(|project| !project.is_remote).count();
@@ -519,6 +537,14 @@ async fn run_services_sync_with_preparer<Prepare>(
     };
     if prepared_projects.len() != expected_project_count {
         return;
+    }
+    {
+        let workspace = workspace.lock();
+        if workspace.terminal_backend_migration_epoch().is_some()
+            || workspace.data_replacement_epoch() != snapshot_epoch
+        {
+            return;
+        }
     }
 
     // Lock scope 2: lock the service manager, mint a top-level cx, run the diff.
@@ -1015,6 +1041,65 @@ mod tests {
         assert!(sm.lock().project_path("project").is_none());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn service_sync_is_suppressed_during_backend_migration() {
+        let mut workspace_value =
+            workspace_with_project("project", &existing_path(), HashMap::new());
+        workspace_value
+            .begin_terminal_backend_migration()
+            .expect("begin migration");
+        let workspace = Arc::new(parking_lot::Mutex::new(workspace_value));
+        let sm = Arc::new(parking_lot::Mutex::new(manager()));
+        let (service_tick, _service_rx) = tokio::sync::watch::channel(0u64);
+        let preparer_called = Arc::new(AtomicBool::new(false));
+        let preparer_flag = preparer_called.clone();
+        let mut sync_state = ServiceSyncState::default();
+
+        run_services_sync_with_preparer(
+            &workspace,
+            &sm,
+            &tokio::runtime::Handle::current(),
+            &service_tick,
+            &mut sync_state,
+            move |_| {
+                preparer_flag.store(true, Ordering::Release);
+                Vec::new()
+            },
+        )
+        .await;
+
+        assert!(!preparer_called.load(Ordering::Acquire));
+        assert!(sm.lock().project_path("project").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn autosave_is_suppressed_during_backend_migration() {
+        let (workspace_tick, _workspace_rx) = tokio::sync::watch::channel(0u64);
+        let no_hook_runner = None;
+        let no_hook_monitor = None;
+        let mut workspace_value =
+            workspace_with_project("project", &existing_path(), HashMap::new());
+        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &no_hook_runner, &no_hook_monitor);
+        workspace_value.notify_data(&mut cx);
+        workspace_value
+            .begin_terminal_backend_migration()
+            .expect("begin migration");
+        let workspace = Arc::new(parking_lot::Mutex::new(workspace_value));
+        let last_saved_version = Arc::new(AtomicU64::new(0));
+        let tracker = Arc::new(AutosaveTracker::default());
+
+        autosave(
+            &workspace,
+            &tokio::runtime::Handle::current(),
+            &last_saved_version,
+            &tracker,
+        )
+        .await;
+
+        assert_eq!(last_saved_version.load(Ordering::Relaxed), 0);
+        assert_eq!(*tracker.pending.lock(), 0);
+    }
+
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn missing_empty_project_retries_when_mount_appears() {
         let project_dir = std::env::temp_dir().join(format!(
@@ -1169,6 +1254,39 @@ mod tests {
                 .unwrap()
                 .service_terminals
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn service_writeback_is_suppressed_during_backend_migration() {
+        let mut workspace_value =
+            workspace_with_service_terminal("project", "/project", "web", "owned-terminal");
+        let migration_epoch = workspace_value
+            .begin_terminal_backend_migration()
+            .expect("begin migration");
+        let workspace = Arc::new(parking_lot::Mutex::new(workspace_value));
+        let (workspace_tick, _rx) = tokio::sync::watch::channel(0u64);
+
+        apply_service_terminal_writebacks(
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            vec![ServiceTerminalWriteback {
+                project_id: "project".into(),
+                project_path: "/project".into(),
+                data_replacement_epoch: migration_epoch,
+                terminal_ids: HashMap::from([("web".into(), "old-backend".into())]),
+            }],
+        );
+
+        assert_eq!(
+            workspace
+                .lock()
+                .project("project")
+                .expect("project")
+                .service_terminals,
+            HashMap::from([("web".into(), "owned-terminal".into())])
         );
     }
 
