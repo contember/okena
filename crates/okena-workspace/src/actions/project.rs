@@ -594,8 +594,7 @@ impl Workspace {
             let hook_terminal_ids: Vec<String> = project.hook_terminals.keys().cloned().collect();
             if let Some(monitor) = cx.hook_monitor() {
                 for terminal_id in &hook_terminal_ids {
-                    monitor.finish_by_terminal_id(terminal_id, None);
-                    monitor.notify_exit(terminal_id, None);
+                    monitor.cancel_by_terminal_id(terminal_id);
                 }
             }
             let mut kill_ids: Vec<String> = Vec::new();

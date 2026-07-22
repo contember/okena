@@ -342,8 +342,7 @@ pub fn begin_workspace_replacement(
     let hook_monitor = cx.hook_monitor();
     if let Some(monitor) = &hook_monitor {
         for terminal_id in outgoing_hook_ids {
-            monitor.finish_by_terminal_id(&terminal_id, None);
-            monitor.notify_exit(&terminal_id, None);
+            monitor.cancel_by_terminal_id(&terminal_id);
         }
     }
 
@@ -627,8 +626,7 @@ fn replace_workspace_with(
     ids.sort();
     if let Some(monitor) = cx.hook_monitor() {
         for id in &outgoing_hook_ids {
-            monitor.finish_by_terminal_id(id, None);
-            monitor.notify_exit(id, None);
+            monitor.cancel_by_terminal_id(id);
         }
     }
     for id in &ids {
@@ -1049,7 +1047,11 @@ mod tests {
 
     #[test]
     fn prepared_replacement_publishes_reserved_ordinary_and_hook_owners_before_launch() {
-        let workspace = Arc::new(Mutex::new(Workspace::new(WorkspaceData::empty())));
+        let workspace = Arc::new(Mutex::new(Workspace::new(data(project(
+            "outgoing",
+            "outgoing-hook",
+            None,
+        )))));
         let backend = Arc::new(OwnershipCheckingBackend {
             workspace: workspace.clone(),
             launches_with_owner: AtomicUsize::new(0),
@@ -1057,6 +1059,12 @@ mod tests {
         let terminals: TerminalsRegistry = Arc::new(Default::default());
         let runner = HookRunner::new(backend.clone(), terminals.clone());
         let monitor = HookMonitor::new();
+        monitor.record_start_named(
+            "on_project_open",
+            "sleep 10",
+            "outgoing",
+            Some("outgoing-hook".to_string()),
+        );
         let mut cx = TestCx {
             runner,
             monitor: monitor.clone(),
@@ -1094,6 +1102,13 @@ mod tests {
                 .iter()
                 .any(|entry| entry.terminal_id.as_deref() == Some(&hook_id))
         );
+        assert!(
+            monitor
+                .history()
+                .iter()
+                .all(|entry| entry.terminal_id.as_deref() != Some("outgoing-hook"))
+        );
+        assert!(monitor.drain_pending_toasts().is_empty());
 
         let completion = materialize_workspace_replacement(plan, backend.as_ref());
         let result =
@@ -1369,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_finishes_outgoing_hook_monitor_before_dropping_ownership() {
+    fn replacement_cancels_outgoing_hook_monitor_before_dropping_ownership() {
         let backend = Arc::new(RecordingBackend {
             next_id: AtomicUsize::new(1),
             killed: Mutex::new(Vec::new()),
@@ -1404,10 +1419,8 @@ mod tests {
         );
 
         assert!(matches!(result, ActionResult::Ok(_)));
-        assert!(monitor.history().iter().all(|execution| !matches!(
-            execution.status,
-            crate::workspace::hook_monitor::HookStatus::Running
-        )));
+        assert!(monitor.history().is_empty());
+        assert!(monitor.drain_pending_toasts().is_empty());
     }
 
     #[test]
