@@ -3464,26 +3464,57 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn background_removal_failure_restores_authoritative_project() {
+        use std::process::Command;
         use std::time::Duration;
 
-        let invalid_worktree = std::env::temp_dir().join(format!(
+        let fixture = std::env::temp_dir().join(format!(
             "okena-remove-failure-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        std::fs::write(&invalid_worktree, "not a directory").expect("create removal obstacle");
+        let repo = fixture.join("main");
+        let invalid_worktree = fixture.join("worktree");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        std::fs::create_dir_all(&repo).expect("create repository");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@okena.local"]);
+        git(&repo, &["config", "user.name", "Okena Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").expect("write base");
+        git(&repo, &["add", "base.txt"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                invalid_worktree.to_str().expect("utf-8 worktree path"),
+            ],
+        );
 
         let mut data = workspace_with_worktree_child();
+        data.projects[0].path = repo.to_string_lossy().into_owned();
         data.projects[1].path = invalid_worktree.to_string_lossy().into_owned();
         let metadata = data.projects[1]
             .worktree_info
             .as_mut()
             .expect("worktree metadata");
         metadata.worktree_path = invalid_worktree.to_string_lossy().into_owned();
-        metadata.main_repo_path = invalid_worktree
-            .with_extension("missing-main")
-            .to_string_lossy()
-            .into_owned();
+        metadata.main_repo_path = repo.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".to_string();
         if let Some(LayoutNode::Terminal { terminal_id, .. }) = data.projects[1].layout.as_mut() {
             *terminal_id = Some("terminal-1".into());
         }
@@ -3510,6 +3541,11 @@ mod tests {
                 .expect("build removal plan");
             (operation_epoch, plan)
         };
+
+        // Provenance is valid when the plan is built. Replace the checkout
+        // with a file afterwards so the background recursive removal fails.
+        std::fs::remove_dir_all(&invalid_worktree).expect("remove checkout directory");
+        std::fs::write(&invalid_worktree, "not a directory").expect("create removal obstacle");
 
         let local = tokio::task::LocalSet::new();
         local
@@ -3577,6 +3613,7 @@ mod tests {
             "failure is surfaced to clients"
         );
         std::fs::remove_file(invalid_worktree).ok();
+        std::fs::remove_dir_all(fixture).ok();
     }
 
     #[cfg(unix)]

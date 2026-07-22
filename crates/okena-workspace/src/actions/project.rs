@@ -1933,6 +1933,133 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn close_rejects_stale_root_pointing_into_independent_repository(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-stale-root-test-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let registered_worktree = fixture.join("registered-worktree");
+        let independent_repo = fixture.join("independent");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&registered_worktree),
+        ]);
+
+        git(&["init", "-b", "main", path_str(&independent_repo)]);
+        std::fs::create_dir_all(independent_repo.join("packages/app")).unwrap();
+        let sentinel = independent_repo.join("must-survive.txt");
+        std::fs::write(&sentinel, "independent data\n").unwrap();
+
+        let mut parent = make_project("parent");
+        parent.path = main_repo.to_string_lossy().into_owned();
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut stale = make_worktree_project("wt1", "parent");
+        stale.path = independent_repo
+            .join("packages/app")
+            .to_string_lossy()
+            .into_owned();
+        let metadata = stale.worktree_info.as_mut().unwrap();
+        metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
+        metadata.worktree_path = registered_worktree.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".to_string();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, stale];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let error = workspace.update(cx, |ws, cx| {
+            ws.close_worktree(
+                &mut FocusManager::new(),
+                "wt1",
+                false,
+                false,
+                false,
+                false,
+                false,
+                &HooksConfig::default(),
+                cx,
+            )
+            .unwrap_err()
+        });
+
+        assert!(error.contains("does not match its recorded checkout root"));
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "independent data\n"
+        );
+        assert!(independent_repo.exists());
+        assert!(workspace.read_with(cx, |ws, _| ws.project("wt1").is_some()));
+
+        let legacy_error = workspace.update(cx, |ws, cx| {
+            ws.with_project("wt1", cx, |project| {
+                project
+                    .worktree_info
+                    .as_mut()
+                    .unwrap()
+                    .worktree_path
+                    .clear();
+                true
+            });
+            match ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx) {
+                Ok(_) => panic!("unregistered legacy worktree must be rejected"),
+                Err(error) => error,
+            }
+        });
+        assert!(legacy_error.contains("does not belong to its parent repository"));
+        assert!(
+            sentinel.exists(),
+            "legacy metadata cannot bypass registration"
+        );
+
+        let legacy_plan = workspace.update(cx, |ws, cx| {
+            ws.with_project("wt1", cx, |project| {
+                project.path = registered_worktree.to_string_lossy().into_owned();
+                true
+            });
+            ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx)
+                .expect("registered legacy worktree is accepted")
+        });
+        assert_eq!(
+            Workspace::physical_path_identity(&legacy_plan.worktree_path),
+            Workspace::physical_path_identity(&registered_worktree)
+        );
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&registered_worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
     fn active_root_lease_rejects_project_and_worktree_registration(cx: &mut gpui::TestAppContext) {
         let fixture =
             std::env::temp_dir().join(format!("okena-root-lease-test-{}", uuid::Uuid::new_v4()));
@@ -2439,10 +2566,9 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn begin_worktree_removal_succeeds_after_create_finishes(cx: &mut gpui::TestAppContext) {
-        // Inverse of the mid-create guard: once finish_creating_project clears
-        // the flag (finalize path), the same removal route is no longer rejected
-        // — the guard releases rather than wedging the row forever.
+    fn root_claim_succeeds_after_create_finishes(cx: &mut gpui::TestAppContext) {
+        // Once finalize clears the create lease, paths below the checkout can
+        // be claimed again rather than remaining wedged forever.
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string()];
         let mut data = make_workspace_data();
@@ -2450,10 +2576,10 @@ mod gpui_tests {
         data.project_order = vec!["parent".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
-        let result = workspace.update(cx, |ws: &mut Workspace, cx| {
+        let result = workspace.update(cx, |ws: &mut Workspace, _cx| {
             ws.mark_creating_project("wt1");
             ws.finish_creating_project("wt1");
-            ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx)
+            ws.ensure_project_path_claim_allowed(Path::new("/tmp/worktrees/wt1/packages/app"))
         });
 
         assert!(

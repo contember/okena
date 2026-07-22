@@ -1,6 +1,6 @@
 //! Worktree operations: create / remove / list.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use okena_core::process::{command, safe_output};
 
@@ -214,6 +214,21 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
     result
 }
 
+/// List the paths Git registers as linked worktrees for a repository.
+/// The main worktree is intentionally excluded.
+pub fn list_linked_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
+    let Some(repo) = crate::gix_helpers::open(repo_path) else {
+        return Vec::new();
+    };
+    let Ok(worktrees) = repo.worktrees() else {
+        return Vec::new();
+    };
+    worktrees
+        .into_iter()
+        .filter_map(|proxy| proxy.base().ok())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +255,19 @@ mod tests {
         entries.sort_by(|a, b| a.1.cmp(&b.1));
         let branches: Vec<&str> = entries.iter().map(|(_, b)| b.as_str()).collect();
         assert_eq!(branches, vec!["feat", "main"]);
+    }
+
+    #[test]
+    fn list_linked_worktree_paths_excludes_main_worktree() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+
+        assert_eq!(list_linked_worktree_paths(&repo), vec![wt_path]);
     }
 
     #[test]

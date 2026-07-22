@@ -12,6 +12,13 @@ pub fn get_repo_root(path: &Path) -> Option<PathBuf> {
     repo.workdir().map(|p| p.to_path_buf())
 }
 
+/// Return the shared Git directory for a main or linked worktree.
+pub fn get_repo_common_dir(path: &Path) -> Option<PathBuf> {
+    let repo = crate::gix_helpers::open(path)?;
+    let common_dir = repo.common_dir();
+    Some(std::fs::canonicalize(common_dir).unwrap_or_else(|_| normalize_path(common_dir)))
+}
+
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
 pub fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
@@ -100,6 +107,7 @@ mod tests {
     fn get_repo_root_returns_none_for_invalid_path() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
         assert!(get_repo_root(&path).is_none());
+        assert!(get_repo_common_dir(&path).is_none());
     }
 
     /// Compare computed paths as `Path` objects for cross-platform correctness
@@ -216,5 +224,24 @@ mod tests {
             root.canonicalize().unwrap(),
             wt_path.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn linked_worktree_shares_common_dir_with_main_repository() {
+        let (_tmp, repo) = init_temp_repo();
+        let worktree_parent = tempfile::tempdir().unwrap();
+        let worktree = worktree_parent.path().join("linked");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                worktree.to_str().unwrap(),
+                "-b",
+                "linked",
+            ],
+        );
+
+        assert_eq!(get_repo_common_dir(&repo), get_repo_common_dir(&worktree));
     }
 }
