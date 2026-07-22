@@ -1001,7 +1001,14 @@ pub(crate) fn spawn_background_worktree_removal(
                 None
             };
             plan.fire_close_hooks_headless(&global_hooks_blocking, monitor.as_ref());
-            let removal = plan.remove_fast();
+            let removal = if did_stash && okena_git::has_uncommitted_changes(&worktree_path) {
+                Err(
+                    "checkout became dirty after stash; preserved it instead of removing it"
+                        .to_string(),
+                )
+            } else {
+                plan.remove_fast().map_err(|error| error.to_string())
+            };
             (plan, removal, dirty_hook)
         })
         .await;
