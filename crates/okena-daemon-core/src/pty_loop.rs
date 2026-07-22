@@ -40,7 +40,7 @@ use okena_hooks::{HookMonitor, HookRunner};
 use okena_services::manager::ServiceManager;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
-use okena_terminal::pty_manager::{PtyEvent, PtyManager};
+use okena_terminal::pty_manager::{PtyEvent, PtyGeneration, PtyManager};
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::persistence::AppSettings;
 use okena_workspace::state::{HookTerminalStatus, Workspace};
@@ -142,7 +142,7 @@ pub async fn run_pty_loop(
         };
 
         // Exits collected across this drain pass, handled together after.
-        let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
+        let mut exit_events: Vec<(String, PtyGeneration, Option<u32>)> = Vec::new();
         // Terminals that produced output this pass (for the OSC hook-exit title
         // check, mirroring the GUI's `dirty_terminal_ids`).
         let mut dirty_terminal_ids: Vec<String> = Vec::new();
@@ -220,7 +220,7 @@ fn process_event(
     event: &PtyEvent,
     terminals: &TerminalsRegistry,
     pty_manager: &PtyManager,
-    exit_events: &mut Vec<(String, Option<u32>)>,
+    exit_events: &mut Vec<(String, PtyGeneration, Option<u32>)>,
     dirty_terminal_ids: &mut Vec<String>,
     bytes_this_turn: &mut usize,
 ) {
@@ -254,7 +254,7 @@ fn process_event(
             // the Terminal yet — the service manager may keep it so users can
             // see crash output.
             if pty_manager.cleanup_exited(terminal_id, *generation) {
-                exit_events.push((terminal_id.clone(), *exit_code));
+                exit_events.push((terminal_id.clone(), *generation, *exit_code));
             }
         }
     }
@@ -388,7 +388,7 @@ fn process_activity_edges(
 /// window/pane notify + toast dismissal have no daemon surface and are dropped
 /// (the soft-close *state* cleanup still runs).
 fn handle_exits(
-    exit_events: &[(String, Option<u32>)],
+    exit_events: &[(String, PtyGeneration, Option<u32>)],
     terminals: &TerminalsRegistry,
     pty_manager: &PtyManager,
     service_manager: &Arc<Mutex<ServiceManager>>,
@@ -408,7 +408,7 @@ fn handle_exits(
         let mut sm = service_manager.lock();
         let mut cx = reactor_ref.cx();
         let mut handled = HashSet::new();
-        for (terminal_id, exit_code) in exit_events {
+        for (terminal_id, _, exit_code) in exit_events {
             if sm.handle_service_exit(terminal_id, *exit_code, &mut cx) {
                 handled.insert(terminal_id.clone());
             }
@@ -421,7 +421,7 @@ fn handle_exits(
     // PTY terminal. This MUST happen before phase 2 (status updates / pending
     // worktree-close resolution) which may delete a project.
     if let Some(monitor) = reactor.hook_monitor.as_ref() {
-        for (terminal_id, exit_code) in exit_events {
+        for (terminal_id, _, exit_code) in exit_events {
             monitor.notify_exit(terminal_id, *exit_code);
         }
     }
@@ -472,9 +472,9 @@ fn handle_exits(
     // removes the socket file.
     {
         let mut reg = terminals.lock();
-        for (terminal_id, _) in exit_events {
+        for (terminal_id, generation, _) in exit_events {
             if !service_tids.contains(terminal_id) && !hook_tids.contains(terminal_id) {
-                pty_manager.kill(terminal_id);
+                pty_manager.kill_exited(terminal_id, *generation);
                 reg.remove(terminal_id);
             }
         }
@@ -489,7 +489,7 @@ fn handle_exits(
     {
         let mut cx = reactor.workspace_cx();
         let mut ws = reactor.workspace.lock();
-        for (tid, _) in exit_events {
+        for (tid, _, _) in exit_events {
             let _stale_toast = ws.cancel_pending_close(tid);
             ws.reap_restored_close(tid, &mut cx);
         }
@@ -524,7 +524,7 @@ fn handle_exits(
 /// `remove_worktree_fast` + `worktree_removed` hook. This matches the normal
 /// daemon `RemoveWorktreeProject` action exactly.
 fn handle_hook_terminal_exits(
-    exit_events: &[(String, Option<u32>)],
+    exit_events: &[(String, PtyGeneration, Option<u32>)],
     service_tids: &HashSet<String>,
     terminals: &TerminalsRegistry,
     service_manager: &Arc<Mutex<ServiceManager>>,
@@ -536,15 +536,15 @@ fn handle_hook_terminal_exits(
         let ws = reactor.workspace.lock();
         exit_events
             .iter()
-            .filter(|(tid, _)| !service_tids.contains(tid))
-            .filter(|(tid, _)| ws.is_hook_terminal(tid).is_some())
-            .map(|(tid, _)| tid.clone())
+            .filter(|(tid, _, _)| !service_tids.contains(tid))
+            .filter(|(tid, _, _)| ws.is_hook_terminal(tid).is_some())
+            .map(|(tid, _, _)| tid.clone())
             .collect()
     };
 
     let global_hooks = reactor.settings.lock().hooks.clone();
 
-    for (terminal_id, exit_code) in exit_events {
+    for (terminal_id, _, exit_code) in exit_events {
         if !hook_tids.contains(terminal_id) {
             continue;
         }
@@ -679,7 +679,7 @@ struct TerminalCloseInfo {
 /// parent-worktree `terminal.on_close` is configured. Retained ownership is
 /// consumed here so duplicate exit events cannot fire the lifecycle twice.
 fn collect_terminal_close_infos(
-    exit_events: &[(String, Option<u32>)],
+    exit_events: &[(String, PtyGeneration, Option<u32>)],
     service_tids: &HashSet<String>,
     hook_tids: &HashSet<String>,
     reactor: &PtyLoopReactor,
@@ -689,8 +689,8 @@ fn collect_terminal_close_infos(
     let mut ws = reactor.workspace.lock();
     exit_events
         .iter()
-        .filter(|(tid, _)| !service_tids.contains(tid) && !hook_tids.contains(tid))
-        .filter_map(|(tid, exit_code)| {
+        .filter(|(tid, _, _)| !service_tids.contains(tid) && !hook_tids.contains(tid))
+        .filter_map(|(tid, _, exit_code)| {
             let layout_project_id = ws.find_project_for_terminal(tid).map(|p| p.id.clone());
             let retained_owner = ws.take_closing_terminal_owner(tid);
             let (project_id, retained_terminal_name) = match (layout_project_id, retained_owner) {
@@ -953,7 +953,15 @@ mod tests {
         project.terminal_names.clear();
 
         let reactor = test_reactor(workspace, AppSettings::default());
-        let exits = vec![("terminal-1".to_string(), Some(9))];
+        let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        pty_manager
+            .create_or_reconnect_terminal(Some("terminal-1"), &cwd)
+            .expect("create tracked PTY");
+        let generation = pty_manager
+            .current_generation("terminal-1")
+            .expect("tracked generation");
+        let exits = vec![("terminal-1".to_string(), generation, Some(9))];
         let info = collect_terminal_close_infos(
             &exits,
             &HashSet::new(),
@@ -1047,6 +1055,13 @@ mod tests {
         exit_code: Option<u32>,
     ) {
         let (pty_manager, _unused_events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        pty_manager
+            .create_or_reconnect_terminal(Some(terminal_id), &cwd)
+            .expect("create tracked hook PTY");
+        let generation = pty_manager
+            .current_generation(terminal_id)
+            .expect("tracked generation");
         let pty_manager = Arc::new(pty_manager);
         let service_manager = Arc::new(Mutex::new(ServiceManager::new(
             reactor.backend.clone(),
@@ -1060,7 +1075,7 @@ mod tests {
             service_tick.clone(),
         );
         handle_exits(
-            &[(terminal_id.to_string(), exit_code)],
+            &[(terminal_id.to_string(), generation, exit_code)],
             &terminals,
             &pty_manager,
             &service_manager,
