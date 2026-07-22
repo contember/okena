@@ -169,15 +169,6 @@ pub(super) fn rename_project_directory(
         None => return ActionResult::Err("cannot determine parent directory".to_string()),
     };
     let new_path = parent.join(&new_name);
-    if let Err(error) = ws.ensure_project_path_mutation_allowed(&project_id, &new_path) {
-        return ActionResult::Err(error);
-    }
-    if new_path.exists() {
-        return ActionResult::Err(format!("'{}' already exists", new_name));
-    }
-    if let Err(e) = std::fs::rename(old_path, &new_path) {
-        return ActionResult::Err(format!("Failed to rename: {}", e));
-    }
     let new_path_str = new_path.to_string_lossy().to_string();
     match ws.rename_project_directory(&project_id, new_path_str, new_name, cx) {
         Ok(()) => ActionResult::Ok(None),
