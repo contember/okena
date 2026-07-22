@@ -19,6 +19,16 @@ pub(super) enum OkenaLaunchFailure {
 }
 
 impl ServiceManager {
+    pub(super) fn scheduled_okena_restart_is_current(
+        &self,
+        key: &(String, String),
+        restart_count: u32,
+    ) -> bool {
+        self.instances.get(key).is_some_and(|instance| {
+            instance.status == ServiceStatus::Restarting && instance.restart_count == restart_count
+        })
+    }
+
     pub(super) fn schedule_okena_restart(
         &self,
         project_id: &str,
@@ -30,6 +40,12 @@ impl ServiceManager {
         let Some(project_incarnation) = self.project_incarnation(project_id, project_path) else {
             return;
         };
+        let key = (project_id.to_string(), service_name.to_string());
+        let Some(restart_count) = self.instances.get(&key).and_then(|instance| {
+            (instance.status == ServiceStatus::Restarting).then_some(instance.restart_count)
+        }) else {
+            return;
+        };
         let project_id = project_id.to_string();
         let service_name = service_name.to_string();
         let project_path = project_path.to_string();
@@ -38,7 +54,10 @@ impl ServiceManager {
         cx.spawn_main(async move |this, cx| {
             cx.timer(delay).await;
             let _ = this.update(cx, |this, cx| {
-                if this.is_project_incarnation_current(&project_id, &project_incarnation) {
+                let key = (project_id.clone(), service_name.clone());
+                if this.is_project_incarnation_current(&project_id, &project_incarnation)
+                    && this.scheduled_okena_restart_is_current(&key, restart_count)
+                {
                     this.start_service(&project_id, &service_name, &project_path, cx);
                 }
             });

@@ -192,6 +192,23 @@ fn handle_exit_restart_clears_terminal() {
 }
 
 #[test]
+fn scheduled_restart_requires_the_same_restarting_state() {
+    let mut manager = manager();
+    let (key, instance) = make_instance("project", "web", true, 1, ServiceStatus::Restarting);
+    let scheduled_restart_count = instance.restart_count;
+    manager.instances.insert(key.clone(), instance);
+
+    assert!(manager.scheduled_okena_restart_is_current(&key, scheduled_restart_count));
+
+    manager.stop_service("project", "web", &mut RecordingCx::default());
+
+    assert!(
+        !manager.scheduled_okena_restart_is_current(&key, scheduled_restart_count),
+        "a manual stop must invalidate the pending restart"
+    );
+}
+
+#[test]
 fn unload_removes_instances() {
     let mut instances: HashMap<(String, String), ServiceInstance> = HashMap::new();
     let mut configs: HashMap<String, Vec<ServiceDefinition>> = HashMap::new();
