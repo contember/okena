@@ -199,6 +199,22 @@ impl ServiceManager {
         self.unload_project_services_inner(project_id, preserved_terminal_ids, cx);
     }
 
+    /// Finish a replacement reconciliation by killing preserved sessions that
+    /// the freshly loaded service set did not successfully reconnect.
+    pub fn kill_unclaimed_preserved_sessions(
+        &self,
+        project_id: &str,
+        preserved_terminal_ids: &HashSet<String>,
+    ) {
+        let claimed: HashSet<String> = self
+            .service_terminal_ids(project_id)
+            .into_values()
+            .collect();
+        for terminal_id in preserved_terminal_ids.difference(&claimed) {
+            self.backend.kill(terminal_id);
+        }
+    }
+
     fn unload_project_services_inner(
         &mut self,
         project_id: &str,

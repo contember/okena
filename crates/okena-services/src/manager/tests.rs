@@ -82,6 +82,10 @@ impl ProjectDir {
     fn path(&self) -> String {
         self.0.to_string_lossy().into_owned()
     }
+
+    fn write_config(&self, config: &str) {
+        std::fs::write(self.0.join("okena.yaml"), config).expect("rewrite test config");
+    }
 }
 
 impl Drop for ProjectDir {
@@ -460,7 +464,7 @@ fn project_path_update_reloads_runtime_under_new_path() {
     manager.instances.insert(key.clone(), instance);
     let mut cx = RecordingCx::default();
 
-    manager.update_project_path("project", &new_path, &mut cx);
+    assert!(manager.update_project_path("project", &new_path, &mut cx));
 
     let new_incarnation = manager
         .project_incarnation("project", &new_path)
@@ -475,4 +479,26 @@ fn project_path_update_reloads_runtime_under_new_path() {
         Some(&new_incarnation)
     );
     assert_eq!(cx.spawned.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn project_path_update_retries_after_parse_failure() {
+    let project = ProjectDir::with_config("services: [");
+    let new_path = project.path();
+    let mut manager = manager();
+    manager
+        .project_paths
+        .insert("project".into(), "/old/project/path".into());
+    manager.begin_project_incarnation("project", "/old/project/path");
+    let mut cx = RecordingCx::default();
+
+    assert!(!manager.update_project_path("project", &new_path, &mut cx));
+    assert_eq!(
+        manager.project_path("project").map(String::as_str),
+        Some("/old/project/path")
+    );
+
+    project.write_config("services: []\n");
+    assert!(manager.update_project_path("project", &new_path, &mut cx));
+    assert_eq!(manager.project_path("project"), Some(&new_path));
 }

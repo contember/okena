@@ -399,6 +399,7 @@ fn sync_services(
             data_replacement_epoch: p.data_replacement_epoch,
         };
         let previous = known.get(&p.id).cloned();
+        let mut preserved_terminal_ids = None;
         if previous.as_ref() == Some(&identity) && sm.project_path(&p.id) == Some(&p.path) {
             continue;
         }
@@ -406,9 +407,10 @@ fn sync_services(
             if previous.as_ref().is_some_and(|previous| {
                 previous.data_replacement_epoch != identity.data_replacement_epoch
             }) {
-                let preserved_terminal_ids: HashSet<String> =
+                let ids_to_preserve: HashSet<String> =
                     p.service_terminals.values().cloned().collect();
-                sm.unload_project_services_preserving(&p.id, &preserved_terminal_ids, cx);
+                sm.unload_project_services_preserving(&p.id, &ids_to_preserve, cx);
+                preserved_terminal_ids = Some(ids_to_preserve);
             } else {
                 sm.unload_project_services(&p.id, cx);
             }
@@ -419,6 +421,9 @@ fn sync_services(
             continue;
         }
         sm.load_project_services(&p.id, &p.path, &p.service_terminals, cx);
+        if let Some(preserved_terminal_ids) = preserved_terminal_ids.as_ref() {
+            sm.kill_unclaimed_preserved_sessions(&p.id, preserved_terminal_ids);
+        }
         known.insert(p.id.clone(), identity);
     }
 
@@ -441,10 +446,13 @@ mod tests {
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct RecordingBackend {
         killed: Mutex<Vec<String>>,
         reconnected: Mutex<Vec<String>>,
+        reconnect_fail_after: Option<usize>,
+        reconnect_count: AtomicUsize,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -470,6 +478,13 @@ mod tests {
                 .lock()
                 .expect("reconnect lock")
                 .push(terminal_id.to_string());
+            let reconnect_count = self.reconnect_count.fetch_add(1, Ordering::Relaxed);
+            if self
+                .reconnect_fail_after
+                .is_some_and(|limit| reconnect_count >= limit)
+            {
+                anyhow::bail!("configured reconnect failure");
+            }
             Ok(terminal_id.to_string())
         }
 
@@ -680,6 +695,8 @@ mod tests {
         let backend = Arc::new(RecordingBackend {
             killed: Mutex::new(Vec::new()),
             reconnected: Mutex::new(Vec::new()),
+            reconnect_fail_after: None,
+            reconnect_count: AtomicUsize::new(0),
         });
         let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
         let sm = Arc::new(parking_lot::Mutex::new(ServiceManager::new(
@@ -724,6 +741,152 @@ mod tests {
                 .as_slice(),
             &["persistent-web", "persistent-web"]
         );
+        std::fs::remove_dir_all(&project_dir).expect("remove project dir");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replacement_kills_preserved_session_removed_from_current_config() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "okena-observer-stale-service-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let config_path = project_dir.join("okena.yaml");
+        std::fs::write(
+            &config_path,
+            "services:\n  - name: web\n    command: echo web\n",
+        )
+        .expect("write initial service config");
+        let project_path = project_dir.to_string_lossy().into_owned();
+        let backend = Arc::new(RecordingBackend {
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            reconnect_fail_after: None,
+            reconnect_count: AtomicUsize::new(0),
+        });
+        let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
+        let sm = Arc::new(parking_lot::Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals,
+        )));
+        let rr = reactor_ref(&sm);
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let mut initial = project("project", &project_path, false);
+                initial
+                    .service_terminals
+                    .insert("web".into(), "persistent-web".into());
+                let mut known = HashMap::new();
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[initial], &mut known, &mut manager, &mut cx);
+                }
+
+                std::fs::write(
+                    &config_path,
+                    "services:\n  - name: replacement\n    command: echo replacement\n",
+                )
+                .expect("write replacement service config");
+                let mut replacement = project("project", &project_path, false);
+                replacement.data_replacement_epoch = 1;
+                replacement
+                    .service_terminals
+                    .insert("web".into(), "persistent-web".into());
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[replacement], &mut known, &mut manager, &mut cx);
+                }
+            })
+            .await;
+
+        assert_eq!(
+            backend.killed.lock().expect("kill lock").as_slice(),
+            &["persistent-web"]
+        );
+        assert_eq!(
+            backend
+                .reconnected
+                .lock()
+                .expect("reconnect lock")
+                .as_slice(),
+            &["persistent-web"]
+        );
+        assert!(sm.lock().service_terminal_ids("project").is_empty());
+        std::fs::remove_dir_all(&project_dir).expect("remove project dir");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replacement_kills_preserved_session_after_reconnect_failure_once() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "okena-observer-failed-reconnect-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(
+            project_dir.join("okena.yaml"),
+            "services:\n  - name: web\n    command: echo web\n",
+        )
+        .expect("write service config");
+        let project_path = project_dir.to_string_lossy().into_owned();
+        let backend = Arc::new(RecordingBackend {
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            reconnect_fail_after: Some(1),
+            reconnect_count: AtomicUsize::new(0),
+        });
+        let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
+        let sm = Arc::new(parking_lot::Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals,
+        )));
+        let rr = reactor_ref(&sm);
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let mut initial = project("project", &project_path, false);
+                initial
+                    .service_terminals
+                    .insert("web".into(), "persistent-web".into());
+                let mut known = HashMap::new();
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[initial], &mut known, &mut manager, &mut cx);
+                }
+
+                let mut replacement = project("project", &project_path, false);
+                replacement.data_replacement_epoch = 1;
+                replacement
+                    .service_terminals
+                    .insert("web".into(), "persistent-web".into());
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[replacement], &mut known, &mut manager, &mut cx);
+                }
+            })
+            .await;
+
+        assert_eq!(
+            backend.killed.lock().expect("kill lock").as_slice(),
+            &["persistent-web"]
+        );
+        assert_eq!(
+            backend
+                .reconnected
+                .lock()
+                .expect("reconnect lock")
+                .as_slice(),
+            &["persistent-web", "persistent-web"]
+        );
+        assert!(sm.lock().service_terminal_ids("project").is_empty());
         std::fs::remove_dir_all(&project_dir).expect("remove project dir");
     }
 

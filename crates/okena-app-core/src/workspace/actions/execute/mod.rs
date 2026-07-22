@@ -26,6 +26,7 @@ use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_workspace::context::WorkspaceCx;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Result of executing an action.
@@ -574,13 +575,35 @@ pub fn ensure_terminal(
             && let Some(path) = layout.find_terminal_path(terminal_id)
             && let Some(LayoutNode::Terminal { shell_type, .. }) = layout.get_at_path(&path)
         {
-            let shell = match shell_type {
-                ShellType::Default => project
-                    .default_shell
-                    .clone()
-                    .unwrap_or_else(|| settings.default_shell.clone()),
-                shell => shell.clone(),
-            };
+            let parent_hooks = project
+                .worktree_info
+                .as_ref()
+                .and_then(|worktree| ws.project(&worktree.parent_project_id))
+                .map(|parent| &parent.hooks);
+            let shell_wrapper =
+                hooks::resolve_shell_wrapper(&project.hooks, parent_hooks, &settings.hooks);
+            let on_create = hooks::resolve_terminal_on_create_simple(
+                &project.hooks,
+                parent_hooks,
+                &settings.hooks,
+            );
+            let folder = ws.folder_for_project_or_parent(&project.id);
+            let env = hooks::terminal_hook_env(
+                &project.id,
+                &project.name,
+                &project.path,
+                project.worktree_info.is_some(),
+                folder.map(|folder| folder.id.as_str()),
+                folder.map(|folder| folder.name.as_str()),
+            );
+            let shell = effective_terminal_shell(
+                shell_type.clone(),
+                project.default_shell.as_ref(),
+                &settings.default_shell,
+                shell_wrapper.as_deref(),
+                on_create.as_deref(),
+                &env,
+            );
             reconnect = Some((project.path.clone(), shell));
             break;
         }
@@ -607,6 +630,24 @@ pub fn ensure_terminal(
             None
         }
     }
+}
+
+fn effective_terminal_shell(
+    shell_type: ShellType,
+    project_default_shell: Option<&ShellType>,
+    global_default_shell: &ShellType,
+    shell_wrapper: Option<&str>,
+    on_create: Option<&str>,
+    env: &HashMap<String, String>,
+) -> ShellType {
+    let mut shell = shell_type.resolve_default(project_default_shell, global_default_shell);
+    if let Some(wrapper) = shell_wrapper {
+        shell = hooks::apply_shell_wrapper(&shell, wrapper, env);
+    }
+    if let Some(command) = on_create {
+        shell = hooks::apply_on_create(&shell, command, env);
+    }
+    shell
 }
 
 /// Spawn PTYs for any uninitialized terminals (`terminal_id: None`) in a project's layout.
@@ -710,22 +751,14 @@ pub fn spawn_uninitialized_terminals(
 
     let mut spawned_ids = Vec::new();
     for (path, shell_type) in uninitialized {
-        let mut shell = match shell_type {
-            ShellType::Default => project_default_shell
-                .clone()
-                .unwrap_or_else(|| global_default.clone()),
-            other => other,
-        };
-
-        // Apply shell_wrapper if configured
-        if let Some(ref wrapper) = shell_wrapper {
-            shell = hooks::apply_shell_wrapper(&shell, wrapper, &env);
-        }
-
-        // Apply on_create: wrap shell to run command first, then exec into shell
-        if let Some(ref cmd) = on_create_cmd {
-            shell = hooks::apply_on_create(&shell, cmd, &env);
-        }
+        let shell = effective_terminal_shell(
+            shell_type,
+            project_default_shell.as_ref(),
+            &global_default,
+            shell_wrapper.as_deref(),
+            on_create_cmd.as_deref(),
+            &env,
+        );
 
         match backend.create_terminal(&spawn_cwd, Some(&shell)) {
             Ok(terminal_id) => {
@@ -934,6 +967,8 @@ mod path_guard_tests {
 
 #[cfg(test)]
 mod reconnect_shell_tests {
+    #[cfg(windows)]
+    use super::spawn_uninitialized_terminals;
     use super::{AppSettings, ensure_terminal};
     use crate::workspace::settings::HooksConfig;
     use crate::workspace::state::{LayoutNode, ProjectData, WindowState, Workspace, WorkspaceData};
@@ -941,6 +976,8 @@ mod reconnect_shell_tests {
     use okena_terminal::backend::TerminalBackend;
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
+    #[cfg(windows)]
+    use okena_workspace::context::WorkspaceCx;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -956,7 +993,8 @@ mod reconnect_shell_tests {
 
     #[derive(Default)]
     struct RecordingBackend {
-        shells: Mutex<Vec<Option<ShellType>>>,
+        created_shells: Mutex<Vec<Option<ShellType>>>,
+        reconnected_shells: Mutex<Vec<Option<ShellType>>>,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -964,12 +1002,12 @@ mod reconnect_shell_tests {
             Arc::new(StubTransport)
         }
 
-        fn create_terminal(
-            &self,
-            _cwd: &str,
-            _shell: Option<&ShellType>,
-        ) -> anyhow::Result<String> {
-            anyhow::bail!("unexpected create")
+        fn create_terminal(&self, _cwd: &str, shell: Option<&ShellType>) -> anyhow::Result<String> {
+            self.created_shells
+                .lock()
+                .expect("created shell lock")
+                .push(shell.cloned());
+            Ok("terminal".to_string())
         }
 
         fn reconnect_terminal(
@@ -978,7 +1016,10 @@ mod reconnect_shell_tests {
             _cwd: &str,
             shell: Option<&ShellType>,
         ) -> anyhow::Result<String> {
-            self.shells.lock().expect("shell lock").push(shell.cloned());
+            self.reconnected_shells
+                .lock()
+                .expect("reconnected shell lock")
+                .push(shell.cloned());
             Ok(terminal_id.to_string())
         }
 
@@ -1000,13 +1041,32 @@ mod reconnect_shell_tests {
         }
     }
 
-    fn workspace(shell_type: ShellType, default_shell: Option<ShellType>) -> Workspace {
+    #[cfg(windows)]
+    struct TestCx;
+
+    #[cfg(windows)]
+    impl WorkspaceCx for TestCx {
+        fn notify(&mut self) {}
+        fn refresh_views(&mut self) {}
+        fn hook_runner(&self) -> Option<crate::workspace::hooks::HookRunner> {
+            None
+        }
+        fn hook_monitor(&self) -> Option<crate::workspace::hook_monitor::HookMonitor> {
+            None
+        }
+    }
+
+    fn workspace_with_terminal(
+        shell_type: ShellType,
+        default_shell: Option<ShellType>,
+        terminal_id: Option<&str>,
+    ) -> Workspace {
         let project = ProjectData {
             id: "project".into(),
             name: "Project".into(),
             path: "/project".into(),
             layout: Some(LayoutNode::Terminal {
-                terminal_id: Some("terminal".into()),
+                terminal_id: terminal_id.map(str::to_string),
                 shell_type,
                 minimized: false,
                 detached: false,
@@ -1040,6 +1100,10 @@ mod reconnect_shell_tests {
         })
     }
 
+    fn workspace(shell_type: ShellType, default_shell: Option<ShellType>) -> Workspace {
+        workspace_with_terminal(shell_type, default_shell, Some("terminal"))
+    }
+
     #[test]
     fn reconnect_passes_explicit_terminal_shell() {
         let explicit = ShellType::Custom {
@@ -1053,7 +1117,11 @@ mod reconnect_shell_tests {
 
         assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
         assert_eq!(
-            backend.shells.lock().expect("shell lock").as_slice(),
+            backend
+                .reconnected_shells
+                .lock()
+                .expect("shell lock")
+                .as_slice(),
             &[Some(explicit)]
         );
     }
@@ -1071,7 +1139,11 @@ mod reconnect_shell_tests {
 
         assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
         assert_eq!(
-            backend.shells.lock().expect("shell lock").as_slice(),
+            backend
+                .reconnected_shells
+                .lock()
+                .expect("shell lock")
+                .as_slice(),
             &[Some(project_default)]
         );
     }
@@ -1085,27 +1157,61 @@ mod reconnect_shell_tests {
 
         assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
         assert_eq!(
-            backend.shells.lock().expect("shell lock").as_slice(),
+            backend
+                .reconnected_shells
+                .lock()
+                .expect("shell lock")
+                .as_slice(),
             &[Some(ShellType::Default)]
         );
     }
 
     #[cfg(windows)]
     #[test]
-    fn reconnect_resolves_global_wsl_default() {
+    fn create_and_reconnect_use_same_wrapped_wsl_route() {
         let wsl = ShellType::Wsl {
             distro: Some("Ubuntu".into()),
         };
-        let ws = workspace(ShellType::Default, None);
-        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let mut create_ws = workspace_with_terminal(ShellType::Default, None, None);
+        let create_terminals: TerminalsRegistry = Arc::new(Default::default());
         let backend = RecordingBackend::default();
         let mut settings = AppSettings::default();
         settings.default_shell = wsl.clone();
+        settings.hooks.terminal.on_create = Some("echo ready".to_string());
+        let mut cx = TestCx;
 
-        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
-        assert_eq!(
-            backend.shells.lock().expect("shell lock").as_slice(),
-            &[Some(wsl)]
+        let _ = spawn_uninitialized_terminals(
+            &mut create_ws,
+            "project",
+            &backend,
+            &create_terminals,
+            &settings,
+            None,
+            &mut cx,
         );
+
+        let reconnect_ws = workspace(ShellType::Default, None);
+        let reconnect_terminals: TerminalsRegistry = Arc::new(Default::default());
+        assert!(
+            ensure_terminal(
+                "terminal",
+                &reconnect_terminals,
+                &backend,
+                &reconnect_ws,
+                &settings,
+            )
+            .is_some()
+        );
+
+        let created = backend.created_shells.lock().expect("created shell lock");
+        let reconnected = backend
+            .reconnected_shells
+            .lock()
+            .expect("reconnected shell lock");
+        assert_eq!(created.as_slice(), reconnected.as_slice());
+        assert!(matches!(
+            created.as_slice(),
+            [Some(ShellType::Custom { .. })]
+        ));
     }
 }
