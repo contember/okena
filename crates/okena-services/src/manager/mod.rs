@@ -168,6 +168,8 @@ struct ActiveDockerMutation {
 struct DockerMutationQueue {
     active: HashMap<DockerMutationScope, ActiveDockerMutation>,
     next_generation: u64,
+    /// Fences status probes that overlap a completed external mutation.
+    completed_generation_by_project: HashMap<String, u64>,
 }
 
 impl DockerMutationQueue {
@@ -215,6 +217,9 @@ impl DockerMutationQueue {
             return None;
         }
 
+        self.completed_generation_by_project
+            .insert(active.current.project_id.clone(), generation);
+
         if let Some(next) = active.pending.pop_front() {
             active.current = next.clone();
             return Some(next);
@@ -222,6 +227,13 @@ impl DockerMutationQueue {
 
         self.active.remove(scope);
         None
+    }
+
+    fn completed_generation(&self, project_id: &str) -> u64 {
+        self.completed_generation_by_project
+            .get(project_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn active_service_names<'a>(&'a self, project_id: &'a str) -> impl Iterator<Item = &'a str> {

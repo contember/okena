@@ -74,6 +74,33 @@ fn reconcile_docker_statuses(
     (has_definitions, changed)
 }
 
+fn reconcile_docker_poll_result(
+    instances: &mut HashMap<(String, String), ServiceInstance>,
+    mutations: &super::DockerMutationQueue,
+    project_id: &str,
+    compose_file: &str,
+    statuses: &[docker_compose::DockerServiceStatus],
+    protected_at_probe: &HashSet<String>,
+    completed_generation_at_probe: u64,
+) -> Option<(bool, bool)> {
+    if mutations.completed_generation(project_id) != completed_generation_at_probe {
+        return None;
+    }
+    let mut protected_services = protected_at_probe.clone();
+    protected_services.extend(
+        mutations
+            .active_service_names(project_id)
+            .map(str::to_string),
+    );
+    Some(reconcile_docker_statuses(
+        instances,
+        project_id,
+        compose_file,
+        statuses,
+        &protected_services,
+    ))
+}
+
 impl ServiceManager {
     /// Load Docker Compose services from an off-reactor filesystem snapshot.
     pub(super) fn load_docker_compose_services_prepared(
@@ -409,20 +436,21 @@ impl ServiceManager {
                     return;
                 }
 
-                let protected_at_probe = this
+                let poll_fence = this
                     .update(cx, |this, _| {
                         if !this.is_project_incarnation_current(&pid, &incarnation) {
                             return None;
                         }
-                        Some(
+                        Some((
                             this.docker_mutations
                                 .active_service_names(&pid)
                                 .map(str::to_string)
                                 .collect::<HashSet<_>>(),
-                        )
+                            this.docker_mutations.completed_generation(&pid),
+                        ))
                     })
                     .flatten();
-                let Some(protected_at_probe) = protected_at_probe else {
+                let Some((protected_at_probe, completed_generation_at_probe)) = poll_fence else {
                     return;
                 };
 
@@ -447,19 +475,17 @@ impl ServiceManager {
                                 if !this.is_project_incarnation_current(&pid, &incarnation) {
                                     return true;
                                 }
-                                let mut protected_services = protected_at_probe.clone();
-                                protected_services.extend(
-                                    this.docker_mutations
-                                        .active_service_names(&pid)
-                                        .map(str::to_string),
-                                );
-                                let (has_definitions, changed) = reconcile_docker_statuses(
+                                let Some((has_definitions, changed)) = reconcile_docker_poll_result(
                                     &mut this.instances,
+                                    &this.docker_mutations,
                                     &pid,
                                     &file,
                                     &statuses,
-                                    &protected_services,
-                                );
+                                    &protected_at_probe,
+                                    completed_generation_at_probe,
+                                ) else {
+                                    return false;
+                                };
                                 if changed {
                                     cx.notify();
                                 }
@@ -492,6 +518,7 @@ impl ServiceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn docker_instance(status: ServiceStatus, ports: Vec<u16>) -> ServiceInstance {
         ServiceInstance {
@@ -552,6 +579,79 @@ mod tests {
         assert!(has_definitions);
         assert!(!changed);
         assert_eq!(instances[&key].status, ServiceStatus::Starting);
+    }
+
+    #[test]
+    fn poll_started_before_completed_mutation_does_not_apply_stale_snapshot() {
+        let key = ("project".to_string(), "web".to_string());
+        let instances = Arc::new(Mutex::new(HashMap::from([(
+            key.clone(),
+            docker_instance(ServiceStatus::Stopped, Vec::new()),
+        )])));
+        let mutations = Arc::new(Mutex::new(super::super::DockerMutationQueue::default()));
+        let (probe_started_tx, probe_started_rx) = std::sync::mpsc::channel();
+        let (release_probe_tx, release_probe_rx) = std::sync::mpsc::channel();
+
+        let poll_instances = instances.clone();
+        let poll_mutations = mutations.clone();
+        let poll = std::thread::spawn(move || {
+            let completed_generation_at_probe = poll_mutations
+                .lock()
+                .expect("mutation lock")
+                .completed_generation("project");
+            probe_started_tx.send(()).expect("mark probe started");
+            release_probe_rx.recv().expect("release stale probe");
+
+            let stale_statuses = [docker_compose::DockerServiceStatus {
+                name: "web".to_string(),
+                state: "running".to_string(),
+                exit_code: None,
+                ports: vec![8080],
+            }];
+            let mutations = poll_mutations.lock().expect("mutation lock");
+            let mut instances = poll_instances.lock().expect("instances lock");
+            reconcile_docker_poll_result(
+                &mut instances,
+                &mutations,
+                "project",
+                "compose.yml",
+                &stale_statuses,
+                &HashSet::new(),
+                completed_generation_at_probe,
+            )
+        });
+
+        probe_started_rx.recv().expect("probe started");
+        {
+            let mut mutations = mutations.lock().expect("mutation lock");
+            let mutation = mutations
+                .enqueue(
+                    key,
+                    None,
+                    "/project".to_string(),
+                    "compose.yml".to_string(),
+                    super::super::DockerMutationKind::Stop,
+                )
+                .expect("mutation starts immediately");
+            assert!(
+                mutations
+                    .finish(&mutation.scope(), mutation.generation)
+                    .is_none()
+            );
+        }
+        release_probe_tx.send(()).expect("release probe");
+
+        assert!(poll.join().expect("poll thread").is_none());
+        let instances = instances.lock().expect("instances lock");
+        assert_eq!(
+            instances[&("project".into(), "web".into())].status,
+            ServiceStatus::Stopped
+        );
+        assert!(
+            instances[&("project".into(), "web".into())]
+                .detected_ports
+                .is_empty()
+        );
     }
 
     #[test]
