@@ -93,13 +93,15 @@ struct ProjectSnapshot {
     id: String,
     path: String,
     is_remote: bool,
+    is_creating: bool,
+    is_closing: bool,
     service_terminals: std::collections::HashMap<String, String>,
     data_replacement_epoch: u64,
 }
 
 struct PreparedProjectSnapshot {
     project: ProjectSnapshot,
-    config: PreparedProjectConfig,
+    config: Option<PreparedProjectConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -502,6 +504,8 @@ async fn run_services_sync_with_preparer<Prepare>(
                     id: p.id.clone(),
                     path: p.path.clone(),
                     is_remote: p.is_remote,
+                    is_creating: p.is_creating,
+                    is_closing: p.is_closing,
                     service_terminals: p.service_terminals.clone(),
                     data_replacement_epoch,
                 })
@@ -531,6 +535,8 @@ async fn run_services_sync_with_preparer<Prepare>(
                     && ws.project(&prepared.project.id).is_some_and(|project| {
                         project.path == prepared.project.path
                             && project.is_remote == prepared.project.is_remote
+                            && project.is_creating == prepared.project.is_creating
+                            && project.is_closing == prepared.project.is_closing
                     })
             })
             .collect::<Vec<_>>()
@@ -565,7 +571,8 @@ fn prepare_project_snapshots(projects: Vec<ProjectSnapshot>) -> Vec<PreparedProj
         .into_iter()
         .filter(|project| !project.is_remote)
         .map(|project| {
-            let config = prepare_project_config(&project.path);
+            let config = (!project.is_creating && !project.is_closing)
+                .then(|| prepare_project_config(&project.path));
             PreparedProjectSnapshot { project, config }
         })
         .collect()
@@ -589,6 +596,12 @@ fn sync_prepared_services(
 
     for prepared in projects {
         let p = prepared.project;
+        if p.is_creating || p.is_closing {
+            continue;
+        }
+        let config = prepared
+            .config
+            .expect("active project snapshots must have prepared service config");
         let identity = KnownProject {
             path: p.path.clone(),
             data_replacement_epoch: p.data_replacement_epoch,
@@ -612,7 +625,7 @@ fn sync_prepared_services(
             .map(|(service, terminal_id)| (service.clone(), terminal_id.clone()))
             .collect();
         let saved_ids_for_attempt: HashSet<String> = saved_for_attempt.values().cloned().collect();
-        let path_exists = !matches!(&prepared.config, PreparedProjectConfig::Missing);
+        let path_exists = !matches!(&config, PreparedProjectConfig::Missing);
 
         if sync_state
             .pending_preserved
@@ -672,13 +685,8 @@ fn sync_prepared_services(
         }
 
         sm.set_project_writeback_owner(&p.id, &p.path, p.data_replacement_epoch);
-        let load_status = sm.load_project_services_prepared(
-            &p.id,
-            &p.path,
-            &saved_for_attempt,
-            prepared.config,
-            cx,
-        );
+        let load_status =
+            sm.load_project_services_prepared(&p.id, &p.path, &saved_for_attempt, config, cx);
         let claimed: HashSet<String> = sm.service_terminal_ids(&p.id).into_values().collect();
         let unclaimed: HashSet<String> = saved_ids_for_attempt
             .difference(&claimed)
@@ -889,6 +897,8 @@ mod tests {
             id: id.to_string(),
             path: path.to_string(),
             is_remote,
+            is_creating: false,
+            is_closing: false,
             service_terminals: Default::default(),
             data_replacement_epoch: 0,
         }
@@ -1011,10 +1021,10 @@ mod tests {
                                 .into_iter()
                                 .map(|project| PreparedProjectSnapshot {
                                     project,
-                                    config: PreparedProjectConfig::Loaded {
+                                    config: Some(PreparedProjectConfig::Loaded {
                                         config: None,
                                         detected_compose_file: None,
-                                    },
+                                    }),
                                 })
                                 .collect()
                         },
@@ -1038,6 +1048,63 @@ mod tests {
             .await;
 
         assert!(progressed.load(Ordering::Acquire));
+        assert!(sm.lock().project_path("project").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_service_preparation_discards_lifecycle_change() {
+        let workspace = Arc::new(parking_lot::Mutex::new(workspace_with_project(
+            "project",
+            "/captured",
+            HashMap::new(),
+        )));
+        let sm = Arc::new(parking_lot::Mutex::new(manager()));
+        let (service_tick, _service_rx) = tokio::sync::watch::channel(0u64);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let task_workspace = workspace.clone();
+                let task_manager = sm.clone();
+                let task_tick = service_tick.clone();
+                let runtime = tokio::runtime::Handle::current();
+                let task = tokio::task::spawn_local(async move {
+                    let mut sync_state = ServiceSyncState::default();
+                    run_services_sync_with_preparer(
+                        &task_workspace,
+                        &task_manager,
+                        &runtime,
+                        &task_tick,
+                        &mut sync_state,
+                        move |projects| {
+                            let _ = started_tx.send(());
+                            release_rx.recv().expect("release preparation");
+                            projects
+                                .into_iter()
+                                .map(|project| PreparedProjectSnapshot {
+                                    project,
+                                    config: Some(PreparedProjectConfig::Loaded {
+                                        config: None,
+                                        detected_compose_file: None,
+                                    }),
+                                })
+                                .collect()
+                        },
+                    )
+                    .await;
+                });
+
+                started_rx.await.expect("preparation started");
+                workspace
+                    .lock()
+                    .mark_closing_project_authoritative("project");
+                release_tx.send(()).expect("release preparation");
+                task.await.expect("sync task completed");
+            })
+            .await;
+
         assert!(sm.lock().project_path("project").is_none());
     }
 
@@ -1375,6 +1442,120 @@ mod tests {
             sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
         assert!(!sync_state.known.contains_key("local"));
+    }
+
+    #[tokio::test]
+    async fn sync_services_suspends_closing_known_project_without_manager() {
+        let sm = std::sync::Arc::new(parking_lot::Mutex::new(manager()));
+        let rr = reactor_ref(&sm);
+        let path = existing_path();
+        let mut closing = project("local", &path, false);
+        closing.is_closing = true;
+        let identity = KnownProject {
+            path,
+            data_replacement_epoch: 0,
+        };
+        let mut sync_state = ServiceSyncState {
+            known: HashMap::from([("local".to_string(), identity.clone())]),
+            ..ServiceSyncState::default()
+        };
+
+        {
+            let mut guard = sm.lock();
+            let mut cx = rr.cx();
+            sync_services(&[closing], &mut sync_state, &mut guard, &mut cx);
+        }
+
+        assert_eq!(sync_state.known.get("local"), Some(&identity));
+        assert!(!sync_state.retry_projects.contains("local"));
+        assert!(sm.lock().project_path("local").is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_services_suspends_lifecycle_then_resumes_once() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "okena-observer-lifecycle-suspend-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(
+            project_dir.join("okena.yaml"),
+            "services:\n  - name: web\n    command: echo web\n",
+        )
+        .expect("write service config");
+        let project_path = project_dir.to_string_lossy().into_owned();
+        let backend = Arc::new(RecordingBackend {
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            reconnect_fail_after: None,
+            reconnect_count: AtomicUsize::new(0),
+        });
+        let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
+        let sm = Arc::new(parking_lot::Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals,
+        )));
+        let rr = reactor_ref(&sm);
+        let mut creating = project("project", &project_path, false);
+        creating.is_creating = true;
+        creating
+            .service_terminals
+            .insert("web".into(), "persistent-web".into());
+        let mut active = creating.clone();
+        active.is_creating = false;
+        let mut sync_state = ServiceSyncState::default();
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[creating], &mut sync_state, &mut manager, &mut cx);
+                }
+                assert!(
+                    backend
+                        .reconnected
+                        .lock()
+                        .expect("reconnect lock")
+                        .is_empty()
+                );
+                assert!(!sync_state.known.contains_key("project"));
+
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[active.clone()], &mut sync_state, &mut manager, &mut cx);
+                }
+                wait_for_test_condition(|| {
+                    backend.reconnected.lock().expect("reconnect lock").len() == 1
+                        && sm.lock().project_path("project") == Some(&project_path)
+                })
+                .await;
+
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[active.clone()], &mut sync_state, &mut manager, &mut cx);
+                }
+                assert_eq!(backend.reconnected.lock().expect("reconnect lock").len(), 1);
+
+                let mut closing = active;
+                closing.is_closing = true;
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[closing], &mut sync_state, &mut manager, &mut cx);
+                }
+            })
+            .await;
+
+        assert_eq!(sm.lock().project_path("project"), Some(&project_path));
+        assert!(sync_state.known.contains_key("project"));
+        assert_eq!(backend.reconnected.lock().expect("reconnect lock").len(), 1);
+        assert!(backend.killed.lock().expect("kill lock").is_empty());
+        std::fs::remove_dir_all(project_dir).expect("remove project dir");
     }
 
     #[tokio::test]
