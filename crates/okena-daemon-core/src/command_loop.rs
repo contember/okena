@@ -41,7 +41,9 @@ use std::sync::Arc;
 
 use okena_app_core::remote_snapshot::build_state_response;
 use okena_app_core::workspace::actions::execute::{
-    ensure_terminal, execute_action, spawn_uninitialized_terminals,
+    apply_imported_workspace, apply_loaded_session, ensure_terminal,
+    ensure_workspace_replacement_allowed, execute_action, import_workspace_data, load_session_data,
+    spawn_uninitialized_terminals,
 };
 use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
@@ -869,6 +871,63 @@ pub async fn daemon_command_loop(
                         CommandResult::Err("command palette unavailable in daemon mode".to_string())
                     }
 
+                    // Session parsing, migration, and worktree validation touch
+                    // disk and Git. Keep both the workspace lock and LocalSet
+                    // reactor free until the prepared data is ready to swap.
+                    ActionRequest::LoadSession { name } => {
+                        let app_settings = settings.lock().clone();
+                        let session_backend = app_settings.session_backend;
+                        load_workspace_off_reactor(
+                            &workspace,
+                            &runtime,
+                            move || load_session_data(&name, session_backend),
+                            |ws, loaded| {
+                                let mut cx = DaemonWorkspaceCx::new(
+                                    &workspace_tick,
+                                    &hook_runner,
+                                    &hook_monitor,
+                                );
+                                apply_loaded_session(
+                                    ws,
+                                    &mut focus_manager,
+                                    loaded,
+                                    &*backend,
+                                    &terminals,
+                                    &app_settings,
+                                    &mut cx,
+                                )
+                                .into_command_result()
+                            },
+                        )
+                        .await
+                    }
+                    ActionRequest::ImportWorkspace { path } => {
+                        let app_settings = settings.lock().clone();
+                        load_workspace_off_reactor(
+                            &workspace,
+                            &runtime,
+                            move || import_workspace_data(&path),
+                            |ws, data| {
+                                let mut cx = DaemonWorkspaceCx::new(
+                                    &workspace_tick,
+                                    &hook_runner,
+                                    &hook_monitor,
+                                );
+                                apply_imported_workspace(
+                                    ws,
+                                    &mut focus_manager,
+                                    data,
+                                    &*backend,
+                                    &terminals,
+                                    &app_settings,
+                                    &mut cx,
+                                )
+                                .into_command_result()
+                            },
+                        )
+                        .await
+                    }
+
                     // ── Soft-close: undo (restore the ejected pane) ──────────────
                     ActionRequest::UndoSoftClose { terminal_id } => {
                         let mut cx =
@@ -1620,6 +1679,35 @@ pub async fn daemon_command_loop(
     }
 }
 
+/// Load replacement data on the blocking pool, then atomically apply it.
+async fn load_workspace_off_reactor<T, Load, Apply>(
+    workspace: &Arc<Mutex<Workspace>>,
+    runtime: &tokio::runtime::Handle,
+    loader: Load,
+    apply: Apply,
+) -> CommandResult
+where
+    T: Send + 'static,
+    Load: FnOnce() -> Result<T, String> + Send + 'static,
+    Apply: FnOnce(&mut Workspace, T) -> CommandResult,
+{
+    if let Err(error) = ensure_workspace_replacement_allowed(&workspace.lock()) {
+        return CommandResult::Err(error);
+    }
+
+    let loaded = match runtime.spawn_blocking(loader).await {
+        Ok(Ok(loaded)) => loaded,
+        Ok(Err(error)) => return CommandResult::Err(error),
+        Err(error) => {
+            return CommandResult::Err(format!("workspace loader task failed: {error}"));
+        }
+    };
+
+    // `apply` repeats the conflict check while this guard is held, closing the
+    // race with worktree operations that started while loading was in flight.
+    apply(&mut workspace.lock(), loaded)
+}
+
 /// Materialize the PTYs for every restored project's uninitialized terminal
 /// slots at daemon startup, then fire each restored project's `on_project_open`
 /// lifecycle hook.
@@ -1775,6 +1863,7 @@ mod tests {
     use crate::test_support::{StubBackend, StubTransport, default_settings, empty_workspace_data};
     use okena_core::api::StateResponse;
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use okena_remote_server::bridge::{BridgeReceiver, BridgeSender, bridge_channel};
     use okena_state::{LayoutNode, WorkspaceData};
@@ -1884,6 +1973,128 @@ mod tests {
         assert_eq!(parse_window_id(""), None);
         // A near-miss UUID (one char short) is still rejected.
         assert_eq!(parse_window_id("550e8400-e29b-41d4-a716-44665544000"), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_workspace_loader_does_not_stall_local_reactor() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
+                let runtime = tokio::runtime::Handle::current();
+                let (started_tx, started_rx) = oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let task_workspace = workspace.clone();
+                let load = tokio::task::spawn_local(async move {
+                    load_workspace_off_reactor(
+                        &task_workspace,
+                        &runtime,
+                        move || {
+                            let _ = started_tx.send(());
+                            release_rx.recv().map_err(|error| error.to_string())?;
+                            Ok(empty_workspace_data())
+                        },
+                        |_workspace, _data| CommandResult::Ok(None),
+                    )
+                    .await
+                });
+
+                started_rx.await.expect("blocking loader started");
+                let reactor_progressed = Arc::new(AtomicBool::new(false));
+                let progressed = reactor_progressed.clone();
+                tokio::task::spawn_local(async move {
+                    tokio::task::yield_now().await;
+                    progressed.store(true, Ordering::Release);
+                })
+                .await
+                .expect("reactor task completed");
+                assert!(
+                    reactor_progressed.load(Ordering::Acquire),
+                    "LocalSet tasks must progress while the loader is blocked"
+                );
+
+                release_tx.send(()).expect("release blocking loader");
+                assert!(matches!(
+                    load.await.expect("workspace loader task joined"),
+                    CommandResult::Ok(_)
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_conflict_started_during_load_rejects_atomic_swap() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let workspace = Arc::new(Mutex::new(Workspace::new(
+                    workspace_with_worktree_child(),
+                )));
+                let runtime = tokio::runtime::Handle::current();
+                let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+                let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+                let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+                let settings = default_settings();
+                let (started_tx, started_rx) = oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let task_workspace = workspace.clone();
+                let task_backend = backend.clone();
+                let task_terminals = terminals.clone();
+                let load = tokio::task::spawn_local(async move {
+                    let mut focus_manager = FocusManager::new();
+                    load_workspace_off_reactor(
+                        &task_workspace,
+                        &runtime,
+                        move || {
+                            let _ = started_tx.send(());
+                            release_rx.recv().map_err(|error| error.to_string())?;
+                            Ok(okena_workspace::persistence::LoadedWorkspace {
+                                data: empty_workspace_data(),
+                                stale_terminal_ids: Vec::new(),
+                            })
+                        },
+                        |ws, loaded| {
+                            let mut cx = DaemonWorkspaceCx::new(
+                                &workspace_tick,
+                                &None,
+                                &None,
+                            );
+                            apply_loaded_session(
+                                ws,
+                                &mut focus_manager,
+                                loaded,
+                                &*task_backend,
+                                &task_terminals,
+                                &settings,
+                                &mut cx,
+                            )
+                            .into_command_result()
+                        },
+                    )
+                    .await
+                });
+
+                started_rx.await.expect("blocking loader started");
+                let protected_epoch = {
+                    let mut ws = workspace.lock();
+                    ws.mark_creating_project("wt1");
+                    ws.data_replacement_epoch()
+                };
+                release_tx.send(()).expect("release blocking loader");
+
+                let result = load.await.expect("workspace loader task joined");
+                assert!(matches!(
+                    result,
+                    CommandResult::Err(ref error)
+                        if error == "cannot replace workspace while worktree 'Project wt1' is being created"
+                ));
+                let ws = workspace.lock();
+                assert!(ws.project("p1").is_some());
+                assert!(ws.project("wt1").is_some());
+                assert!(ws.is_creating_project("wt1"));
+                assert_eq!(ws.data_replacement_epoch(), protected_epoch);
+            })
+            .await;
     }
 
     #[test]

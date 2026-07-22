@@ -75,6 +75,29 @@ fn workspace_replacement_conflict(ws: &Workspace) -> Option<String> {
         })
 }
 
+/// Reject workspace replacement while an in-flight worktree owns its state.
+pub fn ensure_workspace_replacement_allowed(ws: &Workspace) -> Result<(), String> {
+    match workspace_replacement_conflict(ws) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Read and validate a named session without mutating the live workspace.
+pub fn load_session_data(
+    name: &str,
+    backend: okena_terminal::session_backend::SessionBackend,
+) -> Result<LoadedWorkspace, String> {
+    load_session_with_cleanup(name, backend)
+        .map_err(|error| format!("failed to load session '{name}': {error}"))
+}
+
+/// Read and validate an exported workspace without mutating the live workspace.
+pub fn import_workspace_data(path: &str) -> Result<WorkspaceData, String> {
+    import_workspace(std::path::Path::new(path))
+        .map_err(|error| format!("failed to import '{path}': {error}"))
+}
+
 /// Kill outgoing-only PTYs, swap the workspace, then restore incoming terminals.
 fn replace_workspace_with(
     ws: &mut Workspace,
@@ -164,44 +187,17 @@ fn replace_workspace_with(
     }
 }
 
-pub(super) fn load_session_action(
+/// Atomically apply data loaded by [`load_session_data`].
+#[allow(clippy::too_many_arguments)]
+pub fn apply_loaded_session(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
-    name: String,
+    loaded: LoadedWorkspace,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    load_session_action_with_loader(
-        ws,
-        focus_manager,
-        &name,
-        backend,
-        terminals,
-        settings,
-        cx,
-        || load_session_with_cleanup(&name, settings.session_backend).map_err(|e| e.to_string()),
-    )
-}
-
-fn load_session_action_with_loader(
-    ws: &mut Workspace,
-    focus_manager: &mut FocusManager,
-    name: &str,
-    backend: &dyn TerminalBackend,
-    terminals: &TerminalsRegistry,
-    settings: &AppSettings,
-    cx: &mut impl WorkspaceCx,
-    loader: impl FnOnce() -> Result<LoadedWorkspace, String>,
-) -> ActionResult {
-    if let Some(error) = workspace_replacement_conflict(ws) {
-        return ActionResult::Err(error);
-    }
-    let loaded = match loader() {
-        Ok(loaded) => loaded,
-        Err(e) => return ActionResult::Err(format!("failed to load session '{name}': {e}")),
-    };
     replace_workspace_with(
         ws,
         focus_manager,
@@ -212,6 +208,62 @@ fn load_session_action_with_loader(
         &loaded.stale_terminal_ids,
         cx,
     )
+}
+
+/// Atomically apply data loaded by [`import_workspace_data`].
+#[allow(clippy::too_many_arguments)]
+pub fn apply_imported_workspace(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    data: WorkspaceData,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    replace_workspace_with(
+        ws,
+        focus_manager,
+        data,
+        backend,
+        terminals,
+        settings,
+        &[],
+        cx,
+    )
+}
+
+pub(super) fn load_session_action(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    name: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    load_session_action_with_loader(ws, focus_manager, backend, terminals, settings, cx, || {
+        load_session_data(&name, settings.session_backend)
+    })
+}
+
+fn load_session_action_with_loader(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+    loader: impl FnOnce() -> Result<LoadedWorkspace, String>,
+) -> ActionResult {
+    if let Err(error) = ensure_workspace_replacement_allowed(ws) {
+        return ActionResult::Err(error);
+    }
+    let loaded = match loader() {
+        Ok(loaded) => loaded,
+        Err(error) => return ActionResult::Err(error),
+    };
+    apply_loaded_session(ws, focus_manager, loaded, backend, terminals, settings, cx)
 }
 
 pub(super) fn list_sessions_action() -> ActionResult {
@@ -258,45 +310,28 @@ pub(super) fn import_workspace_action(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    import_workspace_action_with_loader(
-        ws,
-        focus_manager,
-        &path,
-        backend,
-        terminals,
-        settings,
-        cx,
-        || import_workspace(std::path::Path::new(&path)).map_err(|e| e.to_string()),
-    )
+    import_workspace_action_with_loader(ws, focus_manager, backend, terminals, settings, cx, || {
+        import_workspace_data(&path)
+    })
 }
 
 fn import_workspace_action_with_loader(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
-    path: &str,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
     loader: impl FnOnce() -> Result<WorkspaceData, String>,
 ) -> ActionResult {
-    if let Some(error) = workspace_replacement_conflict(ws) {
+    if let Err(error) = ensure_workspace_replacement_allowed(ws) {
         return ActionResult::Err(error);
     }
     let data = match loader() {
         Ok(d) => d,
-        Err(e) => return ActionResult::Err(format!("failed to import '{path}': {e}")),
+        Err(error) => return ActionResult::Err(error),
     };
-    replace_workspace_with(
-        ws,
-        focus_manager,
-        data,
-        backend,
-        terminals,
-        settings,
-        &[],
-        cx,
-    )
+    apply_imported_workspace(ws, focus_manager, data, backend, terminals, settings, cx)
 }
 
 pub(super) fn export_workspace_action(ws: &Workspace, path: String) -> ActionResult {
@@ -826,7 +861,6 @@ mod tests {
         let result = load_session_action_with_loader(
             &mut workspace,
             &mut focus,
-            "replacement",
             backend.as_ref(),
             &terminals,
             &AppSettings::default(),
@@ -868,7 +902,6 @@ mod tests {
         let result = import_workspace_action_with_loader(
             &mut workspace,
             &mut focus,
-            "/path/that/must/not/be/read.json",
             backend.as_ref(),
             &terminals,
             &AppSettings::default(),
