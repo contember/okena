@@ -145,8 +145,16 @@ pub fn rebase_onto(worktree_path: &Path, target_branch: &str) -> GitResult<()> {
 /// Stash uncommitted changes.
 pub fn stash_changes(path: &Path) -> GitResult<()> {
     let p = path_str(path)?;
-    let output = safe_output(command("git").args(["-C", p, "stash"]))?;
-    require_success(output)
+    let output =
+        safe_output(command("git").args(["-C", p, "stash", "push", "--include-untracked"]))?;
+    require_success(output)?;
+    if crate::repository::status::has_uncommitted_changes(path) {
+        return Err(GitError::UnsafeWorktree {
+            path: path.to_path_buf(),
+            reason: "checkout remains dirty after stash; refusing destructive removal".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Pop the most recent stash entry.
@@ -375,6 +383,70 @@ mod tests {
     fn stash_changes_returns_err_for_invalid_path() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
         assert!(stash_changes(&path).is_err());
+    }
+
+    #[test]
+    fn stash_changes_preserves_untracked_file_from_linked_worktree() {
+        let (_tmp, repo) = init_temp_repo();
+        let worktree_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let worktree = worktree_tmp.path().join("feature");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                worktree.to_str().unwrap(),
+                "-b",
+                "feature",
+            ],
+        );
+        std::fs::write(worktree.join("untracked.txt"), "preserve me\n").unwrap();
+
+        stash_changes(&worktree).expect("stash untracked file");
+
+        assert!(!worktree.join("untracked.txt").exists());
+        assert!(!crate::repository::status::has_uncommitted_changes(
+            &worktree
+        ));
+        git_in(&repo, &["worktree", "remove", worktree.to_str().unwrap()]);
+        git_in(&repo, &["stash", "apply"]);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("untracked.txt")).unwrap(),
+            "preserve me\n"
+        );
+    }
+
+    #[test]
+    fn stash_changes_rejects_dirty_submodule_checkout() {
+        let (_tmp, repo) = init_temp_repo();
+        let submodule_tmp = tempfile::tempdir().expect("create submodule tempdir");
+        let submodule = submodule_tmp.path();
+        git_in(submodule, &["init", "-b", "main"]);
+        std::fs::write(submodule.join("sub.txt"), "base\n").unwrap();
+        git_in(submodule, &["add", "sub.txt"]);
+        git_in(submodule, &["commit", "-m", "base"]);
+        git_in(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                submodule.to_str().unwrap(),
+                "submodule",
+            ],
+        );
+        git_in(&repo, &["commit", "-m", "add submodule"]);
+        std::fs::write(repo.join("submodule/sub.txt"), "dirty\n").unwrap();
+
+        let error = stash_changes(&repo).expect_err("dirty submodule must block removal");
+
+        assert!(error.to_string().contains("remains dirty after stash"));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("submodule/sub.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert!(crate::repository::status::has_uncommitted_changes(&repo));
     }
 
     #[test]
