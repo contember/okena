@@ -291,6 +291,25 @@ pub struct TerminalBackendMigration {
     pub hook_terminal_ids: Vec<String>,
 }
 
+/// Terminal ownership detached from one project while its directory is moved
+/// or removed by the headless daemon.
+#[derive(Clone, Debug)]
+pub struct ProjectRuntimeQuiesce {
+    pub project_id: String,
+    pub data_replacement_epoch: u64,
+    pub project_path: String,
+    pub teardown_sessions: Vec<TerminalSessionTeardown>,
+    pub hook_terminal_ids: Vec<String>,
+    layout_slots: Vec<ProjectRuntimeSlot>,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectRuntimeSlot {
+    path: Vec<usize>,
+    terminal_name: Option<String>,
+    hidden: Option<bool>,
+}
+
 /// Transient ownership metadata for a terminal awaiting its PTY exit event.
 #[derive(Clone, Debug)]
 pub(crate) struct ClosingTerminalOwner {
@@ -352,6 +371,62 @@ fn take_layout_terminal_ownership(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn take_project_layout_runtime(
+    layout: &mut LayoutNode,
+    project_default_shell: Option<&ShellType>,
+    global_default_shell: &ShellType,
+    backend_preference: SessionBackend,
+    terminal_names: &mut HashMap<String, String>,
+    hidden_terminals: &mut HashMap<String, bool>,
+    path: &mut Vec<usize>,
+    slots: &mut Vec<ProjectRuntimeSlot>,
+    teardown_sessions: &mut Vec<TerminalSessionTeardown>,
+) {
+    match layout {
+        LayoutNode::Terminal {
+            terminal_id,
+            shell_type,
+            ..
+        } => {
+            let Some(terminal_id) = terminal_id.take() else {
+                return;
+            };
+            teardown_sessions.push(TerminalSessionTeardown {
+                terminal_id: terminal_id.clone(),
+                route: crate::persistence::teardown_route(
+                    shell_type,
+                    project_default_shell,
+                    global_default_shell,
+                    backend_preference,
+                ),
+            });
+            slots.push(ProjectRuntimeSlot {
+                path: path.clone(),
+                terminal_name: terminal_names.remove(&terminal_id),
+                hidden: hidden_terminals.remove(&terminal_id),
+            });
+        }
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for (index, child) in children.iter_mut().enumerate() {
+                path.push(index);
+                take_project_layout_runtime(
+                    child,
+                    project_default_shell,
+                    global_default_shell,
+                    backend_preference,
+                    terminal_names,
+                    hidden_terminals,
+                    path,
+                    slots,
+                    teardown_sessions,
+                );
+                path.pop();
+            }
+        }
+    }
+}
+
 impl Workspace {
     pub fn new(data: WorkspaceData) -> Self {
         Self {
@@ -395,6 +470,137 @@ impl Workspace {
     /// Current wholesale data replacement epoch.
     pub fn data_replacement_epoch(&self) -> u64 {
         self.data_replacement_epoch
+    }
+
+    /// Detach every runtime that can retain a project's working directory.
+    /// The layout remains authoritative with empty terminal slots so it can be
+    /// materialized again after a failed removal or a directory move.
+    pub fn begin_project_runtime_quiesce(
+        &mut self,
+        project_id: &str,
+        global_default_shell: &ShellType,
+        backend_preference: SessionBackend,
+        reject_running_hooks: bool,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<ProjectRuntimeQuiesce, String> {
+        if self.lifecycle.is_creating(project_id) {
+            return Err("project is still being created".to_string());
+        }
+        if self.lifecycle.is_closing(project_id) {
+            return Err("project operation is already in progress".to_string());
+        }
+        let project = self
+            .project(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+        if project.is_remote {
+            return Err("remote project directories cannot be changed locally".to_string());
+        }
+        if reject_running_hooks
+            && project
+                .hook_terminals
+                .values()
+                .any(|entry| entry.status == HookTerminalStatus::Running)
+        {
+            return Err("cannot move a project while a lifecycle hook is running".to_string());
+        }
+
+        let data_replacement_epoch = self.data_replacement_epoch;
+        let project_path = project.path.clone();
+        let mut teardown_sessions = Vec::new();
+        let mut hook_terminal_ids = Vec::new();
+        let mut layout_slots = Vec::new();
+        {
+            let project = self
+                .project_mut(project_id)
+                .ok_or_else(|| "Project not found".to_string())?;
+            if let Some(layout) = &mut project.layout {
+                take_project_layout_runtime(
+                    layout,
+                    project.default_shell.as_ref(),
+                    global_default_shell,
+                    backend_preference,
+                    &mut project.terminal_names,
+                    &mut project.hidden_terminals,
+                    &mut Vec::new(),
+                    &mut layout_slots,
+                    &mut teardown_sessions,
+                );
+            }
+            teardown_sessions.extend(
+                project
+                    .service_terminals
+                    .drain()
+                    .map(|(_, terminal_id)| TerminalSessionTeardown::host(terminal_id)),
+            );
+            hook_terminal_ids.extend(project.hook_terminals.keys().cloned());
+            teardown_sessions.extend(
+                hook_terminal_ids
+                    .iter()
+                    .cloned()
+                    .map(TerminalSessionTeardown::host),
+            );
+        }
+        teardown_sessions.extend(
+            self.drain_pending_closes_for_project(project_id)
+                .into_iter()
+                .map(TerminalSessionTeardown::host),
+        );
+        teardown_sessions.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+        teardown_sessions.dedup_by(|a, b| a.terminal_id == b.terminal_id);
+        hook_terminal_ids.sort();
+
+        self.mark_closing_project_authoritative(project_id);
+        self.notify_data(cx);
+        Ok(ProjectRuntimeQuiesce {
+            project_id: project_id.to_string(),
+            data_replacement_epoch,
+            project_path,
+            teardown_sessions,
+            hook_terminal_ids,
+            layout_slots,
+        })
+    }
+
+    pub fn project_runtime_quiesce_is_current(&self, snapshot: &ProjectRuntimeQuiesce) -> bool {
+        self.data_replacement_epoch == snapshot.data_replacement_epoch
+            && self.lifecycle.is_closing(&snapshot.project_id)
+            && self
+                .project(&snapshot.project_id)
+                .is_some_and(|project| project.path == snapshot.project_path)
+    }
+
+    /// Restore terminal metadata after empty layout slots have been materialized.
+    pub fn finish_project_runtime_recovery(
+        &mut self,
+        snapshot: &ProjectRuntimeQuiesce,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let Some(project) = self.project_mut(&snapshot.project_id) else {
+            return;
+        };
+        for slot in &snapshot.layout_slots {
+            let Some(terminal_id) = project
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.get_at_path(&slot.path))
+                .and_then(|node| match node {
+                    LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            if let Some(name) = &slot.terminal_name {
+                project
+                    .terminal_names
+                    .insert(terminal_id.clone(), name.clone());
+            }
+            if let Some(hidden) = slot.hidden {
+                project.hidden_terminals.insert(terminal_id, hidden);
+            }
+        }
+        self.finish_closing_project(&snapshot.project_id);
+        self.notify_data(cx);
     }
 
     /// Snapshot and atomically clear all local terminal ownership for migration.

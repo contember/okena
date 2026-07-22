@@ -64,7 +64,9 @@ use okena_workspace::actions::worktree::WorktreeRemovalPlan;
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
-use okena_workspace::state::{TerminalBackendMigration, WindowId, Workspace};
+use okena_workspace::state::{
+    ProjectRuntimeQuiesce, TerminalBackendMigration, WindowId, Workspace,
+};
 use parking_lot::Mutex;
 use tokio::sync::{Semaphore, oneshot, watch};
 
@@ -279,6 +281,136 @@ fn unload_project_services_for_background_removal(
     let active_service_names = manager.active_okena_service_names(project_id);
     manager.unload_project_services(project_id, &mut cx);
     active_service_names
+}
+
+struct QuiescedProjectRuntime {
+    workspace: ProjectRuntimeQuiesce,
+    active_service_names: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn begin_project_runtime_quiesce(
+    project_id: &str,
+    reject_running_hooks: bool,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    settings: &AppSettings,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+    terminals: &TerminalsRegistry,
+) -> Result<QuiescedProjectRuntime, String> {
+    let snapshot = {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        workspace.lock().begin_project_runtime_quiesce(
+            project_id,
+            &settings.default_shell,
+            settings.session_backend,
+            reject_running_hooks,
+            &mut cx,
+        )?
+    };
+    let active_service_names = unload_project_services_for_background_removal(
+        project_id,
+        service_manager,
+        service_tick,
+        runtime,
+    );
+    {
+        let mut registry = terminals.lock();
+        for teardown in &snapshot.teardown_sessions {
+            registry.remove(&teardown.terminal_id);
+        }
+    }
+    if let Some(monitor) = hook_monitor {
+        for terminal_id in &snapshot.hook_terminal_ids {
+            monitor.cancel_by_terminal_id(terminal_id);
+        }
+    }
+    Ok(QuiescedProjectRuntime {
+        workspace: snapshot,
+        active_service_names,
+    })
+}
+
+async fn flush_project_runtime_teardown(
+    snapshot: &ProjectRuntimeQuiesce,
+    backend: &Arc<dyn TerminalBackend>,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(), String> {
+    let backend = backend.clone();
+    let teardown_sessions = snapshot.teardown_sessions.clone();
+    runtime
+        .spawn_blocking(move || {
+            for teardown in &teardown_sessions {
+                backend.kill_session(teardown);
+            }
+            backend.flush_teardown();
+        })
+        .await
+        .map_err(|error| format!("terminal teardown task failed: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_quiesced_project_runtime(
+    quiesced: &QuiescedProjectRuntime,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    settings: &AppSettings,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(), String> {
+    {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut workspace = workspace.lock();
+        if !workspace.project_runtime_quiesce_is_current(&quiesced.workspace) {
+            return Err(format!(
+                "project changed while runtimes were quiesced: {}",
+                quiesced.workspace.project_id
+            ));
+        }
+        if let okena_app_core::workspace::actions::execute::ActionResult::Err(error) =
+            spawn_uninitialized_terminals(
+                &mut workspace,
+                &quiesced.workspace.project_id,
+                backend.as_ref(),
+                terminals,
+                settings,
+                None,
+                &mut cx,
+            )
+        {
+            return Err(error);
+        }
+    }
+    recover_project_services(
+        &quiesced.workspace.project_id,
+        &quiesced.active_service_names,
+        workspace,
+        service_manager,
+        service_tick,
+        runtime,
+    )
+    .await;
+    {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut workspace = workspace.lock();
+        if !workspace.project_runtime_quiesce_is_current(&quiesced.workspace) {
+            return Err(format!(
+                "project changed while runtimes were recovering: {}",
+                quiesced.workspace.project_id
+            ));
+        }
+        workspace.finish_project_runtime_recovery(&quiesced.workspace, &mut cx);
+    }
+    Ok(())
 }
 
 struct PreparedServiceOwner {
@@ -948,21 +1080,60 @@ async fn remove_worktree_project_off_reactor_with<Remove>(
     focus_manager: &mut FocusManager,
     backend: &Arc<dyn TerminalBackend>,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
     remove: Remove,
 ) -> CommandResult
 where
     Remove: FnOnce(&WorktreeRemovalPlan, bool) -> Result<(), String> + Send + 'static,
 {
-    let (operation_epoch, plan) = {
+    let plan = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
-        let plan = match workspace.begin_worktree_removal(&project_id, &global_hooks, &mut cx) {
+        match workspace.begin_worktree_removal(&project_id, &global_hooks, &mut cx) {
             Ok(plan) => plan,
             Err(error) => return CommandResult::Err(error),
-        };
-        (workspace.data_replacement_epoch(), plan)
+        }
     };
+    let quiesced = match begin_project_runtime_quiesce(
+        &project_id,
+        false,
+        workspace,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+        settings,
+        service_manager,
+        service_tick,
+        runtime,
+        terminals,
+    ) {
+        Ok(quiesced) => quiesced,
+        Err(error) => return CommandResult::Err(error),
+    };
+    if let Err(error) = flush_project_runtime_teardown(&quiesced.workspace, backend, runtime).await
+    {
+        let recovery = recover_quiesced_project_runtime(
+            &quiesced,
+            workspace,
+            workspace_tick,
+            hook_runner,
+            hook_monitor,
+            settings,
+            backend,
+            terminals,
+            service_manager,
+            service_tick,
+            runtime,
+        )
+        .await;
+        return CommandResult::Err(match recovery {
+            Ok(()) => error,
+            Err(recovery_error) => format!("{error}; recovery failed: {recovery_error}"),
+        });
+    }
 
     let blocking_hooks = global_hooks.clone();
     let blocking_monitor = hook_monitor.clone();
@@ -977,17 +1148,52 @@ where
     let (plan, removal) = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
-            return CommandResult::Err(format!("worktree removal task failed: {error}"));
+            let error = format!("worktree removal task failed: {error}");
+            let recovery = recover_quiesced_project_runtime(
+                &quiesced,
+                workspace,
+                workspace_tick,
+                hook_runner,
+                hook_monitor,
+                settings,
+                backend,
+                terminals,
+                service_manager,
+                service_tick,
+                runtime,
+            )
+            .await;
+            return CommandResult::Err(match recovery {
+                Ok(()) => error,
+                Err(recovery_error) => format!("{error}; recovery failed: {recovery_error}"),
+            });
         }
     };
     if let Err(error) = removal {
-        return CommandResult::Err(error);
+        let recovery = recover_quiesced_project_runtime(
+            &quiesced,
+            workspace,
+            workspace_tick,
+            hook_runner,
+            hook_monitor,
+            settings,
+            backend,
+            terminals,
+            service_manager,
+            service_tick,
+            runtime,
+        )
+        .await;
+        return CommandResult::Err(match recovery {
+            Ok(()) => error,
+            Err(recovery_error) => format!("{error}; recovery failed: {recovery_error}"),
+        });
     }
 
     let terminal_ids = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
-        if workspace.data_replacement_epoch() != operation_epoch {
+        if !workspace.project_runtime_quiesce_is_current(&quiesced.workspace) {
             return CommandResult::Err(format!(
                 "workspace changed while worktree was being removed: {project_id}"
             ));
@@ -2290,6 +2496,7 @@ pub async fn daemon_command_loop(
                                 force,
                             });
                         let global_hooks = settings.lock().hooks.clone();
+                        let app_settings = settings.lock().clone();
                         let result = remove_worktree_project_off_reactor_with(
                             project_id,
                             force,
@@ -2301,6 +2508,9 @@ pub async fn daemon_command_loop(
                             &mut focus_manager,
                             &backend,
                             &terminals,
+                            &app_settings,
+                            &service_manager,
+                            &service_tick,
                             &runtime,
                             |plan, force| plan.remove(force),
                         )
@@ -5471,6 +5681,9 @@ mod tests {
         let mut data = workspace_with_worktree_child();
         data.projects[0].path = repo.to_string_lossy().into_owned();
         data.projects[1].path = worktree.to_string_lossy().into_owned();
+        if let Some(LayoutNode::Terminal { terminal_id, .. }) = data.projects[1].layout.as_mut() {
+            *terminal_id = Some("active-in-checkout".to_string());
+        }
         let metadata = data.projects[1]
             .worktree_info
             .as_mut()
@@ -5489,16 +5702,29 @@ mod tests {
         local
             .run_until(async {
                 let (workspace_tick, _workspace_rx) = watch::channel(0u64);
-                let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+                let (teardown_release_tx, teardown_release_rx) = std::sync::mpsc::channel();
+                let backend: Arc<dyn TerminalBackend> = Arc::new(RemovalBarrierBackend {
+                    killed: std::sync::atomic::AtomicBool::new(false),
+                    flush_started: std::sync::atomic::AtomicBool::new(false),
+                    release: Mutex::new(teardown_release_rx),
+                });
                 let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+                let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+                    backend.clone(),
+                    terminals.clone(),
+                )));
+                let (service_tick, _service_rx) = watch::channel(0u64);
+                let app_settings = default_settings();
                 let runtime = tokio::runtime::Handle::current();
-                let (started_tx, started_rx) = oneshot::channel();
+                let (started_tx, mut started_rx) = oneshot::channel();
                 let (release_tx, release_rx) = std::sync::mpsc::channel();
                 let task_workspace = workspace.clone();
                 let task_tick = workspace_tick.clone();
                 let task_backend = backend.clone();
                 let task_terminals = terminals.clone();
                 let task_runtime = runtime.clone();
+                let task_service_manager = service_manager.clone();
+                let task_service_tick = service_tick.clone();
                 let removal = tokio::task::spawn_local(async move {
                     let mut focus_manager = FocusManager::new();
                     remove_worktree_project_off_reactor_with(
@@ -5512,6 +5738,9 @@ mod tests {
                         &mut focus_manager,
                         &task_backend,
                         &task_terminals,
+                        &app_settings,
+                        &task_service_manager,
+                        &task_service_tick,
                         &task_runtime,
                         move |_plan, force| {
                             assert!(force, "the caller's force flag reaches git removal");
@@ -5523,6 +5752,15 @@ mod tests {
                     .await
                 });
 
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(50), &mut started_rx,)
+                        .await
+                        .is_err(),
+                    "physical removal must wait for terminal teardown flush"
+                );
+                teardown_release_tx
+                    .send(())
+                    .expect("release terminal teardown");
                 started_rx.await.expect("blocking removal started");
                 let reader_workspace = workspace.clone();
                 tokio::task::spawn_local(async move {
@@ -5552,6 +5790,12 @@ mod tests {
                 let (workspace_tick, _workspace_rx) = watch::channel(0u64);
                 let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
                 let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+                let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+                    backend.clone(),
+                    terminals.clone(),
+                )));
+                let (service_tick, _service_rx) = watch::channel(0u64);
+                let app_settings = default_settings();
                 let runtime = tokio::runtime::Handle::current();
                 let (started_tx, started_rx) = oneshot::channel();
                 let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -5560,6 +5804,8 @@ mod tests {
                 let task_backend = backend.clone();
                 let task_terminals = terminals.clone();
                 let task_runtime = runtime.clone();
+                let task_service_manager = service_manager.clone();
+                let task_service_tick = service_tick.clone();
                 let removal = tokio::task::spawn_local(async move {
                     let mut focus_manager = FocusManager::new();
                     remove_worktree_project_off_reactor_with(
@@ -5573,6 +5819,9 @@ mod tests {
                         &mut focus_manager,
                         &task_backend,
                         &task_terminals,
+                        &app_settings,
+                        &task_service_manager,
+                        &task_service_tick,
                         &task_runtime,
                         move |_plan, _force| {
                             let _ = started_tx.send(());
