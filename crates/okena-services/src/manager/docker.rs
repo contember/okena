@@ -330,11 +330,8 @@ impl ServiceManager {
             let launch_id = terminal_id.clone();
             let launch_path = project_path.clone();
             let result = cx
-                .spawn_blocking(async move {
-                    smol::unblock(move || {
-                        launch_backend.reconnect_terminal(&launch_id, &launch_path, Some(&shell))
-                    })
-                    .await
+                .spawn_blocking(move || {
+                    launch_backend.reconnect_terminal(&launch_id, &launch_path, Some(&shell))
                 })
                 .await;
             let actual_id = result.as_ref().ok().cloned();
@@ -386,10 +383,8 @@ impl ServiceManager {
                 }
                 for cleanup_id in cleanup_ids {
                     let cleanup_backend = backend.clone();
-                    cx.spawn_blocking(async move {
-                        smol::unblock(move || cleanup_backend.kill(&cleanup_id)).await
-                    })
-                    .await;
+                    cx.spawn_blocking(move || cleanup_backend.kill(&cleanup_id))
+                        .await;
                 }
             }
         });

@@ -59,12 +59,12 @@ impl ServiceAsyncCx for NoopAsyncCx {
 
     fn spawn_blocking<T>(
         &self,
-        future: impl Future<Output = T> + Send + 'static,
+        task: impl FnOnce() -> T + Send + 'static,
     ) -> impl Future<Output = T>
     where
         T: Send + 'static,
     {
-        future
+        smol::unblock(task)
     }
 
     fn timer(&self, _duration: Duration) -> impl Future<Output = ()> {
@@ -129,12 +129,12 @@ impl ServiceAsyncCx for ExecutingAsyncCx {
 
     fn spawn_blocking<T>(
         &self,
-        future: impl Future<Output = T> + Send + 'static,
+        task: impl FnOnce() -> T + Send + 'static,
     ) -> impl Future<Output = T>
     where
         T: Send + 'static,
     {
-        smol::unblock(move || smol::block_on(future))
+        smol::unblock(task)
     }
 
     fn timer(&self, duration: Duration) -> impl Future<Output = ()> {
