@@ -412,6 +412,15 @@ impl Workspace {
         });
 
         let Some((parent_project_id, recorded_root)) = worktree else {
+            if okena_git::get_repo_root(&old_path).is_some_and(|repo_root| {
+                Self::physical_path_identity(&repo_root) == Self::physical_path_identity(&old_path)
+                    && !okena_git::list_linked_worktree_paths(&old_path).is_empty()
+            }) {
+                return Err(
+                    "Cannot rename a Git repository while it has linked worktrees; remove them first"
+                        .to_string(),
+                );
+            }
             let translated_paths = self.translate_local_project_paths(&old_path, &new_path_buf)?;
             std::fs::rename(&old_path, &new_path_buf)
                 .map_err(|error| format!("Failed to rename: {error}"))?;
@@ -2915,6 +2924,93 @@ mod gpui_tests {
         });
         assert!(!project_path.exists());
         assert!(renamed_path.join("packages/nested").exists());
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_main_repository_requires_linked_worktrees_to_be_removed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-main-repo-rename-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let linked_worktree = fixture.join("external-worktree");
+        let renamed_repo = fixture.join("renamed-main");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "file.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "external",
+            path_str(&linked_worktree),
+        ]);
+
+        let mut project = make_project("project");
+        project.path = main_repo.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![project];
+        data.project_order = vec!["project".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let error = workspace.update(cx, |ws, cx| {
+            ws.rename_project_directory(
+                "project",
+                renamed_repo.to_string_lossy().into_owned(),
+                "renamed-main".to_string(),
+                cx,
+            )
+            .expect_err("linked worktree must block repository rename")
+        });
+
+        assert!(error.contains("has linked worktrees"));
+        assert!(main_repo.exists());
+        assert!(!renamed_repo.exists());
+        assert!(okena_git::verify_linked_worktree_fresh(&main_repo, &linked_worktree).is_ok());
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            path_str(&linked_worktree),
+        ]);
+        workspace.update(cx, |ws, cx| {
+            ws.rename_project_directory(
+                "project",
+                renamed_repo.to_string_lossy().into_owned(),
+                "renamed-main".to_string(),
+                cx,
+            )
+            .expect("repository without linked worktrees can be renamed");
+        });
+
+        assert!(!main_repo.exists());
+        assert!(renamed_repo.join(".git").exists());
+        workspace.read_with(cx, |ws, _| {
+            assert_eq!(
+                Path::new(&ws.project("project").unwrap().path),
+                renamed_repo
+            );
+        });
         let _ = std::fs::remove_dir_all(fixture);
     }
 
