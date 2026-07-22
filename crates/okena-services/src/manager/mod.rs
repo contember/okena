@@ -17,7 +17,7 @@ pub use context::{ServiceAsyncCx, ServiceCx, ServiceHandle};
 use crate::config::ServiceDefinition;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -36,6 +36,8 @@ pub struct ServiceManager {
     pub(super) terminals: TerminalsRegistry,
     /// Cancel tokens for Docker status pollers (project_id -> cancel flag)
     pub(super) docker_pollers: HashMap<String, Arc<AtomicBool>>,
+    docker_mutations: DockerMutationQueue,
+    docker_mutation_runner: Arc<dyn commands::DockerMutationRunner>,
     /// Services currently undergoing port detection.
     pub(super) port_detection_active: HashMap<(String, String), PortDetectionState>,
     /// Whether the centralized port detection poller task is running.
@@ -52,6 +54,98 @@ pub(super) struct OkenaLaunchToken {
 pub(super) struct ProjectIncarnation {
     generation: u64,
     path: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DockerMutationKind {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl DockerMutationKind {
+    fn compose_argument(self) -> &'static str {
+        match self {
+            Self::Start => "up",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DockerMutation {
+    generation: u64,
+    project_incarnation: Option<ProjectIncarnation>,
+    project_path: String,
+    compose_file: String,
+    service_name: String,
+    kind: DockerMutationKind,
+}
+
+#[derive(Debug)]
+struct ActiveDockerMutation {
+    generation: u64,
+    pending: VecDeque<DockerMutation>,
+}
+
+#[derive(Default)]
+struct DockerMutationQueue {
+    active: HashMap<(String, String), ActiveDockerMutation>,
+    next_generation: u64,
+}
+
+impl DockerMutationQueue {
+    fn enqueue(
+        &mut self,
+        key: (String, String),
+        project_incarnation: Option<ProjectIncarnation>,
+        project_path: String,
+        compose_file: String,
+        kind: DockerMutationKind,
+    ) -> Option<DockerMutation> {
+        let generation = self.next_generation.max(1);
+        self.next_generation = generation
+            .checked_add(1)
+            .expect("Docker mutation generation exhausted");
+        let mutation = DockerMutation {
+            generation,
+            project_incarnation,
+            project_path,
+            compose_file,
+            service_name: key.1.clone(),
+            kind,
+        };
+
+        if let Some(active) = self.active.get_mut(&key) {
+            active.pending.push_back(mutation);
+            return None;
+        }
+
+        self.active.insert(
+            key,
+            ActiveDockerMutation {
+                generation,
+                pending: VecDeque::new(),
+            },
+        );
+        Some(mutation)
+    }
+
+    fn finish(&mut self, key: &(String, String), generation: u64) -> Option<DockerMutation> {
+        let active = self.active.get_mut(key)?;
+        if active.generation != generation {
+            return None;
+        }
+
+        if let Some(next) = active.pending.pop_front() {
+            active.generation = next.generation;
+            return Some(next);
+        }
+
+        self.active.remove(key);
+        None
+    }
 }
 
 /// Opaque fence for preparing service state without holding the manager lock.
@@ -298,6 +392,8 @@ impl ServiceManager {
             backend,
             terminals,
             docker_pollers: HashMap::new(),
+            docker_mutations: DockerMutationQueue::default(),
+            docker_mutation_runner: Arc::new(commands::CommandDockerMutationRunner),
             port_detection_active: HashMap::new(),
             port_detection_running: false,
         }

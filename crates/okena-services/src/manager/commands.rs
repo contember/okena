@@ -1,8 +1,8 @@
 //! Start / stop / restart individual services, plus PTY-exit handling.
 
 use super::{
-    MAX_RESTART_COUNT, OkenaLaunchToken, ServiceAsyncCx, ServiceCx, ServiceHandle, ServiceKind,
-    ServiceManager, ServiceStatus,
+    DockerMutation, DockerMutationKind, MAX_RESTART_COUNT, OkenaLaunchToken, ServiceAsyncCx,
+    ServiceCx, ServiceHandle, ServiceKind, ServiceManager, ServiceStatus,
 };
 use crate::port_detect;
 use okena_core::process::is_process_alive;
@@ -18,7 +18,72 @@ pub(super) enum OkenaLaunchFailure {
     Reconnect { auto_start: bool },
 }
 
+pub(super) trait DockerMutationRunner: Send + Sync {
+    fn run(&self, mutation: &DockerMutation) -> crate::ServiceResult<()>;
+}
+
+pub(super) struct CommandDockerMutationRunner;
+
+impl DockerMutationRunner for CommandDockerMutationRunner {
+    fn run(&self, mutation: &DockerMutation) -> crate::ServiceResult<()> {
+        run_docker_mutation(mutation)
+    }
+}
+
 impl ServiceManager {
+    fn schedule_docker_mutation(
+        &mut self,
+        key: (String, String),
+        project_path: String,
+        compose_file: String,
+        kind: DockerMutationKind,
+        cx: &mut impl ServiceCx,
+    ) {
+        let project_incarnation = self.project_incarnation(&key.0, &project_path);
+        let Some(first) = self.docker_mutations.enqueue(
+            key.clone(),
+            project_incarnation,
+            project_path,
+            compose_file,
+            kind,
+        ) else {
+            return;
+        };
+        let runner = self.docker_mutation_runner.clone();
+
+        cx.spawn_main(async move |this, cx| {
+            let mut current = Some(first);
+            while let Some(mutation) = current {
+                let run = mutation.clone();
+                let runner = runner.clone();
+                let result = cx.spawn_blocking(async move { runner.run(&run) }).await;
+                if let Err(error) = result {
+                    log::error!(
+                        "docker compose {} failed for '{}': {}",
+                        mutation.kind.compose_argument(),
+                        mutation.service_name,
+                        error
+                    );
+                }
+
+                current = this
+                    .update(cx, |this, cx| {
+                        if mutation
+                            .project_incarnation
+                            .as_ref()
+                            .is_some_and(|incarnation| {
+                                this.is_project_incarnation_current(&key.0, incarnation)
+                            })
+                        {
+                            cx.notify();
+                        }
+                        this.docker_mutations.finish(&key, mutation.generation)
+                    })
+                    .flatten();
+            }
+        });
+    }
+
     pub(super) fn complete_okena_terminal_launch(
         &mut self,
         key: &(String, String),
@@ -116,7 +181,6 @@ impl ServiceManager {
         project_path: &str,
         cx: &mut impl ServiceCx,
     ) {
-        let project_incarnation = self.project_incarnation(project_id, project_path);
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
@@ -139,48 +203,15 @@ impl ServiceManager {
             ServiceKind::DockerCompose { compose_file } => {
                 let compose_file = compose_file.clone();
                 let path = project_path.to_string();
-                let name = service_name.to_string();
                 instance.status = ServiceStatus::Starting;
                 cx.notify();
-
-                // Fire-and-forget: status poller will pick up the change
-                let log_name = name.clone();
-                let pid = project_id.to_string();
-                cx.spawn_main(async move |this, cx| {
-                    let result = cx
-                        .spawn_blocking(async move {
-                            let mut cmd = okena_core::process::command("docker");
-                            // `up -d`, not `start`: `start` only (re)starts an
-                            // already-created container and does NOT resolve
-                            // `depends_on`, so a service like contember-engine
-                            // fails with "missing dependency postgres" when its
-                            // deps aren't already up. `up -d <svc>` creates +
-                            // starts the service and its dependency graph
-                            // (postgres first); it's idempotent for shared deps.
-                            cmd.args(["compose", "-f", &compose_file, "up", "-d", &name])
-                                .current_dir(&path);
-                            okena_core::process::safe_output(&mut cmd)
-                        })
-                        .await;
-                    if let Ok(output) = result
-                        && !output.status.success()
-                    {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        log::error!(
-                            "docker compose start failed for '{}': {}",
-                            log_name,
-                            stderr.trim()
-                        );
-                    }
-                    // Trigger an immediate status poll
-                    let _ = this.update(cx, |this, cx| {
-                        if project_incarnation.as_ref().is_some_and(|incarnation| {
-                            this.is_project_incarnation_current(&pid, incarnation)
-                        }) {
-                            cx.notify();
-                        }
-                    });
-                });
+                self.schedule_docker_mutation(
+                    key,
+                    path,
+                    compose_file,
+                    DockerMutationKind::Start,
+                    cx,
+                );
             }
             ServiceKind::Okena => {
                 self.start_okena_service(project_id, service_name, project_path, cx);
@@ -367,38 +398,16 @@ impl ServiceManager {
                     .get(project_id)
                     .cloned()
                     .unwrap_or_default();
-                let name = service_name.to_string();
                 instance.status = ServiceStatus::Stopped;
                 instance.detected_ports.clear();
                 cx.notify();
-
-                let log_name = name.clone();
-                cx.spawn_main(async move |_this, cx| {
-                    let result = cx
-                        .spawn_blocking(async move {
-                            let mut cmd = okena_core::process::command("docker");
-                            cmd.args(["compose", "-f", &compose_file, "stop", &name])
-                                .current_dir(&path);
-                            okena_core::process::safe_output(&mut cmd)
-                        })
-                        .await;
-                    match result {
-                        Ok(output) if !output.status.success() => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            log::error!(
-                                "docker compose stop failed for '{}': {}",
-                                log_name,
-                                stderr.trim()
-                            );
-                        }
-                        Err(e) => log::error!(
-                            "docker compose stop failed to run for '{}': {}",
-                            log_name,
-                            e
-                        ),
-                        _ => {}
-                    }
-                });
+                self.schedule_docker_mutation(
+                    key,
+                    path,
+                    compose_file,
+                    DockerMutationKind::Stop,
+                    cx,
+                );
             }
             ServiceKind::Okena => {
                 instance.status = ServiceStatus::Stopped;
@@ -432,7 +441,6 @@ impl ServiceManager {
             ServiceKind::DockerCompose { compose_file } => {
                 let compose_file = compose_file.clone();
                 let path = project_path.to_string();
-                let name = service_name.to_string();
 
                 // Kill log viewer PTY if any
                 if let Some(terminal_id) = instance.terminal_id.take() {
@@ -445,41 +453,13 @@ impl ServiceManager {
                 instance.detected_ports.clear();
                 cx.notify();
 
-                let log_name = name.clone();
-                let pid = project_id.to_string();
-                cx.spawn_main(async move |this, cx| {
-                    let result = cx
-                        .spawn_blocking(async move {
-                            let mut cmd = okena_core::process::command("docker");
-                            cmd.args(["compose", "-f", &compose_file, "restart", &name])
-                                .current_dir(&path);
-                            okena_core::process::safe_output(&mut cmd)
-                        })
-                        .await;
-                    match result {
-                        Ok(output) if !output.status.success() => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            log::error!(
-                                "docker compose restart failed for '{}': {}",
-                                log_name,
-                                stderr.trim()
-                            );
-                        }
-                        Err(e) => log::error!(
-                            "docker compose restart failed to run for '{}': {}",
-                            log_name,
-                            e
-                        ),
-                        _ => {}
-                    }
-                    let _ = this.update(cx, |this, cx| {
-                        if project_incarnation.as_ref().is_some_and(|incarnation| {
-                            this.is_project_incarnation_current(&pid, incarnation)
-                        }) {
-                            cx.notify();
-                        }
-                    });
-                });
+                self.schedule_docker_mutation(
+                    key,
+                    path,
+                    compose_file,
+                    DockerMutationKind::Restart,
+                    cx,
+                );
             }
             ServiceKind::Okena => {
                 // Take terminal_id now to prevent concurrent access.
@@ -653,5 +633,41 @@ impl ServiceManager {
 
         cx.notify();
         true
+    }
+}
+
+fn run_docker_mutation(mutation: &DockerMutation) -> crate::ServiceResult<()> {
+    let mut command = okena_core::process::command("docker");
+    match mutation.kind {
+        DockerMutationKind::Start => {
+            // `up -d` creates the service and its dependency graph; `start` does not.
+            command.args([
+                "compose",
+                "-f",
+                &mutation.compose_file,
+                "up",
+                "-d",
+                &mutation.service_name,
+            ]);
+        }
+        DockerMutationKind::Stop | DockerMutationKind::Restart => {
+            command.args([
+                "compose",
+                "-f",
+                &mutation.compose_file,
+                mutation.kind.compose_argument(),
+                &mutation.service_name,
+            ]);
+        }
+    }
+    command.current_dir(&mutation.project_path);
+    let output = okena_core::process::safe_output(&mut command)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(crate::ServiceError::CommandExitError {
+            context: format!("docker compose {}", mutation.kind.compose_argument()),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
     }
 }
