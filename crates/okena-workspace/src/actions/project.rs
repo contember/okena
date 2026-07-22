@@ -176,8 +176,9 @@ impl Workspace {
         global_hooks: &HooksConfig,
         window_id: WindowId,
         cx: &mut impl WorkspaceCx,
-    ) -> String {
+    ) -> Result<String, String> {
         let path = expand_tilde(&path);
+        self.ensure_project_path_claim_allowed(std::path::Path::new(&path))?;
 
         // Auto-detect WSL UNC paths and set default shell accordingly
         #[cfg(windows)]
@@ -239,7 +240,7 @@ impl Workspace {
             monitor.as_ref(),
         );
         self.register_hook_results(hook_results, cx);
-        id
+        Ok(id)
     }
 
     /// Remove hook terminal state restored without a matching live PTY.
@@ -393,12 +394,14 @@ impl Workspace {
         new_path: String,
         new_name: String,
         cx: &mut impl WorkspaceCx,
-    ) {
+    ) -> Result<(), String> {
+        self.ensure_project_path_mutation_allowed(project_id, std::path::Path::new(&new_path))?;
         self.with_project(project_id, cx, |project| {
             project.path = new_path;
             project.name = new_name;
             true
         });
+        Ok(())
     }
 
     /// Set the folder color for a project (also propagates to worktree children without overrides)
@@ -1036,6 +1039,8 @@ mod gpui_tests {
     use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
+    use std::path::Path;
+    use std::process::Command;
 
     fn make_workspace_data() -> WorkspaceData {
         WorkspaceData {
@@ -1099,6 +1104,7 @@ mod gpui_tests {
                 WindowId::Main,
                 cx,
             )
+            .expect("add project")
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1134,6 +1140,7 @@ mod gpui_tests {
                 WindowId::Extra(extra_a_id),
                 cx,
             )
+            .expect("add project")
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1157,7 +1164,8 @@ mod gpui_tests {
                 &HooksConfig::default(),
                 WindowId::Main,
                 cx,
-            );
+            )
+            .expect("add project");
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1182,7 +1190,8 @@ mod gpui_tests {
                 &HooksConfig::default(),
                 WindowId::Main,
                 cx,
-            );
+            )
+            .expect("add project");
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1821,6 +1830,246 @@ mod gpui_tests {
             branch_name: String::new(),
         });
         p
+    }
+
+    fn git(args: &[&str]) {
+        let output = Command::new("git").args(args).output().expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn path_str(path: &Path) -> &str {
+        path.to_str().expect("test path is utf-8")
+    }
+
+    #[gpui::test]
+    fn removal_rejects_sibling_project_inside_physical_worktree_root(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-root-owner-test-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let worktree = fixture.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::create_dir_all(main_repo.join("packages/a")).unwrap();
+        std::fs::create_dir_all(main_repo.join("packages/b")).unwrap();
+        std::fs::write(main_repo.join("packages/a/tracked.txt"), "a\n").unwrap();
+        std::fs::write(main_repo.join("packages/b/tracked.txt"), "b\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "packages"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        let sentinel = worktree.join("packages/b/uncommitted.txt");
+        std::fs::write(&sentinel, "must survive\n").unwrap();
+
+        let mut parent = make_project("parent");
+        parent.path = main_repo.to_string_lossy().into_owned();
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut wt = make_worktree_project("wt1", "parent");
+        wt.path = worktree.join("packages/a").to_string_lossy().into_owned();
+        let metadata = wt.worktree_info.as_mut().unwrap();
+        metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
+        metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".to_string();
+        let mut claimant = make_project("claimant");
+        claimant.name = "Sibling".to_string();
+        claimant.path = worktree.join("packages/b").to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, wt, claimant];
+        data.project_order = vec!["parent".to_string(), "claimant".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let result = workspace.update(cx, |ws, cx| {
+            ws.remove_worktree_project(
+                &mut FocusManager::new(),
+                "wt1",
+                true,
+                &HooksConfig::default(),
+                cx,
+            )
+        });
+
+        assert!(
+            result.is_err_and(|error| error.contains("Sibling")),
+            "removal must identify the sibling claimant"
+        );
+        assert!(sentinel.exists(), "uncommitted sibling data must survive");
+        assert!(worktree.exists(), "the shared checkout must survive");
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn active_root_lease_rejects_project_and_worktree_registration(cx: &mut gpui::TestAppContext) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-root-lease-test-{}", uuid::Uuid::new_v4()));
+        let root = fixture.join("checkout");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut parent = make_project("parent");
+        parent.path = fixture.join("main").to_string_lossy().into_owned();
+        let mut container = make_project("container");
+        container.path = fixture.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, container];
+        data.project_order = vec!["parent".to_string(), "container".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let (add_error, register_error, discovered_error, rename_error, released_claim) = workspace
+            .update(cx, |ws, cx| {
+                let active = ws
+                    .register_worktree_project_deferred_hooks(
+                        "parent",
+                        "active",
+                        &fixture.join("main"),
+                        path_str(&root),
+                        path_str(&root.join("packages/a")),
+                        &HooksConfig::default(),
+                        WindowId::Main,
+                        cx,
+                    )
+                    .expect("register active worktree");
+                let metadata = ws.project(&active).unwrap().worktree_info.as_ref().unwrap();
+                assert_eq!(metadata.worktree_path, path_str(&root));
+                ws.mark_creating_project(&active);
+                let add_error = ws
+                    .add_project(
+                        "claim".to_string(),
+                        root.join("packages/b").to_string_lossy().into_owned(),
+                        false,
+                        &HooksConfig::default(),
+                        WindowId::Main,
+                        cx,
+                    )
+                    .unwrap_err();
+                let register_error = ws
+                    .register_worktree_project_deferred_hooks(
+                        "parent",
+                        "other",
+                        &fixture.join("main"),
+                        path_str(&root.join("nested")),
+                        path_str(&root.join("nested/project")),
+                        &HooksConfig::default(),
+                        WindowId::Main,
+                        cx,
+                    )
+                    .unwrap_err();
+                let discovered_error = ws
+                    .add_discovered_worktree(
+                        path_str(&root.join("discovered")),
+                        "discovered",
+                        "parent",
+                        WindowId::Main,
+                    )
+                    .unwrap_err();
+                let rename_error = ws
+                    .ensure_project_path_mutation_allowed(
+                        "container",
+                        &fixture.with_extension("moved"),
+                    )
+                    .unwrap_err();
+                ws.finish_creating_project(&active);
+                let released_claim = ws
+                    .add_project(
+                        "released claim".to_string(),
+                        root.join("packages/b").to_string_lossy().into_owned(),
+                        false,
+                        &HooksConfig::default(),
+                        WindowId::Main,
+                        cx,
+                    )
+                    .expect("claim succeeds after lease release");
+                (
+                    add_error,
+                    register_error,
+                    discovered_error,
+                    rename_error,
+                    released_claim,
+                )
+            });
+
+        assert!(add_error.contains("active worktree operation"));
+        assert!(register_error.contains("overlaps active operation"));
+        assert!(discovered_error.contains("overlaps active operation"));
+        assert!(rename_error.contains("overlaps active worktree operation"));
+        workspace.read_with(cx, |ws, _| {
+            assert!(ws.project(&released_claim).is_some());
+        });
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn physical_path_identity_normalizes_relative_paths() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            Workspace::physical_path_identity(Path::new("identity-a/../identity-b")),
+            Workspace::physical_path_identity(&cwd.join("identity-b"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn physical_path_identity_folds_windows_case_aliases() {
+        let path = std::env::temp_dir().join(format!(
+            "okena-case-identity-test-{}/Missing",
+            uuid::Uuid::new_v4()
+        ));
+        let upper = std::path::PathBuf::from(path.to_string_lossy().to_uppercase());
+        assert_eq!(
+            Workspace::physical_path_identity(&path),
+            Workspace::physical_path_identity(&upper)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn physical_path_identity_follows_dangling_symlink_before_parent_components() {
+        use std::os::unix::fs::symlink;
+
+        let fixture =
+            std::env::temp_dir().join(format!("okena-path-identity-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&fixture).unwrap();
+        let target = fixture.join("not-created/checkout");
+        let alias = fixture.join("alias");
+        symlink(&target, &alias).unwrap();
+
+        assert_eq!(
+            Workspace::physical_path_identity(&alias.join("child/../project")),
+            Workspace::physical_path_identity(&target.join("project"))
+        );
+        let _ = std::fs::remove_dir_all(&fixture);
     }
 
     #[gpui::test]

@@ -57,7 +57,10 @@ pub(super) fn add_project(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let project_id = ws.add_project(name, path, true, &settings.hooks, window_id, cx);
+    let project_id = match ws.add_project(name, path, true, &settings.hooks, window_id, cx) {
+        Ok(project_id) => project_id,
+        Err(error) => return ActionResult::Err(error),
+    };
     // Surface the newly-created project's id alongside the spawned terminal
     // ids so callers (e.g. the CLI `add-project` verb) can address the project
     // they just created without re-fetching state. `spawn_uninitialized_terminals`
@@ -166,6 +169,9 @@ pub(super) fn rename_project_directory(
         None => return ActionResult::Err("cannot determine parent directory".to_string()),
     };
     let new_path = parent.join(&new_name);
+    if let Err(error) = ws.ensure_project_path_mutation_allowed(&project_id, &new_path) {
+        return ActionResult::Err(error);
+    }
     if new_path.exists() {
         return ActionResult::Err(format!("'{}' already exists", new_name));
     }
@@ -173,8 +179,10 @@ pub(super) fn rename_project_directory(
         return ActionResult::Err(format!("Failed to rename: {}", e));
     }
     let new_path_str = new_path.to_string_lossy().to_string();
-    ws.rename_project_directory(&project_id, new_path_str, new_name, cx);
-    ActionResult::Ok(None)
+    match ws.rename_project_directory(&project_id, new_path_str, new_name, cx) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(error) => ActionResult::Err(error),
+    }
 }
 
 pub(super) fn delete_project(
@@ -485,13 +493,8 @@ pub(super) fn add_discovered_worktree(
     }
     let new_id =
         match ws.add_discovered_worktree(&worktree_path, &branch, &parent_project_id, window_id) {
-            Some(id) => id,
-            None => {
-                return ActionResult::Err(format!(
-                    "worktree already tracked or not addable: {}",
-                    worktree_path
-                ));
-            }
+            Ok(id) => id,
+            Err(error) => return ActionResult::Err(error),
         };
     ws.add_to_worktree_ids(&parent_project_id, &new_id);
     // `add_discovered_worktree` deliberately doesn't notify (caller's job).

@@ -121,12 +121,13 @@ fn with_unclaimed_worktree_root<R>(
     cleanup: impl FnOnce() -> R,
 ) -> Option<R> {
     let workspace = workspace.lock();
-    let normalized_root = okena_git::repository::normalize_path(worktree_path);
+    let physical_root = Workspace::physical_path_identity(worktree_path);
     if workspace
         .projects()
         .iter()
-        .map(|project| okena_git::repository::normalize_path(std::path::Path::new(&project.path)))
-        .any(|project_path| project_path.starts_with(&normalized_root))
+        .filter(|project| !project.is_remote)
+        .map(|project| Workspace::physical_path_identity(std::path::Path::new(&project.path)))
+        .any(|project_path| project_path.starts_with(&physical_root))
     {
         return None;
     }
@@ -475,6 +476,9 @@ fn spawn_merge_worktree_close(
         }
         if ws.is_project_closing(&project_id) {
             return CommandResult::Err("worktree is already closing".to_string());
+        }
+        if let Err(error) = ws.ensure_worktree_removal_claim_allowed(&project_id) {
+            return CommandResult::Err(error);
         }
         let Some(project) = ws
             .project(&project_id)
@@ -2843,14 +2847,16 @@ mod tests {
         let (workspace_tick, _wtrx) = watch::channel(0u64);
         let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
 
-        workspace.add_project(
-            "Test".to_string(),
-            tmp_path,
-            true,
-            &app_settings.hooks,
-            WindowId::Main,
-            &mut cx,
-        );
+        workspace
+            .add_project(
+                "Test".to_string(),
+                tmp_path,
+                true,
+                &app_settings.hooks,
+                WindowId::Main,
+                &mut cx,
+            )
+            .expect("add project");
 
         let history = hook_monitor.as_ref().unwrap().history();
         assert_eq!(
@@ -3500,6 +3506,28 @@ mod tests {
                 assert!(
                     !marker.exists(),
                     "close hooks wait behind terminal teardown"
+                );
+                let registration_error = {
+                    let mut cx =
+                        DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                    workspace
+                        .lock()
+                        .add_project(
+                            "late claimant".to_string(),
+                            worktree
+                                .join("packages/late")
+                                .to_string_lossy()
+                                .into_owned(),
+                            false,
+                            &global_hooks,
+                            WindowId::Main,
+                            &mut cx,
+                        )
+                        .unwrap_err()
+                };
+                assert!(
+                    registration_error.contains("active worktree operation"),
+                    "closing lease must reject registration at the teardown barrier"
                 );
                 release_tx.send(()).expect("release teardown barrier");
 
