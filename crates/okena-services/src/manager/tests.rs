@@ -256,3 +256,42 @@ fn docker_service_terminal_ids_excluded() {
     assert!(ids.contains_key("web"));
     assert!(!ids.contains_key("db")); // Docker service excluded
 }
+
+#[test]
+fn project_reload_invalidates_old_async_incarnation() {
+    let mut lifecycles = ProjectLifecycles::default();
+    let old = lifecycles.begin("project", "/repo");
+    assert!(lifecycles.is_current("project", &old));
+
+    let replacement = lifecycles.begin("project", "/repo");
+
+    assert!(!lifecycles.is_current("project", &old));
+    assert!(lifecycles.is_current("project", &replacement));
+    assert_eq!(
+        lifecycles.get("project", "/repo"),
+        Some(replacement.clone())
+    );
+    assert_ne!(old, replacement);
+}
+
+#[test]
+fn project_incarnation_rejects_reused_id_at_different_path() {
+    let mut lifecycles = ProjectLifecycles::default();
+    let old = lifecycles.begin("project", "/old");
+    let replacement = lifecycles.begin("project", "/new");
+
+    assert!(!lifecycles.is_current("project", &old));
+    assert!(lifecycles.get("project", "/old").is_none());
+    assert_eq!(lifecycles.get("project", "/new"), Some(replacement));
+}
+
+#[test]
+fn project_unload_invalidates_delayed_callbacks() {
+    let mut lifecycles = ProjectLifecycles::default();
+    let loaded = lifecycles.begin("project", "/repo");
+
+    lifecycles.invalidate("project");
+
+    assert!(!lifecycles.is_current("project", &loaded));
+    assert!(lifecycles.get("project", "/repo").is_none());
+}

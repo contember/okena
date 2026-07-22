@@ -26,6 +26,7 @@ pub struct ServiceManager {
     pub(super) instances: HashMap<(String, String), ServiceInstance>,
     pub(super) terminal_to_service: HashMap<String, (String, String)>,
     pub(super) project_paths: HashMap<String, String>,
+    project_lifecycles: ProjectLifecycles,
     pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
     /// Cancel tokens for Docker status pollers (project_id -> cancel flag)
@@ -36,7 +37,51 @@ pub struct ServiceManager {
     pub(super) port_detection_running: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProjectIncarnation {
+    generation: u64,
+    path: String,
+}
+
+#[derive(Default)]
+struct ProjectLifecycles {
+    current: HashMap<String, ProjectIncarnation>,
+    next_generation: u64,
+}
+
+impl ProjectLifecycles {
+    fn begin(&mut self, project_id: &str, project_path: &str) -> ProjectIncarnation {
+        let generation = self.next_generation.max(1);
+        let incarnation = ProjectIncarnation {
+            generation,
+            path: project_path.to_string(),
+        };
+        self.next_generation = generation
+            .checked_add(1)
+            .expect("service project generation exhausted");
+        self.current
+            .insert(project_id.to_string(), incarnation.clone());
+        incarnation
+    }
+
+    fn get(&self, project_id: &str, project_path: &str) -> Option<ProjectIncarnation> {
+        self.current
+            .get(project_id)
+            .filter(|incarnation| incarnation.path == project_path)
+            .cloned()
+    }
+
+    fn invalidate(&mut self, project_id: &str) {
+        self.current.remove(project_id);
+    }
+
+    fn is_current(&self, project_id: &str, incarnation: &ProjectIncarnation) -> bool {
+        self.current.get(project_id) == Some(incarnation)
+    }
+}
+
 pub(super) struct PortDetectionState {
+    pub(super) project_incarnation: ProjectIncarnation,
     pub(super) polls_remaining: u32,
     pub(super) found_any: bool,
     pub(super) stable_count: u32,
@@ -214,6 +259,7 @@ impl ServiceManager {
             instances: HashMap::new(),
             terminal_to_service: HashMap::new(),
             project_paths: HashMap::new(),
+            project_lifecycles: ProjectLifecycles::default(),
             backend,
             terminals,
             docker_pollers: HashMap::new(),
@@ -291,7 +337,37 @@ impl ServiceManager {
     pub fn update_project_path(&mut self, project_id: &str, new_path: &str) {
         if let Some(entry) = self.project_paths.get_mut(project_id) {
             *entry = new_path.to_string();
+            self.begin_project_incarnation(project_id, new_path);
         }
+    }
+
+    pub(super) fn begin_project_incarnation(
+        &mut self,
+        project_id: &str,
+        project_path: &str,
+    ) -> ProjectIncarnation {
+        self.project_lifecycles.begin(project_id, project_path)
+    }
+
+    pub(super) fn project_incarnation(
+        &self,
+        project_id: &str,
+        project_path: &str,
+    ) -> Option<ProjectIncarnation> {
+        self.project_lifecycles.get(project_id, project_path)
+    }
+
+    pub(super) fn invalidate_project_incarnation(&mut self, project_id: &str) {
+        self.project_lifecycles.invalidate(project_id);
+    }
+
+    pub(super) fn is_project_incarnation_current(
+        &self,
+        project_id: &str,
+        incarnation: &ProjectIncarnation,
+    ) -> bool {
+        self.project_lifecycles.is_current(project_id, incarnation)
+            && self.project_paths.get(project_id) == Some(&incarnation.path)
     }
 
     /// Whether the project has any service definitions loaded (Okena or Docker).

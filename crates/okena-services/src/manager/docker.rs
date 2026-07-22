@@ -40,6 +40,9 @@ impl ServiceManager {
         let Some(compose_file) = compose_file else {
             return;
         };
+        let Some(incarnation) = self.project_incarnation(project_id, project_path) else {
+            return;
+        };
 
         // Extract what we need from the reference before spawning
         let filter: Option<Vec<String>> = docker_config
@@ -74,6 +77,9 @@ impl ServiceManager {
             };
 
             let _ = this.update(cx, |this, cx| {
+                if !this.is_project_incarnation_current(&project_id, &incarnation) {
+                    return;
+                }
                 for name in &service_names {
                     let is_extra = filter.as_ref().is_some_and(|f| !f.contains(name));
 
@@ -102,7 +108,13 @@ impl ServiceManager {
                 }
 
                 // Start status poller
-                this.start_docker_status_poller(&project_id, &project_path, &compose_file, cx);
+                this.start_docker_status_poller(
+                    &project_id,
+                    &project_path,
+                    &compose_file,
+                    incarnation,
+                    cx,
+                );
                 cx.notify();
             });
         });
@@ -227,6 +239,7 @@ impl ServiceManager {
         project_id: &str,
         project_path: &str,
         compose_file: &str,
+        incarnation: super::ProjectIncarnation,
         cx: &mut impl ServiceCx,
     ) {
         // Cancel any existing poller for this project
@@ -252,6 +265,14 @@ impl ServiceManager {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
+                let is_current = this
+                    .update(cx, |this, _| {
+                        this.is_project_incarnation_current(&pid, &incarnation)
+                    })
+                    .unwrap_or(false);
+                if !is_current {
+                    return;
+                }
 
                 let path_clone = path.clone();
                 let file_clone = file.clone();
@@ -271,6 +292,9 @@ impl ServiceManager {
                         consecutive_failures = 0;
                         let should_stop = this
                             .update(cx, |this, cx| {
+                                if !this.is_project_incarnation_current(&pid, &incarnation) {
+                                    return true;
+                                }
                                 let mut any_docker = false;
                                 let mut changed = false;
                                 for ds in &statuses {
