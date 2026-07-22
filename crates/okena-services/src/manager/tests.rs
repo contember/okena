@@ -149,6 +149,10 @@ struct BarrierDockerRunner {
     release_start: async_channel::Receiver<()>,
 }
 
+struct TimeoutDockerRunner {
+    events: async_channel::Sender<DockerMutationKind>,
+}
+
 struct RecordingTerminalBackend {
     local: LocalBackend,
     plans: async_channel::Sender<TerminalLaunchPlan>,
@@ -289,6 +293,21 @@ impl commands::DockerMutationRunner for BarrierDockerRunner {
             self.release_start
                 .recv_blocking()
                 .expect("release Docker start");
+        }
+        Ok(())
+    }
+}
+
+impl commands::DockerMutationRunner for TimeoutDockerRunner {
+    fn run(&self, mutation: &DockerMutation) -> crate::ServiceResult<()> {
+        self.events
+            .send_blocking(mutation.kind)
+            .expect("record Docker mutation");
+        if mutation.kind == DockerMutationKind::Start {
+            return Err(crate::ServiceError::CommandFailed(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "simulated Docker timeout",
+            )));
         }
         Ok(())
     }
@@ -725,6 +744,98 @@ fn docker_start_then_immediate_stop_waits_for_running_compose_command() {
         release_tx.send(()).await.expect("release compose up");
         assert_eq!(events_rx.recv().await, Ok(DockerMutationKind::Stop));
 
+        while service_manager
+            .borrow()
+            .docker_mutations
+            .active
+            .contains_key(&key)
+        {
+            smol::Timer::after(Duration::from_millis(1)).await;
+        }
+        assert_eq!(
+            service_manager.borrow().instances[&key].status,
+            ServiceStatus::Stopped
+        );
+    }));
+}
+
+#[test]
+fn docker_mutation_timeout_releases_queue_without_overwriting_newer_intent() {
+    let path = "/project";
+    let key = ("project".to_string(), "web".to_string());
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let mut service_manager = manager();
+    service_manager.docker_mutation_runner = Arc::new(TimeoutDockerRunner { events: events_tx });
+    service_manager
+        .project_paths
+        .insert(key.0.clone(), path.into());
+    service_manager.begin_project_incarnation(&key.0, path);
+    let (_, mut instance) = make_docker_instance(&key.0, &key.1, ServiceStatus::Stopped);
+    instance.terminal_id = None;
+    service_manager.instances.insert(key.clone(), instance);
+
+    let executor = Rc::new(smol::LocalExecutor::new());
+    let service_manager = Rc::new(RefCell::new(service_manager));
+    let handle = ExecutingHandle {
+        manager: Rc::downgrade(&service_manager),
+        executor: executor.clone(),
+        notifications: Arc::new(AtomicUsize::new(0)),
+    };
+
+    smol::block_on(executor.run(async {
+        let mut cx = ExecutingCx { handle };
+        {
+            let mut manager = service_manager.borrow_mut();
+            manager.start_service(&key.0, &key.1, path, &mut cx);
+            manager.stop_service(&key.0, &key.1, &mut cx);
+        }
+
+        assert_eq!(events_rx.recv().await, Ok(DockerMutationKind::Start));
+        assert_eq!(events_rx.recv().await, Ok(DockerMutationKind::Stop));
+        while service_manager
+            .borrow()
+            .docker_mutations
+            .active
+            .contains_key(&key)
+        {
+            smol::Timer::after(Duration::from_millis(1)).await;
+        }
+        assert_eq!(
+            service_manager.borrow().instances[&key].status,
+            ServiceStatus::Stopped
+        );
+    }));
+}
+
+#[test]
+fn final_docker_start_timeout_restores_stopped_status() {
+    let path = "/project";
+    let key = ("project".to_string(), "web".to_string());
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let mut service_manager = manager();
+    service_manager.docker_mutation_runner = Arc::new(TimeoutDockerRunner { events: events_tx });
+    service_manager
+        .project_paths
+        .insert(key.0.clone(), path.into());
+    service_manager.begin_project_incarnation(&key.0, path);
+    let (_, instance) = make_docker_instance(&key.0, &key.1, ServiceStatus::Stopped);
+    service_manager.instances.insert(key.clone(), instance);
+
+    let executor = Rc::new(smol::LocalExecutor::new());
+    let service_manager = Rc::new(RefCell::new(service_manager));
+    let handle = ExecutingHandle {
+        manager: Rc::downgrade(&service_manager),
+        executor: executor.clone(),
+        notifications: Arc::new(AtomicUsize::new(0)),
+    };
+
+    smol::block_on(executor.run(async {
+        let mut cx = ExecutingCx { handle };
+        service_manager
+            .borrow_mut()
+            .start_service(&key.0, &key.1, path, &mut cx);
+
+        assert_eq!(events_rx.recv().await, Ok(DockerMutationKind::Start));
         while service_manager
             .borrow()
             .docker_mutations
