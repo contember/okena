@@ -1,3 +1,4 @@
+use super::commands::OkenaLaunchFailure;
 use super::*;
 use crate::config::{OkenaProjectConfig, PreparedProjectConfig, ServiceDefinition};
 use okena_terminal::backend::LocalBackend;
@@ -566,6 +567,105 @@ fn successful_reload_rearms_restart_and_port_detection() {
         ServiceStatus::Restarting
     );
     assert_eq!(cx.spawned.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn starting_launch_completes_after_same_project_reload() {
+    let path = "/project";
+    let definition = ServiceDefinition {
+        name: "web".into(),
+        command: "echo web".into(),
+        cwd: ".".into(),
+        env: HashMap::new(),
+        auto_start: false,
+        restart_on_crash: false,
+        restart_delay_ms: 1000,
+    };
+    let prepared = || PreparedProjectConfig::Loaded {
+        config: Some(OkenaProjectConfig {
+            services: vec![definition.clone()],
+            docker_compose: None,
+        }),
+        detected_compose_file: None,
+    };
+    let mut manager = manager();
+    let mut cx = RecordingCx::default();
+    manager.load_project_services_prepared("project", path, &HashMap::new(), prepared(), &mut cx);
+
+    manager.start_service("project", "web", path, &mut cx);
+    let key = ("project".to_string(), "web".to_string());
+    let terminal_id = manager.instances[&key]
+        .terminal_id
+        .clone()
+        .expect("pending terminal id");
+    let launch_token = manager.pending_okena_launches[&key].clone();
+    assert_eq!(manager.instances[&key].status, ServiceStatus::Starting);
+
+    manager.reload_project_services_prepared("project", path, prepared(), &mut cx);
+
+    assert_eq!(
+        manager.pending_okena_launches.get(&key),
+        Some(&launch_token)
+    );
+    assert!(manager.complete_okena_terminal_launch(
+        &key,
+        &launch_token,
+        &terminal_id,
+        path,
+        &mut cx,
+    ));
+    assert_eq!(manager.instances[&key].status, ServiceStatus::Running);
+    assert!(manager.terminals.lock().contains_key(&terminal_id));
+    assert_eq!(manager.terminal_to_service.get(&terminal_id), Some(&key));
+    assert!(!manager.pending_okena_launches.contains_key(&key));
+}
+
+#[test]
+fn replacement_launch_rejects_completion_from_reused_terminal_id() {
+    let path = "/project";
+    let mut manager = manager();
+    let mut cx = RecordingCx::default();
+    manager.project_paths.insert("project".into(), path.into());
+    manager.begin_project_incarnation("project", path);
+    let (key, mut instance) = make_instance("project", "web", false, 0, ServiceStatus::Stopped);
+    instance.terminal_id = None;
+    manager.instances.insert(key.clone(), instance);
+
+    manager.begin_okena_terminal_launch(
+        "project",
+        "web",
+        path,
+        "reused-terminal".into(),
+        OkenaLaunchFailure::Crashed,
+        &mut cx,
+    );
+    let stale_token = manager.pending_okena_launches[&key].clone();
+    manager.begin_okena_terminal_launch(
+        "project",
+        "web",
+        path,
+        "reused-terminal".into(),
+        OkenaLaunchFailure::Crashed,
+        &mut cx,
+    );
+    let current_token = manager.pending_okena_launches[&key].clone();
+
+    assert_ne!(stale_token, current_token);
+    assert!(!manager.complete_okena_terminal_launch(
+        &key,
+        &stale_token,
+        "reused-terminal",
+        path,
+        &mut cx,
+    ));
+    assert!(manager.complete_okena_terminal_launch(
+        &key,
+        &current_token,
+        "reused-terminal",
+        path,
+        &mut cx,
+    ));
+    assert_eq!(manager.instances[&key].status, ServiceStatus::Running);
 }
 
 #[test]

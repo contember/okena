@@ -30,6 +30,8 @@ pub struct ServiceManager {
     /// Daemon write-back uses this to reject notifications from an older snapshot.
     project_writeback_owners: HashMap<String, (String, u64)>,
     project_lifecycles: ProjectLifecycles,
+    pending_okena_launches: HashMap<(String, String), OkenaLaunchToken>,
+    next_okena_launch_generation: u64,
     pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
     /// Cancel tokens for Docker status pollers (project_id -> cancel flag)
@@ -38,6 +40,12 @@ pub struct ServiceManager {
     pub(super) port_detection_active: HashMap<(String, String), PortDetectionState>,
     /// Whether the centralized port detection poller task is running.
     pub(super) port_detection_running: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct OkenaLaunchToken {
+    generation: u64,
+    project_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,6 +293,8 @@ impl ServiceManager {
             project_paths: HashMap::new(),
             project_writeback_owners: HashMap::new(),
             project_lifecycles: ProjectLifecycles::default(),
+            pending_okena_launches: HashMap::new(),
+            next_okena_launch_generation: 1,
             backend,
             terminals,
             docker_pollers: HashMap::new(),
@@ -471,6 +481,43 @@ impl ServiceManager {
     ) -> bool {
         self.project_lifecycles.is_current(project_id, incarnation)
             && self.project_paths.get(project_id) == Some(&incarnation.path)
+    }
+
+    pub(super) fn begin_okena_launch(
+        &mut self,
+        key: &(String, String),
+        project_path: &str,
+    ) -> OkenaLaunchToken {
+        let generation = self.next_okena_launch_generation;
+        self.next_okena_launch_generation = generation
+            .checked_add(1)
+            .expect("Okena service launch generation exhausted");
+        let token = OkenaLaunchToken {
+            generation,
+            project_path: project_path.to_string(),
+        };
+        self.pending_okena_launches
+            .insert(key.clone(), token.clone());
+        token
+    }
+
+    pub(super) fn is_okena_launch_current(
+        &self,
+        key: &(String, String),
+        token: &OkenaLaunchToken,
+    ) -> bool {
+        self.pending_okena_launches.get(key) == Some(token)
+            && self.project_paths.get(&key.0) == Some(&token.project_path)
+    }
+
+    pub(super) fn finish_okena_launch(&mut self, key: &(String, String), token: &OkenaLaunchToken) {
+        if self.pending_okena_launches.get(key) == Some(token) {
+            self.pending_okena_launches.remove(key);
+        }
+    }
+
+    pub(super) fn invalidate_okena_launch(&mut self, key: &(String, String)) {
+        self.pending_okena_launches.remove(key);
     }
 
     /// Whether the project has any service definitions loaded (Okena or Docker).

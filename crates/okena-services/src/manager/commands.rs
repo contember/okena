@@ -1,8 +1,8 @@
 //! Start / stop / restart individual services, plus PTY-exit handling.
 
 use super::{
-    MAX_RESTART_COUNT, ServiceAsyncCx, ServiceCx, ServiceHandle, ServiceKind, ServiceManager,
-    ServiceStatus,
+    MAX_RESTART_COUNT, OkenaLaunchToken, ServiceAsyncCx, ServiceCx, ServiceHandle, ServiceKind,
+    ServiceManager, ServiceStatus,
 };
 use crate::port_detect;
 use okena_core::process::is_process_alive;
@@ -19,6 +19,50 @@ pub(super) enum OkenaLaunchFailure {
 }
 
 impl ServiceManager {
+    pub(super) fn complete_okena_terminal_launch(
+        &mut self,
+        key: &(String, String),
+        launch_token: &OkenaLaunchToken,
+        terminal_id: &str,
+        cwd: &str,
+        cx: &mut impl ServiceCx,
+    ) -> bool {
+        if !self.is_okena_launch_current(key, launch_token) {
+            return false;
+        }
+
+        let running = self.instances.get(key).is_some_and(|instance| {
+            instance.status == ServiceStatus::Starting
+                && instance.terminal_id.as_deref() == Some(terminal_id)
+        }) && self.terminal_to_service.get(terminal_id) == Some(key);
+        let exited_without_restart = self.instances.get(key).is_some_and(|instance| {
+            matches!(&instance.status, ServiceStatus::Crashed { .. })
+                && instance.terminal_id.as_deref() == Some(terminal_id)
+        }) && !self.terminal_to_service.contains_key(terminal_id);
+        if !running && !exited_without_restart {
+            return false;
+        }
+
+        let terminal = Arc::new(Terminal::new(
+            terminal_id.to_string(),
+            TerminalSize::default(),
+            self.backend.transport(),
+            cwd.to_string(),
+        ));
+        self.terminals
+            .lock()
+            .insert(terminal_id.to_string(), terminal);
+        if running {
+            if let Some(instance) = self.instances.get_mut(key) {
+                instance.status = ServiceStatus::Running;
+            }
+            self.start_port_detection(&key.0, &key.1, cx);
+        }
+        self.finish_okena_launch(key, launch_token);
+        cx.notify();
+        true
+    }
+
     pub(super) fn scheduled_okena_restart_is_current(
         &self,
         key: &(String, String),
@@ -172,10 +216,14 @@ impl ServiceManager {
         failure: OkenaLaunchFailure,
         cx: &mut impl ServiceCx,
     ) {
-        let Some(project_incarnation) = self.project_incarnation(project_id, project_path) else {
+        if self.project_incarnation(project_id, project_path).is_none() {
             return;
-        };
+        }
         let key = (project_id.to_string(), service_name.to_string());
+        if !self.instances.contains_key(&key) {
+            return;
+        }
+        let launch_token = self.begin_okena_launch(&key, project_path);
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
             None => return,
@@ -203,7 +251,6 @@ impl ServiceManager {
         cx.notify();
 
         let backend = self.backend.clone();
-        let terminals = self.terminals.clone();
         let project_id = project_id.to_string();
         let service_name = service_name.to_string();
         let project_path = project_path.to_string();
@@ -224,56 +271,33 @@ impl ServiceManager {
             let (accepted, cleanup_requested) = this
                 .update(cx, |this, cx| {
                     let key = (project_id.clone(), service_name.clone());
-                    let exited_without_restart =
-                        this.instances.get(&key).is_some_and(|instance| {
-                            matches!(&instance.status, ServiceStatus::Crashed { .. })
-                                && instance.terminal_id.as_deref() == Some(&terminal_id)
-                        }) && !this.terminal_to_service.contains_key(&terminal_id);
-                    if this.is_project_incarnation_current(&project_id, &project_incarnation)
-                        && exited_without_restart
-                        && result
-                            .as_ref()
-                            .is_ok_and(|returned_id| returned_id == &terminal_id)
+                    if result
+                        .as_ref()
+                        .is_ok_and(|returned_id| returned_id == &terminal_id)
+                        && this.complete_okena_terminal_launch(
+                            &key,
+                            &launch_token,
+                            &terminal_id,
+                            &cwd,
+                            cx,
+                        )
                     {
-                        let terminal = Arc::new(Terminal::new(
-                            terminal_id.clone(),
-                            TerminalSize::default(),
-                            backend.transport(),
-                            cwd.clone(),
-                        ));
-                        terminals.lock().insert(terminal_id.clone(), terminal);
-                        cx.notify();
                         return (true, false);
                     }
-                    let current_launch = this.instances.get(&key).is_some_and(|instance| {
-                        instance.status == ServiceStatus::Starting
-                            && instance.terminal_id.as_deref() == Some(&terminal_id)
-                    }) && this.terminal_to_service.get(&terminal_id)
-                        == Some(&key);
-                    if !this.is_project_incarnation_current(&project_id, &project_incarnation)
-                        || !current_launch
-                    {
+                    let current_launch = this.is_okena_launch_current(&key, &launch_token)
+                        && this.instances.get(&key).is_some_and(|instance| {
+                            instance.status == ServiceStatus::Starting
+                                && instance.terminal_id.as_deref() == Some(&terminal_id)
+                        })
+                        && this.terminal_to_service.get(&terminal_id) == Some(&key);
+                    if !current_launch {
                         let cleanup_requested =
                             this.terminal_to_service.get(&terminal_id) != Some(&key);
                         return (false, cleanup_requested);
                     }
 
                     match &result {
-                        Ok(returned_id) if returned_id == &terminal_id => {
-                            let terminal = Arc::new(Terminal::new(
-                                terminal_id.clone(),
-                                TerminalSize::default(),
-                                backend.transport(),
-                                cwd.clone(),
-                            ));
-                            terminals.lock().insert(terminal_id.clone(), terminal);
-                            if let Some(instance) = this.instances.get_mut(&key) {
-                                instance.status = ServiceStatus::Running;
-                            }
-                            this.start_port_detection(&project_id, &service_name, cx);
-                            cx.notify();
-                            (true, false)
-                        }
+                        Ok(returned_id) if returned_id == &terminal_id => unreachable!(),
                         _ => {
                             this.terminal_to_service.remove(&terminal_id);
                             if let Some(instance) = this.instances.get_mut(&key) {
@@ -285,6 +309,7 @@ impl ServiceManager {
                                     OkenaLaunchFailure::Reconnect { .. } => ServiceStatus::Stopped,
                                 };
                             }
+                            this.finish_okena_launch(&key, &launch_token);
                             cx.notify();
                             if matches!(failure, OkenaLaunchFailure::Reconnect { auto_start: true })
                             {
@@ -318,6 +343,10 @@ impl ServiceManager {
     /// Stop a running service.
     pub fn stop_service(&mut self, project_id: &str, service_name: &str, cx: &mut impl ServiceCx) {
         let key = (project_id.to_string(), service_name.to_string());
+        if !self.instances.contains_key(&key) {
+            return;
+        }
+        self.invalidate_okena_launch(&key);
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
             None => return,
@@ -390,6 +419,10 @@ impl ServiceManager {
     ) {
         let project_incarnation = self.project_incarnation(project_id, project_path);
         let key = (project_id.to_string(), service_name.to_string());
+        if !self.instances.contains_key(&key) {
+            return;
+        }
+        self.invalidate_okena_launch(&key);
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
             None => return,
@@ -593,14 +626,16 @@ impl ServiceManager {
         // Okena service exit handling
         instance.detected_ports.clear();
 
-        if instance.definition.restart_on_crash && instance.restart_count < MAX_RESTART_COUNT {
+        let should_restart =
+            instance.definition.restart_on_crash && instance.restart_count < MAX_RESTART_COUNT;
+        if should_restart {
             // Auto-restart: clean up old terminal, will create new one
             instance.terminal_id = None;
             self.terminals.lock().remove(terminal_id);
             instance.status = ServiceStatus::Restarting;
             instance.restart_count += 1;
-
             let restart_delay_ms = instance.definition.restart_delay_ms;
+            self.invalidate_okena_launch(&key);
             if let Some(project_path) = project_path {
                 self.schedule_okena_restart(
                     &project_id,
