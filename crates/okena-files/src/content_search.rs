@@ -133,7 +133,10 @@ impl Default for ContentSearchConfig {
 pub const ALWAYS_IGNORE: &[&str] = &["!.git/", "!.claude/worktrees/"];
 
 /// Configure a walker with the project's ignore rules and our defaults.
-fn configure_walker(project_path: &Path, config: &ContentSearchConfig) -> WalkBuilder {
+fn configure_walker(
+    project_path: &Path,
+    config: &ContentSearchConfig,
+) -> Result<WalkBuilder, String> {
     let mut walk_builder = WalkBuilder::new(project_path);
     walk_builder
         .hidden(false)
@@ -146,16 +149,21 @@ fn configure_walker(project_path: &Path, config: &ContentSearchConfig) -> WalkBu
     // Build overrides: always-ignore dirs + optional user glob filter
     let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
     for pattern in ALWAYS_IGNORE {
-        let _ = override_builder.add(pattern);
+        override_builder
+            .add(pattern)
+            .map_err(|error| format!("Invalid built-in file glob '{pattern}': {error}"))?;
     }
     if let Some(ref glob) = config.file_glob {
-        let _ = override_builder.add(glob);
+        override_builder
+            .add(glob)
+            .map_err(|error| format!("Invalid file glob '{glob}': {error}"))?;
     }
-    if let Ok(overrides) = override_builder.build() {
-        walk_builder.overrides(overrides);
-    }
+    let overrides = override_builder
+        .build()
+        .map_err(|error| format!("Invalid file glob: {error}"))?;
+    walk_builder.overrides(overrides);
 
-    walk_builder
+    Ok(walk_builder)
 }
 
 /// Add context lines to matches by reading the file content.
@@ -223,16 +231,17 @@ pub fn search_content(
     config: &ContentSearchConfig,
     cancelled: &AtomicBool,
     on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-) {
+) -> Result<(), String> {
     if query.is_empty() {
-        return;
+        return Ok(());
     }
 
+    let walker = configure_walker(project_path, config)?;
     match config.mode {
         SearchMode::Fuzzy => {
-            search_content_fuzzy(project_path, query, config, cancelled, on_result)
+            search_content_fuzzy(walker, project_path, query, config, cancelled, on_result)
         }
-        _ => search_content_grep(project_path, query, config, cancelled, on_result),
+        _ => search_content_grep(walker, project_path, query, config, cancelled, on_result),
     }
 }
 
@@ -242,12 +251,13 @@ pub fn search_content(
 /// `Searcher` (it's stateful) and a clone of the matcher; results are funneled
 /// through a `Mutex` around the caller's callback.
 fn search_content_grep(
+    walker: WalkBuilder,
     project_path: &Path,
     query: &str,
     config: &ContentSearchConfig,
     cancelled: &AtomicBool,
     on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-) {
+) -> Result<(), String> {
     let matcher = {
         let mut builder = RegexMatcherBuilder::new();
         builder.case_insensitive(!config.case_sensitive);
@@ -257,10 +267,9 @@ fn search_content_grep(
         } else {
             escape_regex(query)
         };
-        match builder.build(&pattern) {
-            Ok(m) => m,
-            Err(_) => return,
-        }
+        builder
+            .build(&pattern)
+            .map_err(|error| format!("Invalid regular expression: {error}"))?
     };
 
     let total_matches = AtomicUsize::new(0);
@@ -268,110 +277,107 @@ fn search_content_grep(
     let context_lines = config.context_lines;
     let on_result = Mutex::new(on_result);
 
-    configure_walker(project_path, config)
-        .build_parallel()
-        .run(|| {
-            let matcher = matcher.clone();
-            let mut searcher = Searcher::new();
-            let total_matches = &total_matches;
-            let on_result = &on_result;
+    walker.build_parallel().run(|| {
+        let matcher = matcher.clone();
+        let mut searcher = Searcher::new();
+        let total_matches = &total_matches;
+        let on_result = &on_result;
 
-            Box::new(move |entry| {
-                if cancelled.load(Ordering::Relaxed) {
-                    return WalkState::Quit;
-                }
-                if total_matches.load(Ordering::Relaxed) >= max_results {
-                    return WalkState::Quit;
-                }
+        Box::new(move |entry| {
+            if cancelled.load(Ordering::Relaxed) {
+                return WalkState::Quit;
+            }
+            if total_matches.load(Ordering::Relaxed) >= max_results {
+                return WalkState::Quit;
+            }
 
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => return WalkState::Continue,
-                };
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => return WalkState::Continue,
+            };
 
-                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                    return WalkState::Continue;
-                }
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                return WalkState::Continue;
+            }
 
-                let path = entry.path();
-                let mut file_matches: Vec<ContentMatch> = Vec::new();
+            let path = entry.path();
+            let mut file_matches: Vec<ContentMatch> = Vec::new();
 
-                let search_result = searcher.search_path(
-                    &matcher,
-                    path,
-                    UTF8(|line_number, line_content| {
-                        if cancelled.load(Ordering::Relaxed) {
-                            return Ok(false);
-                        }
-                        if total_matches.load(Ordering::Relaxed) + file_matches.len() >= max_results
-                        {
-                            return Ok(false);
-                        }
+            let search_result = searcher.search_path(
+                &matcher,
+                path,
+                UTF8(|line_number, line_content| {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Ok(false);
+                    }
+                    if total_matches.load(Ordering::Relaxed) + file_matches.len() >= max_results {
+                        return Ok(false);
+                    }
 
-                        let line_trimmed = line_content.trim_end_matches(&['\n', '\r'][..]);
+                    let line_trimmed = line_content.trim_end_matches(&['\n', '\r'][..]);
 
-                        // Find match ranges within the line
-                        let mut match_ranges = Vec::new();
-                        matcher
-                            .find_iter(line_content.as_bytes(), |m| {
-                                let start = m.start();
-                                let end = m.end().min(line_trimmed.len());
-                                if start < line_trimmed.len() {
-                                    match_ranges.push(start..end);
-                                }
-                                true
-                            })
-                            .ok();
+                    // Find match ranges within the line
+                    let mut match_ranges = Vec::new();
+                    matcher
+                        .find_iter(line_content.as_bytes(), |m| {
+                            let start = m.start();
+                            let end = m.end().min(line_trimmed.len());
+                            if start < line_trimmed.len() {
+                                match_ranges.push(start..end);
+                            }
+                            true
+                        })
+                        .ok();
 
-                        // Expand tabs to match syntax highlighter output
-                        let (line_expanded, match_ranges) =
-                            expand_tabs(line_trimmed, &match_ranges);
+                    // Expand tabs to match syntax highlighter output
+                    let (line_expanded, match_ranges) = expand_tabs(line_trimmed, &match_ranges);
 
-                        file_matches.push(ContentMatch {
-                            line_number: line_number as usize,
-                            line_content: line_expanded,
-                            match_ranges,
-                            context_before: Vec::new(),
-                            context_after: Vec::new(),
-                        });
+                    file_matches.push(ContentMatch {
+                        line_number: line_number as usize,
+                        line_content: line_expanded,
+                        match_ranges,
+                        context_before: Vec::new(),
+                        context_after: Vec::new(),
+                    });
 
-                        Ok(true)
-                    }),
-                );
+                    Ok(true)
+                }),
+            );
 
-                if search_result.is_err() || file_matches.is_empty() {
-                    return WalkState::Continue;
-                }
+            if search_result.is_err() || file_matches.is_empty() {
+                return WalkState::Continue;
+            }
 
-                let reserved = reserve_match_slots(total_matches, max_results, file_matches.len());
-                if reserved == 0 {
-                    return WalkState::Quit;
-                }
-                file_matches.truncate(reserved);
+            let reserved = reserve_match_slots(total_matches, max_results, file_matches.len());
+            if reserved == 0 {
+                return WalkState::Quit;
+            }
+            file_matches.truncate(reserved);
 
-                if context_lines > 0 {
-                    add_context_lines(&mut file_matches, path, context_lines);
-                }
+            if context_lines > 0 {
+                add_context_lines(&mut file_matches, path, context_lines);
+            }
 
-                let relative_path = path
-                    .strip_prefix(project_path)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
+            let relative_path = path
+                .strip_prefix(project_path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-                let result = FileSearchResult {
-                    file_path: path.to_path_buf(),
-                    relative_path,
-                    matches: file_matches,
-                    best_score: 0,
-                };
+            let result = FileSearchResult {
+                file_path: path.to_path_buf(),
+                relative_path,
+                matches: file_matches,
+                best_score: 0,
+            };
 
-                if let Ok(mut cb) = on_result.lock() {
-                    cb(result);
-                }
+            if let Ok(mut cb) = on_result.lock() {
+                cb(result);
+            }
 
-                WalkState::Continue
-            })
-        });
+            WalkState::Continue
+        })
+    });
+    Ok(())
 }
 
 /// Search using nucleo-matcher (fuzzy mode).
@@ -379,12 +385,13 @@ fn search_content_grep(
 /// Walks the project tree in parallel; each worker thread keeps its own
 /// `Matcher` (it's stateful) and reads file contents independently.
 fn search_content_fuzzy(
+    walker: WalkBuilder,
     project_path: &Path,
     query: &str,
     config: &ContentSearchConfig,
     cancelled: &AtomicBool,
     on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-) {
+) -> Result<(), String> {
     use nucleo_matcher::{Config as NucleoConfig, Matcher, Utf32Str};
 
     let total_matches = AtomicUsize::new(0);
@@ -401,124 +408,122 @@ fn search_content_fuzzy(
         _ => 30,
     };
 
-    configure_walker(project_path, config)
-        .build_parallel()
-        .run(|| {
-            let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
-            let total_matches = &total_matches;
-            let on_result = &on_result;
+    walker.build_parallel().run(|| {
+        let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+        let total_matches = &total_matches;
+        let on_result = &on_result;
 
-            Box::new(move |entry| {
+        Box::new(move |entry| {
+            if cancelled.load(Ordering::Relaxed) {
+                return WalkState::Quit;
+            }
+            if total_matches.load(Ordering::Relaxed) >= max_results {
+                return WalkState::Quit;
+            }
+
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => return WalkState::Continue,
+            };
+
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                return WalkState::Continue;
+            }
+
+            let path = entry.path();
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => return WalkState::Continue,
+            };
+
+            let mut scored_matches: Vec<(u16, ContentMatch)> = Vec::new();
+
+            for (line_idx, line) in content.lines().enumerate() {
                 if cancelled.load(Ordering::Relaxed) {
                     return WalkState::Quit;
                 }
-                if total_matches.load(Ordering::Relaxed) >= max_results {
-                    return WalkState::Quit;
+                if total_matches.load(Ordering::Relaxed) + scored_matches.len() >= max_results {
+                    break;
                 }
 
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => return WalkState::Continue,
-                };
+                let mut haystack_buf = Vec::new();
+                let haystack = Utf32Str::new(line, &mut haystack_buf);
 
-                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                    return WalkState::Continue;
-                }
+                let mut needle_buf2 = Vec::new();
+                let needle = Utf32Str::new(query, &mut needle_buf2);
 
-                let path = entry.path();
-                let content = match std::fs::read_to_string(path) {
-                    Ok(c) => c,
-                    Err(_) => return WalkState::Continue,
-                };
-
-                let mut scored_matches: Vec<(u16, ContentMatch)> = Vec::new();
-
-                for (line_idx, line) in content.lines().enumerate() {
-                    if cancelled.load(Ordering::Relaxed) {
-                        return WalkState::Quit;
-                    }
-                    if total_matches.load(Ordering::Relaxed) + scored_matches.len() >= max_results {
-                        break;
+                let mut indices: Vec<u32> = Vec::new();
+                if let Some(score) = matcher.fuzzy_indices(haystack, needle, &mut indices) {
+                    if score < min_score {
+                        continue;
                     }
 
-                    let mut haystack_buf = Vec::new();
-                    let haystack = Utf32Str::new(line, &mut haystack_buf);
+                    let char_to_byte: Vec<(usize, char)> = line.char_indices().collect();
+                    let match_ranges: Vec<Range<usize>> = indices
+                        .iter()
+                        .filter_map(|&idx| {
+                            let (byte_pos, ch) = char_to_byte.get(idx as usize)?;
+                            Some(*byte_pos..*byte_pos + ch.len_utf8())
+                        })
+                        .collect();
 
-                    let mut needle_buf2 = Vec::new();
-                    let needle = Utf32Str::new(query, &mut needle_buf2);
+                    // Expand tabs to match syntax highlighter output
+                    let (line_expanded, match_ranges) = expand_tabs(line, &match_ranges);
 
-                    let mut indices: Vec<u32> = Vec::new();
-                    if let Some(score) = matcher.fuzzy_indices(haystack, needle, &mut indices) {
-                        if score < min_score {
-                            continue;
-                        }
-
-                        let char_to_byte: Vec<(usize, char)> = line.char_indices().collect();
-                        let match_ranges: Vec<Range<usize>> = indices
-                            .iter()
-                            .filter_map(|&idx| {
-                                let (byte_pos, ch) = char_to_byte.get(idx as usize)?;
-                                Some(*byte_pos..*byte_pos + ch.len_utf8())
-                            })
-                            .collect();
-
-                        // Expand tabs to match syntax highlighter output
-                        let (line_expanded, match_ranges) = expand_tabs(line, &match_ranges);
-
-                        scored_matches.push((
-                            score,
-                            ContentMatch {
-                                line_number: line_idx + 1,
-                                line_content: line_expanded,
-                                match_ranges,
-                                context_before: Vec::new(),
-                                context_after: Vec::new(),
-                            },
-                        ));
-                    }
+                    scored_matches.push((
+                        score,
+                        ContentMatch {
+                            line_number: line_idx + 1,
+                            line_content: line_expanded,
+                            match_ranges,
+                            context_before: Vec::new(),
+                            context_after: Vec::new(),
+                        },
+                    ));
                 }
+            }
 
-                if scored_matches.is_empty() {
-                    return WalkState::Continue;
-                }
+            if scored_matches.is_empty() {
+                return WalkState::Continue;
+            }
 
-                // Sort by score descending — best matches first
-                scored_matches.sort_by_key(|b| std::cmp::Reverse(b.0));
+            // Sort by score descending — best matches first
+            scored_matches.sort_by_key(|b| std::cmp::Reverse(b.0));
 
-                let reserved =
-                    reserve_match_slots(total_matches, max_results, scored_matches.len());
-                if reserved == 0 {
-                    return WalkState::Quit;
-                }
-                scored_matches.truncate(reserved);
+            let reserved = reserve_match_slots(total_matches, max_results, scored_matches.len());
+            if reserved == 0 {
+                return WalkState::Quit;
+            }
+            scored_matches.truncate(reserved);
 
-                let best_score = scored_matches.first().map(|(s, _)| *s).unwrap_or(0);
-                let mut file_matches: Vec<ContentMatch> =
-                    scored_matches.into_iter().map(|(_, m)| m).collect();
+            let best_score = scored_matches.first().map(|(s, _)| *s).unwrap_or(0);
+            let mut file_matches: Vec<ContentMatch> =
+                scored_matches.into_iter().map(|(_, m)| m).collect();
 
-                if context_lines > 0 {
-                    add_context_lines(&mut file_matches, path, context_lines);
-                }
+            if context_lines > 0 {
+                add_context_lines(&mut file_matches, path, context_lines);
+            }
 
-                let relative_path = path
-                    .strip_prefix(project_path)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
+            let relative_path = path
+                .strip_prefix(project_path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-                let result = FileSearchResult {
-                    file_path: path.to_path_buf(),
-                    relative_path,
-                    matches: file_matches,
-                    best_score,
-                };
+            let result = FileSearchResult {
+                file_path: path.to_path_buf(),
+                relative_path,
+                matches: file_matches,
+                best_score,
+            };
 
-                if let Ok(mut cb) = on_result.lock() {
-                    cb(result);
-                }
+            if let Ok(mut cb) = on_result.lock() {
+                cb(result);
+            }
 
-                WalkState::Continue
-            })
-        });
+            WalkState::Continue
+        })
+    });
+    Ok(())
 }
 
 /// Handle for cancelling a running search.
@@ -617,7 +622,7 @@ mod tests {
             results.push(result.relative_path);
         };
 
-        search_content(&dir.path, "needle", &config, &cancelled, &mut on_result);
+        search_content(&dir.path, "needle", &config, &cancelled, &mut on_result).unwrap();
 
         assert!(results.iter().any(|path| path == "small.txt"));
         assert!(!results.iter().any(|path| path == "big.log"));
@@ -646,7 +651,8 @@ mod tests {
                     .into_iter()
                     .map(|found| (result.relative_path.clone(), found.line_number)),
             );
-        });
+        })
+        .unwrap();
 
         let unique = matches.iter().collect::<std::collections::HashSet<_>>();
         assert_eq!(matches.len(), config.max_results);
@@ -661,5 +667,45 @@ mod tests {
     #[test]
     fn parallel_fuzzy_search_has_a_strict_result_cap() {
         assert_dense_parallel_search_respects_cap(SearchMode::Fuzzy);
+    }
+
+    #[test]
+    fn invalid_file_glob_returns_an_error_without_results() {
+        let dir = TempDir::new();
+        fs::write(dir.path.join("match.txt"), "needle\n").unwrap();
+        let cancelled = AtomicBool::new(false);
+        let config = ContentSearchConfig {
+            file_glob: Some("[".to_string()),
+            ..ContentSearchConfig::default()
+        };
+        let mut result_count = 0;
+
+        let error = search_content(&dir.path, "needle", &config, &cancelled, &mut |_| {
+            result_count += 1
+        })
+        .unwrap_err();
+
+        assert!(error.contains("Invalid file glob"), "{error}");
+        assert_eq!(result_count, 0);
+    }
+
+    #[test]
+    fn invalid_regex_returns_an_error_without_results() {
+        let dir = TempDir::new();
+        fs::write(dir.path.join("match.txt"), "needle\n").unwrap();
+        let cancelled = AtomicBool::new(false);
+        let config = ContentSearchConfig {
+            mode: SearchMode::Regex,
+            ..ContentSearchConfig::default()
+        };
+        let mut result_count = 0;
+
+        let error = search_content(&dir.path, "(", &config, &cancelled, &mut |_| {
+            result_count += 1
+        })
+        .unwrap_err();
+
+        assert!(error.contains("Invalid regular expression"), "{error}");
+        assert_eq!(result_count, 0);
     }
 }
