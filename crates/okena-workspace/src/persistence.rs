@@ -39,8 +39,8 @@ pub use super::settings::{
 #[allow(unused_imports)]
 pub use super::sessions::{
     ExportedWorkspace, SessionInfo, delete_session, export_workspace, import_workspace,
-    list_sessions, load_session, load_session_with_cleanup, rename_session, save_session,
-    session_exists,
+    list_sessions, load_session, load_session_with_cleanup, load_session_with_cleanup_for_shell,
+    rename_session, save_session, session_exists,
 };
 
 /// Current workspace schema version - increment when making breaking changes
@@ -334,6 +334,14 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
 
 /// Load workspace data while retaining ids owned by stale worktree rows.
 pub fn load_workspace_with_cleanup(backend: SessionBackend) -> Result<LoadedWorkspace> {
+    load_workspace_with_cleanup_for_shell(backend, &ShellType::Default)
+}
+
+/// Load workspace data with the transient global shell needed for stale cleanup routing.
+pub fn load_workspace_with_cleanup_for_shell(
+    backend: SessionBackend,
+    global_default_shell: &ShellType,
+) -> Result<LoadedWorkspace> {
     let path = get_workspace_path();
 
     // If workspace.json is missing, try to auto-recover from backup
@@ -410,7 +418,8 @@ pub fn load_workspace_with_cleanup(backend: SessionBackend) -> Result<LoadedWork
         let session_backend = backend.resolve();
         let clear_ids = !session_backend.supports_persistence();
         validate_workspace_data(&mut data, clear_ids, backend);
-        let stale_terminal_ids = sync_worktrees_with_backend(&mut data, backend);
+        let stale_terminal_ids =
+            sync_worktrees_with_backend_and_shell(&mut data, backend, global_default_shell);
 
         // Successful load — allow saving
         LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
@@ -954,12 +963,13 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
 /// worktree projects that have become stale.
 #[cfg(test)]
 pub(crate) fn sync_worktrees(data: &mut WorkspaceData) -> Vec<TerminalSessionTeardown> {
-    sync_worktrees_with_backend(data, SessionBackend::None)
+    sync_worktrees_with_backend_and_shell(data, SessionBackend::None, &ShellType::Default)
 }
 
-pub(crate) fn sync_worktrees_with_backend(
+pub(crate) fn sync_worktrees_with_backend_and_shell(
     data: &mut WorkspaceData,
     backend_preference: SessionBackend,
+    global_default_shell: &ShellType,
 ) -> Vec<TerminalSessionTeardown> {
     let stale_ids: Vec<String> = data
         .projects
@@ -979,28 +989,18 @@ pub(crate) fn sync_worktrees_with_backend(
                 collect_layout_teardowns(
                     layout,
                     project.default_shell.as_ref(),
+                    global_default_shell,
                     backend_preference,
                     &mut sessions,
                 );
             }
-            let project_route = teardown_route(
-                project
-                    .default_shell
-                    .as_ref()
-                    .unwrap_or(&ShellType::Default),
-                project.default_shell.as_ref(),
-                backend_preference,
-            );
             sessions.extend(
                 project
                     .service_terminals
                     .values()
                     .chain(project.hook_terminals.keys())
                     .cloned()
-                    .map(|terminal_id| TerminalSessionTeardown {
-                        terminal_id,
-                        route: project_route.clone(),
-                    }),
+                    .map(TerminalSessionTeardown::host),
             );
             sessions
         })
@@ -1067,6 +1067,7 @@ pub(crate) fn sync_worktrees_with_backend(
 fn collect_layout_teardowns(
     layout: &LayoutNode,
     project_default_shell: Option<&ShellType>,
+    global_default_shell: &ShellType,
     backend_preference: SessionBackend,
     sessions: &mut Vec<TerminalSessionTeardown>,
 ) {
@@ -1077,7 +1078,12 @@ fn collect_layout_teardowns(
             ..
         } => sessions.push(TerminalSessionTeardown {
             terminal_id: terminal_id.clone(),
-            route: teardown_route(shell_type, project_default_shell, backend_preference),
+            route: teardown_route(
+                shell_type,
+                project_default_shell,
+                global_default_shell,
+                backend_preference,
+            ),
         }),
         LayoutNode::Terminal { .. } => {}
         LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
@@ -1085,6 +1091,7 @@ fn collect_layout_teardowns(
                 collect_layout_teardowns(
                     child,
                     project_default_shell,
+                    global_default_shell,
                     backend_preference,
                     sessions,
                 );
@@ -1096,12 +1103,13 @@ fn collect_layout_teardowns(
 fn teardown_route(
     shell: &ShellType,
     project_default_shell: Option<&ShellType>,
+    global_default_shell: &ShellType,
     backend_preference: SessionBackend,
 ) -> TerminalTeardownRoute {
     #[cfg(windows)]
     if let ShellType::Wsl { distro } = shell
         .clone()
-        .resolve_default(project_default_shell, &ShellType::Default)
+        .resolve_default(project_default_shell, global_default_shell)
     {
         return TerminalTeardownRoute::Wsl {
             backend: okena_terminal::session_backend::resolve_for_wsl(
@@ -1112,7 +1120,12 @@ fn teardown_route(
         };
     }
     #[cfg(not(windows))]
-    let _ = (shell, project_default_shell, backend_preference);
+    let _ = (
+        shell,
+        project_default_shell,
+        global_default_shell,
+        backend_preference,
+    );
     TerminalTeardownRoute::Host
 }
 
@@ -2525,6 +2538,7 @@ mod tests {
                 distro: Some("Ubuntu".to_string()),
             },
             None,
+            &ShellType::Default,
             SessionBackend::None,
         );
 
@@ -2535,6 +2549,107 @@ mod tests {
                 backend: okena_terminal::session_backend::ResolvedBackend::None,
             }
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_cleanup_routes_only_layout_terminals_through_wsl() {
+        let mut worktree = make_project("wt1");
+        worktree.path = format!("Z:\\missing-okena-worktree-{}", uuid::Uuid::new_v4());
+        worktree.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "C:\\repo".to_string(),
+            worktree_path: worktree.path.clone(),
+            branch_name: "feature".to_string(),
+        });
+        worktree.default_shell = Some(ShellType::Wsl {
+            distro: Some("Ubuntu".to_string()),
+        });
+        worktree.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("layout".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        });
+        worktree
+            .service_terminals
+            .insert("web".to_string(), "service".to_string());
+        worktree.hook_terminals.insert(
+            "hook".to_string(),
+            crate::state::HookTerminalEntry {
+                label: "hook".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo hook".to_string(),
+                cwd: "C:\\repo".to_string(),
+            },
+        );
+        let mut data = make_workspace(
+            vec![make_project("p1"), worktree],
+            vec!["p1", "wt1"],
+            vec![],
+        );
+
+        let stale =
+            sync_worktrees_with_backend_and_shell(&mut data, SessionBackend::None, &ShellType::Cmd);
+        let route = |id: &str| {
+            stale
+                .iter()
+                .find(|session| session.terminal_id == id)
+                .map(|session| session.route.clone())
+                .expect("stale descriptor")
+        };
+
+        assert!(matches!(route("layout"), TerminalTeardownRoute::Wsl { .. }));
+        assert_eq!(route("service"), TerminalTeardownRoute::Host);
+        assert_eq!(route("hook"), TerminalTeardownRoute::Host);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_default_layout_uses_transient_global_wsl_route() {
+        let mut worktree = make_project("wt1");
+        worktree.path = format!("Z:\\missing-okena-worktree-{}", uuid::Uuid::new_v4());
+        worktree.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "C:\\repo".to_string(),
+            worktree_path: worktree.path.clone(),
+            branch_name: "feature".to_string(),
+        });
+        worktree.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("layout".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        });
+        let mut data = make_workspace(
+            vec![make_project("p1"), worktree],
+            vec!["p1", "wt1"],
+            vec![],
+        );
+
+        let stale = sync_worktrees_with_backend_and_shell(
+            &mut data,
+            SessionBackend::None,
+            &ShellType::Wsl {
+                distro: Some("Debian".to_string()),
+            },
+        );
+
+        assert!(matches!(
+            stale.as_slice(),
+            [TerminalSessionTeardown {
+                terminal_id,
+                route: TerminalTeardownRoute::Wsl {
+                    distro: Some(distro),
+                    ..
+                },
+            }] if terminal_id == "layout" && distro == "Debian"
+        ));
     }
 
     // === validate_workspace_data worktree migration ===

@@ -18,7 +18,8 @@ use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::persistence::{
     LoadedWorkspace, delete_session, export_workspace, import_workspace, list_sessions,
-    load_session_with_cleanup, rename_session, save_session, session_exists,
+    load_session_with_cleanup, load_session_with_cleanup_for_shell, rename_session, save_session,
+    session_exists,
 };
 use crate::workspace::state::{Workspace, WorkspaceData};
 use okena_terminal::TerminalsRegistry;
@@ -89,6 +90,16 @@ pub fn load_session_data(
     backend: okena_terminal::session_backend::SessionBackend,
 ) -> Result<LoadedWorkspace, String> {
     load_session_with_cleanup(name, backend)
+        .map_err(|error| format!("failed to load session '{name}': {error}"))
+}
+
+/// Read and validate a named session using the daemon's transient global shell.
+pub fn load_session_data_for_shell(
+    name: &str,
+    backend: okena_terminal::session_backend::SessionBackend,
+    global_default_shell: &okena_terminal::shell_config::ShellType,
+) -> Result<LoadedWorkspace, String> {
+    load_session_with_cleanup_for_shell(name, backend, global_default_shell)
         .map_err(|error| format!("failed to load session '{name}': {error}"))
 }
 

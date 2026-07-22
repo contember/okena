@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 pub use session::{
     apply_imported_workspace, apply_loaded_session, ensure_workspace_replacement_allowed,
-    import_workspace_data, load_session_data,
+    import_workspace_data, load_session_data, load_session_data_for_shell,
 };
 
 /// Result of executing an action.

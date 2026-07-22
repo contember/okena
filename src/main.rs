@@ -295,8 +295,11 @@ fn run_headless(listen_addr: Option<IpAddr>) -> anyhow::Result<()> {
     println!("Starting Okena in headless mode...");
     let app_settings = okena_workspace::settings::load_settings();
     let session_backend = app_settings.session_backend;
-    let loaded_workspace =
-        persistence::load_workspace_with_cleanup(session_backend).unwrap_or_else(|error| {
+    let loaded_workspace = persistence::load_workspace_with_cleanup_for_shell(
+        session_backend,
+        &app_settings.default_shell,
+    )
+    .unwrap_or_else(|error| {
         log::error!(
             "Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.",
             error,
