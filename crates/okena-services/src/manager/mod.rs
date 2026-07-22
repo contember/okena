@@ -17,7 +17,8 @@ pub use context::{ServiceAsyncCx, ServiceCx, ServiceHandle};
 use crate::config::ServiceDefinition;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -66,7 +67,7 @@ pub(super) struct ProjectIncarnation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DockerMutationKind {
+pub enum DockerMutationKind {
     Start,
     Stop,
     Restart,
@@ -106,6 +107,55 @@ impl DockerMutation {
             compose_file: self.compose_file.clone(),
         }
     }
+
+    fn compose_identity(&self) -> ComposeProjectIdentity {
+        ComposeProjectIdentity::new(&self.project_path, &self.compose_file)
+    }
+}
+
+/// Filesystem identity of one Compose project configuration.
+///
+/// The identity resolves aliases for existing paths and keeps normalized
+/// suffixes for paths that disappeared during an asynchronous operation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ComposeProjectIdentity {
+    project_path: PathBuf,
+    compose_file: PathBuf,
+}
+
+impl ComposeProjectIdentity {
+    pub fn new(project_path: impl AsRef<Path>, compose_file: impl AsRef<Path>) -> Self {
+        let project_path = project_path.as_ref();
+        let compose_file = compose_file.as_ref();
+        let compose_file = if compose_file.is_absolute() {
+            compose_file.to_path_buf()
+        } else {
+            project_path.join(compose_file)
+        };
+        Self {
+            project_path: crate::docker_compose::physical_path(project_path),
+            compose_file: crate::docker_compose::physical_path(&compose_file),
+        }
+    }
+
+    pub fn project_path(&self) -> &Path {
+        &self.project_path
+    }
+
+    pub fn compose_file(&self) -> &Path {
+        &self.compose_file
+    }
+}
+
+/// One active or queued external Compose mutation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposeMutationActivity {
+    pub project_id: String,
+    pub project_path: String,
+    pub compose_file: String,
+    pub service_name: String,
+    pub kind: DockerMutationKind,
+    pub queued: bool,
 }
 
 #[derive(Debug)]
@@ -455,6 +505,45 @@ impl ServiceManager {
                     .map(|tid| (name.clone(), tid.clone()))
             })
             .collect()
+    }
+
+    /// Report Compose subprocesses and queued mutations owned by the targets.
+    ///
+    /// Physical identities keep an in-flight mutation visible after a project
+    /// reload or workspace replacement changes its logical project ID.
+    pub fn compose_mutations_for(
+        &self,
+        project_ids: &HashSet<String>,
+        compose_identities: &HashSet<ComposeProjectIdentity>,
+    ) -> Vec<ComposeMutationActivity> {
+        let mut activities = Vec::new();
+        for active in self.docker_mutations.active.values() {
+            for (mutation, queued) in std::iter::once((&active.current, false))
+                .chain(active.pending.iter().map(|mutation| (mutation, true)))
+            {
+                if !project_ids.contains(&mutation.project_id)
+                    && !compose_identities.contains(&mutation.compose_identity())
+                {
+                    continue;
+                }
+                activities.push(ComposeMutationActivity {
+                    project_id: mutation.project_id.clone(),
+                    project_path: mutation.project_path.clone(),
+                    compose_file: mutation.compose_file.clone(),
+                    service_name: mutation.service_name.clone(),
+                    kind: mutation.kind,
+                    queued,
+                });
+            }
+        }
+        activities.sort_by(|left, right| {
+            left.project_path
+                .cmp(&right.project_path)
+                .then_with(|| left.compose_file.cmp(&right.compose_file))
+                .then_with(|| left.queued.cmp(&right.queued))
+                .then_with(|| left.service_name.cmp(&right.service_name))
+        });
+        activities
     }
 
     /// Okena services whose active intent must survive a backend migration.

@@ -7,7 +7,7 @@ use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::TerminalTransport;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::{Future, ready};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
@@ -1030,11 +1030,29 @@ fn project_unload_discards_queued_docker_mutations() {
         service_manager
             .borrow_mut()
             .unload_project_services(project_id, &mut cx);
+        let activities = service_manager.borrow().compose_mutations_for(
+            &HashSet::from([project_id.to_string()]),
+            &HashSet::from([ComposeProjectIdentity::new(path, "docker-compose.yml")]),
+        );
+        assert_eq!(activities.len(), 2);
+        assert_eq!(
+            activities.iter().filter(|activity| activity.queued).count(),
+            1
+        );
         release_tx.send(()).await.expect("release active mutation");
 
         while !service_manager.borrow().docker_mutations.active.is_empty() {
             smol::Timer::after(Duration::from_millis(1)).await;
         }
+        assert!(
+            service_manager
+                .borrow()
+                .compose_mutations_for(
+                    &HashSet::from([project_id.to_string()]),
+                    &HashSet::from([ComposeProjectIdentity::new(path, "docker-compose.yml")]),
+                )
+                .is_empty()
+        );
         assert!(events_rx.try_recv().is_err());
     }));
 }
@@ -1108,6 +1126,94 @@ fn docker_mutation_scope_follows_compose_path_across_workspace_projects() {
         "the same Compose project must have one external mutation owner"
     );
     assert_eq!(queue.active[&first.scope()].pending.len(), 1);
+}
+
+#[test]
+fn compose_mutation_activity_reports_active_and_queued_across_incarnations() {
+    let project = ProjectDir::with_config("");
+    std::fs::write(project.0.join("compose.yml"), "services: {}").expect("write Compose config");
+    let project_path = project.path();
+    let mut manager = manager();
+    let old_incarnation = manager.begin_project_incarnation("old-project", &project_path);
+    let active = manager
+        .docker_mutations
+        .enqueue(
+            ("old-project".into(), "web".into()),
+            Some(old_incarnation),
+            project_path.clone(),
+            "compose.yml".into(),
+            DockerMutationKind::Start,
+        )
+        .expect("first mutation is active");
+    manager.invalidate_project_incarnation("old-project");
+    let replacement = manager.begin_project_incarnation("replacement", &project_path);
+    assert!(
+        manager
+            .docker_mutations
+            .enqueue(
+                ("replacement".into(), "worker".into()),
+                Some(replacement),
+                project_path.clone(),
+                "compose.yml".into(),
+                DockerMutationKind::Stop,
+            )
+            .is_none()
+    );
+
+    let activities = manager.compose_mutations_for(
+        &HashSet::new(),
+        &HashSet::from([ComposeProjectIdentity::new(&project_path, "compose.yml")]),
+    );
+    assert_eq!(activities.len(), 2);
+    assert_eq!(activities[0].project_id, "old-project");
+    assert_eq!(activities[0].kind, DockerMutationKind::Start);
+    assert!(!activities[0].queued);
+    assert_eq!(activities[1].project_id, "replacement");
+    assert_eq!(activities[1].kind, DockerMutationKind::Stop);
+    assert!(activities[1].queued);
+
+    let scope = active.scope();
+    let queued = manager
+        .docker_mutations
+        .finish(&scope, active.generation)
+        .expect("queued mutation becomes active");
+    manager.docker_mutations.finish(&scope, queued.generation);
+    assert!(
+        manager
+            .compose_mutations_for(
+                &HashSet::from(["old-project".to_string(), "replacement".to_string()]),
+                &HashSet::new(),
+            )
+            .is_empty()
+    );
+}
+
+#[test]
+fn compose_mutation_activity_ignores_unrelated_targets() {
+    let mut queue = DockerMutationQueue::default();
+    let active = queue
+        .enqueue(
+            ("project".into(), "web".into()),
+            None,
+            "/repo".into(),
+            "compose.yml".into(),
+            DockerMutationKind::Start,
+        )
+        .expect("first mutation is active");
+    let mut manager = manager();
+    manager.docker_mutations = queue;
+
+    assert!(
+        manager
+            .compose_mutations_for(
+                &HashSet::from(["other".to_string()]),
+                &HashSet::from([ComposeProjectIdentity::new("/other", "compose.yml")]),
+            )
+            .is_empty()
+    );
+    manager
+        .docker_mutations
+        .finish(&active.scope(), active.generation);
 }
 
 #[test]
