@@ -117,6 +117,10 @@ pub trait TerminalBackend: Send + Sync {
     fn supports_session_backend_reconfiguration(&self) -> bool {
         false
     }
+    /// Fence new PTY creation before draining the old persistence route.
+    fn begin_session_backend_reconfiguration(&self) -> Result<()> {
+        anyhow::bail!("terminal backend does not support live session route changes")
+    }
     /// Verify that the old persistence route no longer owns live work.
     fn ensure_session_backend_reconfigurable(&self) -> Result<()> {
         anyhow::bail!("terminal backend does not support live session route changes")
@@ -125,6 +129,8 @@ pub trait TerminalBackend: Send + Sync {
     fn apply_session_backend(&self, _backend: SessionBackend) -> Result<()> {
         anyhow::bail!("terminal backend does not support live session route changes")
     }
+    /// Release a creation fence without changing the active route.
+    fn cancel_session_backend_reconfiguration(&self) {}
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf>;
     fn supports_buffer_capture(&self) -> bool;
     fn is_remote(&self) -> bool;
@@ -209,6 +215,10 @@ impl TerminalBackend for LocalBackend {
         true
     }
 
+    fn begin_session_backend_reconfiguration(&self) -> Result<()> {
+        self.pty_manager.begin_session_backend_reconfiguration()
+    }
+
     fn ensure_session_backend_reconfigurable(&self) -> Result<()> {
         self.pty_manager.ensure_session_backend_reconfigurable()
     }
@@ -216,6 +226,10 @@ impl TerminalBackend for LocalBackend {
     fn apply_session_backend(&self, backend: SessionBackend) -> Result<()> {
         self.pty_manager.apply_session_backend(backend);
         Ok(())
+    }
+
+    fn cancel_session_backend_reconfiguration(&self) {
+        self.pty_manager.cancel_session_backend_reconfiguration();
     }
 
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf> {
