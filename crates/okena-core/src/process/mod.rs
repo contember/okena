@@ -316,6 +316,119 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_foreground_tree_without_touching_unrelated_process() {
+        let _g = guard();
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_path = pid_file.path().to_string_lossy().into_owned();
+        let mut unrelated = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("unrelated process");
+
+        let started = std::time::Instant::now();
+        let err = run(CommandSpec::new("/bin/sh")
+            .args([
+                "-c",
+                "sleep 30 & echo $! > \"$1\"; wait $!",
+                "okena-test",
+                &pid_path,
+            ])
+            .timeout(Duration::from_millis(500)))
+        .expect_err("process tree should time out");
+        let elapsed = started.elapsed();
+        let descendant_pid = read_test_pid(pid_file.path());
+        let descendant_dead = wait_for_test_process_exit(descendant_pid, Duration::from_secs(1));
+        let unrelated_alive = unrelated.try_wait().expect("probe unrelated").is_none();
+
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        if !descendant_dead {
+            kill_test_process(descendant_pid);
+        }
+
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(elapsed < Duration::from_secs(2), "elapsed: {elapsed:?}");
+        assert!(descendant_dead, "foreground descendant survived timeout");
+        assert!(unrelated_alive, "unrelated process was terminated");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_parent_with_background_pipe_descendant_finishes_bounded() {
+        let _g = guard();
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_path = pid_file.path().to_string_lossy().into_owned();
+
+        let started = std::time::Instant::now();
+        let output = run(CommandSpec::new("/bin/sh").args([
+            "-c",
+            "printf 'retained\\n'; sleep 30 & echo $! > \"$1\"",
+            "okena-test",
+            &pid_path,
+        ]))
+        .expect("parent result");
+        let elapsed = started.elapsed();
+        let descendant_pid = read_test_pid(pid_file.path());
+        let descendant_dead = wait_for_test_process_exit(descendant_pid, Duration::from_secs(1));
+        if !descendant_dead {
+            kill_test_process(descendant_pid);
+        }
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"retained\n");
+        assert!(elapsed < Duration::from_secs(2), "elapsed: {elapsed:?}");
+        assert!(descendant_dead, "background descendant survived collection");
+    }
+
+    #[cfg(unix)]
+    fn read_test_pid(path: &std::path::Path) -> u32 {
+        std::fs::read_to_string(path)
+            .expect("read descendant pid")
+            .trim()
+            .parse()
+            .expect("parse descendant pid")
+    }
+
+    #[cfg(unix)]
+    fn wait_for_test_pid(path: &std::path::Path, timeout: Duration) -> u32 {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path)
+                && let Ok(pid) = contents.trim().parse()
+            {
+                return pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for descendant pid"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_test_process_exit(pid: u32, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if !is_process_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !is_process_alive(pid)
+    }
+
+    #[cfg(unix)]
+    fn kill_test_process(pid: u32) {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return;
+        };
+        // SAFETY: this fallback only targets the PID written by the test child.
+        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
     #[test]
     fn lane_default_is_interactive() {
         let _g = guard();
@@ -352,6 +465,37 @@ mod tests {
         handle.cancel();
         let err = handle.wait().expect_err("cancelled");
         assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_kills_running_process_tree() {
+        let _g = guard();
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_path = pid_file.path().to_string_lossy().into_owned();
+        let handle = CommandBus::global().submit(CommandSpec::new("/bin/sh").args([
+            "-c",
+            "sleep 30 & echo $! > \"$1\"; wait $!",
+            "okena-test",
+            &pid_path,
+        ]));
+        let descendant_pid = wait_for_test_pid(pid_file.path(), Duration::from_secs(2));
+
+        let started = std::time::Instant::now();
+        handle.cancel();
+        let err = handle.wait().expect_err("cancelled");
+        let elapsed = started.elapsed();
+        let descendant_dead = wait_for_test_process_exit(descendant_pid, Duration::from_secs(1));
+        if !descendant_dead {
+            kill_test_process(descendant_pid);
+        }
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        assert!(elapsed < Duration::from_secs(2), "elapsed: {elapsed:?}");
+        assert!(
+            descendant_dead,
+            "foreground descendant survived cancellation"
+        );
     }
 
     #[test]
