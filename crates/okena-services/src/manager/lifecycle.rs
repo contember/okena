@@ -2,13 +2,10 @@
 
 use super::{
     ServiceCx, ServiceInstance, ServiceKind, ServiceLoadStatus, ServiceManager, ServiceStatus,
+    commands::OkenaLaunchFailure,
 };
-use crate::config::load_project_config;
-use okena_terminal::shell_config::ShellType;
-use okena_terminal::terminal::{Terminal, TerminalSize};
+use crate::config::{PreparedProjectConfig, load_project_config};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 impl ServiceManager {
@@ -22,34 +19,79 @@ impl ServiceManager {
         saved_terminal_ids: &HashMap<String, String>,
         cx: &mut impl ServiceCx,
     ) -> ServiceLoadStatus {
+        let prepared = match load_project_config(project_path) {
+            Ok(config) => {
+                let detected_compose_file =
+                    crate::docker_compose::detect_compose_file(project_path);
+                PreparedProjectConfig::Loaded {
+                    config,
+                    detected_compose_file,
+                }
+            }
+            Err(error) => PreparedProjectConfig::Failed(error.to_string()),
+        };
+        self.load_project_services_prepared(
+            project_id,
+            project_path,
+            saved_terminal_ids,
+            prepared,
+            cx,
+        )
+    }
+
+    /// Apply a config previously read away from the owning reactor.
+    pub fn load_project_services_prepared(
+        &mut self,
+        project_id: &str,
+        project_path: &str,
+        saved_terminal_ids: &HashMap<String, String>,
+        prepared: PreparedProjectConfig,
+        cx: &mut impl ServiceCx,
+    ) -> ServiceLoadStatus {
         log::info!(
             "[services] load_project_services project_id={} path={}",
             project_id,
             project_path
         );
-        let config = match load_project_config(project_path) {
-            Ok(Some(config)) => {
+        let config = match prepared {
+            PreparedProjectConfig::Loaded {
+                config: Some(config),
+                detected_compose_file,
+            } => {
                 log::info!(
                     "[services] Found okena.yaml with {} services",
                     config.services.len()
                 );
-                config
+                (config, detected_compose_file)
             }
-            Ok(None) => {
+            PreparedProjectConfig::Loaded {
+                config: None,
+                detected_compose_file,
+            } => {
                 log::info!("[services] No okena.yaml found at {}", project_path);
                 // No okena.yaml — still try Docker Compose auto-detection
                 self.begin_project_incarnation(project_id, project_path);
                 self.project_paths
                     .insert(project_id.to_string(), project_path.to_string());
-                self.load_docker_compose_services(project_id, project_path, None, cx);
+                self.load_docker_compose_services_prepared(
+                    project_id,
+                    project_path,
+                    None,
+                    detected_compose_file,
+                    cx,
+                );
                 cx.notify();
                 return ServiceLoadStatus::Loaded;
             }
-            Err(e) => {
+            PreparedProjectConfig::Missing => {
+                log::warn!("Project path disappeared before service apply: {project_path}");
+                return ServiceLoadStatus::Failed;
+            }
+            PreparedProjectConfig::Failed(error) => {
                 log::error!(
                     "Failed to load okena.yaml for project {}: {}",
                     project_id,
-                    e
+                    error
                 );
                 cx.notify();
                 return ServiceLoadStatus::Failed;
@@ -60,6 +102,7 @@ impl ServiceManager {
         self.project_paths
             .insert(project_id.to_string(), project_path.to_string());
 
+        let (config, detected_compose_file) = config;
         let auto_start_names: Vec<String> = config
             .services
             .iter()
@@ -103,10 +146,11 @@ impl ServiceManager {
         }
 
         // Load Docker Compose services
-        self.load_docker_compose_services(
+        self.load_docker_compose_services_prepared(
             project_id,
             project_path,
             config.docker_compose.as_ref(),
+            detected_compose_file,
             cx,
         );
 
@@ -129,63 +173,15 @@ impl ServiceManager {
             None => return,
         };
 
-        let command = instance.definition.command.clone();
-        let cwd_relative = instance.definition.cwd.clone();
-        let cwd = Path::new(project_path)
-            .join(&cwd_relative)
-            .to_string_lossy()
-            .to_string();
-
-        let shell = ShellType::for_command(command);
-
-        match self
-            .backend
-            .reconnect_terminal(saved_terminal_id, &cwd, Some(&shell))
-        {
-            Ok(terminal_id) => {
-                let terminal = Arc::new(Terminal::new(
-                    terminal_id.clone(),
-                    TerminalSize::default(),
-                    self.backend.transport(),
-                    cwd,
-                ));
-                self.terminals.lock().insert(terminal_id.clone(), terminal);
-
-                #[allow(
-                    clippy::expect_used,
-                    reason = "instance inserted earlier in this function, absence is a bug"
-                )]
-                let instance = self
-                    .instances
-                    .get_mut(&key)
-                    .expect("bug: service instance must exist");
-                instance.status = ServiceStatus::Running;
-                instance.terminal_id = Some(terminal_id.clone());
-                self.terminal_to_service.insert(
-                    terminal_id,
-                    (project_id.to_string(), service_name.to_string()),
-                );
-                log::info!(
-                    "Reconnected service '{}' for project {} (terminal {})",
-                    service_name,
-                    project_id,
-                    saved_terminal_id
-                );
-                self.start_port_detection(project_id, service_name, cx);
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to reconnect service '{}' for project {} (terminal {}): {}",
-                    service_name,
-                    project_id,
-                    saved_terminal_id,
-                    e
-                );
-                // Leave as Stopped — auto_start will create a fresh terminal if configured
-            }
-        }
-
-        cx.notify();
+        let auto_start = instance.definition.auto_start;
+        self.begin_okena_terminal_launch(
+            project_id,
+            service_name,
+            project_path,
+            saved_terminal_id.to_string(),
+            OkenaLaunchFailure::Reconnect { auto_start },
+            cx,
+        );
     }
 
     /// Stop all running services for a project and remove all instances/configs.

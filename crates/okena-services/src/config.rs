@@ -39,6 +39,40 @@ pub struct ServiceDefinition {
     pub restart_delay_ms: u64,
 }
 
+/// Filesystem result prepared away from the service-manager reactor.
+#[derive(Debug)]
+pub enum PreparedProjectConfig {
+    Missing,
+    Loaded {
+        config: Option<OkenaProjectConfig>,
+        detected_compose_file: Option<String>,
+    },
+    Failed(String),
+}
+
+/// Probe and parse one project's service config without touching manager state.
+pub fn prepare_project_config(project_path: &str) -> PreparedProjectConfig {
+    if !Path::new(project_path).exists() {
+        return PreparedProjectConfig::Missing;
+    }
+    match load_project_config(project_path) {
+        Ok(config) => {
+            let detect_compose = config
+                .as_ref()
+                .and_then(|config| config.docker_compose.as_ref())
+                .is_none_or(|docker| docker.enabled != Some(false) && docker.file.is_none());
+            let detected_compose_file = detect_compose
+                .then(|| crate::docker_compose::detect_compose_file(project_path))
+                .flatten();
+            PreparedProjectConfig::Loaded {
+                config,
+                detected_compose_file,
+            }
+        }
+        Err(error) => PreparedProjectConfig::Failed(error.to_string()),
+    }
+}
+
 fn default_cwd() -> String {
     ".".to_string()
 }

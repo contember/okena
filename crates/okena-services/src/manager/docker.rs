@@ -24,6 +24,26 @@ impl ServiceManager {
         docker_config: Option<&crate::config::DockerComposeConfig>,
         cx: &mut impl ServiceCx,
     ) {
+        let detected_compose_file = docker_config
+            .and_then(|config| config.file.clone())
+            .or_else(|| docker_compose::detect_compose_file(project_path));
+        self.load_docker_compose_services_prepared(
+            project_id,
+            project_path,
+            docker_config,
+            detected_compose_file,
+            cx,
+        );
+    }
+
+    pub(super) fn load_docker_compose_services_prepared(
+        &mut self,
+        project_id: &str,
+        project_path: &str,
+        docker_config: Option<&crate::config::DockerComposeConfig>,
+        detected_compose_file: Option<String>,
+        cx: &mut impl ServiceCx,
+    ) {
         // Check if explicitly disabled
         if docker_config
             .as_ref()
@@ -35,7 +55,7 @@ impl ServiceManager {
         // Resolve compose file (fast filesystem check, OK on main thread)
         let compose_file = docker_config
             .and_then(|dc| dc.file.clone())
-            .or_else(|| docker_compose::detect_compose_file(project_path));
+            .or(detected_compose_file);
 
         let Some(compose_file) = compose_file else {
             return;
@@ -196,41 +216,91 @@ impl ServiceManager {
 
         let shell = ShellType::for_command(command);
 
-        match self.backend.create_terminal(&project_path, Some(&shell)) {
-            Ok(terminal_id) => {
-                let terminal = Arc::new(Terminal::new(
-                    terminal_id.clone(),
-                    TerminalSize::default(),
-                    self.backend.transport(),
-                    project_path,
-                ));
-                self.terminals.lock().insert(terminal_id.clone(), terminal);
-
-                #[allow(
-                    clippy::expect_used,
-                    reason = "Docker log instance ensured earlier in this function, absence is a bug"
-                )]
-                let instance = self
-                    .instances
-                    .get_mut(&key)
-                    .expect("bug: service instance must exist");
-                instance.terminal_id = Some(terminal_id.clone());
-                self.terminal_to_service.insert(
-                    terminal_id,
-                    (project_id.to_string(), service_name.to_string()),
-                );
-            }
-            Err(e) => {
-                log::error!(
-                    "Failed to open Docker logs for '{}' in project {}: {}",
-                    service_name,
-                    project_id,
-                    e
-                );
-            }
-        }
-
+        let _ = instance;
+        let Some(project_incarnation) = self.project_incarnation(project_id, &project_path) else {
+            return;
+        };
+        let terminal_id = uuid::Uuid::new_v4().to_string();
+        let Some(instance) = self.instances.get_mut(&key) else {
+            return;
+        };
+        instance.terminal_id = Some(terminal_id.clone());
+        self.terminal_to_service
+            .insert(terminal_id.clone(), key.clone());
         cx.notify();
+
+        let backend = self.backend.clone();
+        let terminals = self.terminals.clone();
+        let project_id = project_id.to_string();
+        let service_name = service_name.to_string();
+        cx.spawn_main(async move |this, cx| {
+            let launch_backend = backend.clone();
+            let launch_id = terminal_id.clone();
+            let launch_path = project_path.clone();
+            let result = cx
+                .spawn_blocking(async move {
+                    smol::unblock(move || {
+                        launch_backend.reconnect_terminal(&launch_id, &launch_path, Some(&shell))
+                    })
+                    .await
+                })
+                .await;
+            let actual_id = result.as_ref().ok().cloned();
+            let (accepted, cleanup_requested) = this
+                .update(cx, |this, cx| {
+                    let key = (project_id.clone(), service_name.clone());
+                    let current_launch = this.instances.get(&key).is_some_and(|instance| {
+                        instance.terminal_id.as_deref() == Some(&terminal_id)
+                    }) && this.terminal_to_service.get(&terminal_id)
+                        == Some(&key);
+                    if !this.is_project_incarnation_current(&project_id, &project_incarnation)
+                        || !current_launch
+                    {
+                        return (
+                            false,
+                            this.terminal_to_service.get(&terminal_id) != Some(&key),
+                        );
+                    }
+                    match &result {
+                        Ok(returned_id) if returned_id == &terminal_id => {
+                            let terminal = Arc::new(Terminal::new(
+                                terminal_id.clone(),
+                                TerminalSize::default(),
+                                backend.transport(),
+                                project_path.clone(),
+                            ));
+                            terminals.lock().insert(terminal_id.clone(), terminal);
+                            cx.notify();
+                            (true, false)
+                        }
+                        _ => {
+                            this.terminal_to_service.remove(&terminal_id);
+                            if let Some(instance) = this.instances.get_mut(&key) {
+                                instance.terminal_id = None;
+                            }
+                            cx.notify();
+                            (false, true)
+                        }
+                    }
+                })
+                .unwrap_or((false, true));
+            if !accepted {
+                let mut cleanup_ids: std::collections::HashSet<String> = actual_id
+                    .into_iter()
+                    .filter(|actual_id| actual_id != &terminal_id || cleanup_requested)
+                    .collect();
+                if cleanup_requested {
+                    cleanup_ids.insert(terminal_id);
+                }
+                for cleanup_id in cleanup_ids {
+                    let cleanup_backend = backend.clone();
+                    cx.spawn_blocking(async move {
+                        smol::unblock(move || cleanup_backend.kill(&cleanup_id)).await
+                    })
+                    .await;
+                }
+            }
+        });
     }
 
     /// Start a background poller that updates Docker service statuses every 5s.

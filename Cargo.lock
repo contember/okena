@@ -6499,6 +6499,7 @@ dependencies = [
  "serde_yaml_ng",
  "smol",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
