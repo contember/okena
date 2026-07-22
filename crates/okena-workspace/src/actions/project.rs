@@ -395,12 +395,122 @@ impl Workspace {
         new_name: String,
         cx: &mut impl WorkspaceCx,
     ) -> Result<(), String> {
-        self.ensure_project_path_mutation_allowed(project_id, std::path::Path::new(&new_path))?;
-        self.with_project(project_id, cx, |project| {
-            project.path = new_path;
-            project.name = new_name;
-            true
+        let new_path_buf = std::path::PathBuf::from(&new_path);
+        self.ensure_project_path_mutation_allowed(project_id, &new_path_buf)?;
+        if new_path_buf.exists() {
+            return Err(format!("'{}' already exists", new_name));
+        }
+        let project = self
+            .project(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+        let old_path = std::path::PathBuf::from(&project.path);
+        let worktree = project.worktree_info.as_ref().map(|metadata| {
+            (
+                metadata.parent_project_id.clone(),
+                metadata.worktree_path.clone(),
+            )
         });
+
+        let Some((parent_project_id, recorded_root)) = worktree else {
+            std::fs::rename(&old_path, &new_path_buf)
+                .map_err(|error| format!("Failed to rename: {error}"))?;
+            self.with_project(project_id, cx, |project| {
+                project.path = new_path;
+                project.name = new_name;
+                true
+            });
+            return Ok(());
+        };
+
+        let parent_path = self
+            .project(&parent_project_id)
+            .filter(|parent| !parent.is_remote)
+            .map(|parent| parent.path.clone())
+            .ok_or_else(|| "Worktree parent project is not local".to_string())?;
+        let checkout_query = if recorded_root.is_empty() {
+            old_path.clone()
+        } else {
+            std::path::PathBuf::from(&recorded_root)
+        };
+        let verified = okena_git::verify_linked_worktree_fresh(
+            std::path::Path::new(&parent_path),
+            &checkout_query,
+        )
+        .map_err(|error| error.to_string())?;
+        let root_identity = Self::physical_path_identity(verified.checkout_path());
+        let old_identity = Self::physical_path_identity(&old_path);
+        if !old_identity.starts_with(&root_identity) {
+            return Err("project path is outside its linked worktree root".to_string());
+        }
+
+        if old_identity != root_identity {
+            if !Self::physical_path_identity(&new_path_buf).starts_with(&root_identity) {
+                return Err("renamed project path must stay inside its linked worktree".to_string());
+            }
+            std::fs::rename(&old_path, &new_path_buf)
+                .map_err(|error| format!("Failed to rename: {error}"))?;
+            self.with_project(project_id, cx, |project| {
+                project.path = new_path;
+                project.name = new_name;
+                true
+            });
+            return Ok(());
+        }
+
+        let canonical_root = std::fs::canonicalize(verified.checkout_path())
+            .map_err(|error| format!("Failed to resolve worktree root: {error}"))?;
+        let mut translated_paths = Vec::new();
+        for descendant in self.projects().iter().filter(|project| !project.is_remote) {
+            let descendant_path = std::path::Path::new(&descendant.path);
+            if !Self::physical_path_identity(descendant_path).starts_with(&root_identity) {
+                continue;
+            }
+            let canonical_descendant = std::fs::canonicalize(descendant_path).map_err(|error| {
+                format!(
+                    "Failed to resolve descendant project '{}': {error}",
+                    descendant.name
+                )
+            })?;
+            let suffix = canonical_descendant
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    format!(
+                        "Failed to translate descendant project '{}' into moved worktree",
+                        descendant.name
+                    )
+                })?;
+            translated_paths.push((
+                descendant.id.clone(),
+                new_path_buf.join(suffix).to_string_lossy().into_owned(),
+            ));
+        }
+
+        let moved = okena_git::move_worktree(&verified, &new_path_buf)
+            .map_err(|error| error.to_string())?;
+        let moved_root = moved.checkout_path().to_string_lossy().into_owned();
+        for (id, translated_path) in translated_paths {
+            if let Some(descendant) = self
+                .data
+                .projects
+                .iter_mut()
+                .find(|project| project.id == id)
+            {
+                descendant.path = translated_path;
+            }
+        }
+        if let Some(project) = self
+            .data
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+        {
+            project.path = moved_root.clone();
+            project.name = new_name;
+            if let Some(metadata) = &mut project.worktree_info {
+                metadata.worktree_path = moved_root;
+            }
+        }
+        self.notify_data(cx);
         Ok(())
     }
 
@@ -2029,7 +2139,7 @@ mod gpui_tests {
                 Err(error) => error,
             }
         });
-        assert!(legacy_error.contains("does not belong to its parent repository"));
+        assert!(legacy_error.contains("does not belong to the parent repository"));
         assert!(
             sentinel.exists(),
             "legacy metadata cannot bypass registration"
@@ -2563,6 +2673,180 @@ mod gpui_tests {
             assert!(ws.is_project_closing("wt1"));
             assert!(ws.project("wt1").unwrap().is_closing);
         });
+    }
+
+    #[gpui::test]
+    fn rename_worktree_root_moves_git_registration_and_descendant_projects(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-root-rename-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let worktree = fixture.join("worktree");
+        let renamed = fixture.join("renamed-worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::create_dir_all(main_repo.join("packages/child")).unwrap();
+        std::fs::write(main_repo.join("packages/child/file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "packages"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+
+        let mut parent = make_project("parent");
+        parent.path = main_repo.to_string_lossy().into_owned();
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut child = make_worktree_project("wt1", "parent");
+        child.path = worktree.to_string_lossy().into_owned();
+        let metadata = child.worktree_info.as_mut().unwrap();
+        metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
+        metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        let mut descendant = make_project("descendant");
+        descendant.path = worktree
+            .join("packages/child")
+            .to_string_lossy()
+            .into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, child, descendant];
+        data.project_order = vec!["parent".to_string(), "descendant".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        workspace.update(cx, |ws, cx| {
+            ws.rename_project_directory(
+                "wt1",
+                renamed.to_string_lossy().into_owned(),
+                "renamed-worktree".to_string(),
+                cx,
+            )
+            .unwrap();
+        });
+
+        workspace.read_with(cx, |ws, _| {
+            let moved = ws.project("wt1").unwrap();
+            assert_eq!(Path::new(&moved.path), renamed);
+            assert_eq!(
+                Path::new(&moved.worktree_info.as_ref().unwrap().worktree_path),
+                renamed
+            );
+            assert_eq!(
+                Path::new(&ws.project("descendant").unwrap().path),
+                renamed.join("packages/child")
+            );
+        });
+        assert!(!worktree.exists());
+        assert!(okena_git::verify_linked_worktree_fresh(&main_repo, &renamed).is_ok());
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&renamed),
+        ]);
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_monorepo_subdirectory_preserves_worktree_root(cx: &mut gpui::TestAppContext) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-subdir-rename-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let worktree = fixture.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::create_dir_all(main_repo.join("packages/app")).unwrap();
+        std::fs::write(main_repo.join("packages/app/file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "packages"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        let old_project_path = worktree.join("packages/app");
+        let new_project_path = worktree.join("packages/renamed-app");
+
+        let mut parent = make_project("parent");
+        parent.path = main_repo.to_string_lossy().into_owned();
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut child = make_worktree_project("wt1", "parent");
+        child.path = old_project_path.to_string_lossy().into_owned();
+        let metadata = child.worktree_info.as_mut().unwrap();
+        metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
+        metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, child];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        workspace.update(cx, |ws, cx| {
+            ws.rename_project_directory(
+                "wt1",
+                new_project_path.to_string_lossy().into_owned(),
+                "renamed-app".to_string(),
+                cx,
+            )
+            .unwrap();
+        });
+
+        workspace.read_with(cx, |ws, _| {
+            let moved = ws.project("wt1").unwrap();
+            assert_eq!(Path::new(&moved.path), new_project_path);
+            assert_eq!(
+                Path::new(&moved.worktree_info.as_ref().unwrap().worktree_path),
+                worktree
+            );
+        });
+        assert!(worktree.exists());
+        assert!(!old_project_path.exists());
+        assert!(new_project_path.exists());
+        assert!(okena_git::verify_linked_worktree_fresh(&main_repo, &worktree).is_ok());
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(fixture);
     }
 
     #[gpui::test]
