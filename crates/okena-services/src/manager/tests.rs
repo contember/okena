@@ -4,9 +4,11 @@ use crate::config::{OkenaProjectConfig, PreparedProjectConfig, ServiceDefinition
 use okena_terminal::backend::LocalBackend;
 use okena_terminal::pty_manager::PtyManager;
 use okena_terminal::session_backend::SessionBackend;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::{Future, ready};
 use std::path::PathBuf;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -65,6 +67,97 @@ impl ServiceAsyncCx for NoopAsyncCx {
 
     fn timer(&self, _duration: Duration) -> impl Future<Output = ()> {
         ready(())
+    }
+}
+
+#[derive(Clone)]
+struct ExecutingHandle {
+    manager: Weak<RefCell<ServiceManager>>,
+    executor: Rc<smol::LocalExecutor<'static>>,
+    notifications: Arc<AtomicUsize>,
+}
+
+struct ExecutingAsyncCx;
+
+struct ExecutingCx {
+    handle: ExecutingHandle,
+}
+
+impl ServiceCx for ExecutingCx {
+    type Handle = ExecutingHandle;
+    type AsyncCx = ExecutingAsyncCx;
+
+    fn notify(&mut self) {
+        self.handle.notifications.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn spawn_main<F>(&self, f: F)
+    where
+        F: AsyncFnOnce(Self::Handle, &mut Self::AsyncCx) + 'static,
+    {
+        let handle = self.handle.clone();
+        let executor = handle.executor.clone();
+        executor
+            .spawn(async move {
+                f(handle, &mut ExecutingAsyncCx).await;
+            })
+            .detach();
+    }
+}
+
+impl ServiceHandle for ExecutingHandle {
+    type AsyncCx = ExecutingAsyncCx;
+
+    fn update<R>(
+        &self,
+        _cx: &mut Self::AsyncCx,
+        f: impl FnOnce(&mut ServiceManager, &mut <Self::AsyncCx as ServiceAsyncCx>::ReentryCx<'_>) -> R,
+    ) -> Option<R> {
+        let manager = self.manager.upgrade()?;
+        let mut manager = manager.try_borrow_mut().ok()?;
+        let mut cx = ExecutingCx {
+            handle: self.clone(),
+        };
+        Some(f(&mut manager, &mut cx))
+    }
+}
+
+impl ServiceAsyncCx for ExecutingAsyncCx {
+    type ReentryCx<'a> = ExecutingCx;
+
+    fn spawn_blocking<T>(
+        &self,
+        future: impl Future<Output = T> + Send + 'static,
+    ) -> impl Future<Output = T>
+    where
+        T: Send + 'static,
+    {
+        smol::unblock(move || smol::block_on(future))
+    }
+
+    fn timer(&self, duration: Duration) -> impl Future<Output = ()> {
+        async move {
+            smol::Timer::after(duration).await;
+        }
+    }
+}
+
+struct BarrierDockerRunner {
+    events: async_channel::Sender<DockerMutationKind>,
+    release_start: async_channel::Receiver<()>,
+}
+
+impl commands::DockerMutationRunner for BarrierDockerRunner {
+    fn run(&self, mutation: &DockerMutation) -> crate::ServiceResult<()> {
+        self.events
+            .send_blocking(mutation.kind)
+            .expect("record Docker mutation");
+        if mutation.kind == DockerMutationKind::Start {
+            self.release_start
+                .recv_blocking()
+                .expect("release Docker start");
+        }
+        Ok(())
     }
 }
 
@@ -375,6 +468,150 @@ fn docker_service_terminal_ids_excluded() {
     assert_eq!(ids.len(), 1);
     assert!(ids.contains_key("web"));
     assert!(!ids.contains_key("db")); // Docker service excluded
+}
+
+#[test]
+fn docker_start_then_stop_dispatches_in_request_order() {
+    let path = "/project";
+    let key = ("project".to_string(), "web".to_string());
+    let mut manager = manager();
+    manager.project_paths.insert(key.0.clone(), path.into());
+    manager.begin_project_incarnation(&key.0, path);
+    let (_, mut instance) = make_docker_instance(&key.0, &key.1, ServiceStatus::Stopped);
+    instance.terminal_id = None;
+    manager.instances.insert(key.clone(), instance);
+    let mut cx = RecordingCx::default();
+
+    manager.start_service(&key.0, &key.1, path, &mut cx);
+    let active_generation = manager.docker_mutations.active[&key].generation;
+    assert_eq!(cx.spawned.load(Ordering::Relaxed), 1);
+
+    manager.stop_service(&key.0, &key.1, &mut cx);
+
+    assert_eq!(cx.spawned.load(Ordering::Relaxed), 1);
+    assert_eq!(manager.instances[&key].status, ServiceStatus::Stopped);
+    assert_eq!(
+        manager.docker_mutations.active[&key]
+            .pending
+            .iter()
+            .map(|mutation| mutation.kind)
+            .collect::<Vec<_>>(),
+        vec![DockerMutationKind::Stop]
+    );
+
+    let stop = manager
+        .docker_mutations
+        .finish(&key, active_generation)
+        .expect("stop must dispatch after start completes");
+    assert_eq!(stop.kind, DockerMutationKind::Stop);
+    assert!(
+        manager
+            .docker_mutations
+            .finish(&key, stop.generation)
+            .is_none()
+    );
+    assert!(!manager.docker_mutations.active.contains_key(&key));
+}
+
+#[test]
+fn docker_start_then_immediate_stop_waits_for_running_compose_command() {
+    let path = "/project";
+    let key = ("project".to_string(), "web".to_string());
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let (release_tx, release_rx) = async_channel::bounded(1);
+    let mut service_manager = manager();
+    service_manager.docker_mutation_runner = Arc::new(BarrierDockerRunner {
+        events: events_tx,
+        release_start: release_rx,
+    });
+    service_manager
+        .project_paths
+        .insert(key.0.clone(), path.into());
+    service_manager.begin_project_incarnation(&key.0, path);
+    let (_, mut instance) = make_docker_instance(&key.0, &key.1, ServiceStatus::Stopped);
+    instance.terminal_id = None;
+    service_manager.instances.insert(key.clone(), instance);
+
+    let executor = Rc::new(smol::LocalExecutor::new());
+    let service_manager = Rc::new(RefCell::new(service_manager));
+    let handle = ExecutingHandle {
+        manager: Rc::downgrade(&service_manager),
+        executor: executor.clone(),
+        notifications: Arc::new(AtomicUsize::new(0)),
+    };
+
+    smol::block_on(executor.run(async {
+        let mut cx = ExecutingCx { handle };
+        {
+            let mut manager = service_manager.borrow_mut();
+            manager.start_service(&key.0, &key.1, path, &mut cx);
+            manager.stop_service(&key.0, &key.1, &mut cx);
+        }
+
+        assert_eq!(events_rx.recv().await, Ok(DockerMutationKind::Start));
+        assert!(
+            events_rx.try_recv().is_err(),
+            "stop must not dispatch while compose up is blocked"
+        );
+
+        release_tx.send(()).await.expect("release compose up");
+        assert_eq!(events_rx.recv().await, Ok(DockerMutationKind::Stop));
+
+        while service_manager
+            .borrow()
+            .docker_mutations
+            .active
+            .contains_key(&key)
+        {
+            smol::Timer::after(Duration::from_millis(1)).await;
+        }
+        assert_eq!(
+            service_manager.borrow().instances[&key].status,
+            ServiceStatus::Stopped
+        );
+    }));
+}
+
+#[test]
+fn docker_mutations_remain_serialized_across_project_incarnations() {
+    let key = ("project".to_string(), "web".to_string());
+    let mut queue = DockerMutationQueue::default();
+    let first_incarnation = ProjectIncarnation {
+        generation: 1,
+        path: "/old".into(),
+    };
+    let replacement_incarnation = ProjectIncarnation {
+        generation: 2,
+        path: "/new".into(),
+    };
+
+    let start = queue
+        .enqueue(
+            key.clone(),
+            Some(first_incarnation),
+            "/old".into(),
+            "compose.yml".into(),
+            DockerMutationKind::Start,
+        )
+        .expect("first mutation dispatches immediately");
+    assert!(
+        queue
+            .enqueue(
+                key.clone(),
+                Some(replacement_incarnation.clone()),
+                "/new".into(),
+                "compose.yml".into(),
+                DockerMutationKind::Stop,
+            )
+            .is_none(),
+        "replacement work must not race the active mutation"
+    );
+
+    let stop = queue
+        .finish(&key, start.generation)
+        .expect("replacement stop dispatches after the old mutation drains");
+    assert_eq!(stop.kind, DockerMutationKind::Stop);
+    assert_eq!(stop.project_incarnation, Some(replacement_incarnation));
 }
 
 #[test]
