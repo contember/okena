@@ -416,10 +416,8 @@ impl ServiceManager {
                         }
                         Some(
                             this.docker_mutations
-                                .active
-                                .keys()
-                                .filter(|(project_id, _)| project_id == &pid)
-                                .map(|(_, service_name)| service_name.clone())
+                                .active_service_names(&pid)
+                                .map(str::to_string)
                                 .collect::<HashSet<_>>(),
                         )
                     })
@@ -452,10 +450,8 @@ impl ServiceManager {
                                 let mut protected_services = protected_at_probe.clone();
                                 protected_services.extend(
                                     this.docker_mutations
-                                        .active
-                                        .keys()
-                                        .filter(|(project_id, _)| project_id == &pid)
-                                        .map(|(_, service_name)| service_name.clone()),
+                                        .active_service_names(&pid)
+                                        .map(str::to_string),
                                 );
                                 let (has_definitions, changed) = reconcile_docker_statuses(
                                     &mut this.instances,

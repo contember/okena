@@ -153,6 +153,13 @@ struct TimeoutDockerRunner {
     events: async_channel::Sender<DockerMutationKind>,
 }
 
+struct ProjectBarrierDockerRunner {
+    events: async_channel::Sender<(String, String)>,
+    releases: async_channel::Receiver<()>,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
+}
+
 struct RecordingTerminalBackend {
     local: LocalBackend,
     plans: async_channel::Sender<TerminalLaunchPlan>,
@@ -309,6 +316,21 @@ impl commands::DockerMutationRunner for TimeoutDockerRunner {
                 "simulated Docker timeout",
             )));
         }
+        Ok(())
+    }
+}
+
+impl commands::DockerMutationRunner for ProjectBarrierDockerRunner {
+    fn run(&self, mutation: &DockerMutation) -> crate::ServiceResult<()> {
+        let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+        self.events
+            .send_blocking((mutation.project_id.clone(), mutation.service_name.clone()))
+            .expect("record Docker mutation");
+        self.releases
+            .recv_blocking()
+            .expect("release Docker mutation");
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -670,7 +692,14 @@ fn docker_start_then_stop_dispatches_in_request_order() {
     let mut cx = RecordingCx::default();
 
     manager.start_service(&key.0, &key.1, path, &mut cx);
-    let active_generation = manager.docker_mutations.active[&key].generation;
+    let scope = manager
+        .docker_mutations
+        .active
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let active_generation = manager.docker_mutations.active[&scope].current.generation;
     assert_eq!(cx.spawned.load(Ordering::Relaxed), 1);
 
     manager.stop_service(&key.0, &key.1, &mut cx);
@@ -678,7 +707,7 @@ fn docker_start_then_stop_dispatches_in_request_order() {
     assert_eq!(cx.spawned.load(Ordering::Relaxed), 1);
     assert_eq!(manager.instances[&key].status, ServiceStatus::Stopped);
     assert_eq!(
-        manager.docker_mutations.active[&key]
+        manager.docker_mutations.active[&scope]
             .pending
             .iter()
             .map(|mutation| mutation.kind)
@@ -688,16 +717,16 @@ fn docker_start_then_stop_dispatches_in_request_order() {
 
     let stop = manager
         .docker_mutations
-        .finish(&key, active_generation)
+        .finish(&scope, active_generation)
         .expect("stop must dispatch after start completes");
     assert_eq!(stop.kind, DockerMutationKind::Stop);
     assert!(
         manager
             .docker_mutations
-            .finish(&key, stop.generation)
+            .finish(&scope, stop.generation)
             .is_none()
     );
-    assert!(!manager.docker_mutations.active.contains_key(&key));
+    assert!(!manager.docker_mutations.active.contains_key(&scope));
 }
 
 #[test]
@@ -748,7 +777,8 @@ fn docker_start_then_immediate_stop_waits_for_running_compose_command() {
             .borrow()
             .docker_mutations
             .active
-            .contains_key(&key)
+            .values()
+            .any(|active| active.current.project_id == key.0)
         {
             smol::Timer::after(Duration::from_millis(1)).await;
         }
@@ -796,7 +826,8 @@ fn docker_mutation_timeout_releases_queue_without_overwriting_newer_intent() {
             .borrow()
             .docker_mutations
             .active
-            .contains_key(&key)
+            .values()
+            .any(|active| active.current.project_id == key.0)
         {
             smol::Timer::after(Duration::from_millis(1)).await;
         }
@@ -808,18 +839,20 @@ fn docker_mutation_timeout_releases_queue_without_overwriting_newer_intent() {
 }
 
 #[test]
-fn final_docker_start_timeout_restores_stopped_status() {
+fn docker_start_all_timeouts_restore_each_stopped_status() {
     let path = "/project";
-    let key = ("project".to_string(), "web".to_string());
+    let project_id = "project";
     let (events_tx, events_rx) = async_channel::unbounded();
     let mut service_manager = manager();
     service_manager.docker_mutation_runner = Arc::new(TimeoutDockerRunner { events: events_tx });
     service_manager
         .project_paths
-        .insert(key.0.clone(), path.into());
-    service_manager.begin_project_incarnation(&key.0, path);
-    let (_, instance) = make_docker_instance(&key.0, &key.1, ServiceStatus::Stopped);
-    service_manager.instances.insert(key.clone(), instance);
+        .insert(project_id.into(), path.into());
+    service_manager.begin_project_incarnation(project_id, path);
+    for name in ["web", "worker"] {
+        let (key, instance) = make_docker_instance(project_id, name, ServiceStatus::Stopped);
+        service_manager.instances.insert(key, instance);
+    }
 
     let executor = Rc::new(smol::LocalExecutor::new());
     let service_manager = Rc::new(RefCell::new(service_manager));
@@ -833,21 +866,176 @@ fn final_docker_start_timeout_restores_stopped_status() {
         let mut cx = ExecutingCx { handle };
         service_manager
             .borrow_mut()
-            .start_service(&key.0, &key.1, path, &mut cx);
+            .start_all(project_id, path, &mut cx);
 
+        assert_eq!(events_rx.recv().await, Ok(DockerMutationKind::Start));
         assert_eq!(events_rx.recv().await, Ok(DockerMutationKind::Start));
         while service_manager
             .borrow()
             .docker_mutations
             .active
-            .contains_key(&key)
+            .values()
+            .any(|active| active.current.project_id == project_id)
         {
             smol::Timer::after(Duration::from_millis(1)).await;
         }
-        assert_eq!(
-            service_manager.borrow().instances[&key].status,
-            ServiceStatus::Stopped
-        );
+        for name in ["web", "worker"] {
+            assert_eq!(
+                service_manager.borrow().instances[&(project_id.into(), name.into())].status,
+                ServiceStatus::Stopped
+            );
+        }
+    }));
+}
+
+#[test]
+fn docker_start_all_serializes_mutations_for_one_compose_project() {
+    let path = "/project";
+    let project_id = "project";
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let (release_tx, release_rx) = async_channel::unbounded();
+    let runner = Arc::new(ProjectBarrierDockerRunner {
+        events: events_tx,
+        releases: release_rx,
+        in_flight: AtomicUsize::new(0),
+        max_in_flight: AtomicUsize::new(0),
+    });
+    let mut service_manager = manager();
+    service_manager.docker_mutation_runner = runner.clone();
+    service_manager
+        .project_paths
+        .insert(project_id.into(), path.into());
+    service_manager.begin_project_incarnation(project_id, path);
+    for name in ["web", "worker"] {
+        let (key, instance) = make_docker_instance(project_id, name, ServiceStatus::Stopped);
+        service_manager.instances.insert(key, instance);
+    }
+
+    let executor = Rc::new(smol::LocalExecutor::new());
+    let service_manager = Rc::new(RefCell::new(service_manager));
+    let handle = ExecutingHandle {
+        manager: Rc::downgrade(&service_manager),
+        executor: executor.clone(),
+        notifications: Arc::new(AtomicUsize::new(0)),
+    };
+
+    smol::block_on(executor.run(async {
+        let mut cx = ExecutingCx { handle };
+        service_manager
+            .borrow_mut()
+            .start_all(project_id, path, &mut cx);
+
+        let first = events_rx.recv().await.expect("first Docker mutation");
+        assert!(events_rx.try_recv().is_err());
+        release_tx.send(()).await.expect("release first mutation");
+        let second = events_rx.recv().await.expect("second Docker mutation");
+        assert_ne!(first.1, second.1);
+        release_tx.send(()).await.expect("release second mutation");
+
+        while !service_manager.borrow().docker_mutations.active.is_empty() {
+            smol::Timer::after(Duration::from_millis(1)).await;
+        }
+        assert_eq!(runner.max_in_flight.load(Ordering::SeqCst), 1);
+    }));
+}
+
+#[test]
+fn docker_mutations_for_unrelated_compose_projects_can_overlap() {
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let (release_tx, release_rx) = async_channel::unbounded();
+    let runner = Arc::new(ProjectBarrierDockerRunner {
+        events: events_tx,
+        releases: release_rx,
+        in_flight: AtomicUsize::new(0),
+        max_in_flight: AtomicUsize::new(0),
+    });
+    let mut service_manager = manager();
+    service_manager.docker_mutation_runner = runner.clone();
+    for (project_id, path) in [("project-a", "/project-a"), ("project-b", "/project-b")] {
+        service_manager
+            .project_paths
+            .insert(project_id.into(), path.into());
+        service_manager.begin_project_incarnation(project_id, path);
+        let (key, instance) = make_docker_instance(project_id, "web", ServiceStatus::Stopped);
+        service_manager.instances.insert(key, instance);
+    }
+
+    let executor = Rc::new(smol::LocalExecutor::new());
+    let service_manager = Rc::new(RefCell::new(service_manager));
+    let handle = ExecutingHandle {
+        manager: Rc::downgrade(&service_manager),
+        executor: executor.clone(),
+        notifications: Arc::new(AtomicUsize::new(0)),
+    };
+
+    smol::block_on(executor.run(async {
+        let mut cx = ExecutingCx { handle };
+        {
+            let mut manager = service_manager.borrow_mut();
+            manager.start_service("project-a", "web", "/project-a", &mut cx);
+            manager.start_service("project-b", "web", "/project-b", &mut cx);
+        }
+
+        let first = events_rx.recv().await.expect("first Docker mutation");
+        let second = events_rx.recv().await.expect("overlapping Docker mutation");
+        assert_ne!(first.0, second.0);
+        assert_eq!(runner.in_flight.load(Ordering::SeqCst), 2);
+        release_tx.send(()).await.expect("release first mutation");
+        release_tx.send(()).await.expect("release second mutation");
+
+        while !service_manager.borrow().docker_mutations.active.is_empty() {
+            smol::Timer::after(Duration::from_millis(1)).await;
+        }
+        assert_eq!(runner.max_in_flight.load(Ordering::SeqCst), 2);
+    }));
+}
+
+#[test]
+fn project_unload_discards_queued_docker_mutations() {
+    let path = "/project";
+    let project_id = "project";
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let (release_tx, release_rx) = async_channel::unbounded();
+    let runner = Arc::new(ProjectBarrierDockerRunner {
+        events: events_tx,
+        releases: release_rx,
+        in_flight: AtomicUsize::new(0),
+        max_in_flight: AtomicUsize::new(0),
+    });
+    let mut service_manager = manager();
+    service_manager.docker_mutation_runner = runner;
+    service_manager
+        .project_paths
+        .insert(project_id.into(), path.into());
+    service_manager.begin_project_incarnation(project_id, path);
+    for name in ["web", "worker"] {
+        let (key, instance) = make_docker_instance(project_id, name, ServiceStatus::Stopped);
+        service_manager.instances.insert(key, instance);
+    }
+
+    let executor = Rc::new(smol::LocalExecutor::new());
+    let service_manager = Rc::new(RefCell::new(service_manager));
+    let handle = ExecutingHandle {
+        manager: Rc::downgrade(&service_manager),
+        executor: executor.clone(),
+        notifications: Arc::new(AtomicUsize::new(0)),
+    };
+
+    smol::block_on(executor.run(async {
+        let mut cx = ExecutingCx { handle };
+        service_manager
+            .borrow_mut()
+            .start_all(project_id, path, &mut cx);
+        events_rx.recv().await.expect("first Docker mutation");
+        service_manager
+            .borrow_mut()
+            .unload_project_services(project_id, &mut cx);
+        release_tx.send(()).await.expect("release active mutation");
+
+        while !service_manager.borrow().docker_mutations.active.is_empty() {
+            smol::Timer::after(Duration::from_millis(1)).await;
+        }
+        assert!(events_rx.try_recv().is_err());
     }));
 }
 
@@ -857,18 +1045,18 @@ fn docker_mutations_remain_serialized_across_project_incarnations() {
     let mut queue = DockerMutationQueue::default();
     let first_incarnation = ProjectIncarnation {
         generation: 1,
-        path: "/old".into(),
+        path: "/repo".into(),
     };
     let replacement_incarnation = ProjectIncarnation {
         generation: 2,
-        path: "/new".into(),
+        path: "/repo".into(),
     };
 
     let start = queue
         .enqueue(
             key.clone(),
             Some(first_incarnation),
-            "/old".into(),
+            "/repo".into(),
             "compose.yml".into(),
             DockerMutationKind::Start,
         )
@@ -878,7 +1066,7 @@ fn docker_mutations_remain_serialized_across_project_incarnations() {
             .enqueue(
                 key.clone(),
                 Some(replacement_incarnation.clone()),
-                "/new".into(),
+                "/repo".into(),
                 "compose.yml".into(),
                 DockerMutationKind::Stop,
             )
@@ -886,11 +1074,40 @@ fn docker_mutations_remain_serialized_across_project_incarnations() {
         "replacement work must not race the active mutation"
     );
 
+    let scope = start.scope();
     let stop = queue
-        .finish(&key, start.generation)
+        .finish(&scope, start.generation)
         .expect("replacement stop dispatches after the old mutation drains");
     assert_eq!(stop.kind, DockerMutationKind::Stop);
     assert_eq!(stop.project_incarnation, Some(replacement_incarnation));
+}
+
+#[test]
+fn docker_mutation_scope_follows_compose_path_across_workspace_projects() {
+    let mut queue = DockerMutationQueue::default();
+    let first = queue
+        .enqueue(
+            ("project-a".into(), "web".into()),
+            None,
+            "/repo".into(),
+            "compose.yml".into(),
+            DockerMutationKind::Start,
+        )
+        .expect("first Compose mutation dispatches");
+
+    assert!(
+        queue
+            .enqueue(
+                ("project-b".into(), "worker".into()),
+                None,
+                "/repo".into(),
+                "compose.yml".into(),
+                DockerMutationKind::Stop,
+            )
+            .is_none(),
+        "the same Compose project must have one external mutation owner"
+    );
+    assert_eq!(queue.active[&first.scope()].pending.len(), 1);
 }
 
 #[test]
