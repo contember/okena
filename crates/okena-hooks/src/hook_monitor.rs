@@ -9,6 +9,10 @@ use std::time::{Duration, Instant};
 /// Maximum number of hook executions to keep in history.
 const MAX_HISTORY: usize = 50;
 
+/// Exit events can beat sync-hook waiter registration immediately after PTY spawn.
+const MAX_EARLY_EXITS: usize = 128;
+const EARLY_EXIT_TTL: Duration = Duration::from_secs(30);
+
 /// Status of a hook execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookStatus {
@@ -139,6 +143,7 @@ struct HookMonitorInner {
     next_id: u64,
     running_count: usize,
     exit_waiters: HashMap<String, mpsc::Sender<Option<u32>>>,
+    early_exits: VecDeque<(String, Option<u32>, Instant)>,
     /// Monotonic counter incremented on every mutation. Allows cheap
     /// "has anything changed?" checks without cloning the full history.
     version: u64,
@@ -168,6 +173,7 @@ impl HookMonitor {
             next_id: 1,
             running_count: 0,
             exit_waiters: HashMap::new(),
+            early_exits: VecDeque::new(),
             version: 0,
         })))
     }
@@ -208,6 +214,22 @@ impl HookMonitor {
         }
 
         id
+    }
+
+    /// Record a hook execution whose type came from persisted/wire state.
+    pub fn record_start_named(
+        &self,
+        hook_type: &str,
+        command: &str,
+        project_name: &str,
+        terminal_id: Option<String>,
+    ) -> u64 {
+        self.record_start(
+            intern_hook_type(hook_type),
+            command,
+            project_name,
+            terminal_id,
+        )
     }
 
     /// Record hook completion (success, failure, or spawn error).
@@ -309,7 +331,18 @@ impl HookMonitor {
     pub fn register_exit_waiter(&self, terminal_id: &str) -> mpsc::Receiver<Option<u32>> {
         let (tx, rx) = mpsc::channel();
         let mut inner = self.0.lock();
-        inner.exit_waiters.insert(terminal_id.to_string(), tx);
+        prune_early_exits(&mut inner.early_exits);
+        if let Some(index) = inner
+            .early_exits
+            .iter()
+            .position(|(id, _, _)| id == terminal_id)
+        {
+            if let Some((_, exit_code, _)) = inner.early_exits.remove(index) {
+                let _ = tx.send(exit_code);
+            }
+        } else {
+            inner.exit_waiters.insert(terminal_id.to_string(), tx);
+        }
         rx
     }
 
@@ -348,7 +381,25 @@ impl HookMonitor {
         let mut inner = self.0.lock();
         if let Some(tx) = inner.exit_waiters.remove(terminal_id) {
             let _ = tx.send(exit_code);
+        } else {
+            prune_early_exits(&mut inner.early_exits);
+            inner.early_exits.retain(|(id, _, _)| id != terminal_id);
+            inner
+                .early_exits
+                .push_back((terminal_id.to_string(), exit_code, Instant::now()));
+            while inner.early_exits.len() > MAX_EARLY_EXITS {
+                inner.early_exits.pop_front();
+            }
         }
+    }
+}
+
+fn prune_early_exits(early_exits: &mut VecDeque<(String, Option<u32>, Instant)>) {
+    while early_exits
+        .front()
+        .is_some_and(|(_, _, received_at)| received_at.elapsed() > EARLY_EXIT_TTL)
+    {
+        early_exits.pop_front();
     }
 }
 
@@ -473,6 +524,61 @@ mod tests {
         let rx = monitor.register_exit_waiter("term-2");
         monitor.notify_exit("term-2", None);
         assert_eq!(rx.recv().unwrap(), None);
+    }
+
+    #[test]
+    fn exit_waiter_receives_exit_that_arrived_before_registration() {
+        let monitor = HookMonitor::new();
+        monitor.notify_exit("term-early", Some(7));
+
+        let rx = monitor.register_exit_waiter("term-early");
+
+        assert_eq!(rx.try_recv().unwrap(), Some(7));
+    }
+
+    #[test]
+    fn early_exit_can_finish_execution_recorded_after_the_event() {
+        let monitor = HookMonitor::new();
+        monitor.notify_exit("term-fast", Some(0));
+        monitor.record_start("pre_merge", "true", "project", Some("term-fast".into()));
+
+        let rx = monitor.register_exit_waiter("term-fast");
+        let exit_code = rx.try_recv().unwrap();
+        assert!(monitor.finish_by_terminal_id("term-fast", exit_code));
+
+        assert!(matches!(
+            monitor.history()[0].status,
+            HookStatus::Succeeded { .. }
+        ));
+    }
+
+    #[test]
+    fn early_exit_buffer_is_bounded() {
+        let monitor = HookMonitor::new();
+        for index in 0..=MAX_EARLY_EXITS {
+            monitor.notify_exit(&format!("term-{index}"), Some(0));
+        }
+
+        let evicted = monitor.register_exit_waiter("term-0");
+        let newest = monitor.register_exit_waiter(&format!("term-{MAX_EARLY_EXITS}"));
+
+        assert!(matches!(evicted.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert_eq!(newest.try_recv().unwrap(), Some(0));
+    }
+
+    #[test]
+    fn record_start_named_interns_persisted_hook_type() {
+        let monitor = HookMonitor::new();
+        monitor.record_start_named(
+            "on_project_open",
+            "echo rerun",
+            "project",
+            Some("term-rerun".into()),
+        );
+
+        let history = monitor.history();
+        assert_eq!(history[0].hook_type, "on_project_open");
+        assert_eq!(history[0].terminal_id.as_deref(), Some("term-rerun"));
     }
 
     #[test]

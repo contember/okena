@@ -110,6 +110,9 @@ pub(super) fn switch_shell(
     if ws.get_terminal_shell(&project_id, &path).as_ref() == Some(&shell) {
         return ActionResult::Ok(None);
     }
+    if terminals.lock().contains_key(&terminal_id) {
+        ws.remember_closing_terminal_owner(&project_id, &terminal_id);
+    }
     backend.kill(&terminal_id);
     terminals.lock().remove(&terminal_id);
     ws.set_terminal_shell(&project_id, &path, shell, cx);
@@ -131,6 +134,9 @@ pub(super) fn close(
     let path = find_terminal_path(ws, &project_id, &terminal_id);
     match path {
         Some(path) => {
+            if terminals.lock().contains_key(&terminal_id) {
+                ws.remember_closing_terminal_owner(&project_id, &terminal_id);
+            }
             backend.kill(&terminal_id);
             terminals.lock().remove(&terminal_id);
             ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);
@@ -154,6 +160,9 @@ pub(super) fn close_many(
         let path = find_terminal_path(ws, &project_id, terminal_id);
         match path {
             Some(path) => {
+                if terminals.lock().contains_key(terminal_id) {
+                    ws.remember_closing_terminal_owner(&project_id, terminal_id);
+                }
                 backend.kill(terminal_id);
                 terminals.lock().remove(terminal_id);
                 ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);

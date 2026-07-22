@@ -512,15 +512,27 @@ pub(super) fn rerun_hook(
     terminals: &TerminalsRegistry,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let (command, cwd) = match ws
-        .project(&project_id)
-        .and_then(|p| p.hook_terminals.get(&terminal_id))
-    {
-        Some(e) => (e.command.clone(), e.cwd.clone()),
+    let (command, cwd, hook_type, project_name) = match ws.project(&project_id).and_then(|p| {
+        p.hook_terminals.get(&terminal_id).map(|entry| {
+            (
+                entry.command.clone(),
+                entry.cwd.clone(),
+                entry.hook_type.clone(),
+                p.name.clone(),
+            )
+        })
+    }) {
+        Some(details) => details,
         None => return ActionResult::Err(format!("hook terminal not found: {}", terminal_id)),
     };
+    let monitor = cx.hook_monitor();
     backend.kill(&terminal_id);
-    let new_id = match backend.create_terminal(&cwd, None) {
+    if let Some(monitor) = monitor.as_ref() {
+        monitor.finish_by_terminal_id(&terminal_id, None);
+        monitor.notify_exit(&terminal_id, None);
+    }
+    let shell = okena_workspace::hooks::keep_alive_hook_shell(&command);
+    let new_id = match backend.create_terminal(&cwd, Some(&shell)) {
         Ok(id) => id,
         Err(e) => return ActionResult::Err(format!("failed to spawn hook terminal: {}", e)),
     };
@@ -537,8 +549,9 @@ pub(super) fn rerun_hook(
         guard.insert(new_id.clone(), terminal);
     }
     ws.swap_hook_terminal_id(&project_id, &terminal_id, &new_id, cx);
-    let cmd_with_newline = format!("{}\n", command);
-    transport.send_input(&new_id, cmd_with_newline.as_bytes());
+    if let Some(monitor) = monitor {
+        monitor.record_start_named(&hook_type, &command, &project_name, Some(new_id.clone()));
+    }
     ActionResult::Ok(Some(serde_json::json!({ "terminal_id": new_id })))
 }
 
@@ -560,12 +573,257 @@ pub(super) fn dismiss_hook(
 
     backend.kill(&terminal_id);
     if let Some(monitor) = cx.hook_monitor() {
+        monitor.finish_by_terminal_id(&terminal_id, None);
         monitor.notify_exit(&terminal_id, None);
     }
     ws.cancel_pending_worktree_close(&terminal_id);
     ws.remove_hook_terminal(&terminal_id, cx);
     terminals.lock().remove(&terminal_id);
     ActionResult::Ok(None)
+}
+
+#[cfg(test)]
+mod hook_action_tests {
+    use super::{ActionResult, dismiss_hook, rerun_hook};
+    use crate::workspace::state::{
+        HookTerminalEntry, HookTerminalStatus, ProjectData, WindowState, Workspace, WorkspaceData,
+    };
+    use okena_core::theme::FolderColor;
+    use okena_terminal::TerminalsRegistry;
+    use okena_terminal::backend::TerminalBackend;
+    use okena_terminal::shell_config::ShellType;
+    use okena_terminal::terminal::TerminalTransport;
+    use okena_workspace::context::WorkspaceCx;
+    use okena_workspace::hook_monitor::{HookMonitor, HookStatus};
+    use okena_workspace::hooks::HookRunner;
+    use okena_workspace::settings::HooksConfig;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct RecordingTransport {
+        inputs: Mutex<Vec<(String, Vec<u8>)>>,
+    }
+
+    impl TerminalTransport for RecordingTransport {
+        fn send_input(&self, terminal_id: &str, data: &[u8]) {
+            self.inputs
+                .lock()
+                .unwrap()
+                .push((terminal_id.to_string(), data.to_vec()));
+        }
+
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        transport: Arc<RecordingTransport>,
+        next_id: AtomicUsize,
+        shells: Mutex<Vec<Option<ShellType>>>,
+        killed: Mutex<Vec<String>>,
+    }
+
+    impl TerminalBackend for RecordingBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            self.transport.clone()
+        }
+
+        fn create_terminal(&self, _cwd: &str, shell: Option<&ShellType>) -> anyhow::Result<String> {
+            self.shells.lock().unwrap().push(shell.cloned());
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            Ok(format!("rerun-{id}"))
+        }
+
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            unreachable!("tests do not reconnect terminals")
+        }
+
+        fn kill(&self, terminal_id: &str) {
+            self.killed.lock().unwrap().push(terminal_id.to_string());
+        }
+
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+
+        fn is_remote(&self) -> bool {
+            false
+        }
+
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    struct TestCx {
+        monitor: HookMonitor,
+    }
+
+    impl WorkspaceCx for TestCx {
+        fn notify(&mut self) {}
+
+        fn refresh_views(&mut self) {}
+
+        fn hook_runner(&self) -> Option<HookRunner> {
+            None
+        }
+
+        fn hook_monitor(&self) -> Option<HookMonitor> {
+            Some(self.monitor.clone())
+        }
+    }
+
+    fn workspace_with_hook(terminal_id: &str) -> Workspace {
+        let mut hook_terminals = HashMap::new();
+        hook_terminals.insert(
+            terminal_id.to_string(),
+            HookTerminalEntry {
+                label: "on_project_open (Project p1)".to_string(),
+                status: HookTerminalStatus::Running,
+                hook_type: "on_project_open".to_string(),
+                command: "export OKENA_PROJECT_ID='p1'; echo test".to_string(),
+                cwd: "/tmp/test".to_string(),
+            },
+        );
+        let project = ProjectData {
+            id: "p1".to_string(),
+            name: "Project p1".to_string(),
+            path: "/tmp/test".to_string(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals,
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        };
+        Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["p1".to_string()],
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            folders: Vec::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn rerun_hook_uses_completion_wrapper_and_records_fresh_execution() {
+        let mut workspace = workspace_with_hook("old-hook");
+        let backend = RecordingBackend::default();
+        let terminals: TerminalsRegistry = Default::default();
+        let monitor = HookMonitor::new();
+        monitor.record_start(
+            "on_project_open",
+            "echo test",
+            "Project p1",
+            Some("old-hook".to_string()),
+        );
+        let mut cx = TestCx {
+            monitor: monitor.clone(),
+        };
+
+        let result = rerun_hook(
+            &mut workspace,
+            "p1".to_string(),
+            "old-hook".to_string(),
+            &backend,
+            &terminals,
+            &mut cx,
+        );
+
+        assert!(matches!(result, ActionResult::Ok(_)));
+        let entry = workspace
+            .project("p1")
+            .unwrap()
+            .hook_terminals
+            .get("rerun-0")
+            .unwrap();
+        assert_eq!(entry.status, HookTerminalStatus::Running);
+        assert!(
+            !workspace
+                .project("p1")
+                .unwrap()
+                .hook_terminals
+                .contains_key("old-hook")
+        );
+        assert!(backend.transport.inputs.lock().unwrap().is_empty());
+
+        let shells = backend.shells.lock().unwrap();
+        let ShellType::Custom { args, .. } = shells[0].as_ref().unwrap() else {
+            panic!("rerun should use a completion-wrapped custom shell");
+        };
+        assert!(args.iter().any(|arg| arg.contains("__okena_hook_exit")));
+
+        let history = monitor.history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].terminal_id.as_deref(), Some("rerun-0"));
+        assert!(matches!(history[0].status, HookStatus::Running));
+        assert_eq!(history[1].terminal_id.as_deref(), Some("old-hook"));
+        assert!(matches!(history[1].status, HookStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn dismiss_hook_finishes_running_execution_before_removing_owner() {
+        let mut workspace = workspace_with_hook("hook-1");
+        let backend = RecordingBackend::default();
+        let terminals: TerminalsRegistry = Default::default();
+        let monitor = HookMonitor::new();
+        monitor.record_start(
+            "on_project_open",
+            "echo test",
+            "Project p1",
+            Some("hook-1".to_string()),
+        );
+        let mut cx = TestCx {
+            monitor: monitor.clone(),
+        };
+
+        let result = dismiss_hook(
+            &mut workspace,
+            "p1".to_string(),
+            "hook-1".to_string(),
+            &backend,
+            &terminals,
+            &mut cx,
+        );
+
+        assert!(matches!(result, ActionResult::Ok(None)));
+        assert!(workspace.project("p1").unwrap().hook_terminals.is_empty());
+        let history = monitor.history();
+        assert!(matches!(history[0].status, HookStatus::Failed { .. }));
+        assert_eq!(backend.killed.lock().unwrap().as_slice(), ["hook-1"]);
+    }
 }
 
 #[cfg(all(test, feature = "gpui"))]

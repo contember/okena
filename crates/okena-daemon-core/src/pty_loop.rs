@@ -250,7 +250,7 @@ fn process_event(
 
 /// Hook-exit-via-OSC-title: for any terminal that produced output this batch and
 /// IS a hook terminal, if its title is `__okena_hook_exit:<code>`, set the hook
-/// status to Succeeded (code 0) / Failed otherwise.
+/// status and HookMonitor execution to Succeeded (code 0) / Failed otherwise.
 ///
 /// Mirrors the GUI's post-batch dirty-title scan (`app/mod.rs`). This happens for
 /// keep-alive hooks whose command finished but whose PTY stays alive as an
@@ -262,7 +262,7 @@ fn process_osc_hook_exits(
 ) {
     // Collect status updates under the registry + workspace read locks, then
     // apply them under a single workspace write lock (matching the GUI's split).
-    let mut status_updates: Vec<(String, HookTerminalStatus)> = Vec::new();
+    let mut status_updates: Vec<(String, HookTerminalStatus, Option<u32>)> = Vec::new();
     {
         let terminals_guard = terminals.lock();
         let ws = reactor.workspace.lock();
@@ -280,14 +280,17 @@ fn process_osc_hook_exits(
                 } else {
                     HookTerminalStatus::Failed { exit_code }
                 };
-                status_updates.push((tid.clone(), status));
+                status_updates.push((tid.clone(), status, u32::try_from(exit_code).ok()));
             }
         }
     }
     if !status_updates.is_empty() {
         let mut cx = reactor.workspace_cx();
         let mut ws = reactor.workspace.lock();
-        for (tid, status) in status_updates {
+        for (tid, status, exit_code) in status_updates {
+            if let Some(monitor) = reactor.hook_monitor.as_ref() {
+                monitor.finish_by_terminal_id(&tid, exit_code);
+            }
             ws.update_hook_terminal_status(&tid, status, &mut cx);
         }
     }
@@ -626,7 +629,7 @@ fn handle_hook_terminal_exits(
 }
 
 /// Args for a single `terminal.on_close` hook firing, collected under the
-/// workspace read lock so the (subprocess-spawning) hook run happens outside it.
+/// workspace lock so the (subprocess-spawning) hook run happens outside it.
 struct TerminalCloseInfo {
     project_hooks: okena_state::HooksConfig,
     parent_hooks: Option<okena_state::HooksConfig>,
@@ -643,7 +646,8 @@ struct TerminalCloseInfo {
 
 /// Collect `terminal.on_close` firing args for exited user terminals (non-service,
 /// non-hook), applying the GUI's gating: fire only when a global, project, OR
-/// parent-worktree `terminal.on_close` is configured.
+/// parent-worktree `terminal.on_close` is configured. Retained ownership is
+/// consumed here so duplicate exit events cannot fire the lifecycle twice.
 fn collect_terminal_close_infos(
     exit_events: &[(String, Option<u32>)],
     service_tids: &HashSet<String>,
@@ -652,12 +656,19 @@ fn collect_terminal_close_infos(
     global_hooks: &okena_state::HooksConfig,
 ) -> Vec<TerminalCloseInfo> {
     let global_on_close = global_hooks.terminal.on_close.is_some();
-    let ws = reactor.workspace.lock();
+    let mut ws = reactor.workspace.lock();
     exit_events
         .iter()
         .filter(|(tid, _)| !service_tids.contains(tid) && !hook_tids.contains(tid))
         .filter_map(|(tid, exit_code)| {
-            let p = ws.find_project_for_terminal(tid)?;
+            let layout_project_id = ws.find_project_for_terminal(tid).map(|p| p.id.clone());
+            let retained_owner = ws.take_closing_terminal_owner(tid);
+            let (project_id, retained_terminal_name) = match (layout_project_id, retained_owner) {
+                (Some(project_id), retained) => (project_id, retained.and_then(|(_, name)| name)),
+                (None, Some(owner)) => owner,
+                (None, None) => return None,
+            };
+            let p = ws.project(&project_id)?;
             let parent_on_close = p
                 .worktree_info
                 .as_ref()
@@ -672,7 +683,11 @@ fn collect_terminal_close_infos(
                 .as_ref()
                 .and_then(|wt| ws.project(&wt.parent_project_id))
                 .map(|pp| pp.hooks.clone());
-            let terminal_name = p.terminal_names.get(tid).cloned();
+            let terminal_name = p
+                .terminal_names
+                .get(tid)
+                .cloned()
+                .or(retained_terminal_name);
             let is_worktree = p.worktree_info.is_some();
             let folder = ws.folder_for_project_or_parent(&p.id);
             let folder_id = folder.map(|f| f.id.clone());
@@ -698,11 +713,13 @@ fn collect_terminal_close_infos(
 mod tests {
     use super::*;
 
+    use okena_hooks::HookStatus;
     use okena_state::{HookTerminalEntry, ProjectData, WorktreeMetadata};
     use okena_terminal::backend::LocalBackend;
     use okena_terminal::session_backend::SessionBackend;
+    use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::{Terminal, TerminalSize};
-    use okena_workspace::state::{PendingWorktreeClose, WorkspaceData};
+    use okena_workspace::state::{LayoutNode, PendingWorktreeClose, WorkspaceData};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -854,6 +871,143 @@ mod tests {
             main_repo_path: main_repo.to_string_lossy().into_owned(),
         });
         workspace
+    }
+
+    fn plain_project(terminal_id: &str) -> ProjectData {
+        ProjectData {
+            id: "project-1".into(),
+            name: "Project One".into(),
+            path: "/tmp/project-one".into(),
+            layout: Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal_id.into()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            }),
+            terminal_names: HashMap::from([(terminal_id.into(), "Build shell".into())]),
+            hidden_terminals: Default::default(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: Default::default(),
+            default_shell: None,
+            hook_terminals: Default::default(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        }
+    }
+
+    #[test]
+    fn terminal_close_uses_retained_owner_after_layout_removal_once() {
+        let mut project = plain_project("terminal-1");
+        project.hooks.terminal.on_close = Some("echo closed".into());
+        let mut workspace = Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["project-1".into()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        });
+        workspace.remember_closing_terminal_owner("project-1", "terminal-1");
+        let project = workspace.data.projects.first_mut().expect("project");
+        project.layout = None;
+        project.terminal_names.clear();
+
+        let reactor = test_reactor(workspace, AppSettings::default());
+        let exits = vec![("terminal-1".to_string(), Some(9))];
+        let info = collect_terminal_close_infos(
+            &exits,
+            &HashSet::new(),
+            &HashSet::new(),
+            &reactor,
+            &okena_state::HooksConfig::default(),
+        );
+
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].project_id, "project-1");
+        assert_eq!(info[0].terminal_name.as_deref(), Some("Build shell"));
+        assert_eq!(info[0].exit_code, Some(9));
+        assert!(
+            collect_terminal_close_infos(
+                &exits,
+                &HashSet::new(),
+                &HashSet::new(),
+                &reactor,
+                &okena_state::HooksConfig::default(),
+            )
+            .is_empty(),
+            "retained ownership is consumed by the first exit"
+        );
+    }
+
+    #[test]
+    fn osc_hook_exit_finishes_monitor_and_queues_failure_toast() {
+        let mut project = plain_project("hook-1");
+        project.hook_terminals.insert(
+            "hook-1".into(),
+            HookTerminalEntry {
+                label: "Open hook".into(),
+                status: HookTerminalStatus::Running,
+                hook_type: "on_project_open".into(),
+                command: "exit 7".into(),
+                cwd: "/tmp/project-one".into(),
+            },
+        );
+        let workspace = Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["project-1".into()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        });
+        let reactor = test_reactor(workspace, AppSettings::default());
+        let monitor = reactor.hook_monitor.clone().expect("hook monitor");
+        monitor.record_start(
+            "on_project_open",
+            "exit 7",
+            "Project One",
+            Some("hook-1".into()),
+        );
+
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let terminal = Arc::new(Terminal::new(
+            "hook-1".into(),
+            terminal_size(),
+            reactor.backend.transport(),
+            "/tmp/project-one".into(),
+        ));
+        terminal.process_output(b"\x1b]0;__okena_hook_exit:7\x07");
+        terminals.lock().insert("hook-1".into(), terminal);
+
+        process_osc_hook_exits(&["hook-1".into()], &terminals, &reactor);
+
+        let workspace = reactor.workspace.lock();
+        assert!(matches!(
+            workspace
+                .project("project-1")
+                .expect("project")
+                .hook_terminals["hook-1"]
+                .status,
+            HookTerminalStatus::Failed { exit_code: 7 }
+        ));
+        drop(workspace);
+        assert!(matches!(
+            monitor.history()[0].status,
+            HookStatus::Failed { exit_code: 7, .. }
+        ));
+        assert_eq!(monitor.drain_pending_toasts().len(), 1);
     }
 
     async fn drive_hook_exit_through_pty_loop(
