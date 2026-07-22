@@ -20,6 +20,8 @@ pub struct TerminalLaunchCommand {
 pub struct TerminalLaunchPlan {
     pub route: ShellType,
     pub initial_command: Option<TerminalLaunchCommand>,
+    /// Environment owned by this launch, kept out of shell command strings.
+    pub environment: Vec<(String, String)>,
 }
 
 impl TerminalLaunchPlan {
@@ -27,7 +29,14 @@ impl TerminalLaunchPlan {
         Self {
             route,
             initial_command: None,
+            environment: Vec::new(),
         }
+    }
+
+    pub fn with_environment(mut self, mut environment: Vec<(String, String)>) -> Self {
+        environment.sort_by(|a, b| a.0.cmp(&b.0));
+        self.environment = environment;
+        self
     }
 
     fn legacy_shell(&self) -> ShellType {
