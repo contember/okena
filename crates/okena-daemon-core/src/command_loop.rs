@@ -142,7 +142,8 @@ fn cleanup_created_worktree_if_unclaimed(
     git_root: &std::path::Path,
 ) {
     let result = with_unclaimed_worktree_root(workspace, worktree_path, || {
-        okena_git::remove_worktree_fast(worktree_path, git_root)
+        okena_git::verify_linked_worktree_fresh(git_root, worktree_path)
+            .and_then(|verified| okena_git::remove_worktree_fast(&verified))
     });
     match result {
         Some(Err(error)) => log::warn!(
@@ -281,7 +282,6 @@ pub(crate) fn spawn_background_worktree_removal(
             // queued handles and persistent sessions release their checkout CWD.
             teardown_backend.flush_teardown();
             let worktree_path = plan.worktree_path.clone();
-            let main_repo_path = std::path::PathBuf::from(&plan.main_repo_path);
             // force_remove = is_dirty && !did_stash — same condition the sync
             // close_worktree path uses to fire the dirty-close safety net. Runs
             // before close hooks and removal, matching the canonical sync flow.
@@ -291,7 +291,7 @@ pub(crate) fn spawn_background_worktree_removal(
                 None
             };
             plan.fire_close_hooks_headless(&global_hooks_blocking, monitor.as_ref());
-            let removal = okena_git::remove_worktree_fast(&worktree_path, &main_repo_path);
+            let removal = plan.remove_fast();
             (plan, removal, dirty_hook)
         })
         .await;
@@ -3543,9 +3543,11 @@ mod tests {
         };
 
         // Provenance is valid when the plan is built. Replace the checkout
-        // with a file afterwards so the background recursive removal fails.
+        // afterwards; the unrelated directory must never be recursively removed.
         std::fs::remove_dir_all(&invalid_worktree).expect("remove checkout directory");
-        std::fs::write(&invalid_worktree, "not a directory").expect("create removal obstacle");
+        std::fs::create_dir(&invalid_worktree).expect("create unrelated replacement");
+        let sentinel = invalid_worktree.join("must-survive.txt");
+        std::fs::write(&sentinel, "unrelated data").expect("write sentinel");
 
         let local = tokio::task::LocalSet::new();
         local
@@ -3603,16 +3605,15 @@ mod tests {
             "failed removal restores service ownership"
         );
         assert!(terminals.lock().contains_key("restored-terminal"));
-        assert!(
-            invalid_worktree.is_file(),
-            "failed removal left source untouched"
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).expect("replacement survives"),
+            "unrelated data"
         );
         assert_eq!(
             hook_monitor_service.drain_pending_toasts().len(),
             1,
             "failure is surfaced to clients"
         );
-        std::fs::remove_file(invalid_worktree).ok();
         std::fs::remove_dir_all(fixture).ok();
     }
 
