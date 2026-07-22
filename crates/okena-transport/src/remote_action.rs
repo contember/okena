@@ -21,6 +21,12 @@ const BYTES_TIMEOUT_SECS: u64 = 90;
 /// actions, these may need to walk and inspect an entire large checkout.
 const SEARCH_TIMEOUT_SECS: u64 = 90;
 
+/// Total request timeout for synchronous filesystem mutations. Direct
+/// worktree removal may run two sequential five-minute close hooks before Git.
+const LONG_MUTATION_TIMEOUT_SECS: u64 = 11 * 60;
+
+const ACTIONS_PATH: &str = "/v1/actions";
+
 /// Hard ceiling on response body size accepted by the remote bridge. Cuts
 /// off arbitrarily large or runaway responses before they're buffered into
 /// memory (peak resident is ~4× the file size while the base64 + JSON +
@@ -33,12 +39,15 @@ enum ActionClientKind {
     Fast,
     Bytes,
     Search,
+    LongMutation,
 }
 
 fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
     match action {
         ActionRequest::ReadFileBytes { .. } => ActionClientKind::Bytes,
         ActionRequest::SearchContent { .. } => ActionClientKind::Search,
+        ActionRequest::RemoveWorktreeProject { .. }
+        | ActionRequest::RenameProjectDirectory { .. } => ActionClientKind::LongMutation,
         _ => ActionClientKind::Fast,
     }
 }
@@ -48,7 +57,12 @@ fn timeout_for(action: &ActionRequest) -> u64 {
         ActionClientKind::Fast => FAST_TIMEOUT_SECS,
         ActionClientKind::Bytes => BYTES_TIMEOUT_SECS,
         ActionClientKind::Search => SEARCH_TIMEOUT_SECS,
+        ActionClientKind::LongMutation => LONG_MUTATION_TIMEOUT_SECS,
     }
+}
+
+fn action_url(base_url: &str) -> String {
+    format!("{base_url}{ACTIONS_PATH}")
 }
 
 #[cfg(feature = "blocking-http")]
@@ -64,6 +78,7 @@ struct RemoteActionClientInner {
     fast: OnceLock<Result<ClientAndUrl, String>>,
     bytes: OnceLock<Result<ClientAndUrl, String>>,
     search: OnceLock<Result<ClientAndUrl, String>>,
+    long_mutation: OnceLock<Result<ClientAndUrl, String>>,
     #[cfg(feature = "cancellable-http")]
     async_search: OnceLock<Result<AsyncClientAndUrl, String>>,
 }
@@ -87,6 +102,7 @@ impl RemoteActionClient {
                 fast: OnceLock::new(),
                 bytes: OnceLock::new(),
                 search: OnceLock::new(),
+                long_mutation: OnceLock::new(),
                 #[cfg(feature = "cancellable-http")]
                 async_search: OnceLock::new(),
             }),
@@ -99,10 +115,11 @@ impl RemoteActionClient {
             ActionClientKind::Fast => &self.inner.fast,
             ActionClientKind::Bytes => &self.inner.bytes,
             ActionClientKind::Search => &self.inner.search,
+            ActionClientKind::LongMutation => &self.inner.long_mutation,
         };
         let timeout = std::time::Duration::from_secs(timeout_for(&action));
         let client_and_url = transport.get_or_init(|| {
-            crate::remote_http::blocking_client_and_url(&self.inner.config, "/v1/actions", timeout)
+            crate::remote_http::blocking_client_and_url(&self.inner.config, ACTIONS_PATH, timeout)
         });
         let (client, url) = match client_and_url {
             Ok(client_and_url) => client_and_url,
@@ -257,7 +274,7 @@ pub async fn post_action_async_with_client(
     token: &str,
     action: ActionRequest,
 ) -> Result<Option<serde_json::Value>, String> {
-    let url = format!("{base_url}/v1/actions");
+    let url = action_url(base_url);
     let mut response = client
         .post(url)
         .bearer_auth(token)
@@ -375,6 +392,27 @@ mod tests {
         }
     }
 
+    fn remove_worktree_action() -> ActionRequest {
+        ActionRequest::RemoveWorktreeProject {
+            project_id: "project".to_string(),
+            force: false,
+        }
+    }
+
+    fn rename_project_directory_action() -> ActionRequest {
+        ActionRequest::RenameProjectDirectory {
+            project_id: "project".to_string(),
+            new_name: "renamed".to_string(),
+        }
+    }
+
+    fn ordinary_fast_action() -> ActionRequest {
+        ActionRequest::ReadFile {
+            project_id: "project".to_string(),
+            relative_path: "README.md".to_string(),
+        }
+    }
+
     #[cfg(feature = "cancellable-http")]
     fn remote_config(port: u16) -> RemoteConnectionConfig {
         RemoteConnectionConfig {
@@ -397,13 +435,36 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_long_mutations_use_dedicated_clients() {
+        for action in [remove_worktree_action(), rename_project_directory_action()] {
+            assert_eq!(client_kind_for(&action), ActionClientKind::LongMutation);
+            assert_eq!(timeout_for(&action), LONG_MUTATION_TIMEOUT_SECS);
+        }
+        assert_eq!(LONG_MUTATION_TIMEOUT_SECS, 660);
+    }
+
+    #[test]
+    fn ordinary_actions_keep_the_fast_timeout() {
+        let action = ordinary_fast_action();
+        assert_eq!(client_kind_for(&action), ActionClientKind::Fast);
+        assert_eq!(timeout_for(&action), FAST_TIMEOUT_SECS);
+        assert_eq!(FAST_TIMEOUT_SECS, 10);
+    }
+
+    #[test]
+    fn action_posts_use_the_canonical_route() {
+        assert_eq!(ACTIONS_PATH, "/v1/actions");
+        assert_eq!(
+            action_url("https://okena.example"),
+            "https://okena.example/v1/actions"
+        );
+    }
+
+    #[test]
     fn content_search_has_a_dedicated_cached_client() {
         assert_eq!(client_kind_for(&search_action()), ActionClientKind::Search);
         assert_eq!(
-            client_kind_for(&ActionRequest::ReadFile {
-                project_id: "project".to_string(),
-                relative_path: "README.md".to_string(),
-            }),
+            client_kind_for(&ordinary_fast_action()),
             ActionClientKind::Fast
         );
         assert_eq!(
