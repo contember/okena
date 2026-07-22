@@ -975,7 +975,7 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
         .projects
         .iter()
         .filter(|p| p.worktree_info.is_some())
-        .filter(|p| !Path::new(&p.path).exists())
+        .filter(|p| !worktree_checkout_path(p).exists())
         .map(|p| p.id.clone())
         .collect();
 
@@ -1062,6 +1062,16 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
     }
 
     stale_terminal_ids
+}
+
+pub(crate) fn worktree_checkout_path(project: &ProjectData) -> &Path {
+    let path = project
+        .worktree_info
+        .as_ref()
+        .map(|metadata| metadata.worktree_path.as_str())
+        .filter(|path| !path.is_empty())
+        .unwrap_or(project.path.as_str());
+    Path::new(path)
 }
 
 fn collect_layout_teardowns(
@@ -2403,6 +2413,36 @@ mod tests {
         // Should still have both projects
         assert_eq!(data.projects.len(), 2);
         assert!(data.project_order.contains(&"wt1".to_string()));
+    }
+
+    #[test]
+    fn sync_worktrees_preserves_monorepo_worktree_when_project_subdir_is_missing() {
+        let checkout =
+            std::env::temp_dir().join(format!("okena-monorepo-sync-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&checkout).expect("create checkout root");
+        let mut wt_project = make_project("wt1");
+        wt_project.path = checkout
+            .join("packages/missing")
+            .to_string_lossy()
+            .into_owned();
+        wt_project.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: checkout.to_string_lossy().into_owned(),
+            branch_name: "some-branch".to_string(),
+        });
+        let mut data = make_workspace(
+            vec![make_project("p1"), wt_project],
+            vec!["p1", "wt1"],
+            vec![],
+        );
+
+        sync_worktrees(&mut data);
+
+        assert!(data.projects.iter().any(|project| project.id == "wt1"));
+        assert!(data.project_order.contains(&"wt1".to_string()));
+        std::fs::remove_dir(checkout).expect("remove checkout root");
     }
 
     #[test]
