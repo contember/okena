@@ -36,6 +36,10 @@ pub struct WorktreeRemovalPlan {
 }
 
 impl WorktreeRemovalPlan {
+    pub fn worktree_path(&self) -> &std::path::Path {
+        &self.worktree_path
+    }
+
     /// Reject standard-remove failures that can be known before runtimes are
     /// disturbed. Git refuses a dirty checkout unless the caller passes force.
     pub fn preflight_remove(&self, force: bool) -> Result<(), String> {
