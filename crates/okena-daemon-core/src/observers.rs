@@ -34,7 +34,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use okena_services::manager::{ServiceCx, ServiceManager};
+use okena_services::manager::{
+    ServiceCx, ServiceLoadStatus, ServiceManager, ServiceTerminalWriteback,
+};
 use okena_workspace::persistence;
 
 use crate::reactor::DaemonReactor;
@@ -44,6 +46,7 @@ use crate::workspace_cx::DaemonWorkspaceCx;
 /// Debounce window before an autosave is flushed to disk. Mirrors the GUI's
 /// 500ms timer in `app/mod.rs`.
 const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 pub(crate) struct AutosaveTracker {
@@ -83,6 +86,7 @@ impl Drop for AutosaveJob {
 
 /// Per-project snapshot taken under the workspace lock so the services diff can
 /// run after the lock is dropped (the separate-lock-scope guard).
+#[derive(Clone)]
 struct ProjectSnapshot {
     id: String,
     path: String,
@@ -95,6 +99,63 @@ struct ProjectSnapshot {
 struct KnownProject {
     path: String,
     data_replacement_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingPreservedSessions {
+    identity: KnownProject,
+    terminal_ids: HashSet<String>,
+}
+
+#[derive(Default)]
+struct ServiceSyncState {
+    known: HashMap<String, KnownProject>,
+    pending_preserved: HashMap<String, PendingPreservedSessions>,
+    discarded_terminal_ids: HashMap<String, HashSet<String>>,
+    retry_projects: HashSet<String>,
+    retry_deadline: Option<tokio::time::Instant>,
+}
+
+fn replace_pending_preserved_sessions(
+    sync_state: &mut ServiceSyncState,
+    project_id: &str,
+    identity: &KnownProject,
+    terminal_ids: HashSet<String>,
+    sm: &ServiceManager,
+) {
+    if let Some(previous) = sync_state.pending_preserved.remove(project_id) {
+        let abandoned: HashSet<String> = previous
+            .terminal_ids
+            .difference(&terminal_ids)
+            .cloned()
+            .collect();
+        sm.kill_unclaimed_preserved_sessions(project_id, &abandoned);
+    }
+    if !terminal_ids.is_empty() {
+        sync_state.pending_preserved.insert(
+            project_id.to_string(),
+            PendingPreservedSessions {
+                identity: identity.clone(),
+                terminal_ids,
+            },
+        );
+    }
+}
+
+impl ServiceSyncState {
+    fn request_retry(&mut self, project_id: &str) {
+        self.retry_projects.insert(project_id.to_string());
+        if self.retry_deadline.is_none() {
+            self.retry_deadline = Some(tokio::time::Instant::now() + SERVICE_RETRY_DELAY);
+        }
+    }
+
+    fn resolve_retry(&mut self, project_id: &str) {
+        self.retry_projects.remove(project_id);
+        if self.retry_projects.is_empty() {
+            self.retry_deadline = None;
+        }
+    }
 }
 
 impl DaemonReactor {
@@ -170,9 +231,7 @@ async fn workspace_tick_task(
     service_tick: tokio::sync::watch::Sender<u64>,
     runtime: tokio::runtime::Handle,
 ) {
-    // Projects already loaded into the service manager — the GUI's `known` set,
-    // kept across passes to make the diff idempotent.
-    let mut known: HashMap<String, KnownProject> = HashMap::new();
+    let mut sync_state = ServiceSyncState::default();
 
     // Mirror the GUI's initial load: run one diff pass before awaiting ticks so
     // persisted projects get their services loaded at startup.
@@ -181,19 +240,21 @@ async fn workspace_tick_task(
         &service_manager,
         &runtime,
         &service_tick,
-        &mut known,
+        &mut sync_state,
     );
 
     loop {
-        if tick_rx.changed().await.is_err() {
-            // All senders dropped — the reactor is gone; stop the task.
+        let Some(workspace_changed) =
+            wait_for_service_sync_trigger(&mut tick_rx, &mut sync_state.retry_deadline).await
+        else {
             return;
-        }
+        };
 
-        // Coarse "persistent state changed" tick. Bumped here — and nowhere that
-        // can block — so clients are notified immediately; the debounced autosave
-        // runs on its own task and never gates this.
-        state_version.send_modify(|v| *v += 1);
+        if workspace_changed {
+            // Retry-only passes do not represent a workspace mutation. Successful
+            // service loads notify through `service_tick` on their own.
+            state_version.send_modify(|v| *v += 1);
+        }
 
         // ── project → services load/unload diff ─────────────────────────────
         run_services_sync(
@@ -201,8 +262,27 @@ async fn workspace_tick_task(
             &service_manager,
             &runtime,
             &service_tick,
-            &mut known,
+            &mut sync_state,
         );
+    }
+}
+
+/// Wait for either a real workspace mutation or the one deduplicated retry timer.
+/// Returns `None` when the workspace tick sender is gone.
+async fn wait_for_service_sync_trigger(
+    tick_rx: &mut tokio::sync::watch::Receiver<u64>,
+    retry_deadline: &mut Option<tokio::time::Instant>,
+) -> Option<bool> {
+    if let Some(deadline) = *retry_deadline {
+        tokio::select! {
+            changed = tick_rx.changed() => changed.ok().map(|_| true),
+            _ = tokio::time::sleep_until(deadline) => {
+                *retry_deadline = None;
+                Some(false)
+            }
+        }
+    } else {
+        tick_rx.changed().await.ok().map(|_| true)
     }
 }
 
@@ -229,30 +309,41 @@ async fn service_tick_task(
         //
         // Lock scope 1: snapshot the per-project terminal-id maps under the
         // service-manager lock, then DROP it.
-        let terminal_maps: Vec<(String, std::collections::HashMap<String, String>)> = {
-            let sm = service_manager.lock();
-            let project_ids: HashSet<String> =
-                sm.instances().keys().map(|(pid, _)| pid.clone()).collect();
-            project_ids
-                .into_iter()
-                .map(|pid| {
-                    let ids = sm.service_terminal_ids(&pid);
-                    (pid, ids)
-                })
-                .collect()
-        };
+        let writebacks = service_manager.lock().service_terminal_writebacks();
 
         // Lock scope 2: write the maps back under the workspace lock.
         // `sync_service_terminals` only notifies when a map actually changes, so
         // once converged this stops bumping `workspace_tick` and the cross-tick
         // storm terminates.
+        apply_service_terminal_writebacks(
+            &workspace,
+            &workspace_tick,
+            &hook_runner,
+            &hook_monitor,
+            writebacks,
+        );
+    }
+}
+
+fn apply_service_terminal_writebacks(
+    workspace: &SharedWorkspace,
+    workspace_tick: &tokio::sync::watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    writebacks: Vec<ServiceTerminalWriteback>,
+) {
+    let mut ws = workspace.lock();
+    let current_epoch = ws.data_replacement_epoch();
+    let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+    for writeback in writebacks {
+        if writeback.data_replacement_epoch != current_epoch
+            || ws
+                .project(&writeback.project_id)
+                .is_none_or(|project| project.path != writeback.project_path)
         {
-            let mut ws = workspace.lock();
-            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-            for (project_id, terminals) in terminal_maps {
-                ws.sync_service_terminals(&project_id, terminals, &mut cx);
-            }
+            continue;
         }
+        ws.sync_service_terminals(&writeback.project_id, writeback.terminal_ids, &mut cx);
     }
 }
 
@@ -341,7 +432,7 @@ fn run_services_sync(
     service_manager: &SharedServiceManager,
     runtime: &tokio::runtime::Handle,
     service_tick: &tokio::sync::watch::Sender<u64>,
-    known: &mut HashMap<String, KnownProject>,
+    sync_state: &mut ServiceSyncState,
 ) {
     // Lock scope 1: snapshot the projects, then drop the workspace lock.
     let projects: Vec<ProjectSnapshot> = {
@@ -370,7 +461,7 @@ fn run_services_sync(
     );
     let mut sm = service_manager.lock();
     let mut cx = reactor_ref.cx();
-    sync_services(&projects, known, &mut sm, &mut cx);
+    sync_services(&projects, sync_state, &mut sm, &mut cx);
 }
 
 /// GPUI-free port of `okena-app`'s `app/mod.rs::sync_services`: diff the current
@@ -380,7 +471,7 @@ fn run_services_sync(
 /// stale manager merely because the new project reused the same id.
 fn sync_services(
     projects: &[ProjectSnapshot],
-    known: &mut HashMap<String, KnownProject>,
+    sync_state: &mut ServiceSyncState,
     sm: &mut ServiceManager,
     cx: &mut impl ServiceCx,
 ) {
@@ -398,43 +489,131 @@ fn sync_services(
             path: p.path.clone(),
             data_replacement_epoch: p.data_replacement_epoch,
         };
-        let previous = known.get(&p.id).cloned();
-        let mut preserved_terminal_ids = None;
-        if previous.as_ref() == Some(&identity) && sm.project_path(&p.id) == Some(&p.path) {
+        let saved_ids: HashSet<String> = p.service_terminals.values().cloned().collect();
+        if let Some(discarded) = sync_state.discarded_terminal_ids.get_mut(&p.id) {
+            discarded.retain(|terminal_id| saved_ids.contains(terminal_id));
+            if discarded.is_empty() {
+                sync_state.discarded_terminal_ids.remove(&p.id);
+            }
+        }
+        let discarded = sync_state
+            .discarded_terminal_ids
+            .get(&p.id)
+            .cloned()
+            .unwrap_or_default();
+        let saved_for_attempt: HashMap<String, String> = p
+            .service_terminals
+            .iter()
+            .filter(|(_, terminal_id)| !discarded.contains(*terminal_id))
+            .map(|(service, terminal_id)| (service.clone(), terminal_id.clone()))
+            .collect();
+        let saved_ids_for_attempt: HashSet<String> = saved_for_attempt.values().cloned().collect();
+        let path_exists = std::path::Path::new(&p.path).exists();
+
+        if sync_state
+            .pending_preserved
+            .get(&p.id)
+            .is_some_and(|pending| {
+                pending.identity != identity || pending.terminal_ids != saved_ids_for_attempt
+            })
+        {
+            replace_pending_preserved_sessions(
+                sync_state,
+                &p.id,
+                &identity,
+                saved_ids_for_attempt.clone(),
+                sm,
+            );
+        }
+
+        let previous = sync_state.known.get(&p.id).cloned();
+        if path_exists
+            && previous.as_ref() == Some(&identity)
+            && sm.project_path(&p.id) == Some(&p.path)
+        {
+            sync_state.resolve_retry(&p.id);
             continue;
         }
         if previous.is_some() || sm.project_path(&p.id).is_some() {
-            if previous.as_ref().is_some_and(|previous| {
+            let replacing_data = previous.as_ref().is_some_and(|previous| {
                 previous.data_replacement_epoch != identity.data_replacement_epoch
-            }) {
-                let ids_to_preserve: HashSet<String> =
-                    p.service_terminals.values().cloned().collect();
-                sm.unload_project_services_preserving(&p.id, &ids_to_preserve, cx);
-                preserved_terminal_ids = Some(ids_to_preserve);
+            });
+            if replacing_data || !path_exists {
+                sm.unload_project_services_preserving(&p.id, &saved_ids_for_attempt, cx);
+                replace_pending_preserved_sessions(
+                    sync_state,
+                    &p.id,
+                    &identity,
+                    saved_ids_for_attempt.clone(),
+                    sm,
+                );
             } else {
                 sm.unload_project_services(&p.id, cx);
             }
-            known.remove(&p.id);
+            sync_state.known.remove(&p.id);
         }
-        // Skip projects whose directory doesn't exist yet (deferred worktrees).
-        if !std::path::Path::new(&p.path).exists() {
+
+        if !path_exists {
+            if !saved_ids_for_attempt.is_empty() {
+                replace_pending_preserved_sessions(
+                    sync_state,
+                    &p.id,
+                    &identity,
+                    saved_ids_for_attempt,
+                    sm,
+                );
+                sync_state.request_retry(&p.id);
+            } else {
+                sync_state.resolve_retry(&p.id);
+            }
             continue;
         }
-        sm.load_project_services(&p.id, &p.path, &p.service_terminals, cx);
-        if let Some(preserved_terminal_ids) = preserved_terminal_ids.as_ref() {
-            sm.kill_unclaimed_preserved_sessions(&p.id, preserved_terminal_ids);
+
+        sm.set_project_writeback_owner(&p.id, &p.path, p.data_replacement_epoch);
+        let load_status = sm.load_project_services(&p.id, &p.path, &saved_for_attempt, cx);
+        let claimed: HashSet<String> = sm.service_terminal_ids(&p.id).into_values().collect();
+        let unclaimed: HashSet<String> = saved_ids_for_attempt
+            .difference(&claimed)
+            .cloned()
+            .collect();
+        sm.kill_unclaimed_preserved_sessions(&p.id, &saved_ids_for_attempt);
+        if !unclaimed.is_empty() {
+            sync_state
+                .discarded_terminal_ids
+                .entry(p.id.clone())
+                .or_default()
+                .extend(unclaimed);
         }
-        known.insert(p.id.clone(), identity);
+        sync_state.pending_preserved.remove(&p.id);
+
+        match load_status {
+            ServiceLoadStatus::Loaded => {
+                sync_state.known.insert(p.id.clone(), identity);
+                sync_state.resolve_retry(&p.id);
+            }
+            ServiceLoadStatus::Failed => {
+                sync_state.known.remove(&p.id);
+                sync_state.request_retry(&p.id);
+            }
+        }
     }
 
-    let removed: Vec<String> = known
+    let removed: HashSet<String> = sync_state
+        .known
         .keys()
+        .chain(sync_state.pending_preserved.keys())
+        .chain(sync_state.retry_projects.iter())
         .filter(|id| !current_ids.contains(*id))
         .cloned()
         .collect();
     for id in &removed {
+        if let Some(pending) = sync_state.pending_preserved.remove(id) {
+            sm.kill_unclaimed_preserved_sessions(id, &pending.terminal_ids);
+        }
         sm.unload_project_services(id, cx);
-        known.remove(id);
+        sync_state.known.remove(id);
+        sync_state.discarded_terminal_ids.remove(id);
+        sync_state.resolve_retry(id);
     }
 }
 
@@ -527,6 +706,40 @@ mod tests {
         }
     }
 
+    fn workspace_with_service_terminal(
+        project_id: &str,
+        project_path: &str,
+        service_name: &str,
+        terminal_id: &str,
+    ) -> okena_workspace::state::Workspace {
+        use okena_workspace::state::ProjectData;
+
+        let mut data = empty_workspace_data();
+        data.project_order.push(project_id.to_string());
+        data.projects.push(ProjectData {
+            id: project_id.to_string(),
+            name: "Project".into(),
+            path: project_path.to_string(),
+            layout: None,
+            terminal_names: Default::default(),
+            hidden_terminals: Default::default(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::from([(service_name.to_string(), terminal_id.to_string())]),
+            default_shell: None,
+            hook_terminals: Default::default(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        });
+        okena_workspace::state::Workspace::new(data)
+    }
+
     /// The on-disk path used for "exists" projects in the diff tests — the crate
     /// dir always exists, so the deferred-worktree skip is not triggered.
     fn existing_path() -> String {
@@ -552,6 +765,71 @@ mod tests {
         ServiceReactorRef::new(manager.clone(), tokio::runtime::Handle::current(), tick)
     }
 
+    #[test]
+    fn service_writeback_is_epoch_fenced_and_can_clear_zero_instance_ownership() {
+        let workspace = Arc::new(parking_lot::Mutex::new(workspace_with_service_terminal(
+            "project",
+            "/project",
+            "web",
+            "incoming-terminal",
+        )));
+        let (workspace_tick, _rx) = tokio::sync::watch::channel(0u64);
+
+        apply_service_terminal_writebacks(
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            vec![ServiceTerminalWriteback {
+                project_id: "project".into(),
+                project_path: "/project".into(),
+                data_replacement_epoch: 1,
+                terminal_ids: HashMap::from([("web".into(), "stale-terminal".into())]),
+            }],
+        );
+        assert_eq!(
+            workspace
+                .lock()
+                .project("project")
+                .unwrap()
+                .service_terminals,
+            HashMap::from([("web".into(), "incoming-terminal".into())])
+        );
+
+        apply_service_terminal_writebacks(
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            vec![ServiceTerminalWriteback {
+                project_id: "project".into(),
+                project_path: "/project".into(),
+                data_replacement_epoch: 0,
+                terminal_ids: HashMap::new(),
+            }],
+        );
+        assert!(
+            workspace
+                .lock()
+                .project("project")
+                .unwrap()
+                .service_terminals
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn due_service_retry_is_an_autonomous_sync_trigger() {
+        let (_tick, mut tick_rx) = tokio::sync::watch::channel(0u64);
+        let mut deadline = Some(tokio::time::Instant::now());
+
+        assert_eq!(
+            wait_for_service_sync_trigger(&mut tick_rx, &mut deadline).await,
+            Some(false)
+        );
+        assert!(deadline.is_none());
+    }
+
     #[tokio::test]
     async fn sync_services_loads_new_local_projects_and_tracks_them() {
         let sm = std::sync::Arc::new(parking_lot::Mutex::new(manager()));
@@ -561,17 +839,17 @@ mod tests {
             project("local", &existing_path(), false),
             project("remote", &existing_path(), true),
         ];
-        let mut known = HashMap::new();
+        let mut sync_state = ServiceSyncState::default();
 
         {
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&projects, &mut known, &mut guard, &mut cx);
+            sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
 
         // Non-remote, on-disk project is tracked; remote project is skipped.
-        assert!(known.contains_key("local"));
-        assert!(!known.contains_key("remote"));
+        assert!(sync_state.known.contains_key("local"));
+        assert!(!sync_state.known.contains_key("remote"));
     }
 
     #[tokio::test]
@@ -580,16 +858,16 @@ mod tests {
         let rr = reactor_ref(&sm);
 
         let projects = vec![project("ghost", "/path/that/does/not/exist/okena", false)];
-        let mut known = HashMap::new();
+        let mut sync_state = ServiceSyncState::default();
 
         {
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&projects, &mut known, &mut guard, &mut cx);
+            sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
 
         // Deferred worktree (missing dir) is NOT tracked, so a later pass retries.
-        assert!(!known.contains_key("ghost"));
+        assert!(!sync_state.known.contains_key("ghost"));
     }
 
     #[tokio::test]
@@ -598,23 +876,23 @@ mod tests {
         let rr = reactor_ref(&sm);
 
         // Pass 1: load a local project.
-        let mut known = HashMap::new();
+        let mut sync_state = ServiceSyncState::default();
         {
             let projects = vec![project("local", &existing_path(), false)];
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&projects, &mut known, &mut guard, &mut cx);
+            sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
-        assert!(known.contains_key("local"));
+        assert!(sync_state.known.contains_key("local"));
 
         // Pass 2: the project is gone from the workspace → it is unloaded.
         {
             let projects: Vec<ProjectSnapshot> = vec![];
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&projects, &mut known, &mut guard, &mut cx);
+            sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
-        assert!(!known.contains_key("local"));
+        assert!(!sync_state.known.contains_key("local"));
     }
 
     #[tokio::test]
@@ -623,23 +901,23 @@ mod tests {
         let rr = reactor_ref(&sm);
 
         let projects = vec![project("local", &existing_path(), false)];
-        let mut known = HashMap::new();
+        let mut sync_state = ServiceSyncState::default();
 
         // First pass loads and tracks.
         {
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&projects, &mut known, &mut guard, &mut cx);
+            sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
-        let known_after_first = known.clone();
+        let known_after_first = sync_state.known.clone();
 
         // Second pass with the same project set is a no-op (already in `known`).
         {
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&projects, &mut known, &mut guard, &mut cx);
+            sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
-        assert_eq!(known, known_after_first);
+        assert_eq!(sync_state.known, known_after_first);
     }
 
     #[tokio::test]
@@ -652,13 +930,13 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let mut known = HashMap::new();
+        let mut sync_state = ServiceSyncState::default();
 
         {
             let projects = vec![project("reused", &first_path, false)];
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&projects, &mut known, &mut guard, &mut cx);
+            sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
 
         {
@@ -666,12 +944,13 @@ mod tests {
             replacement.data_replacement_epoch = 1;
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&[replacement], &mut known, &mut guard, &mut cx);
+            sync_services(&[replacement], &mut sync_state, &mut guard, &mut cx);
         }
 
         assert_eq!(sm.lock().project_path("reused"), Some(&second_path));
         assert_eq!(
-            known
+            sync_state
+                .known
                 .get("reused")
                 .map(|entry| entry.data_replacement_epoch),
             Some(1)
@@ -712,11 +991,11 @@ mod tests {
                 initial
                     .service_terminals
                     .insert("web".into(), "persistent-web".into());
-                let mut known = HashMap::new();
+                let mut sync_state = ServiceSyncState::default();
                 {
                     let mut manager = sm.lock();
                     let mut cx = rr.cx();
-                    sync_services(&[initial], &mut known, &mut manager, &mut cx);
+                    sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
 
                 let mut replacement = project("project", &project_path, false);
@@ -727,7 +1006,7 @@ mod tests {
                 {
                     let mut manager = sm.lock();
                     let mut cx = rr.cx();
-                    sync_services(&[replacement], &mut known, &mut manager, &mut cx);
+                    sync_services(&[replacement], &mut sync_state, &mut manager, &mut cx);
                 }
             })
             .await;
@@ -779,11 +1058,11 @@ mod tests {
                 initial
                     .service_terminals
                     .insert("web".into(), "persistent-web".into());
-                let mut known = HashMap::new();
+                let mut sync_state = ServiceSyncState::default();
                 {
                     let mut manager = sm.lock();
                     let mut cx = rr.cx();
-                    sync_services(&[initial], &mut known, &mut manager, &mut cx);
+                    sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
 
                 std::fs::write(
@@ -799,7 +1078,7 @@ mod tests {
                 {
                     let mut manager = sm.lock();
                     let mut cx = rr.cx();
-                    sync_services(&[replacement], &mut known, &mut manager, &mut cx);
+                    sync_services(&[replacement], &mut sync_state, &mut manager, &mut cx);
                 }
             })
             .await;
@@ -854,11 +1133,11 @@ mod tests {
                 initial
                     .service_terminals
                     .insert("web".into(), "persistent-web".into());
-                let mut known = HashMap::new();
+                let mut sync_state = ServiceSyncState::default();
                 {
                     let mut manager = sm.lock();
                     let mut cx = rr.cx();
-                    sync_services(&[initial], &mut known, &mut manager, &mut cx);
+                    sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
 
                 let mut replacement = project("project", &project_path, false);
@@ -869,7 +1148,7 @@ mod tests {
                 {
                     let mut manager = sm.lock();
                     let mut cx = rr.cx();
-                    sync_services(&[replacement], &mut known, &mut manager, &mut cx);
+                    sync_services(&[replacement], &mut sync_state, &mut manager, &mut cx);
                 }
             })
             .await;
@@ -890,17 +1169,263 @@ mod tests {
         std::fs::remove_dir_all(&project_dir).expect("remove project dir");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_replacement_kills_pending_session_once_when_project_is_removed() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "okena-observer-pending-remove-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(
+            project_dir.join("okena.yaml"),
+            "services:\n  - name: web\n    command: echo web\n",
+        )
+        .expect("write service config");
+        let project_path = project_dir.to_string_lossy().into_owned();
+        let missing_path = project_dir.with_extension("missing");
+        let missing_path = missing_path.to_string_lossy().into_owned();
+        let backend = Arc::new(RecordingBackend {
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            reconnect_fail_after: None,
+            reconnect_count: AtomicUsize::new(0),
+        });
+        let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
+        let sm = Arc::new(parking_lot::Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals,
+        )));
+        let rr = reactor_ref(&sm);
+        let mut sync_state = ServiceSyncState::default();
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let mut initial = project("project", &project_path, false);
+                initial
+                    .service_terminals
+                    .insert("web".into(), "persistent-web".into());
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
+                }
+
+                let mut replacement = project("project", &missing_path, false);
+                replacement.data_replacement_epoch = 1;
+                replacement
+                    .service_terminals
+                    .insert("web".into(), "persistent-web".into());
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(
+                        &[replacement.clone()],
+                        &mut sync_state,
+                        &mut manager,
+                        &mut cx,
+                    );
+                    sync_services(&[replacement], &mut sync_state, &mut manager, &mut cx);
+                }
+                assert!(backend.killed.lock().expect("kill lock").is_empty());
+                assert!(sync_state.pending_preserved.contains_key("project"));
+                assert!(sm.lock().service_terminal_writebacks().is_empty());
+
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[], &mut sync_state, &mut manager, &mut cx);
+                    sync_services(&[], &mut sync_state, &mut manager, &mut cx);
+                }
+            })
+            .await;
+        assert_eq!(
+            backend.killed.lock().expect("kill lock").as_slice(),
+            &["persistent-web"]
+        );
+        assert!(!sync_state.pending_preserved.contains_key("project"));
+        std::fs::remove_dir_all(&project_dir).expect("remove project dir");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_replacement_reconnects_pending_session_when_path_returns() {
+        let base = std::env::temp_dir().join(format!(
+            "okena-observer-pending-recover-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let initial_dir = base.join("initial");
+        let recovered_dir = base.join("recovered");
+        std::fs::create_dir_all(&initial_dir).expect("create initial project dir");
+        std::fs::write(
+            initial_dir.join("okena.yaml"),
+            "services:\n  - name: web\n    command: echo web\n",
+        )
+        .expect("write initial service config");
+        let initial_path = initial_dir.to_string_lossy().into_owned();
+        let recovered_path = recovered_dir.to_string_lossy().into_owned();
+        let backend = Arc::new(RecordingBackend {
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            reconnect_fail_after: None,
+            reconnect_count: AtomicUsize::new(0),
+        });
+        let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
+        let sm = Arc::new(parking_lot::Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals,
+        )));
+        let rr = reactor_ref(&sm);
+        let mut sync_state = ServiceSyncState::default();
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async {
+                let mut initial = project("project", &initial_path, false);
+                initial
+                    .service_terminals
+                    .insert("web".into(), "persistent-web".into());
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
+                }
+
+                let mut replacement = project("project", &recovered_path, false);
+                replacement.data_replacement_epoch = 1;
+                replacement
+                    .service_terminals
+                    .insert("web".into(), "persistent-web".into());
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(
+                        &[replacement.clone()],
+                        &mut sync_state,
+                        &mut manager,
+                        &mut cx,
+                    );
+                }
+                assert!(sync_state.pending_preserved.contains_key("project"));
+                assert!(sm.lock().service_terminal_writebacks().is_empty());
+
+                std::fs::create_dir_all(&recovered_dir).expect("create recovered project dir");
+                std::fs::write(
+                    recovered_dir.join("okena.yaml"),
+                    "services:\n  - name: web\n    command: echo web\n",
+                )
+                .expect("write recovered service config");
+                {
+                    let mut manager = sm.lock();
+                    let mut cx = rr.cx();
+                    sync_services(&[replacement], &mut sync_state, &mut manager, &mut cx);
+                }
+            })
+            .await;
+
+        assert!(backend.killed.lock().expect("kill lock").is_empty());
+        assert_eq!(
+            backend
+                .reconnected
+                .lock()
+                .expect("reconnect lock")
+                .as_slice(),
+            &["persistent-web", "persistent-web"]
+        );
+        assert!(!sync_state.pending_preserved.contains_key("project"));
+        assert!(sync_state.known.contains_key("project"));
+        std::fs::remove_dir_all(&base).expect("remove project dirs");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_load_retries_without_rekilling_discarded_session() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "okena-observer-load-retry-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let config_path = project_dir.join("okena.yaml");
+        std::fs::write(&config_path, "services: [").expect("write malformed config");
+        let project_path = project_dir.to_string_lossy().into_owned();
+        let backend = Arc::new(RecordingBackend {
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            reconnect_fail_after: None,
+            reconnect_count: AtomicUsize::new(0),
+        });
+        let terminals = Arc::new(parking_lot::Mutex::new(Default::default()));
+        let sm = Arc::new(parking_lot::Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals,
+        )));
+        let rr = reactor_ref(&sm);
+        let mut sync_state = ServiceSyncState::default();
+        let mut snapshot = project("project", &project_path, false);
+        snapshot
+            .service_terminals
+            .insert("web".into(), "persistent-web".into());
+
+        {
+            let mut manager = sm.lock();
+            let mut cx = rr.cx();
+            sync_services(&[snapshot.clone()], &mut sync_state, &mut manager, &mut cx);
+        }
+        let first_deadline = sync_state.retry_deadline;
+        assert!(first_deadline.is_some());
+        assert_eq!(
+            backend.killed.lock().expect("kill lock").as_slice(),
+            &["persistent-web"]
+        );
+        assert_eq!(
+            sm.lock().service_terminal_writebacks(),
+            vec![ServiceTerminalWriteback {
+                project_id: "project".into(),
+                project_path: project_path.clone(),
+                data_replacement_epoch: 0,
+                terminal_ids: HashMap::new(),
+            }]
+        );
+
+        {
+            let mut manager = sm.lock();
+            let mut cx = rr.cx();
+            sync_services(&[snapshot.clone()], &mut sync_state, &mut manager, &mut cx);
+        }
+        assert_eq!(sync_state.retry_deadline, first_deadline);
+        assert_eq!(
+            backend.killed.lock().expect("kill lock").as_slice(),
+            &["persistent-web"]
+        );
+
+        std::fs::write(&config_path, "services: []\n").expect("repair config");
+        sync_state.retry_deadline = None;
+        {
+            let mut manager = sm.lock();
+            let mut cx = rr.cx();
+            sync_services(&[snapshot], &mut sync_state, &mut manager, &mut cx);
+        }
+        assert!(sync_state.known.contains_key("project"));
+        assert!(!sync_state.retry_projects.contains("project"));
+        assert_eq!(
+            backend.killed.lock().expect("kill lock").as_slice(),
+            &["persistent-web"]
+        );
+        std::fs::remove_dir_all(&project_dir).expect("remove project dir");
+    }
+
     #[tokio::test]
     async fn sync_services_unloads_changed_missing_path_and_reloads_after_recovery() {
         let sm = std::sync::Arc::new(parking_lot::Mutex::new(manager()));
         let rr = reactor_ref(&sm);
-        let mut known = HashMap::new();
+        let mut sync_state = ServiceSyncState::default();
 
         {
             let projects = vec![project("local", &existing_path(), false)];
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&projects, &mut known, &mut guard, &mut cx);
+            sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
 
         {
@@ -908,9 +1433,9 @@ mod tests {
             missing.data_replacement_epoch = 1;
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&[missing], &mut known, &mut guard, &mut cx);
+            sync_services(&[missing], &mut sync_state, &mut guard, &mut cx);
         }
-        assert!(!known.contains_key("local"));
+        assert!(!sync_state.known.contains_key("local"));
         assert!(sm.lock().project_path("local").is_none());
 
         {
@@ -918,9 +1443,9 @@ mod tests {
             recovered.data_replacement_epoch = 1;
             let mut guard = sm.lock();
             let mut cx = rr.cx();
-            sync_services(&[recovered], &mut known, &mut guard, &mut cx);
+            sync_services(&[recovered], &mut sync_state, &mut guard, &mut cx);
         }
-        assert!(known.contains_key("local"));
+        assert!(sync_state.known.contains_key("local"));
         let recovered_path = existing_path();
         assert_eq!(sm.lock().project_path("local"), Some(&recovered_path));
     }

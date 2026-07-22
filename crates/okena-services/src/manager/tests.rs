@@ -18,13 +18,16 @@ struct NoopAsyncCx;
 #[derive(Clone, Default)]
 struct RecordingCx {
     spawned: Arc<AtomicUsize>,
+    notifications: Arc<AtomicUsize>,
 }
 
 impl ServiceCx for RecordingCx {
     type Handle = NoopHandle;
     type AsyncCx = NoopAsyncCx;
 
-    fn notify(&mut self) {}
+    fn notify(&mut self) {
+        self.notifications.fetch_add(1, Ordering::Relaxed);
+    }
 
     fn spawn_main<F>(&self, _f: F)
     where
@@ -411,6 +414,44 @@ fn malformed_reload_preserves_current_incarnation() {
         Some(incarnation)
     );
     assert_eq!(cx.spawned.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn malformed_initial_load_reports_failure_without_claiming_path() {
+    let project = ProjectDir::with_config("services: [");
+    let path = project.path();
+    let mut manager = manager();
+    let mut cx = RecordingCx::default();
+
+    let status = manager.load_project_services("project", &path, &HashMap::new(), &mut cx);
+
+    assert_eq!(status, ServiceLoadStatus::Failed);
+    assert_eq!(manager.project_path("project"), None);
+    assert_eq!(manager.project_incarnation("project", &path), None);
+    assert_eq!(cx.notifications.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn empty_loaded_project_publishes_an_explicit_empty_writeback() {
+    let project = ProjectDir::with_config("services: []\n");
+    let path = project.path();
+    let mut manager = manager();
+    let mut cx = RecordingCx::default();
+    manager.set_project_writeback_owner("project", &path, 7);
+
+    let status = manager.load_project_services("project", &path, &HashMap::new(), &mut cx);
+
+    assert_eq!(status, ServiceLoadStatus::Loaded);
+    assert_eq!(
+        manager.service_terminal_writebacks(),
+        vec![ServiceTerminalWriteback {
+            project_id: "project".into(),
+            project_path: path,
+            data_replacement_epoch: 7,
+            terminal_ids: HashMap::new(),
+        }]
+    );
+    assert!(cx.notifications.load(Ordering::Relaxed) > 0);
 }
 
 #[test]

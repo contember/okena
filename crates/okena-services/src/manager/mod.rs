@@ -26,6 +26,9 @@ pub struct ServiceManager {
     pub(super) instances: HashMap<(String, String), ServiceInstance>,
     pub(super) terminal_to_service: HashMap<String, (String, String)>,
     pub(super) project_paths: HashMap<String, String>,
+    /// Workspace replacement epoch owning each project's persisted terminal map.
+    /// Daemon write-back uses this to reject notifications from an older snapshot.
+    project_writeback_owners: HashMap<String, (String, u64)>,
     project_lifecycles: ProjectLifecycles,
     pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
@@ -41,6 +44,20 @@ pub struct ServiceManager {
 pub(super) struct ProjectIncarnation {
     generation: u64,
     path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceTerminalWriteback {
+    pub project_id: String,
+    pub project_path: String,
+    pub data_replacement_epoch: u64,
+    pub terminal_ids: HashMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceLoadStatus {
+    Loaded,
+    Failed,
 }
 
 #[derive(Default)]
@@ -259,6 +276,7 @@ impl ServiceManager {
             instances: HashMap::new(),
             terminal_to_service: HashMap::new(),
             project_paths: HashMap::new(),
+            project_writeback_owners: HashMap::new(),
             project_lifecycles: ProjectLifecycles::default(),
             backend,
             terminals,
@@ -281,6 +299,34 @@ impl ServiceManager {
                     .as_ref()
                     .map(|tid| (name.clone(), tid.clone()))
             })
+            .collect()
+    }
+
+    /// Associate future terminal ownership write-back with one workspace snapshot.
+    pub fn set_project_writeback_owner(
+        &mut self,
+        project_id: &str,
+        project_path: &str,
+        data_replacement_epoch: u64,
+    ) {
+        self.project_writeback_owners.insert(
+            project_id.to_string(),
+            (project_path.to_string(), data_replacement_epoch),
+        );
+    }
+
+    /// Snapshot every attempted project, including projects with no service instances.
+    pub fn service_terminal_writebacks(&self) -> Vec<ServiceTerminalWriteback> {
+        self.project_writeback_owners
+            .iter()
+            .map(
+                |(project_id, (project_path, data_replacement_epoch))| ServiceTerminalWriteback {
+                    project_id: project_id.clone(),
+                    project_path: project_path.clone(),
+                    data_replacement_epoch: *data_replacement_epoch,
+                    terminal_ids: self.service_terminal_ids(project_id),
+                },
+            )
             .collect()
     }
 
