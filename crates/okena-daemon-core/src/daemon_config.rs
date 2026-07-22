@@ -36,6 +36,7 @@ use serde_json::Value;
 /// `Arc<parking_lot::Mutex<AppSettings>>`.
 pub struct DaemonConfig {
     settings: Arc<Mutex<AppSettings>>,
+    persist_settings: Arc<dyn Fn(&AppSettings) -> Result<(), String> + Send + Sync>,
 }
 
 impl DaemonConfig {
@@ -45,7 +46,23 @@ impl DaemonConfig {
     /// this `Arc<Mutex<AppSettings>>`; this struct is the write path while
     /// other daemon code reads the same `Arc`.
     pub fn new(settings: Arc<Mutex<AppSettings>>) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            persist_settings: Arc::new(|settings| {
+                save_settings(settings).map_err(|error| error.to_string())
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_persistence(
+        settings: Arc<Mutex<AppSettings>>,
+        persist_settings: Arc<dyn Fn(&AppSettings) -> Result<(), String> + Send + Sync>,
+    ) -> Self {
+        Self {
+            settings,
+            persist_settings,
+        }
     }
 
     /// Return the full current settings as JSON.
@@ -62,6 +79,16 @@ impl DaemonConfig {
     /// unchanged.
     pub fn set_settings(&mut self, patch: Value) -> CommandResult {
         remote_config::set_settings(self, patch)
+    }
+
+    /// Validate a patch without persisting it or changing the shared settings.
+    pub fn preview_settings(&self, patch: Value) -> Result<AppSettings, String> {
+        remote_config::preview_settings_patch(&self.settings.lock(), patch)
+    }
+
+    /// Persist and publish settings that were already validated by [`Self::preview_settings`].
+    pub fn store_prevalidated_settings(&mut self, settings: &AppSettings) -> CommandResult {
+        remote_config::store_prevalidated_settings(self, settings)
     }
 
     /// List built-in + custom themes, flagging the active one.
@@ -101,7 +128,7 @@ impl ConfigBackend for DaemonConfig {
     fn store_settings(&mut self, new: &AppSettings) -> Result<(), String> {
         // Persist to disk first; only replace the held value on success so a
         // save failure leaves the in-memory settings unchanged.
-        save_settings(new).map_err(|e| e.to_string())?;
+        (self.persist_settings)(new)?;
         *self.settings.lock() = new.clone();
         Ok(())
     }
