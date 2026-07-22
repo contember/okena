@@ -13,6 +13,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Compose mutations may legitimately pull or build images, but must not own
+/// the mutation queue forever when Docker or a credential helper wedges.
+const DOCKER_MUTATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 #[derive(Clone, Copy)]
 pub(super) enum OkenaLaunchFailure {
     Crashed,
@@ -58,6 +62,7 @@ impl ServiceManager {
                 let run = mutation.clone();
                 let runner = runner.clone();
                 let result = cx.spawn_blocking(async move { runner.run(&run) }).await;
+                let failed = result.is_err();
                 if let Err(error) = result {
                     log::error!(
                         "docker compose {} failed for '{}': {}",
@@ -69,16 +74,28 @@ impl ServiceManager {
 
                 current = this
                     .update(cx, |this, cx| {
-                        if mutation
-                            .project_incarnation
-                            .as_ref()
-                            .is_some_and(|incarnation| {
-                                this.is_project_incarnation_current(&key.0, incarnation)
-                            })
-                        {
+                        let is_current =
+                            mutation
+                                .project_incarnation
+                                .as_ref()
+                                .is_some_and(|incarnation| {
+                                    this.is_project_incarnation_current(&key.0, incarnation)
+                                });
+                        let next = this.docker_mutations.finish(&key, mutation.generation);
+                        if is_current {
+                            if failed
+                                && next.is_none()
+                                && let Some(instance) = this.instances.get_mut(&key)
+                                && matches!(
+                                    instance.status,
+                                    ServiceStatus::Starting | ServiceStatus::Restarting
+                                )
+                            {
+                                instance.status = ServiceStatus::Stopped;
+                            }
                             cx.notify();
                         }
-                        this.docker_mutations.finish(&key, mutation.generation)
+                        next
                     })
                     .flatten();
             }
@@ -678,7 +695,8 @@ fn run_docker_mutation(mutation: &DockerMutation) -> crate::ServiceResult<()> {
         }
     }
     command.current_dir(&mutation.project_path);
-    let output = okena_core::process::safe_output(&mut command)?;
+    let output =
+        okena_core::process::safe_output_with_timeout(&mut command, DOCKER_MUTATION_TIMEOUT)?;
     if output.status.success() {
         Ok(())
     } else {
