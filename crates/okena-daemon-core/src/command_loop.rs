@@ -181,11 +181,13 @@ fn recover_project_services(
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
 ) {
-    let project_path = workspace
-        .lock()
-        .project(project_id)
-        .map(|project| project.path.clone());
-    let Some(project_path) = project_path else {
+    let project_owner = {
+        let workspace = workspace.lock();
+        workspace
+            .project(project_id)
+            .map(|project| (project.path.clone(), workspace.data_replacement_epoch()))
+    };
+    let Some((project_path, data_replacement_epoch)) = project_owner else {
         return;
     };
     if !std::path::Path::new(&project_path).exists() {
@@ -198,6 +200,7 @@ fn recover_project_services(
     );
     let mut manager = service_manager.lock();
     let mut cx = reactor_ref.cx();
+    manager.set_project_writeback_owner(project_id, &project_path, data_replacement_epoch);
     // The old persistent sessions were intentionally killed before removal;
     // reconnecting their ids here would race their asynchronous teardown.
     manager.load_project_services(project_id, &project_path, &HashMap::new(), &mut cx);
@@ -1976,6 +1979,81 @@ mod tests {
         assert_eq!(parse_window_id(""), None);
         // A near-miss UUID (one char short) is still rejected.
         assert_eq!(parse_window_id("550e8400-e29b-41d4-a716-44665544000"), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_close_service_recovery_rearms_current_writeback_owner() {
+        let project_dir =
+            std::env::temp_dir().join(format!("okena-service-recovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&project_dir).expect("create project fixture");
+        std::fs::write(project_dir.join("okena.yaml"), "services: []\n")
+            .expect("write project services");
+
+        let project_path = project_dir.to_string_lossy().into_owned();
+        let mut data = workspace_with_uninitialized_terminal(&project_path);
+        data.projects[0]
+            .service_terminals
+            .insert("stale".to_string(), "old-session".to_string());
+        let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+        let no_hook_runner = None;
+        let no_hook_monitor = None;
+        let mut workspace_value = Workspace::new(data);
+        let replacement = workspace_value.data().clone();
+        let mut workspace_cx =
+            DaemonWorkspaceCx::new(&workspace_tick, &no_hook_runner, &no_hook_monitor);
+        workspace_value.replace_data(&mut FocusManager::new(), replacement, &mut workspace_cx);
+        let current_epoch = workspace_value.data_replacement_epoch();
+        let workspace = Arc::new(Mutex::new(workspace_value));
+
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(backend, terminals)));
+        service_manager.lock().set_project_writeback_owner(
+            "p1",
+            "/stale/path",
+            current_epoch.wrapping_sub(1),
+        );
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let runtime = tokio::runtime::Handle::current();
+
+        unload_project_services("p1", &service_manager, &service_tick, &runtime);
+        assert!(
+            service_manager
+                .lock()
+                .service_terminal_writebacks()
+                .is_empty()
+        );
+
+        recover_project_services("p1", &workspace, &service_manager, &service_tick, &runtime);
+
+        let writebacks = service_manager.lock().service_terminal_writebacks();
+        assert_eq!(writebacks.len(), 1);
+        let writeback = &writebacks[0];
+        assert_eq!(writeback.project_id, "p1");
+        assert_eq!(writeback.project_path, project_path);
+        assert_eq!(writeback.data_replacement_epoch, current_epoch);
+        assert!(writeback.terminal_ids.is_empty());
+
+        let mut workspace = workspace.lock();
+        assert_eq!(
+            workspace.data_replacement_epoch(),
+            writeback.data_replacement_epoch
+        );
+        assert_eq!(
+            workspace.project("p1").map(|project| project.path.as_str()),
+            Some(project_path.as_str())
+        );
+        workspace.sync_service_terminals("p1", writeback.terminal_ids.clone(), &mut workspace_cx);
+        assert!(
+            workspace
+                .project("p1")
+                .expect("project")
+                .service_terminals
+                .is_empty()
+        );
+        drop(workspace);
+
+        std::fs::remove_dir_all(project_dir).expect("remove project fixture");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
