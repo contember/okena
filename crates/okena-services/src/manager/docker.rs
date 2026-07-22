@@ -8,10 +8,63 @@ use crate::config::ServiceDefinition;
 use crate::docker_compose;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+fn reconcile_docker_statuses(
+    instances: &mut HashMap<(String, String), ServiceInstance>,
+    project_id: &str,
+    compose_file: &str,
+    statuses: &[docker_compose::DockerServiceStatus],
+    protected_services: &HashSet<String>,
+) -> (bool, bool) {
+    let statuses_by_name: HashMap<&str, &docker_compose::DockerServiceStatus> = statuses
+        .iter()
+        .map(|status| (status.name.as_str(), status))
+        .collect();
+    let mut has_definitions = false;
+    let mut changed = false;
+
+    for ((pid, service_name), instance) in instances.iter_mut() {
+        if pid != project_id
+            || !matches!(
+                &instance.kind,
+                ServiceKind::DockerCompose {
+                    compose_file: instance_file
+                } if instance_file == compose_file
+            )
+        {
+            continue;
+        }
+        has_definitions = true;
+
+        // A snapshot taken across an active mutation can describe either side
+        // of that mutation, so let the mutation's requested state win for now.
+        if protected_services.contains(service_name) {
+            continue;
+        }
+
+        let (new_status, new_ports) = match statuses_by_name.get(service_name.as_str()) {
+            Some(status) => (
+                docker_compose::map_docker_state(&status.state, status.exit_code),
+                status.ports.clone(),
+            ),
+            None => (ServiceStatus::Stopped, Vec::new()),
+        };
+        if instance.status != new_status {
+            instance.status = new_status;
+            changed = true;
+        }
+        if instance.detected_ports != new_ports {
+            instance.detected_ports = new_ports;
+            changed = true;
+        }
+    }
+
+    (has_definitions, changed)
+}
 
 impl ServiceManager {
     /// Load Docker Compose services from an off-reactor filesystem snapshot.
@@ -330,6 +383,25 @@ impl ServiceManager {
                     return;
                 }
 
+                let protected_at_probe = this
+                    .update(cx, |this, _| {
+                        if !this.is_project_incarnation_current(&pid, &incarnation) {
+                            return None;
+                        }
+                        Some(
+                            this.docker_mutations
+                                .active
+                                .keys()
+                                .filter(|(project_id, _)| project_id == &pid)
+                                .map(|(_, service_name)| service_name.clone())
+                                .collect::<HashSet<_>>(),
+                        )
+                    })
+                    .flatten();
+                let Some(protected_at_probe) = protected_at_probe else {
+                    return;
+                };
+
                 let path_clone = path.clone();
                 let file_clone = file.clone();
                 let result = smol::unblock(move || {
@@ -351,32 +423,25 @@ impl ServiceManager {
                                 if !this.is_project_incarnation_current(&pid, &incarnation) {
                                     return true;
                                 }
-                                let mut any_docker = false;
-                                let mut changed = false;
-                                for ds in &statuses {
-                                    let key = (pid.clone(), ds.name.clone());
-                                    if let Some(inst) = this.instances.get_mut(&key)
-                                        && matches!(inst.kind, ServiceKind::DockerCompose { .. })
-                                    {
-                                        any_docker = true;
-                                        let new_status = docker_compose::map_docker_state(
-                                            &ds.state,
-                                            ds.exit_code,
-                                        );
-                                        if inst.status != new_status {
-                                            inst.status = new_status;
-                                            changed = true;
-                                        }
-                                        if inst.detected_ports != ds.ports {
-                                            inst.detected_ports = ds.ports.clone();
-                                            changed = true;
-                                        }
-                                    }
-                                }
+                                let mut protected_services = protected_at_probe.clone();
+                                protected_services.extend(
+                                    this.docker_mutations
+                                        .active
+                                        .keys()
+                                        .filter(|(project_id, _)| project_id == &pid)
+                                        .map(|(_, service_name)| service_name.clone()),
+                                );
+                                let (has_definitions, changed) = reconcile_docker_statuses(
+                                    &mut this.instances,
+                                    &pid,
+                                    &file,
+                                    &statuses,
+                                    &protected_services,
+                                );
                                 if changed {
                                     cx.notify();
                                 }
-                                !any_docker
+                                !has_definitions
                             })
                             .unwrap_or(true);
 
@@ -399,5 +464,71 @@ impl ServiceManager {
                 cx.timer(Duration::from_secs(delay)).await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn docker_instance(status: ServiceStatus, ports: Vec<u16>) -> ServiceInstance {
+        ServiceInstance {
+            definition: ServiceDefinition {
+                name: "web".to_string(),
+                command: String::new(),
+                cwd: ".".to_string(),
+                env: HashMap::new(),
+                auto_start: false,
+                restart_on_crash: false,
+                restart_delay_ms: 0,
+            },
+            kind: ServiceKind::DockerCompose {
+                compose_file: "compose.yml".to_string(),
+            },
+            status,
+            terminal_id: None,
+            restart_count: 0,
+            detected_ports: ports,
+            is_extra: false,
+        }
+    }
+
+    #[test]
+    fn empty_snapshot_stops_known_service_without_stopping_poller() {
+        let key = ("project".to_string(), "web".to_string());
+        let mut instances = HashMap::from([(
+            key.clone(),
+            docker_instance(ServiceStatus::Running, vec![8080]),
+        )]);
+
+        let (has_definitions, changed) = reconcile_docker_statuses(
+            &mut instances,
+            "project",
+            "compose.yml",
+            &[],
+            &HashSet::new(),
+        );
+
+        assert!(has_definitions);
+        assert!(changed);
+        assert_eq!(instances[&key].status, ServiceStatus::Stopped);
+        assert!(instances[&key].detected_ports.is_empty());
+    }
+
+    #[test]
+    fn snapshot_does_not_override_active_mutation() {
+        let key = ("project".to_string(), "web".to_string());
+        let mut instances = HashMap::from([(
+            key.clone(),
+            docker_instance(ServiceStatus::Starting, Vec::new()),
+        )]);
+        let protected = HashSet::from(["web".to_string()]);
+
+        let (has_definitions, changed) =
+            reconcile_docker_statuses(&mut instances, "project", "compose.yml", &[], &protected);
+
+        assert!(has_definitions);
+        assert!(!changed);
+        assert_eq!(instances[&key].status, ServiceStatus::Starting);
     }
 }
