@@ -50,7 +50,7 @@ use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
 use okena_services::manager::ServiceManager;
 use okena_terminal::TerminalsRegistry;
-use okena_terminal::backend::TerminalBackend;
+use okena_terminal::backend::{TerminalBackend, TerminalSessionTeardown};
 use okena_workspace::actions::soft_close::{
     begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow,
 };
@@ -58,7 +58,7 @@ use okena_workspace::actions::worktree::WorktreeRemovalPlan;
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
-use okena_workspace::state::{WindowId, Workspace};
+use okena_workspace::state::{TerminalBackendMigration, WindowId, Workspace};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
@@ -204,6 +204,343 @@ fn recover_project_services(
     // The old persistent sessions were intentionally killed before removal;
     // reconnecting their ids here would race their asynchronous teardown.
     manager.load_project_services(project_id, &project_path, &HashMap::new(), &mut cx);
+}
+
+struct TerminalBackendMigrationGuard {
+    workspace: Arc<Mutex<Workspace>>,
+    workspace_tick: watch::Sender<u64>,
+    hook_runner: Option<okena_hooks::HookRunner>,
+    hook_monitor: Option<okena_hooks::HookMonitor>,
+    epoch: u64,
+    active: bool,
+}
+
+impl TerminalBackendMigrationGuard {
+    fn new(
+        workspace: Arc<Mutex<Workspace>>,
+        workspace_tick: watch::Sender<u64>,
+        hook_runner: Option<okena_hooks::HookRunner>,
+        hook_monitor: Option<okena_hooks::HookMonitor>,
+        epoch: u64,
+    ) -> Self {
+        Self {
+            workspace,
+            workspace_tick,
+            hook_runner,
+            hook_monitor,
+            epoch,
+            active: true,
+        }
+    }
+
+    fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut cx =
+            DaemonWorkspaceCx::new(&self.workspace_tick, &self.hook_runner, &self.hook_monitor);
+        self.workspace
+            .lock()
+            .finish_terminal_backend_migration(self.epoch, &mut cx);
+        self.active = false;
+    }
+
+    fn finish(mut self) {
+        self.release();
+    }
+}
+
+impl Drop for TerminalBackendMigrationGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn rematerialize_terminal_backend_migration(
+    migration: &TerminalBackendMigration,
+    app_settings: &AppSettings,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+    active_services: &HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut ws = workspace.lock();
+        if let Err(error) = ws.restore_terminal_backend_migration_slots(migration) {
+            errors.push(error);
+        } else {
+            for slot in &migration.ordinary_slots {
+                if ensure_terminal(
+                    &slot.terminal_id,
+                    terminals,
+                    backend.as_ref(),
+                    &ws,
+                    app_settings,
+                )
+                .is_none()
+                {
+                    errors.push(format!(
+                        "failed to rematerialize terminal: {}",
+                        slot.terminal_id
+                    ));
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    for project_id in &migration.project_ids {
+        recover_project_services(
+            project_id,
+            workspace,
+            service_manager,
+            service_tick,
+            runtime,
+        );
+    }
+
+    let service_reactor = ServiceReactorRef::new(
+        service_manager.clone(),
+        runtime.clone(),
+        service_tick.clone(),
+    );
+    let mut manager = service_manager.lock();
+    let mut cx = service_reactor.cx();
+    for (project_id, service_names) in active_services {
+        for service_name in service_names {
+            if let CommandResult::Err(error) =
+                manager.start_service_action(project_id, service_name, &mut cx)
+            {
+                errors.push(error);
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn set_settings_with_backend_migration(
+    patch: serde_json::Value,
+    daemon_config: &mut DaemonConfig,
+    backend: &Arc<dyn TerminalBackend>,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    terminals: &TerminalsRegistry,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+    deadlines: &SoftCloseDeadlines,
+) -> CommandResult {
+    let new_settings = match daemon_config.preview_settings(patch) {
+        Ok(settings) => settings,
+        Err(error) => return CommandResult::Err(error),
+    };
+    let old_settings = daemon_config
+        .preview_settings(serde_json::json!({}))
+        .expect(
+            "the current in-memory settings were already validated during daemon initialization",
+        );
+    if new_settings.session_backend == old_settings.session_backend {
+        return daemon_config.store_prevalidated_settings(&new_settings);
+    }
+    if !backend.supports_session_backend_reconfiguration() {
+        return CommandResult::Err(
+            "terminal backend does not support live session route changes".to_string(),
+        );
+    }
+
+    let mut migration = {
+        let mut ws = workspace.lock();
+        match ws.begin_terminal_backend_migration(
+            old_settings.session_backend,
+            &old_settings.default_shell,
+        ) {
+            Ok(migration) => migration,
+            Err(error) => return CommandResult::Err(error),
+        }
+    };
+    let guard = TerminalBackendMigrationGuard::new(
+        workspace.clone(),
+        workspace_tick.clone(),
+        hook_runner.clone(),
+        hook_monitor.clone(),
+        migration.epoch,
+    );
+
+    let service_reactor = ServiceReactorRef::new(
+        service_manager.clone(),
+        runtime.clone(),
+        service_tick.clone(),
+    );
+    let mut active_services = HashMap::new();
+    {
+        let mut manager = service_manager.lock();
+        let mut cx = service_reactor.cx();
+        for project_id in &migration.project_ids {
+            active_services.insert(
+                project_id.clone(),
+                manager.active_okena_service_names(project_id),
+            );
+            migration.teardown_sessions.extend(
+                manager
+                    .unload_project_services_for_backend_migration(project_id, &mut cx)
+                    .into_iter()
+                    .map(TerminalSessionTeardown::host),
+            );
+        }
+    }
+
+    let registry_ids: Vec<String> = terminals.lock().keys().cloned().collect();
+    migration.teardown_sessions.extend(
+        registry_ids
+            .iter()
+            .cloned()
+            .map(TerminalSessionTeardown::host),
+    );
+    migration
+        .teardown_sessions
+        .sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+    migration
+        .teardown_sessions
+        .dedup_by(|a, b| a.terminal_id == b.terminal_id);
+    {
+        let mut deadlines = deadlines.lock();
+        let mut registry = terminals.lock();
+        for teardown in &migration.teardown_sessions {
+            deadlines.remove(&teardown.terminal_id);
+            registry.remove(&teardown.terminal_id);
+        }
+    }
+    if let Some(monitor) = hook_monitor {
+        for terminal_id in &migration.hook_terminal_ids {
+            monitor.cancel_exit_waiter(terminal_id);
+            monitor.finish_by_terminal_id(terminal_id, None);
+        }
+    }
+
+    let teardown_backend = backend.clone();
+    let teardown_sessions = migration.teardown_sessions.clone();
+    let teardown_result = runtime
+        .spawn_blocking(move || {
+            for teardown in &teardown_sessions {
+                teardown_backend.kill_session(teardown);
+            }
+            teardown_backend.flush_teardown();
+            teardown_backend.ensure_session_backend_reconfigurable()
+        })
+        .await;
+    let teardown_result = match teardown_result {
+        Ok(result) => result.map_err(|error| error.to_string()),
+        Err(error) => Err(format!("terminal teardown task failed: {error}")),
+    };
+    if let Err(error) = teardown_result {
+        let recovery = rematerialize_terminal_backend_migration(
+            &migration,
+            &old_settings,
+            workspace,
+            workspace_tick,
+            hook_runner,
+            hook_monitor,
+            backend,
+            terminals,
+            service_manager,
+            service_tick,
+            runtime,
+            &active_services,
+        );
+        guard.finish();
+        return CommandResult::Err(match recovery {
+            Ok(()) => error,
+            Err(recovery_error) => format!("{error}; rollback failed: {recovery_error}"),
+        });
+    }
+
+    let store_result = daemon_config.store_prevalidated_settings(&new_settings);
+    if let CommandResult::Err(error) = store_result {
+        let recovery = rematerialize_terminal_backend_migration(
+            &migration,
+            &old_settings,
+            workspace,
+            workspace_tick,
+            hook_runner,
+            hook_monitor,
+            backend,
+            terminals,
+            service_manager,
+            service_tick,
+            runtime,
+            &active_services,
+        );
+        guard.finish();
+        return CommandResult::Err(match recovery {
+            Ok(()) => error,
+            Err(recovery_error) => format!("{error}; rollback failed: {recovery_error}"),
+        });
+    }
+
+    if let Err(error) = backend.apply_session_backend(new_settings.session_backend) {
+        let restore_settings = daemon_config.store_prevalidated_settings(&old_settings);
+        let recovery = rematerialize_terminal_backend_migration(
+            &migration,
+            &old_settings,
+            workspace,
+            workspace_tick,
+            hook_runner,
+            hook_monitor,
+            backend,
+            terminals,
+            service_manager,
+            service_tick,
+            runtime,
+            &active_services,
+        );
+        guard.finish();
+        let mut failures = vec![format!("failed to switch terminal backend: {error}")];
+        if let CommandResult::Err(error) = restore_settings {
+            failures.push(format!("settings rollback failed: {error}"));
+        }
+        if let Err(error) = recovery {
+            failures.push(format!("terminal rollback failed: {error}"));
+        }
+        return CommandResult::Err(failures.join("; "));
+    }
+
+    let recovery = rematerialize_terminal_backend_migration(
+        &migration,
+        &new_settings,
+        workspace,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+        backend,
+        terminals,
+        service_manager,
+        service_tick,
+        runtime,
+        &active_services,
+    );
+    guard.finish();
+    match recovery {
+        Ok(()) => store_result,
+        Err(error) => CommandResult::Err(format!(
+            "settings changed, but terminal rematerialization failed: {error}"
+        )),
+    }
 }
 
 fn apply_deferred_hook_actions(
@@ -842,7 +1179,21 @@ pub async fn daemon_command_loop(
                     ActionRequest::GetSettings => daemon_config.get_settings(),
                     ActionRequest::GetSettingsSchema => get_settings_schema(),
                     ActionRequest::SetSettings { patch } => {
-                        let result = daemon_config.set_settings(patch);
+                        let result = set_settings_with_backend_migration(
+                            patch,
+                            &mut daemon_config,
+                            &backend,
+                            &workspace,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                            &terminals,
+                            &service_manager,
+                            &service_tick,
+                            &runtime,
+                            &deadlines,
+                        )
+                        .await;
                         publish_config_change_after_success(&result, &state_version);
                         result
                     }
@@ -1868,6 +2219,7 @@ mod tests {
     use super::*;
     use crate::test_support::{StubBackend, StubTransport, default_settings, empty_workspace_data};
     use okena_core::api::StateResponse;
+    use okena_terminal::session_backend::SessionBackend;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1942,6 +2294,268 @@ mod tests {
             settings,
             daemon_config,
         }
+    }
+
+    struct RecordingMigrationBackend {
+        events: Arc<Mutex<Vec<String>>>,
+        session_backend: Mutex<SessionBackend>,
+    }
+
+    impl RecordingMigrationBackend {
+        fn new(events: Arc<Mutex<Vec<String>>>, session_backend: SessionBackend) -> Self {
+            Self {
+                events,
+                session_backend: Mutex::new(session_backend),
+            }
+        }
+    }
+
+    impl TerminalBackend for RecordingMigrationBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("unexpected fresh terminal creation")
+        }
+
+        fn reconnect_terminal(
+            &self,
+            terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            self.events.lock().push(format!(
+                "reconnect:{:?}:{terminal_id}",
+                *self.session_backend.lock()
+            ));
+            Ok(terminal_id.to_string())
+        }
+
+        fn kill(&self, terminal_id: &str) {
+            self.events.lock().push(format!("kill:{terminal_id}"));
+        }
+
+        fn flush_teardown(&self) {
+            self.events.lock().push("flush".to_string());
+        }
+
+        fn supports_session_backend_reconfiguration(&self) -> bool {
+            true
+        }
+
+        fn ensure_session_backend_reconfigurable(&self) -> anyhow::Result<()> {
+            self.events.lock().push("preflight".to_string());
+            Ok(())
+        }
+
+        fn apply_session_backend(&self, backend: SessionBackend) -> anyhow::Result<()> {
+            self.events.lock().push(format!("switch:{backend:?}"));
+            *self.session_backend.lock() = backend;
+            Ok(())
+        }
+
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+
+        fn is_remote(&self) -> bool {
+            false
+        }
+
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    fn workspace_with_migration_terminals(path: &str) -> Workspace {
+        use okena_state::{HookTerminalEntry, HookTerminalStatus};
+
+        let mut data = workspace_with_uninitialized_terminal(path);
+        let project = &mut data.projects[0];
+        let Some(LayoutNode::Terminal { terminal_id, .. }) = project.layout.as_mut() else {
+            panic!("terminal fixture")
+        };
+        *terminal_id = Some("ordinary".to_string());
+        project.hook_terminals.insert(
+            "hook".to_string(),
+            HookTerminalEntry {
+                label: "hook".to_string(),
+                status: HookTerminalStatus::Running,
+                hook_type: "on_project_open".to_string(),
+                command: "echo hook".to_string(),
+                cwd: path.to_string(),
+            },
+        );
+        Workspace::new(data)
+    }
+
+    async fn run_recorded_backend_migration(
+        fail_store: bool,
+    ) -> (
+        CommandResult,
+        Vec<String>,
+        Arc<Mutex<Workspace>>,
+        Arc<Mutex<AppSettings>>,
+        std::path::PathBuf,
+    ) {
+        let project_dir =
+            std::env::temp_dir().join(format!("okena-backend-migration-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&project_dir).expect("create migration fixture");
+        std::fs::write(project_dir.join("okena.yaml"), "services: []\n")
+            .expect("write migration services");
+        let project_path = project_dir.to_string_lossy().into_owned();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingMigrationBackend::new(
+            events.clone(),
+            SessionBackend::None,
+        ));
+        let workspace = Arc::new(Mutex::new(workspace_with_migration_terminals(
+            &project_path,
+        )));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let settings = Arc::new(Mutex::new(default_settings()));
+        settings.lock().session_backend = SessionBackend::None;
+        let persistence_events = events.clone();
+        let mut daemon_config = DaemonConfig::with_persistence(
+            settings.clone(),
+            Arc::new(move |_| {
+                persistence_events.lock().push("store".to_string());
+                if fail_store {
+                    Err("injected persistence failure".to_string())
+                } else {
+                    Ok(())
+                }
+            }),
+        );
+        let (workspace_tick, _workspace_rx) = watch::channel(0u64);
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let no_hook_runner = None;
+        let no_hook_monitor = None;
+        let result = set_settings_with_backend_migration(
+            serde_json::json!({ "session_backend": "Tmux" }),
+            &mut daemon_config,
+            &backend,
+            &workspace,
+            &workspace_tick,
+            &no_hook_runner,
+            &no_hook_monitor,
+            &terminals,
+            &service_manager,
+            &service_tick,
+            &tokio::runtime::Handle::current(),
+            &Arc::new(Mutex::new(HashMap::new())),
+        )
+        .await;
+        let recorded_events = events.lock().clone();
+        (result, recorded_events, workspace, settings, project_dir)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backend_migration_cleans_before_store_and_materializes_on_new_route() {
+        let (result, events, workspace, settings, project_dir) =
+            run_recorded_backend_migration(false).await;
+
+        assert!(matches!(result, CommandResult::Ok(_)));
+        assert_eq!(
+            events,
+            vec![
+                "kill:hook",
+                "kill:ordinary",
+                "flush",
+                "preflight",
+                "store",
+                "switch:Tmux",
+                "reconnect:Tmux:ordinary",
+            ]
+        );
+        assert_eq!(settings.lock().session_backend, SessionBackend::Tmux);
+        let workspace = workspace.lock();
+        assert_eq!(workspace.terminal_backend_migration_epoch(), None);
+        let project = workspace.project("p1").expect("project survives migration");
+        assert!(project.hook_terminals.is_empty());
+        assert!(matches!(
+            project.layout.as_ref(),
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal_id),
+                ..
+            }) if terminal_id == "ordinary"
+        ));
+        drop(workspace);
+        std::fs::remove_dir_all(project_dir).expect("remove migration fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backend_migration_save_failure_rematerializes_the_old_route() {
+        let (result, events, workspace, settings, project_dir) =
+            run_recorded_backend_migration(true).await;
+
+        assert!(
+            matches!(result, CommandResult::Err(ref error) if error.contains("injected persistence failure"))
+        );
+        assert_eq!(
+            events,
+            vec![
+                "kill:hook",
+                "kill:ordinary",
+                "flush",
+                "preflight",
+                "store",
+                "reconnect:None:ordinary",
+            ]
+        );
+        assert_eq!(settings.lock().session_backend, SessionBackend::None);
+        let workspace = workspace.lock();
+        assert_eq!(workspace.terminal_backend_migration_epoch(), None);
+        assert!(matches!(
+            workspace
+                .project("p1")
+                .and_then(|project| project.layout.as_ref()),
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal_id),
+                ..
+            }) if terminal_id == "ordinary"
+        ));
+        drop(workspace);
+        std::fs::remove_dir_all(project_dir).expect("remove migration fixture");
+    }
+
+    #[test]
+    fn backend_migration_guard_releases_the_gate_and_publishes_a_fresh_tick() {
+        let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
+        let (workspace_tick, workspace_rx) = watch::channel(0u64);
+        let migration = workspace
+            .lock()
+            .begin_terminal_backend_migration(SessionBackend::None, &ShellType::Default)
+            .expect("begin migration");
+
+        drop(TerminalBackendMigrationGuard::new(
+            workspace.clone(),
+            workspace_tick,
+            None,
+            None,
+            migration.epoch,
+        ));
+
+        assert_eq!(workspace.lock().terminal_backend_migration_epoch(), None);
+        assert_eq!(*workspace_rx.borrow(), 1);
     }
 
     async fn request(
