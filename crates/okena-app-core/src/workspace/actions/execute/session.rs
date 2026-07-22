@@ -13,11 +13,11 @@
 // more than it clarifies here.
 #![allow(clippy::too_many_arguments)]
 
-use super::{ActionResult, spawn_uninitialized_terminals};
+use super::{ActionResult, ensure_terminal, spawn_uninitialized_terminals};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::persistence::{
-    delete_session, export_workspace, import_workspace, list_sessions, load_session,
+    delete_session, export_workspace, import_workspace, list_sessions, load_session_with_cleanup,
     rename_session, save_session, session_exists,
 };
 use crate::workspace::state::{Workspace, WorkspaceData};
@@ -26,8 +26,34 @@ use okena_terminal::backend::TerminalBackend;
 use okena_workspace::context::WorkspaceCx;
 use std::collections::HashSet;
 
-/// Kill every live PTY, swap the workspace to `data`, then respawn terminals for
-/// every project in the new workspace. Shared by `load_session` + `import`.
+fn ordinary_terminal_ids(data: &WorkspaceData) -> HashSet<String> {
+    data.projects
+        .iter()
+        .flat_map(|project| {
+            project
+                .layout
+                .as_ref()
+                .map_or_else(Vec::new, |layout| layout.collect_terminal_ids())
+        })
+        .collect()
+}
+
+fn project_owned_terminal_ids(data: &WorkspaceData) -> HashSet<String> {
+    data.projects
+        .iter()
+        .flat_map(|project| {
+            let mut ids = project
+                .layout
+                .as_ref()
+                .map_or_else(Vec::new, |layout| layout.collect_terminal_ids());
+            ids.extend(project.service_terminals.values().cloned());
+            ids.extend(project.hook_terminals.keys().cloned());
+            ids
+        })
+        .collect()
+}
+
+/// Kill outgoing-only PTYs, swap the workspace, then restore incoming terminals.
 fn replace_workspace_with(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
@@ -35,28 +61,35 @@ fn replace_workspace_with(
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
+    stale_terminal_ids: &[String],
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    // Include persisted hook ids from both workspaces: a persistent backend can
-    // own them even when this process has no matching registry entry.
+    let incoming_ordinary_ids = ordinary_terminal_ids(&data);
+    let mut incoming_persistent_ids = incoming_ordinary_ids.clone();
+    incoming_persistent_ids.extend(
+        data.projects
+            .iter()
+            .flat_map(|project| project.service_terminals.values().cloned()),
+    );
+
     let outgoing_hook_ids: HashSet<String> = ws
         .projects()
         .iter()
         .flat_map(|project| project.hook_terminals.keys().cloned())
         .collect();
-    let mut ids: Vec<String> = terminals.lock().keys().cloned().collect();
-    ids.extend(
-        ws.projects()
-            .iter()
-            .flat_map(|project| project.hook_terminals.keys().cloned()),
-    );
-    ids.extend(
+    let mut ids_to_kill: HashSet<String> = terminals.lock().keys().cloned().collect();
+    ids_to_kill.extend(project_owned_terminal_ids(ws.data()));
+    ids_to_kill.extend(stale_terminal_ids.iter().cloned());
+    // Incoming hooks are never reconnected; load clears them and fires fresh
+    // project-open lifecycle hooks instead.
+    ids_to_kill.extend(
         data.projects
             .iter()
             .flat_map(|project| project.hook_terminals.keys().cloned()),
     );
+    ids_to_kill.retain(|id| !incoming_persistent_ids.contains(id));
+    let mut ids: Vec<String> = ids_to_kill.into_iter().collect();
     ids.sort();
-    ids.dedup();
     if let Some(monitor) = cx.hook_monitor() {
         for id in &outgoing_hook_ids {
             monitor.finish_by_terminal_id(id, None);
@@ -75,9 +108,16 @@ fn replace_workspace_with(
         ws.clear_stale_hook_terminals(pid, cx);
     }
 
-    // Non-persistent loads have uninitialized layout slots; persistent sessions
-    // retain ordinary ids and reconnect through the existing spawn path.
     let mut materialization_errors = Vec::new();
+    let mut incoming_ordinary_ids: Vec<String> = incoming_ordinary_ids.into_iter().collect();
+    incoming_ordinary_ids.sort();
+    for terminal_id in incoming_ordinary_ids {
+        if ensure_terminal(&terminal_id, terminals, backend, ws).is_none() {
+            materialization_errors.push(format!(
+                "failed to reconnect persisted terminal {terminal_id}"
+            ));
+        }
+    }
     for pid in &project_ids {
         if let ActionResult::Err(e) =
             spawn_uninitialized_terminals(ws, pid, backend, terminals, settings, None, cx)
@@ -107,11 +147,20 @@ pub(super) fn load_session_action(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let data = match load_session(&name, settings.session_backend) {
-        Ok(d) => d,
+    let loaded = match load_session_with_cleanup(&name, settings.session_backend) {
+        Ok(loaded) => loaded,
         Err(e) => return ActionResult::Err(format!("failed to load session '{name}': {e}")),
     };
-    replace_workspace_with(ws, focus_manager, data, backend, terminals, settings, cx)
+    replace_workspace_with(
+        ws,
+        focus_manager,
+        loaded.data,
+        backend,
+        terminals,
+        settings,
+        &loaded.stale_terminal_ids,
+        cx,
+    )
 }
 
 pub(super) fn list_sessions_action() -> ActionResult {
@@ -162,7 +211,16 @@ pub(super) fn import_workspace_action(
         Ok(d) => d,
         Err(e) => return ActionResult::Err(format!("failed to import '{path}': {e}")),
     };
-    replace_workspace_with(ws, focus_manager, data, backend, terminals, settings, cx)
+    replace_workspace_with(
+        ws,
+        focus_manager,
+        data,
+        backend,
+        terminals,
+        settings,
+        &[],
+        cx,
+    )
 }
 
 pub(super) fn export_workspace_action(ws: &Workspace, path: String) -> ActionResult {
@@ -185,7 +243,7 @@ mod tests {
         HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, WindowState,
     };
     use okena_terminal::shell_config::ShellType;
-    use okena_terminal::terminal::TerminalTransport;
+    use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -203,6 +261,7 @@ mod tests {
     struct RecordingBackend {
         next_id: AtomicUsize,
         killed: Mutex<Vec<String>>,
+        reconnected: Mutex<Vec<(String, String)>>,
         fail_next_cwds: Mutex<HashSet<String>>,
     }
 
@@ -221,11 +280,15 @@ mod tests {
 
         fn reconnect_terminal(
             &self,
-            _terminal_id: &str,
-            _cwd: &str,
+            terminal_id: &str,
+            cwd: &str,
             _shell: Option<&ShellType>,
         ) -> anyhow::Result<String> {
-            anyhow::bail!("not used")
+            self.reconnected
+                .lock()
+                .unwrap()
+                .push((terminal_id.to_string(), cwd.to_string()));
+            Ok(terminal_id.to_string())
         }
 
         fn kill(&self, terminal_id: &str) {
@@ -333,6 +396,7 @@ mod tests {
         let backend = Arc::new(RecordingBackend {
             next_id: AtomicUsize::new(1),
             killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
             fail_next_cwds: Mutex::new(HashSet::new()),
         });
         let terminals: TerminalsRegistry = Arc::new(Default::default());
@@ -352,6 +416,7 @@ mod tests {
             backend.as_ref(),
             &terminals,
             &AppSettings::default(),
+            &[],
             &mut cx,
         );
 
@@ -370,12 +435,102 @@ mod tests {
     }
 
     #[test]
+    fn persistent_replacement_preserves_and_reconnects_incoming_terminal_ids() {
+        let backend = Arc::new(RecordingBackend {
+            next_id: AtomicUsize::new(1),
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::new()),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let runner = HookRunner::new(backend.clone(), terminals.clone());
+        let monitor = HookMonitor::new();
+        let mut cx = TestCx { runner, monitor };
+        let terminal_node = |id: &str| LayoutNode::Terminal {
+            terminal_id: Some(id.to_string()),
+            shell_type: ShellType::Default,
+            minimized: false,
+            detached: false,
+            zoom_level: 1.0,
+        };
+
+        let mut outgoing = project("old", "outgoing-hook", None);
+        outgoing.layout = Some(LayoutNode::Tabs {
+            children: vec![terminal_node("shared"), terminal_node("outgoing-only")],
+            active_tab: 0,
+        });
+        let mut workspace = Workspace::new(data(outgoing));
+        let mut focus = FocusManager::default();
+
+        terminals.lock().insert(
+            "registry-only".to_string(),
+            Arc::new(Terminal::new(
+                "registry-only".to_string(),
+                TerminalSize::default(),
+                backend.transport(),
+                "/old".to_string(),
+            )),
+        );
+
+        let mut incoming = project("new", "incoming-hook", None);
+        let incoming_cwd = incoming.path.clone();
+        incoming.layout = Some(LayoutNode::Tabs {
+            children: vec![terminal_node("shared"), terminal_node("incoming-only")],
+            active_tab: 0,
+        });
+        incoming
+            .service_terminals
+            .insert("server".to_string(), "incoming-service".to_string());
+
+        let result = replace_workspace_with(
+            &mut workspace,
+            &mut focus,
+            data(incoming),
+            backend.as_ref(),
+            &terminals,
+            &AppSettings::default(),
+            &["discarded-stale".to_string()],
+            &mut cx,
+        );
+
+        assert!(matches!(result, ActionResult::Ok(_)));
+        let killed = backend.killed.lock().unwrap();
+        assert!(killed.contains(&"outgoing-only".to_string()));
+        assert!(killed.contains(&"registry-only".to_string()));
+        assert!(killed.contains(&"outgoing-hook".to_string()));
+        assert!(killed.contains(&"incoming-hook".to_string()));
+        assert!(killed.contains(&"discarded-stale".to_string()));
+        assert!(!killed.contains(&"shared".to_string()));
+        assert!(!killed.contains(&"incoming-only".to_string()));
+        assert!(!killed.contains(&"incoming-service".to_string()));
+        drop(killed);
+
+        let reconnected = backend.reconnected.lock().unwrap();
+        assert_eq!(
+            *reconnected,
+            vec![
+                ("incoming-only".to_string(), incoming_cwd.clone()),
+                ("shared".to_string(), incoming_cwd),
+            ]
+        );
+        drop(reconnected);
+        let registry = terminals.lock();
+        assert_eq!(registry.len(), 2);
+        assert!(registry.contains_key("shared"));
+        assert!(registry.contains_key("incoming-only"));
+        assert!(!registry.contains_key("registry-only"));
+        let loaded = workspace.project("new").expect("incoming project loaded");
+        assert!(!loaded.hook_terminals.contains_key("incoming-hook"));
+    }
+
+    #[test]
     fn replacement_attempts_every_project_and_reports_aggregated_materialization_errors() {
         let failed_cwd = std::env::temp_dir().join("okena-session-failed");
         let successful_cwd = std::env::temp_dir().join("okena-session-successful");
         let backend = Arc::new(RecordingBackend {
             next_id: AtomicUsize::new(1),
             killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
             fail_next_cwds: Mutex::new(HashSet::from([failed_cwd.to_string_lossy().into_owned()])),
         });
         let terminals: TerminalsRegistry = Arc::new(Default::default());
@@ -418,6 +573,7 @@ mod tests {
             backend.as_ref(),
             &terminals,
             &AppSettings::default(),
+            &[],
             &mut cx,
         );
 
@@ -453,6 +609,7 @@ mod tests {
         let backend = Arc::new(RecordingBackend {
             next_id: AtomicUsize::new(1),
             killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
             fail_next_cwds: Mutex::new(HashSet::new()),
         });
         let terminals: TerminalsRegistry = Arc::new(Default::default());
@@ -478,6 +635,7 @@ mod tests {
             backend.as_ref(),
             &terminals,
             &AppSettings::default(),
+            &[],
             &mut cx,
         );
 

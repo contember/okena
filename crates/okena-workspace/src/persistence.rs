@@ -37,11 +37,19 @@ pub use super::settings::{
 #[allow(unused_imports)]
 pub use super::sessions::{
     ExportedWorkspace, SessionInfo, delete_session, export_workspace, import_workspace,
-    list_sessions, load_session, rename_session, save_session, session_exists,
+    list_sessions, load_session, load_session_with_cleanup, rename_session, save_session,
+    session_exists,
 };
 
 /// Current workspace schema version - increment when making breaking changes
 pub const WORKSPACE_VERSION: u32 = 2;
+
+/// Workspace data plus persistent terminal sessions orphaned by load-time
+/// cleanup. Startup kills these ids after constructing its terminal backend.
+pub struct LoadedWorkspace {
+    pub data: WorkspaceData,
+    pub stale_terminal_ids: Vec<String>,
+}
 
 /// Get the config directory for the active profile.
 ///
@@ -319,6 +327,11 @@ pub(crate) fn validate_workspace_data(
 /// On error, the caller should fall back to `default_workspace()` — auto-save is
 /// automatically blocked to prevent overwriting valid data on disk.
 pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
+    load_workspace_with_cleanup(backend).map(|loaded| loaded.data)
+}
+
+/// Load workspace data while retaining ids owned by stale worktree rows.
+pub fn load_workspace_with_cleanup(backend: SessionBackend) -> Result<LoadedWorkspace> {
     let path = get_workspace_path();
 
     // If workspace.json is missing, try to auto-recover from backup
@@ -395,11 +408,14 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
         let session_backend = backend.resolve();
         let clear_ids = !session_backend.supports_persistence();
         validate_workspace_data(&mut data, clear_ids, backend);
-        sync_worktrees(&mut data);
+        let stale_terminal_ids = sync_worktrees(&mut data);
 
         // Successful load — allow saving
         LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
-        Ok(data)
+        Ok(LoadedWorkspace {
+            data,
+            stale_terminal_ids,
+        })
     } else {
         let bak_path = path.with_extension("json.bak");
         if bak_path.exists() {
@@ -415,7 +431,10 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
             // Fresh install — no workspace.json and no backup. Allow saving.
             log::info!("No workspace file found — starting with default workspace.");
         }
-        Ok(default_workspace())
+        Ok(LoadedWorkspace {
+            data: default_workspace(),
+            stale_terminal_ids: Vec::new(),
+        })
     }
 }
 
@@ -931,7 +950,7 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
 /// Worktrees are only added as projects explicitly by the user (via the worktree
 /// list popover or the create worktree dialog). This function only cleans up
 /// worktree projects that have become stale.
-pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
+pub(crate) fn sync_worktrees(data: &mut WorkspaceData) -> Vec<String> {
     let stale_ids: Vec<String> = data
         .projects
         .iter()
@@ -939,6 +958,23 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
         .filter(|p| !Path::new(&p.path).exists())
         .map(|p| p.id.clone())
         .collect();
+
+    let mut stale_terminal_ids: Vec<String> = data
+        .projects
+        .iter()
+        .filter(|project| stale_ids.contains(&project.id))
+        .flat_map(|project| {
+            let mut ids = project
+                .layout
+                .as_ref()
+                .map_or_else(Vec::new, LayoutNode::collect_terminal_ids);
+            ids.extend(project.service_terminals.values().cloned());
+            ids.extend(project.hook_terminals.keys().cloned());
+            ids
+        })
+        .collect();
+    stale_terminal_ids.sort();
+    stale_terminal_ids.dedup();
 
     for id in &stale_ids {
         data.projects.retain(|p| p.id != *id);
@@ -951,6 +987,21 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
             parent.worktree_ids.retain(|pid| pid != id);
         }
     }
+
+    let retained_terminal_ids: std::collections::HashSet<String> = data
+        .projects
+        .iter()
+        .flat_map(|project| {
+            let mut ids = project
+                .layout
+                .as_ref()
+                .map_or_else(Vec::new, LayoutNode::collect_terminal_ids);
+            ids.extend(project.service_terminals.values().cloned());
+            ids.extend(project.hook_terminals.keys().cloned());
+            ids
+        })
+        .collect();
+    stale_terminal_ids.retain(|id| !retained_terminal_ids.contains(id));
 
     // Self-heal a worktree left mid-create by a daemon kill: optimistic create
     // registers the row with layout:None before the git checkout, and the
@@ -977,6 +1028,8 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
             p.is_creating = false;
         }
     }
+
+    stale_terminal_ids
 }
 
 /// Create a default workspace with one project
@@ -2337,9 +2390,28 @@ mod tests {
             worktree_path: String::new(),
             branch_name: "b".to_string(),
         });
+        wt.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("stale-layout".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: Default::default(),
+            zoom_level: 1.0,
+        });
+        wt.service_terminals
+            .insert("service".to_string(), "stale-service".to_string());
+        wt.hook_terminals.insert(
+            "stale-hook".to_string(),
+            crate::state::HookTerminalEntry {
+                label: "hook".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo hook".to_string(),
+                cwd: "/tmp".to_string(),
+            },
+        );
 
         let mut data = make_workspace(vec![parent, wt], vec!["p1", "wt1"], vec![]);
-        sync_worktrees(&mut data);
+        let stale_terminal_ids = sync_worktrees(&mut data);
 
         let p1 = data.projects.iter().find(|p| p.id == "p1").unwrap();
         assert!(
@@ -2349,6 +2421,15 @@ mod tests {
         assert!(
             !data.projects.iter().any(|p| p.id == "wt1"),
             "stale worktree removed"
+        );
+        assert_eq!(
+            stale_terminal_ids,
+            vec![
+                "stale-hook".to_string(),
+                "stale-layout".to_string(),
+                "stale-service".to_string(),
+            ],
+            "discarded ownership survives long enough for startup cleanup"
         );
     }
 

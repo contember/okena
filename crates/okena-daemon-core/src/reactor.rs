@@ -47,6 +47,9 @@ pub struct DaemonReactor {
     /// Bumped on every service-reactor `notify`.
     pub service_tick: watch::Sender<u64>,
 
+    /// Blocking autosave jobs that must drain before the final shutdown save.
+    pub(crate) autosave_tracker: Arc<crate::observers::AutosaveTracker>,
+
     /// Hook runner (creates PTY-backed hook terminals), if configured.
     pub hook_runner: Option<HookRunner>,
 
@@ -78,6 +81,7 @@ impl DaemonReactor {
             state_version: watch::Sender::new(0),
             workspace_tick: watch::Sender::new(0),
             service_tick: watch::Sender::new(0),
+            autosave_tracker: Arc::new(crate::observers::AutosaveTracker::default()),
             hook_runner,
             hook_monitor,
             runtime,
