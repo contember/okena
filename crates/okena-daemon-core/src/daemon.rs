@@ -504,6 +504,11 @@ fn flush_shutdown_state(
             .drain_pending_closes()
             .into_iter()
             .chain(ws.drain_pending_terminal_kills())
+            .chain(
+                ws.projects()
+                    .iter()
+                    .flat_map(|project| project.hook_terminals.keys().cloned()),
+            )
             .collect();
         (ws.data().clone(), terminal_ids)
     };
@@ -586,7 +591,41 @@ mod shutdown_tests {
 
     #[test]
     fn shutdown_drains_terminal_kills_before_saving() {
-        let workspace = Arc::new(Mutex::new(Workspace::new(WorkspaceData::empty())));
+        let mut data = WorkspaceData::empty();
+        let mut project = okena_state::ProjectData {
+            id: "p1".to_string(),
+            name: "Project".to_string(),
+            path: "/tmp".to_string(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        };
+        project.hook_terminals.insert(
+            "persistent-hook".to_string(),
+            okena_state::HookTerminalEntry {
+                label: "on_project_open".to_string(),
+                status: okena_state::HookTerminalStatus::Running,
+                hook_type: "on_project_open".to_string(),
+                command: "echo hook".to_string(),
+                cwd: "/tmp".to_string(),
+            },
+        );
+        data.projects.push(project);
+        data.project_order.push("p1".to_string());
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
         workspace.lock().queue_terminal_kills([
             "terminal-a".to_string(),
             "terminal-a".to_string(),
@@ -600,13 +639,14 @@ mod shutdown_tests {
         let saved = AtomicBool::new(false);
 
         flush_shutdown_state(&workspace, &backend, &terminals, |_| {
-            assert_eq!(killed.lock().len(), 2, "cleanup precedes final save");
+            assert_eq!(killed.lock().len(), 3, "cleanup precedes final save");
             saved.store(true, Ordering::Relaxed);
             Ok(())
         })
         .unwrap();
 
         assert!(saved.load(Ordering::Relaxed));
+        assert!(killed.lock().contains(&"persistent-hook".to_string()));
         assert!(workspace.lock().drain_pending_terminal_kills().is_empty());
     }
 }
