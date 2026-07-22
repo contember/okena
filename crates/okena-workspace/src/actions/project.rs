@@ -15,8 +15,30 @@ pub struct ProjectDirectoryRenamePlan {
     project_id: String,
     old_path: std::path::PathBuf,
     new_name: String,
-    translated_paths: Vec<(String, String)>,
+    translated_paths: Vec<ProjectPathTranslation>,
     move_kind: ProjectDirectoryMove,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectPathTranslation {
+    project_id: String,
+    old_path: String,
+    new_path: String,
+    translated_hook_terminal_ids: Vec<String>,
+}
+
+impl ProjectPathTranslation {
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub fn old_path(&self) -> &str {
+        &self.old_path
+    }
+
+    pub fn new_path(&self) -> &str {
+        &self.new_path
+    }
 }
 
 #[derive(Clone)]
@@ -42,6 +64,23 @@ impl ProjectDirectoryRenamePlan {
 
     pub fn old_path(&self) -> &std::path::Path {
         &self.old_path
+    }
+
+    pub fn new_path(&self) -> &std::path::Path {
+        match &self.move_kind {
+            ProjectDirectoryMove::Directory { new_path, .. }
+            | ProjectDirectoryMove::Worktree { new_path, .. } => new_path,
+        }
+    }
+
+    pub fn affected_translations(&self) -> &[ProjectPathTranslation] {
+        &self.translated_paths
+    }
+
+    pub fn affected_project_ids(&self) -> impl Iterator<Item = &str> {
+        self.translated_paths
+            .iter()
+            .map(|translation| translation.project_id.as_str())
     }
 
     pub fn execute(&self) -> Result<ProjectDirectoryRenameResult, String> {
@@ -485,15 +524,7 @@ impl Workspace {
         });
 
         let Some((parent_project_id, recorded_root)) = worktree else {
-            if okena_git::get_repo_root(&old_path).is_some_and(|repo_root| {
-                Self::physical_path_identity(&repo_root) == Self::physical_path_identity(&old_path)
-                    && !okena_git::list_linked_worktree_paths(&old_path).is_empty()
-            }) {
-                return Err(
-                    "Cannot rename a Git repository while it has linked worktrees; remove them first"
-                        .to_string(),
-                );
-            }
+            self.ensure_directory_tree_git_topology_safe(&old_path, None)?;
             let translated_paths = self.translate_local_project_paths(&old_path, &new_path_buf)?;
             return Ok(ProjectDirectoryRenamePlan {
                 project_id: project_id.to_string(),
@@ -532,6 +563,7 @@ impl Workspace {
             if !Self::physical_path_identity(&new_path_buf).starts_with(&root_identity) {
                 return Err("renamed project path must stay inside its linked worktree".to_string());
             }
+            self.ensure_directory_tree_git_topology_safe(&old_path, None)?;
             let translated_paths = self.translate_local_project_paths(&old_path, &new_path_buf)?;
             return Ok(ProjectDirectoryRenamePlan {
                 project_id: project_id.to_string(),
@@ -545,6 +577,10 @@ impl Workspace {
             });
         }
 
+        self.ensure_directory_tree_git_topology_safe(
+            verified.checkout_path(),
+            Some(verified.checkout_path()),
+        )?;
         let translated_paths =
             self.translate_local_project_paths(verified.checkout_path(), &new_path_buf)?;
         Ok(ProjectDirectoryRenamePlan {
@@ -598,7 +634,7 @@ impl Workspace {
         &self,
         old_root: &std::path::Path,
         new_root: &std::path::Path,
-    ) -> Result<Vec<(String, String)>, String> {
+    ) -> Result<Vec<ProjectPathTranslation>, String> {
         let old_identity = Self::physical_path_identity(old_root);
         let canonical_root = std::fs::canonicalize(old_root)
             .map_err(|error| format!("Failed to resolve project directory: {error}"))?;
@@ -627,25 +663,107 @@ impl Workspace {
             } else {
                 new_root.join(suffix)
             };
-            translated_paths.push((
-                descendant.id.clone(),
-                translated_path.to_string_lossy().into_owned(),
-            ));
+            let translated_hook_terminal_ids = descendant
+                .hook_terminals
+                .iter()
+                .filter(|(_, entry)| {
+                    Self::physical_path_identity(std::path::Path::new(&entry.cwd))
+                        == Self::physical_path_identity(descendant_path)
+                })
+                .map(|(terminal_id, _)| terminal_id.clone())
+                .collect();
+            translated_paths.push(ProjectPathTranslation {
+                project_id: descendant.id.clone(),
+                old_path: descendant.path.clone(),
+                new_path: translated_path.to_string_lossy().into_owned(),
+                translated_hook_terminal_ids,
+            });
         }
         Ok(translated_paths)
     }
 
-    fn apply_translated_project_paths(&mut self, translated_paths: Vec<(String, String)>) {
-        for (id, translated_path) in translated_paths {
+    fn apply_translated_project_paths(&mut self, translated_paths: Vec<ProjectPathTranslation>) {
+        for translation in translated_paths {
             if let Some(descendant) = self
                 .data
                 .projects
                 .iter_mut()
-                .find(|project| project.id == id)
+                .find(|project| project.id == translation.project_id)
             {
-                descendant.path = translated_path;
+                descendant.path = translation.new_path.clone();
+                for terminal_id in &translation.translated_hook_terminal_ids {
+                    if let Some(entry) = descendant.hook_terminals.get_mut(terminal_id) {
+                        entry.cwd = translation.new_path.clone();
+                    }
+                }
             }
         }
+    }
+
+    /// Reject directory moves that would invalidate Git's absolute worktree links.
+    fn ensure_directory_tree_git_topology_safe(
+        &self,
+        old_root: &std::path::Path,
+        allowed_worktree_root: Option<&std::path::Path>,
+    ) -> Result<(), String> {
+        let old_identity = Self::physical_path_identity(old_root);
+        let allowed_identity = allowed_worktree_root.map(Self::physical_path_identity);
+        let mut repo_roots: Vec<std::path::PathBuf> = Vec::new();
+
+        for project in self.projects().iter().filter(|project| !project.is_remote) {
+            let project_path = std::path::Path::new(&project.path);
+            let project_identity = Self::physical_path_identity(project_path);
+            if project_identity.starts_with(&old_identity)
+                && let Some(repo_root) = okena_git::get_repo_root(project_path)
+            {
+                let repo_identity = Self::physical_path_identity(&repo_root);
+                if repo_identity.starts_with(&old_identity) {
+                    if !repo_roots
+                        .iter()
+                        .any(|known| Self::physical_path_identity(known) == repo_identity)
+                    {
+                        repo_roots.push(repo_root);
+                    }
+                    if project.worktree_info.is_some()
+                        && allowed_identity.as_ref() != Some(&repo_identity)
+                    {
+                        return Err(format!(
+                            "Cannot rename a directory containing linked worktree project '{}'",
+                            project.name
+                        ));
+                    }
+                }
+            }
+
+            if let Some(metadata) = &project.worktree_info
+                && !metadata.worktree_path.is_empty()
+            {
+                let recorded_identity =
+                    Self::physical_path_identity(std::path::Path::new(&metadata.worktree_path));
+                if recorded_identity.starts_with(&old_identity)
+                    && allowed_identity.as_ref() != Some(&recorded_identity)
+                {
+                    return Err(format!(
+                        "Cannot rename a directory containing recorded worktree root for '{}'",
+                        project.name
+                    ));
+                }
+            }
+        }
+
+        for repo_root in repo_roots {
+            let repo_identity = Self::physical_path_identity(&repo_root);
+            if allowed_identity.as_ref() == Some(&repo_identity) {
+                continue;
+            }
+            if !okena_git::list_linked_worktree_paths(&repo_root).is_empty() {
+                return Err(
+                    "Cannot rename a Git repository while it has linked worktrees; remove them first"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Set the folder color for a project (also propagates to worktree children without overrides)
@@ -3005,12 +3123,35 @@ mod gpui_tests {
         project.path = project_path.to_string_lossy().into_owned();
         let mut descendant = make_project("descendant");
         descendant.path = descendant_path.to_string_lossy().into_owned();
+        descendant.hook_terminals.insert(
+            "completed-descendant-hook".to_string(),
+            okena_state::HookTerminalEntry {
+                label: "completed".to_string(),
+                status: okena_state::HookTerminalStatus::Succeeded,
+                hook_type: "project.on_open".to_string(),
+                command: "echo done".to_string(),
+                cwd: descendant_path.to_string_lossy().into_owned(),
+            },
+        );
         let mut data = make_workspace_data();
         data.projects = vec![project, descendant];
         data.project_order = vec!["project".to_string(), "descendant".to_string()];
         let workspace = cx.new(|_| Workspace::new(data));
 
         workspace.update(cx, |ws, cx| {
+            let plan = ws
+                .prepare_project_directory_rename(
+                    "project",
+                    renamed_path.to_string_lossy().into_owned(),
+                    "renamed-project".to_string(),
+                )
+                .unwrap();
+            assert_eq!(
+                plan.affected_project_ids().collect::<Vec<_>>(),
+                vec!["project", "descendant"]
+            );
+            assert_eq!(plan.old_path(), project_path);
+            assert_eq!(plan.new_path(), renamed_path);
             ws.rename_project_directory(
                 "project",
                 renamed_path.to_string_lossy().into_owned(),
@@ -3027,6 +3168,13 @@ mod gpui_tests {
             );
             assert_eq!(
                 Path::new(&ws.project("descendant").unwrap().path),
+                renamed_path.join("packages/nested")
+            );
+            assert_eq!(
+                Path::new(
+                    &ws.project("descendant").unwrap().hook_terminals["completed-descendant-hook"]
+                        .cwd
+                ),
                 renamed_path.join("packages/nested")
             );
         });
@@ -3119,6 +3267,150 @@ mod gpui_tests {
                 renamed_repo
             );
         });
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_ancestor_rejects_descendant_repository_with_external_worktree(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-ancestor-repo-rename-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ancestor = fixture.join("workspace");
+        let main_repo = ancestor.join("packages/repo");
+        let linked_worktree = fixture.join("external-worktree");
+        let renamed = fixture.join("renamed-workspace");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "file.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "external",
+            path_str(&linked_worktree),
+        ]);
+
+        let mut parent = make_project("ancestor");
+        parent.path = ancestor.to_string_lossy().into_owned();
+        let mut descendant = make_project("repo");
+        descendant.path = main_repo.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, descendant];
+        data.project_order = vec!["ancestor".to_string(), "repo".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let error = workspace.update(cx, |ws, _| {
+            ws.prepare_project_directory_rename(
+                "ancestor",
+                renamed.to_string_lossy().into_owned(),
+                "renamed-workspace".to_string(),
+            )
+            .err()
+            .expect("descendant repository registration must block ancestor move")
+        });
+        assert!(error.contains("has linked worktrees"));
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&linked_worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_ancestor_rejects_descendant_worktree_metadata_root(cx: &mut gpui::TestAppContext) {
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-ancestor-worktree-rename-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let main_repo = fixture.join("main");
+        let ancestor = fixture.join("workspace");
+        let worktree = ancestor.join("linked-checkout");
+        let renamed = fixture.join("renamed-workspace");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "file.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+
+        let mut main = make_project("main");
+        main.path = main_repo.to_string_lossy().into_owned();
+        let mut outer = make_project("ancestor");
+        outer.path = ancestor.to_string_lossy().into_owned();
+        let mut child = make_worktree_project("worktree", "main");
+        child.path = worktree.to_string_lossy().into_owned();
+        child.worktree_info.as_mut().unwrap().worktree_path =
+            worktree.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![main, outer, child];
+        data.project_order = vec!["main".to_string(), "ancestor".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let error = workspace.update(cx, |ws, _| {
+            ws.prepare_project_directory_rename(
+                "ancestor",
+                renamed.to_string_lossy().into_owned(),
+                "renamed-workspace".to_string(),
+            )
+            .err()
+            .expect("registered descendant checkout must block plain directory move")
+        });
+        assert!(error.contains("linked worktree project"));
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&worktree),
+        ]);
         let _ = std::fs::remove_dir_all(fixture);
     }
 
