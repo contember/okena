@@ -119,6 +119,34 @@ fn publish_config_change_after_success(result: &CommandResult, state_version: &w
     }
 }
 
+struct SettingsUpdateOutcome {
+    result: CommandResult,
+    committed: bool,
+}
+
+impl SettingsUpdateOutcome {
+    fn uncommitted(result: CommandResult) -> Self {
+        Self {
+            result,
+            committed: false,
+        }
+    }
+
+    fn from_store_result(result: CommandResult) -> Self {
+        let committed = matches!(result, CommandResult::Ok(_));
+        Self { result, committed }
+    }
+}
+
+fn publish_committed_settings_change(
+    outcome: &SettingsUpdateOutcome,
+    state_version: &watch::Sender<u64>,
+) {
+    if outcome.committed {
+        state_version.send_modify(|version| *version = version.wrapping_add(1));
+    }
+}
+
 /// Run destructive cleanup only while no current project occupies the physical
 /// worktree root or one of its subdirectories. The workspace guard fences
 /// replacement registration against the check-to-delete window.
@@ -588,10 +616,10 @@ async fn set_settings_with_backend_migration(
     service_tick: &watch::Sender<u64>,
     runtime: &tokio::runtime::Handle,
     deadlines: &SoftCloseDeadlines,
-) -> CommandResult {
+) -> SettingsUpdateOutcome {
     let new_settings = match daemon_config.preview_settings(patch) {
         Ok(settings) => settings,
-        Err(error) => return CommandResult::Err(error),
+        Err(error) => return SettingsUpdateOutcome::uncommitted(CommandResult::Err(error)),
     };
     let old_settings = daemon_config
         .preview_settings(serde_json::json!({}))
@@ -599,18 +627,20 @@ async fn set_settings_with_backend_migration(
             "the current in-memory settings were already validated during daemon initialization",
         );
     if new_settings.session_backend == old_settings.session_backend {
-        return daemon_config.store_prevalidated_settings(&new_settings);
+        return SettingsUpdateOutcome::from_store_result(
+            daemon_config.store_prevalidated_settings(&new_settings),
+        );
     }
     if !backend.supports_session_backend_reconfiguration() {
-        return CommandResult::Err(
+        return SettingsUpdateOutcome::uncommitted(CommandResult::Err(
             "terminal backend does not support live session route changes".to_string(),
-        );
+        ));
     }
 
     if let Err(error) = backend.begin_session_backend_reconfiguration() {
-        return CommandResult::Err(format!(
+        return SettingsUpdateOutcome::uncommitted(CommandResult::Err(format!(
             "failed to begin terminal backend migration: {error}"
-        ));
+        )));
     }
     let mut backend_guard = BackendReconfigurationGuard::new(backend.clone());
 
@@ -623,7 +653,7 @@ async fn set_settings_with_backend_migration(
             Ok(migration) => migration,
             Err(error) => {
                 backend_guard.cancel();
-                return CommandResult::Err(error);
+                return SettingsUpdateOutcome::uncommitted(CommandResult::Err(error));
             }
         }
     };
@@ -717,10 +747,10 @@ async fn set_settings_with_backend_migration(
             &active_services,
         );
         guard.finish();
-        return CommandResult::Err(match recovery {
+        return SettingsUpdateOutcome::uncommitted(CommandResult::Err(match recovery {
             Ok(()) => error,
             Err(recovery_error) => format!("{error}; rollback failed: {recovery_error}"),
-        });
+        }));
     }
 
     let store_result = daemon_config.store_prevalidated_settings(&new_settings);
@@ -741,10 +771,10 @@ async fn set_settings_with_backend_migration(
             &active_services,
         );
         guard.finish();
-        return CommandResult::Err(match recovery {
+        return SettingsUpdateOutcome::uncommitted(CommandResult::Err(match recovery {
             Ok(()) => error,
             Err(recovery_error) => format!("{error}; rollback failed: {recovery_error}"),
-        });
+        }));
     }
 
     if let Err(error) = backend.apply_session_backend(new_settings.session_backend) {
@@ -772,7 +802,7 @@ async fn set_settings_with_backend_migration(
         if let Err(error) = recovery {
             failures.push(format!("terminal rollback failed: {error}"));
         }
-        return CommandResult::Err(failures.join("; "));
+        return SettingsUpdateOutcome::uncommitted(CommandResult::Err(failures.join("; ")));
     }
     backend_guard.applied();
 
@@ -791,11 +821,15 @@ async fn set_settings_with_backend_migration(
         &active_services,
     );
     guard.finish();
-    match recovery {
+    let result = match recovery {
         Ok(()) => store_result,
         Err(error) => CommandResult::Err(format!(
             "settings changed, but terminal rematerialization failed: {error}"
         )),
+    };
+    SettingsUpdateOutcome {
+        result,
+        committed: true,
     }
 }
 
@@ -1508,7 +1542,7 @@ pub async fn daemon_command_loop(
                     ActionRequest::GetSettings => daemon_config.get_settings(),
                     ActionRequest::GetSettingsSchema => get_settings_schema(),
                     ActionRequest::SetSettings { patch } => {
-                        let result = set_settings_with_backend_migration(
+                        let outcome = set_settings_with_backend_migration(
                             patch,
                             &mut daemon_config,
                             &backend,
@@ -1523,8 +1557,8 @@ pub async fn daemon_command_loop(
                             &deadlines,
                         )
                         .await;
-                        publish_config_change_after_success(&result, &state_version);
-                        result
+                        publish_committed_settings_change(&outcome, &state_version);
+                        outcome.result
                     }
                     ActionRequest::GetThemes => daemon_config.get_themes(),
                     ActionRequest::GetTheme { id } => daemon_config.get_theme(id),
@@ -2753,14 +2787,23 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         session_backend: Mutex<SessionBackend>,
         reconfiguration: AtomicBool,
+        fail_apply: bool,
+        fail_reconnect: bool,
     }
 
     impl RecordingMigrationBackend {
-        fn new(events: Arc<Mutex<Vec<String>>>, session_backend: SessionBackend) -> Self {
+        fn new(
+            events: Arc<Mutex<Vec<String>>>,
+            session_backend: SessionBackend,
+            fail_apply: bool,
+            fail_reconnect: bool,
+        ) -> Self {
             Self {
                 events,
                 session_backend: Mutex::new(session_backend),
                 reconfiguration: AtomicBool::new(false),
+                fail_apply,
+                fail_reconnect,
             }
         }
     }
@@ -2788,6 +2831,9 @@ mod tests {
                 "reconnect:{:?}:{terminal_id}",
                 *self.session_backend.lock()
             ));
+            if self.fail_reconnect {
+                anyhow::bail!("injected reconnect failure");
+            }
             Ok(terminal_id.to_string())
         }
 
@@ -2817,6 +2863,9 @@ mod tests {
 
         fn apply_session_backend(&self, backend: SessionBackend) -> anyhow::Result<()> {
             self.events.lock().push(format!("switch:{backend:?}"));
+            if self.fail_apply {
+                anyhow::bail!("injected backend switch failure");
+            }
             *self.session_backend.lock() = backend;
             self.reconfiguration.store(false, Ordering::SeqCst);
             Ok(())
@@ -2873,8 +2922,10 @@ mod tests {
 
     async fn run_recorded_backend_migration(
         fail_store: bool,
+        fail_apply: bool,
+        fail_reconnect: bool,
     ) -> (
-        CommandResult,
+        SettingsUpdateOutcome,
         Vec<String>,
         Arc<Mutex<Workspace>>,
         Arc<Mutex<AppSettings>>,
@@ -2891,6 +2942,8 @@ mod tests {
         let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingMigrationBackend::new(
             events.clone(),
             SessionBackend::None,
+            fail_apply,
+            fail_reconnect,
         ));
         let workspace = Arc::new(Mutex::new(workspace_with_migration_terminals(
             &project_path,
@@ -2939,10 +2992,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn backend_migration_cleans_before_store_and_materializes_on_new_route() {
-        let (result, events, workspace, settings, project_dir) =
-            run_recorded_backend_migration(false).await;
+        let (outcome, events, workspace, settings, project_dir) =
+            run_recorded_backend_migration(false, false, false).await;
 
-        assert!(matches!(result, CommandResult::Ok(_)));
+        assert!(matches!(outcome.result, CommandResult::Ok(_)));
+        assert!(outcome.committed);
         assert_eq!(
             events,
             vec![
@@ -2974,12 +3028,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn backend_migration_save_failure_rematerializes_the_old_route() {
-        let (result, events, workspace, settings, project_dir) =
-            run_recorded_backend_migration(true).await;
+        let (outcome, events, workspace, settings, project_dir) =
+            run_recorded_backend_migration(true, false, false).await;
 
         assert!(
-            matches!(result, CommandResult::Err(ref error) if error.contains("injected persistence failure"))
+            matches!(outcome.result, CommandResult::Err(ref error) if error.contains("injected persistence failure"))
         );
+        assert!(!outcome.committed);
         assert_eq!(
             events,
             vec![
@@ -3006,6 +3061,71 @@ mod tests {
             }) if terminal_id == "ordinary"
         ));
         drop(workspace);
+        std::fs::remove_dir_all(project_dir).expect("remove migration fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backend_migration_recovery_failure_still_publishes_committed_settings() {
+        let (outcome, events, _workspace, settings, project_dir) =
+            run_recorded_backend_migration(false, false, true).await;
+        let (state_version, receiver) = watch::channel(9u64);
+
+        publish_committed_settings_change(&outcome, &state_version);
+
+        assert!(matches!(
+            outcome.result,
+            CommandResult::Err(ref error)
+                if error.contains("settings changed, but terminal rematerialization failed")
+        ));
+        assert!(outcome.committed);
+        assert_eq!(*receiver.borrow(), 10);
+        assert_eq!(settings.lock().session_backend, SessionBackend::Tmux);
+        assert_eq!(
+            events,
+            vec![
+                "begin",
+                "kill:hook",
+                "kill:ordinary",
+                "flush",
+                "preflight",
+                "store",
+                "switch:Tmux",
+                "reconnect:Tmux:ordinary",
+            ]
+        );
+        std::fs::remove_dir_all(project_dir).expect("remove migration fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backend_migration_rollback_does_not_publish_settings_change() {
+        let (outcome, events, _workspace, settings, project_dir) =
+            run_recorded_backend_migration(false, true, false).await;
+        let (state_version, receiver) = watch::channel(9u64);
+
+        publish_committed_settings_change(&outcome, &state_version);
+
+        assert!(matches!(
+            outcome.result,
+            CommandResult::Err(ref error) if error.contains("injected backend switch failure")
+        ));
+        assert!(!outcome.committed);
+        assert_eq!(*receiver.borrow(), 9);
+        assert_eq!(settings.lock().session_backend, SessionBackend::None);
+        assert_eq!(
+            events,
+            vec![
+                "begin",
+                "kill:hook",
+                "kill:ordinary",
+                "flush",
+                "preflight",
+                "store",
+                "switch:Tmux",
+                "cancel",
+                "store",
+                "reconnect:None:ordinary",
+            ]
+        );
         std::fs::remove_dir_all(project_dir).expect("remove migration fixture");
     }
 
