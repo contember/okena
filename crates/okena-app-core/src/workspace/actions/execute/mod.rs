@@ -132,23 +132,23 @@ pub fn execute_action(
             }
         }
         ActionRequest::SendText { terminal_id, text } => {
-            terminal::send_text(ws, terminal_id, text, backend, terminals)
+            terminal::send_text(ws, terminal_id, text, backend, terminals, settings)
         }
         ActionRequest::SendBytes { terminal_id, data } => {
-            terminal::send_bytes(ws, terminal_id, data, backend, terminals)
+            terminal::send_bytes(ws, terminal_id, data, backend, terminals, settings)
         }
         ActionRequest::RunCommand {
             terminal_id,
             command,
-        } => terminal::run_command(ws, terminal_id, command, backend, terminals),
+        } => terminal::run_command(ws, terminal_id, command, backend, terminals, settings),
         ActionRequest::SendSpecialKey { terminal_id, key } => {
-            terminal::send_special_key(ws, terminal_id, key, backend, terminals)
+            terminal::send_special_key(ws, terminal_id, key, backend, terminals, settings)
         }
         ActionRequest::Resize {
             terminal_id,
             cols,
             rows,
-        } => terminal::resize(ws, terminal_id, cols, rows, backend, terminals),
+        } => terminal::resize(ws, terminal_id, cols, rows, backend, terminals, settings),
         ActionRequest::UpdateSplitSizes {
             project_id,
             path,
@@ -206,7 +206,7 @@ pub fn execute_action(
             terminal_id,
         } => project::dismiss_hook(ws, project_id, terminal_id, backend, terminals, cx),
         ActionRequest::ReadContent { terminal_id } => {
-            terminal::read_content(ws, terminal_id, backend, terminals)
+            terminal::read_content(ws, terminal_id, backend, terminals, settings)
         }
         ActionRequest::ExportBuffer { terminal_id } => {
             terminal::export_buffer(terminal_id, backend)
@@ -558,26 +558,37 @@ pub fn ensure_terminal(
     terminals: &TerminalsRegistry,
     backend: &dyn TerminalBackend,
     ws: &Workspace,
+    settings: &AppSettings,
 ) -> Option<Arc<Terminal>> {
     // Fast path: already in registry
     if let Some(term) = terminals.lock().get(terminal_id).cloned() {
         return Some(term);
     }
 
-    // Find which project owns this terminal_id and get its path
-    let mut cwd = None;
+    // Find which project owns this terminal_id and preserve its configured shell.
+    // This is required for WSL reconnects: passing `None` routes the persistent
+    // attach through the Windows host backend instead of the WSL distro backend.
+    let mut reconnect = None;
     for project in &ws.data().projects {
         if let Some(layout) = &project.layout
-            && layout.find_terminal_path(terminal_id).is_some()
+            && let Some(path) = layout.find_terminal_path(terminal_id)
+            && let Some(LayoutNode::Terminal { shell_type, .. }) = layout.get_at_path(&path)
         {
-            cwd = Some(project.path.clone());
+            let shell = match shell_type {
+                ShellType::Default => project
+                    .default_shell
+                    .clone()
+                    .unwrap_or_else(|| settings.default_shell.clone()),
+                shell => shell.clone(),
+            };
+            reconnect = Some((project.path.clone(), shell));
             break;
         }
     }
-    let cwd = cwd?;
+    let (cwd, shell) = reconnect?;
 
     // Spawn PTY via backend
-    match backend.reconnect_terminal(terminal_id, &cwd, None) {
+    match backend.reconnect_terminal(terminal_id, &cwd, Some(&shell)) {
         Ok(_id) => {
             let terminal = Arc::new(Terminal::new(
                 terminal_id.to_string(),
@@ -918,5 +929,183 @@ mod path_guard_tests {
         assert!(validate_leaf_name("..").is_err());
         assert!(validate_leaf_name("a/b").is_err());
         assert!(validate_leaf_name("a\\b").is_err());
+    }
+}
+
+#[cfg(test)]
+mod reconnect_shell_tests {
+    use super::{AppSettings, ensure_terminal};
+    use crate::workspace::settings::HooksConfig;
+    use crate::workspace::state::{LayoutNode, ProjectData, WindowState, Workspace, WorkspaceData};
+    use okena_terminal::TerminalsRegistry;
+    use okena_terminal::backend::TerminalBackend;
+    use okena_terminal::shell_config::ShellType;
+    use okena_terminal::terminal::TerminalTransport;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    struct StubTransport;
+
+    impl TerminalTransport for StubTransport {
+        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        shells: Mutex<Vec<Option<ShellType>>>,
+    }
+
+    impl TerminalBackend for RecordingBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("unexpected create")
+        }
+
+        fn reconnect_terminal(
+            &self,
+            terminal_id: &str,
+            _cwd: &str,
+            shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            self.shells.lock().expect("shell lock").push(shell.cloned());
+            Ok(terminal_id.to_string())
+        }
+
+        fn kill(&self, _terminal_id: &str) {}
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    fn workspace(shell_type: ShellType, default_shell: Option<ShellType>) -> Workspace {
+        let project = ProjectData {
+            id: "project".into(),
+            name: "Project".into(),
+            path: "/project".into(),
+            layout: Some(LayoutNode::Terminal {
+                terminal_id: Some("terminal".into()),
+                shell_type,
+                minimized: false,
+                detached: false,
+                zoom_level: 1.0,
+            }),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        };
+        Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["project".into()],
+            folders: Vec::new(),
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn reconnect_passes_explicit_terminal_shell() {
+        let explicit = ShellType::Custom {
+            path: "/bin/explicit".into(),
+            args: vec!["--login".into()],
+        };
+        let ws = workspace(explicit.clone(), None);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        let settings = AppSettings::default();
+
+        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
+        assert_eq!(
+            backend.shells.lock().expect("shell lock").as_slice(),
+            &[Some(explicit)]
+        );
+    }
+
+    #[test]
+    fn reconnect_resolves_terminal_default_from_project() {
+        let project_default = ShellType::Custom {
+            path: "/bin/project-default".into(),
+            args: Vec::new(),
+        };
+        let ws = workspace(ShellType::Default, Some(project_default.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        let settings = AppSettings::default();
+
+        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
+        assert_eq!(
+            backend.shells.lock().expect("shell lock").as_slice(),
+            &[Some(project_default)]
+        );
+    }
+
+    #[test]
+    fn reconnect_passes_system_default_instead_of_none() {
+        let ws = workspace(ShellType::Default, None);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        let settings = AppSettings::default();
+
+        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
+        assert_eq!(
+            backend.shells.lock().expect("shell lock").as_slice(),
+            &[Some(ShellType::Default)]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reconnect_resolves_global_wsl_default() {
+        let wsl = ShellType::Wsl {
+            distro: Some("Ubuntu".into()),
+        };
+        let ws = workspace(ShellType::Default, None);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        let mut settings = AppSettings::default();
+        settings.default_shell = wsl.clone();
+
+        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
+        assert_eq!(
+            backend.shells.lock().expect("shell lock").as_slice(),
+            &[Some(wsl)]
+        );
     }
 }

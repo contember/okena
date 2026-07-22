@@ -25,9 +25,10 @@ fn with_ensured_terminal(
     terminal_id: &str,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
     f: impl FnOnce(&Terminal) -> ActionResult,
 ) -> ActionResult {
-    match ensure_terminal(terminal_id, terminals, backend, ws) {
+    match ensure_terminal(terminal_id, terminals, backend, ws, settings) {
         Some(term) => f(&term),
         None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
     }
@@ -201,8 +202,9 @@ pub(super) fn send_text(
     text: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
         term.send_input(&text);
         ActionResult::Ok(None)
     })
@@ -214,8 +216,9 @@ pub(super) fn send_bytes(
     data: Vec<u8>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
         term.send_bytes(&data);
         ActionResult::Ok(None)
     })
@@ -227,8 +230,9 @@ pub(super) fn run_command(
     command: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
         term.send_input(&format!("{}\r", command));
         ActionResult::Ok(None)
     })
@@ -240,8 +244,9 @@ pub(super) fn send_special_key(
     key: SpecialKey,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
         term.send_bytes(&key.to_bytes());
         ActionResult::Ok(None)
     })
@@ -254,8 +259,9 @@ pub(super) fn resize(
     rows: u16,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
         let size = TerminalSize {
             cols,
             rows,
@@ -318,8 +324,9 @@ pub(super) fn read_content(
     terminal_id: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    with_ensured_terminal(ws, &terminal_id, backend, terminals, |term| {
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
         let content = term.with_content(|term| {
             let grid = term.grid();
             let screen_lines = grid.screen_lines();

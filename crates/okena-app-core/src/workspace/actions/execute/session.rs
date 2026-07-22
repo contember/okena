@@ -64,6 +64,27 @@ fn replace_workspace_with(
     stale_terminal_ids: &[String],
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    if let Some(project) = ws
+        .projects()
+        .iter()
+        .find(|project| ws.is_creating_project(&project.id))
+    {
+        return ActionResult::Err(format!(
+            "cannot replace workspace while worktree '{}' is being created",
+            project.name
+        ));
+    }
+    if let Some(project) = ws
+        .projects()
+        .iter()
+        .find(|project| ws.is_project_closing(&project.id))
+    {
+        return ActionResult::Err(format!(
+            "cannot replace workspace while worktree '{}' is closing",
+            project.name
+        ));
+    }
+
     let incoming_ordinary_ids = ordinary_terminal_ids(&data);
     let mut incoming_persistent_ids = incoming_ordinary_ids.clone();
     incoming_persistent_ids.extend(
@@ -112,7 +133,7 @@ fn replace_workspace_with(
     let mut incoming_ordinary_ids: Vec<String> = incoming_ordinary_ids.into_iter().collect();
     incoming_ordinary_ids.sort();
     for terminal_id in incoming_ordinary_ids {
-        if ensure_terminal(&terminal_id, terminals, backend, ws).is_none() {
+        if ensure_terminal(&terminal_id, terminals, backend, ws, settings).is_none() {
             materialization_errors.push(format!(
                 "failed to reconnect persisted terminal {terminal_id}"
             ));
@@ -644,5 +665,89 @@ mod tests {
             execution.status,
             crate::workspace::hook_monitor::HookStatus::Running
         )));
+    }
+
+    #[test]
+    fn replacement_is_rejected_while_optimistic_worktree_create_is_active() {
+        let backend = Arc::new(RecordingBackend {
+            next_id: AtomicUsize::new(1),
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::new()),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let runner = HookRunner::new(backend.clone(), terminals.clone());
+        let monitor = HookMonitor::new();
+        let mut cx = TestCx { runner, monitor };
+        let mut workspace = Workspace::new(data(project("creating", "old-hook", None)));
+        workspace.mark_creating_project("creating");
+        let original_epoch = workspace.data_replacement_epoch();
+        let mut focus = FocusManager::default();
+
+        let result = replace_workspace_with(
+            &mut workspace,
+            &mut focus,
+            data(project("replacement", "new-hook", None)),
+            backend.as_ref(),
+            &terminals,
+            &AppSettings::default(),
+            &[],
+            &mut cx,
+        );
+
+        assert!(matches!(
+            result,
+            ActionResult::Err(ref error)
+                if error == "cannot replace workspace while worktree 'creating' is being created"
+        ));
+        assert!(workspace.project("creating").is_some());
+        assert!(workspace.project("replacement").is_none());
+        assert!(workspace.is_creating_project("creating"));
+        assert_eq!(workspace.data_replacement_epoch(), original_epoch);
+        assert!(backend.killed.lock().unwrap().is_empty());
+        assert!(backend.reconnected.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replacement_is_rejected_while_worktree_close_or_merge_is_active() {
+        let backend = Arc::new(RecordingBackend {
+            next_id: AtomicUsize::new(1),
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::new()),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let runner = HookRunner::new(backend.clone(), terminals.clone());
+        let monitor = HookMonitor::new();
+        let mut cx = TestCx { runner, monitor };
+        let mut workspace = Workspace::new(data(project("closing", "old-hook", None)));
+        // Both background close routes set this authoritative flag before any
+        // non-merge removal or merge git work is dispatched.
+        workspace.mark_closing_project_authoritative("closing");
+        let original_epoch = workspace.data_replacement_epoch();
+        let mut focus = FocusManager::default();
+
+        let result = replace_workspace_with(
+            &mut workspace,
+            &mut focus,
+            data(project("replacement", "new-hook", None)),
+            backend.as_ref(),
+            &terminals,
+            &AppSettings::default(),
+            &[],
+            &mut cx,
+        );
+
+        assert!(matches!(
+            result,
+            ActionResult::Err(ref error)
+                if error == "cannot replace workspace while worktree 'closing' is closing"
+        ));
+        assert!(workspace.project("closing").is_some());
+        assert!(workspace.project("replacement").is_none());
+        assert!(workspace.is_project_closing("closing"));
+        assert_eq!(workspace.data_replacement_epoch(), original_epoch);
+        assert!(backend.killed.lock().unwrap().is_empty());
+        assert!(backend.reconnected.lock().unwrap().is_empty());
     }
 }
