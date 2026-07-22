@@ -112,12 +112,58 @@ fn publish_config_change_after_success(result: &CommandResult, state_version: &w
     }
 }
 
+fn unload_project_services(
+    project_id: &str,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+) {
+    let reactor_ref = ServiceReactorRef::new(
+        service_manager.clone(),
+        runtime.clone(),
+        service_tick.clone(),
+    );
+    let mut manager = service_manager.lock();
+    let mut cx = reactor_ref.cx();
+    manager.unload_project_services(project_id, &mut cx);
+}
+
+fn recover_project_services(
+    project_id: &str,
+    workspace: &Arc<Mutex<Workspace>>,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
+) {
+    let project_path = workspace
+        .lock()
+        .project(project_id)
+        .map(|project| project.path.clone());
+    let Some(project_path) = project_path else {
+        return;
+    };
+    if !std::path::Path::new(&project_path).exists() {
+        return;
+    }
+    let reactor_ref = ServiceReactorRef::new(
+        service_manager.clone(),
+        runtime.clone(),
+        service_tick.clone(),
+    );
+    let mut manager = service_manager.lock();
+    let mut cx = reactor_ref.cx();
+    // The old persistent sessions were intentionally killed before removal;
+    // reconnecting their ids here would race their asynchronous teardown.
+    manager.load_project_services(project_id, &project_path, &HashMap::new(), &mut cx);
+}
+
 /// Run physical worktree removal off the reactor while the daemon keeps the
 /// authoritative project row in `is_closing` state. State is deleted only after
 /// Git confirms the checkout is gone; failures restore normal terminal slots.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_background_worktree_removal(
     plan: WorktreeRemovalPlan,
+    operation_epoch: u64,
     did_stash: bool,
     global_hooks: &okena_workspace::persistence::HooksConfig,
     workspace: &Arc<Mutex<Workspace>>,
@@ -127,6 +173,9 @@ pub(crate) fn spawn_background_worktree_removal(
     backend: &Arc<dyn TerminalBackend>,
     terminals: &TerminalsRegistry,
     settings: &Arc<Mutex<AppSettings>>,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &tokio::runtime::Handle,
 ) -> CommandResult {
     let terminal_ids = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
@@ -136,6 +185,9 @@ pub(crate) fn spawn_background_worktree_removal(
             Err(error) => return CommandResult::Err(error),
         }
     };
+    // ServiceManager owns restart-on-crash. Unload before killing project PTYs
+    // so their exit events cannot schedule replacement services mid-removal.
+    unload_project_services(&plan.project_id, service_manager, service_tick, runtime);
     for id in terminal_ids {
         backend.kill(&id);
         terminals.lock().remove(&id);
@@ -149,6 +201,9 @@ pub(crate) fn spawn_background_worktree_removal(
     let backend = backend.clone();
     let terminals = terminals.clone();
     let settings = settings.clone();
+    let service_manager = service_manager.clone();
+    let service_tick = service_tick.clone();
+    let runtime = runtime.clone();
     tokio::task::spawn_local(async move {
         let task_project_id = plan.project_id.clone();
         let global_hooks_blocking = global_hooks.clone();
@@ -156,6 +211,7 @@ pub(crate) fn spawn_background_worktree_removal(
         let outcome = tokio::task::spawn_blocking(move || {
             let worktree_path = plan.worktree_path.clone();
             let main_repo_path = std::path::PathBuf::from(&plan.main_repo_path);
+            plan.fire_close_hooks_headless(&global_hooks_blocking, monitor.as_ref());
             // force_remove = is_dirty && !did_stash — same condition the sync
             // close_worktree path uses to fire the dirty-close safety net. Runs
             // BEFORE remove_worktree_fast so the hook's CWD still exists.
@@ -181,6 +237,13 @@ pub(crate) fn spawn_background_worktree_removal(
                         let mut cx =
                             DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
                         let mut ws = workspace.lock();
+                        if ws.data_replacement_epoch() != operation_epoch {
+                            log::info!(
+                                "worktree-close: ignoring stale completion for {}",
+                                plan.project_id
+                            );
+                            return;
+                        }
                         let mut focus_manager = FocusManager::new();
                         ws.finish_worktree_removal(
                             &mut focus_manager,
@@ -202,6 +265,13 @@ pub(crate) fn spawn_background_worktree_removal(
                         let mut cx =
                             DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
                         let mut ws = workspace.lock();
+                        if ws.data_replacement_epoch() != operation_epoch {
+                            log::info!(
+                                "worktree-close: ignoring stale failure for {}",
+                                plan.project_id
+                            );
+                            return;
+                        }
                         ws.finish_closing_project(&plan.project_id);
                         cx.notify();
                         if let okena_app_core::workspace::actions::execute::ActionResult::Err(
@@ -226,15 +296,51 @@ pub(crate) fn spawn_background_worktree_removal(
                                 plan.worktree_path.display()
                             )));
                         }
+                        drop(ws);
+                        recover_project_services(
+                            &plan.project_id,
+                            &workspace,
+                            &service_manager,
+                            &service_tick,
+                            &runtime,
+                        );
                     }
                 }
             }
             Err(e) => {
                 log::error!("worktree-close: removal task failed: {e}");
+                let app_settings = settings.lock().clone();
                 let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
                 let mut ws = workspace.lock();
+                if ws.data_replacement_epoch() != operation_epoch {
+                    log::info!("worktree-close: ignoring stale task failure for {task_project_id}");
+                    return;
+                }
                 ws.finish_closing_project(&task_project_id);
                 cx.notify();
+                if let okena_app_core::workspace::actions::execute::ActionResult::Err(spawn_error) =
+                    spawn_uninitialized_terminals(
+                        &mut ws,
+                        &task_project_id,
+                        backend.as_ref(),
+                        &terminals,
+                        &app_settings,
+                        None,
+                        &mut cx,
+                    )
+                {
+                    log::error!(
+                        "worktree-close: failed to restore terminals for {task_project_id}: {spawn_error}"
+                    );
+                }
+                drop(ws);
+                recover_project_services(
+                    &task_project_id,
+                    &workspace,
+                    &service_manager,
+                    &service_tick,
+                    &runtime,
+                );
             }
         }
     });
@@ -244,6 +350,7 @@ pub(crate) fn spawn_background_worktree_removal(
 
 fn abort_background_worktree_close(
     project_id: &str,
+    operation_epoch: u64,
     error: String,
     workspace: &Arc<Mutex<Workspace>>,
     workspace_tick: &watch::Sender<u64>,
@@ -253,6 +360,10 @@ fn abort_background_worktree_close(
     let project_name = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut ws = workspace.lock();
+        if ws.data_replacement_epoch() != operation_epoch {
+            log::info!("worktree-close: ignoring stale abort for {project_id}");
+            return;
+        }
         let name = ws
             .project(project_id)
             .map(|project| project.name.clone())
@@ -285,6 +396,8 @@ fn spawn_merge_worktree_close(
     backend: &Arc<dyn TerminalBackend>,
     terminals: &TerminalsRegistry,
     settings: &Arc<Mutex<AppSettings>>,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
 ) -> CommandResult {
     let prep = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
@@ -311,6 +424,7 @@ fn spawn_merge_worktree_close(
         ws.mark_closing_project_authoritative(&project_id);
         cx.notify();
         (
+            ws.data_replacement_epoch(),
             project_name,
             project_path,
             project_hooks,
@@ -328,16 +442,24 @@ fn spawn_merge_worktree_close(
     let backend = backend.clone();
     let terminals = terminals.clone();
     let settings = settings.clone();
+    let service_manager = service_manager.clone();
+    let service_tick = service_tick.clone();
     tokio::task::spawn_local(async move {
         use okena_workspace::actions::worktree::{
             CloseWorktreeGitOutcome, close_worktree_merge_git,
         };
-        let (project_name, project_path, project_hooks, main_repo_path, folder_id, folder_name) =
-            prep;
+        let (
+            operation_epoch,
+            project_name,
+            project_path,
+            project_hooks,
+            main_repo_path,
+            folder_id,
+            folder_name,
+        ) = prep;
         let blocking_project_id = project_id.clone();
         let blocking_global_hooks = global_hooks.clone();
         let blocking_monitor = hook_monitor.clone();
-        let blocking_runner = hook_runner.clone();
         let outcome = runtime
             .spawn_blocking(move || {
                 use std::path::Path;
@@ -365,7 +487,6 @@ fn spawn_merge_worktree_close(
                         folder_id.as_deref(),
                         folder_name.as_deref(),
                         blocking_monitor.as_ref(),
-                        blocking_runner.as_ref(),
                     )
                 } else {
                     CloseWorktreeGitOutcome::Ok { did_stash: false }
@@ -373,10 +494,16 @@ fn spawn_merge_worktree_close(
             })
             .await;
 
+        if workspace.lock().data_replacement_epoch() != operation_epoch {
+            log::info!("worktree-close: ignoring stale merge completion for {project_id}");
+            return;
+        }
+
         let did_stash = match outcome {
             Err(error) => {
                 abort_background_worktree_close(
                     &project_id,
+                    operation_epoch,
                     format!("worktree close task failed: {error}"),
                     &workspace,
                     &workspace_tick,
@@ -388,6 +515,7 @@ fn spawn_merge_worktree_close(
             Ok(CloseWorktreeGitOutcome::Err(error)) => {
                 abort_background_worktree_close(
                     &project_id,
+                    operation_epoch,
                     error,
                     &workspace,
                     &workspace_tick,
@@ -396,12 +524,13 @@ fn spawn_merge_worktree_close(
                 );
                 return;
             }
-            Ok(CloseWorktreeGitOutcome::RebaseConflict {
-                error,
-                terminal_actions,
-                hook_results,
-            }) => {
-                {
+            Ok(CloseWorktreeGitOutcome::RebaseConflict { error, hook_plan }) => {
+                if let Some(hook_plan) = hook_plan {
+                    let (terminal_actions, hook_results) = okena_hooks::execute_hook_action_plan(
+                        hook_plan,
+                        hook_monitor.as_ref(),
+                        hook_runner.as_ref(),
+                    );
                     let mut cx =
                         DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
                     let mut ws = workspace.lock();
@@ -412,6 +541,7 @@ fn spawn_merge_worktree_close(
                 }
                 abort_background_worktree_close(
                     &project_id,
+                    operation_epoch,
                     error,
                     &workspace,
                     &workspace_tick,
@@ -442,6 +572,7 @@ fn spawn_merge_worktree_close(
                 Ok(plan) => {
                     let _ = spawn_background_worktree_removal(
                         plan,
+                        operation_epoch,
                         did_stash,
                         &global_hooks,
                         &workspace,
@@ -451,10 +582,14 @@ fn spawn_merge_worktree_close(
                         &backend,
                         &terminals,
                         &settings,
+                        &service_manager,
+                        &service_tick,
+                        &runtime,
                     );
                 }
                 Err(error) => abort_background_worktree_close(
                     &project_id,
+                    operation_epoch,
                     error,
                     &workspace,
                     &workspace_tick,
@@ -494,6 +629,7 @@ fn spawn_merge_worktree_close(
         if let CommandResult::Err(error) = result {
             abort_background_worktree_close(
                 &project_id,
+                operation_epoch,
                 error,
                 &workspace,
                 &workspace_tick,
@@ -869,11 +1005,12 @@ pub async fn daemon_command_loop(
                                     if let Ok(id) = &registered {
                                         ws.mark_creating_project(id);
                                     }
-                                    registered
+                                    let operation_epoch = ws.data_replacement_epoch();
+                                    registered.map(|id| (id, operation_epoch))
                                 };
                                 match new_id {
                                     Err(e) => CommandResult::Err(e),
-                                    Ok(new_id) => {
+                                    Ok((new_id, operation_epoch)) => {
                                         let workspace = workspace.clone();
                                         let workspace_tick = workspace_tick.clone();
                                         let hook_runner = hook_runner.clone();
@@ -884,6 +1021,7 @@ pub async fn daemon_command_loop(
                                         let git_root = git_root.clone();
                                         let branch = branch.clone();
                                         let worktree_path = worktree_path.clone();
+                                        let wt_project_path_task = wt_project_path.clone();
                                         let new_id_task = new_id.clone();
                                         tokio::task::spawn_local(async move {
                                             let git = {
@@ -925,6 +1063,44 @@ pub async fn daemon_command_loop(
                                             })
                                             .await
                                             };
+                                            let replacement_state = {
+                                                let ws = workspace.lock();
+                                                (
+                                                    ws.data_replacement_epoch() != operation_epoch,
+                                                    ws.projects().iter().any(|project| {
+                                                        project.path == wt_project_path_task
+                                                    }),
+                                                )
+                                            };
+                                            if replacement_state.0 {
+                                                log::info!(
+                                                    "worktree-create: ignoring stale completion for {new_id_task}"
+                                                );
+                                                let created_by_attempt = match &git {
+                                                    Ok((false, Ok(()))) => true,
+                                                    Ok((
+                                                        false,
+                                                        Err(okena_git::GitError::WorktreeExists {
+                                                            ..
+                                                        }),
+                                                    )) => false,
+                                                    Ok((false, Err(_))) => true,
+                                                    _ => false,
+                                                };
+                                                if created_by_attempt && !replacement_state.1 {
+                                                    let _ =
+                                                        tokio::task::spawn_blocking(move || {
+                                                            let _ = okena_git::remove_worktree_fast(
+                                                                std::path::Path::new(
+                                                                    &worktree_path,
+                                                                ),
+                                                                &git_root,
+                                                            );
+                                                        })
+                                                        .await;
+                                                }
+                                                return;
+                                            }
                                             match git {
                                                 Ok((_, Ok(()))) => {
                                                     {
@@ -1081,6 +1257,8 @@ pub async fn daemon_command_loop(
                                 &backend,
                                 &terminals,
                                 &settings,
+                                &service_manager,
+                                &service_tick,
                             )
                         } else {
                             let plan = {
@@ -1096,10 +1274,13 @@ pub async fn daemon_command_loop(
                                         && global_hooks.worktree.before_remove.is_none()
                                 });
                                 if fast {
-                                    Some(ws.begin_worktree_removal(
-                                        &project_id,
-                                        &global_hooks,
-                                        &mut cx,
+                                    Some((
+                                        ws.data_replacement_epoch(),
+                                        ws.begin_worktree_removal(
+                                            &project_id,
+                                            &global_hooks,
+                                            &mut cx,
+                                        ),
                                     ))
                                 } else {
                                     None
@@ -1128,19 +1309,25 @@ pub async fn daemon_command_loop(
                                         &hook_monitor,
                                     )
                                 }
-                                Some(Err(error)) => CommandResult::Err(error),
-                                Some(Ok(plan)) => spawn_background_worktree_removal(
-                                    plan,
-                                    false,
-                                    &global_hooks,
-                                    &workspace,
-                                    &workspace_tick,
-                                    &hook_runner,
-                                    &hook_monitor,
-                                    &backend,
-                                    &terminals,
-                                    &settings,
-                                ),
+                                Some((_, Err(error))) => CommandResult::Err(error),
+                                Some((operation_epoch, Ok(plan))) => {
+                                    spawn_background_worktree_removal(
+                                        plan,
+                                        operation_epoch,
+                                        false,
+                                        &global_hooks,
+                                        &workspace,
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                        &backend,
+                                        &terminals,
+                                        &settings,
+                                        &service_manager,
+                                        &service_tick,
+                                        &runtime,
+                                    )
+                                }
                             }
                         }
                     }
@@ -2790,6 +2977,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stale_background_close_abort_cannot_mutate_reused_project_id() {
+        let workspace = Arc::new(Mutex::new(Workspace::new(workspace_with_worktree_child())));
+        let hook_monitor = Some(okena_hooks::HookMonitor::new());
+        let hook_runner = None;
+        let (workspace_tick, _receiver) = watch::channel(0u64);
+
+        {
+            let mut ws = workspace.lock();
+            ws.mark_closing_project_authoritative("wt1");
+            let mut replacement = workspace_with_worktree_child();
+            replacement.projects[1].name = "Replacement project".to_string();
+            let mut focus_manager = FocusManager::new();
+            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+            ws.replace_data(&mut focus_manager, replacement, &mut cx);
+        }
+
+        abort_background_worktree_close(
+            "wt1",
+            0,
+            "old operation failed".to_string(),
+            &workspace,
+            &workspace_tick,
+            &hook_runner,
+            &hook_monitor,
+        );
+
+        let ws = workspace.lock();
+        let project = ws.project("wt1").expect("replacement project retained");
+        assert_eq!(project.name, "Replacement project");
+        assert!(!project.is_closing);
+        assert!(
+            hook_monitor
+                .as_ref()
+                .expect("monitor")
+                .drain_pending_toasts()
+                .is_empty()
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn background_removal_failure_restores_authoritative_project() {
         use std::time::Duration;
@@ -2823,12 +3050,20 @@ mod tests {
         let hook_monitor = Some(hook_monitor_service.clone());
         let hook_runner = None;
         let (workspace_tick, _receiver) = watch::channel(0u64);
-        let plan = {
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            backend.clone(),
+            terminals.clone(),
+        )));
+        let (service_tick, _service_receiver) = watch::channel(0u64);
+        let runtime = tokio::runtime::Handle::current();
+        let (operation_epoch, plan) = {
             let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-            workspace
-                .lock()
+            let mut ws = workspace.lock();
+            let operation_epoch = ws.data_replacement_epoch();
+            let plan = ws
                 .begin_worktree_removal("wt1", &Default::default(), &mut cx)
-                .expect("build removal plan")
+                .expect("build removal plan");
+            (operation_epoch, plan)
         };
 
         let local = tokio::task::LocalSet::new();
@@ -2836,6 +3071,7 @@ mod tests {
             .run_until(async {
                 let result = spawn_background_worktree_removal(
                     plan,
+                    operation_epoch,
                     false,
                     &Default::default(),
                     &workspace,
@@ -2845,6 +3081,9 @@ mod tests {
                     &backend,
                     &terminals,
                     &settings,
+                    &service_manager,
+                    &service_tick,
+                    &runtime,
                 );
                 assert!(
                     matches!(result, CommandResult::Ok(Some(ref value)) if value["pending"] == true)
@@ -2876,6 +3115,12 @@ mod tests {
             }) if id == "restored-terminal"
         ));
         drop(workspace_guard);
+        let expected_service_path = invalid_worktree.to_string_lossy().into_owned();
+        assert_eq!(
+            service_manager.lock().project_path("wt1"),
+            Some(&expected_service_path),
+            "failed removal restores service ownership"
+        );
         assert!(terminals.lock().contains_key("restored-terminal"));
         assert!(
             invalid_worktree.is_file(),

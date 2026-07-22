@@ -14,6 +14,7 @@ use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_workspace::context::WorkspaceCx;
+use okena_workspace::hook_monitor::HookStatus;
 use std::sync::Arc;
 
 fn project_not_found(project_id: &str) -> ActionResult {
@@ -196,6 +197,9 @@ pub(super) fn delete_project(
     // AFTER their own guards.
     if ws.is_creating_project(&project_id) {
         return ActionResult::Err("worktree is still being created".to_string());
+    }
+    if ws.is_project_closing(&project_id) {
+        return ActionResult::Err("project is already being closed".to_string());
     }
     let global_hooks = settings.hooks.clone();
     ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
@@ -526,16 +530,29 @@ pub(super) fn rerun_hook(
         None => return ActionResult::Err(format!("hook terminal not found: {}", terminal_id)),
     };
     let monitor = cx.hook_monitor();
+    let shell = okena_workspace::hooks::keep_alive_hook_shell(&command);
+    let new_id = match backend.create_terminal(&cwd, Some(&shell)) {
+        Ok(id) => id,
+        Err(e) => {
+            let message = format!("failed to spawn hook terminal: {e}");
+            if let Some(monitor) = monitor.as_ref() {
+                let execution_id =
+                    monitor.record_start_named(&hook_type, &command, &project_name, None);
+                monitor.record_finish(
+                    execution_id,
+                    HookStatus::SpawnError {
+                        message: message.clone(),
+                    },
+                );
+            }
+            return ActionResult::Err(message);
+        }
+    };
     backend.kill(&terminal_id);
     if let Some(monitor) = monitor.as_ref() {
         monitor.finish_by_terminal_id(&terminal_id, None);
         monitor.notify_exit(&terminal_id, None);
     }
-    let shell = okena_workspace::hooks::keep_alive_hook_shell(&command);
-    let new_id = match backend.create_terminal(&cwd, Some(&shell)) {
-        Ok(id) => id,
-        Err(e) => return ActionResult::Err(format!("failed to spawn hook terminal: {}", e)),
-    };
     let transport = backend.transport();
     let terminal = Arc::new(Terminal::new(
         new_id.clone(),
@@ -584,7 +601,8 @@ pub(super) fn dismiss_hook(
 
 #[cfg(test)]
 mod hook_action_tests {
-    use super::{ActionResult, dismiss_hook, rerun_hook};
+    use super::{ActionResult, delete_project, dismiss_hook, rerun_hook};
+    use crate::workspace::focus::FocusManager;
     use crate::workspace::state::{
         HookTerminalEntry, HookTerminalStatus, ProjectData, WindowState, Workspace, WorkspaceData,
     };
@@ -596,9 +614,9 @@ mod hook_action_tests {
     use okena_workspace::context::WorkspaceCx;
     use okena_workspace::hook_monitor::{HookMonitor, HookStatus};
     use okena_workspace::hooks::HookRunner;
-    use okena_workspace::settings::HooksConfig;
+    use okena_workspace::settings::{AppSettings, HooksConfig};
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -627,6 +645,7 @@ mod hook_action_tests {
         next_id: AtomicUsize,
         shells: Mutex<Vec<Option<ShellType>>>,
         killed: Mutex<Vec<String>>,
+        fail_create: AtomicBool,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -636,6 +655,9 @@ mod hook_action_tests {
 
         fn create_terminal(&self, _cwd: &str, shell: Option<&ShellType>) -> anyhow::Result<String> {
             self.shells.lock().unwrap().push(shell.cloned());
+            if self.fail_create.load(Ordering::Relaxed) {
+                anyhow::bail!("spawn failed");
+            }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             Ok(format!("rerun-{id}"))
         }
@@ -823,6 +845,93 @@ mod hook_action_tests {
         let history = monitor.history();
         assert!(matches!(history[0].status, HookStatus::Failed { .. }));
         assert_eq!(backend.killed.lock().unwrap().as_slice(), ["hook-1"]);
+    }
+
+    #[test]
+    fn rerun_spawn_failure_preserves_the_existing_hook_owner() {
+        let mut workspace = workspace_with_hook("old-hook");
+        let backend = RecordingBackend::default();
+        backend.fail_create.store(true, Ordering::Relaxed);
+        let terminals: TerminalsRegistry = Default::default();
+        let monitor = HookMonitor::new();
+        monitor.record_start(
+            "on_project_open",
+            "echo test",
+            "Project p1",
+            Some("old-hook".to_string()),
+        );
+        let mut cx = TestCx {
+            monitor: monitor.clone(),
+        };
+
+        let result = rerun_hook(
+            &mut workspace,
+            "p1".to_string(),
+            "old-hook".to_string(),
+            &backend,
+            &terminals,
+            &mut cx,
+        );
+
+        assert!(matches!(result, ActionResult::Err(message) if message.contains("spawn failed")));
+        assert!(
+            workspace
+                .project("p1")
+                .unwrap()
+                .hook_terminals
+                .contains_key("old-hook")
+        );
+        assert!(backend.killed.lock().unwrap().is_empty());
+        let history = monitor.history();
+        assert!(matches!(history[0].status, HookStatus::SpawnError { .. }));
+        assert!(matches!(history[1].status, HookStatus::Running));
+    }
+
+    #[test]
+    fn delete_project_rejects_an_authoritative_close_in_progress() {
+        let mut workspace = workspace_with_hook("hook-1");
+        workspace.mark_closing_project_authoritative("p1");
+        let mut focus_manager = FocusManager::default();
+        let monitor = HookMonitor::new();
+        let mut cx = TestCx { monitor };
+
+        let result = delete_project(
+            &mut workspace,
+            &mut focus_manager,
+            "p1".to_string(),
+            &AppSettings::default(),
+            &mut cx,
+        );
+
+        assert!(matches!(
+            result,
+            ActionResult::Err(message) if message == "project is already being closed"
+        ));
+        assert!(workspace.project("p1").is_some());
+    }
+
+    #[test]
+    fn project_delete_finishes_owned_hook_executions_before_removal() {
+        let mut workspace = workspace_with_hook("hook-1");
+        let mut focus_manager = FocusManager::default();
+        let monitor = HookMonitor::new();
+        monitor.record_start(
+            "on_project_open",
+            "echo test",
+            "Project p1",
+            Some("hook-1".to_string()),
+        );
+        let mut cx = TestCx {
+            monitor: monitor.clone(),
+        };
+
+        workspace.delete_project(&mut focus_manager, "p1", &HooksConfig::default(), &mut cx);
+
+        assert!(workspace.project("p1").is_none());
+        assert!(matches!(
+            monitor.history()[0].status,
+            HookStatus::Failed { .. }
+        ));
     }
 }
 

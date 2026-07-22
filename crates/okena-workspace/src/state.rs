@@ -174,8 +174,10 @@ impl Workspace {
         self.notify_data(cx);
     }
 
-    /// Replace workspace data wholesale (e.g. from disk reload).
-    /// Does NOT bump data_version — the data came from disk, not a user edit.
+    /// Replace workspace data wholesale (e.g. by loading a named session).
+    ///
+    /// A replacement becomes the daemon's active restart state, so it is a
+    /// persistent mutation even though its source was another file.
     pub fn replace_data(
         &mut self,
         focus_manager: &mut FocusManager,
@@ -183,7 +185,11 @@ impl Workspace {
         cx: &mut impl WorkspaceCx,
     ) {
         self.data = data;
+        for project in &mut self.data.projects {
+            project.is_closing = false;
+        }
         self.data_replacement_epoch += 1;
+        self.lifecycle = ProjectLifecycleTracker::new();
         // Snapshots in pending_closes refer to the old data — drop them so an
         // undo can't restore into a wholesale-replaced workspace. The
         // restore-race breadcrumbs refer to the old layout too.
@@ -191,8 +197,7 @@ impl Workspace {
         self.restored_closes.clear();
         self.closing_terminal_owners.clear();
         focus_manager.clear_all();
-        cx.notify();
-        cx.refresh_views();
+        self.notify_data(cx);
     }
 
     /// Record that a project was accessed (for sorting by recency)
@@ -1985,8 +1990,12 @@ mod gpui_tests {
         fm.set_focused_project_id(Some("p1".to_string()));
         assert!(fm.focused_project_id().is_some());
 
-        let new_data = make_workspace_data(vec![make_project("p2")], vec!["p2"]);
+        let mut new_data = make_workspace_data(vec![make_project("p2")], vec!["p2"]);
+        new_data.projects[0].is_closing = true;
         workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.mark_creating_project("p2");
+            ws.mark_closing_project("p2");
+            ws.mark_worktree_removing("/tmp/p2");
             ws.replace_data(&mut fm, new_data, cx);
         });
 
@@ -1994,6 +2003,12 @@ mod gpui_tests {
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data().projects.len(), 1);
             assert_eq!(ws.data().projects[0].id, "p2");
+            assert_eq!(ws.data_version(), 1);
+            assert_eq!(ws.data_replacement_epoch(), 1);
+            assert!(!ws.is_creating_project("p2"));
+            assert!(!ws.is_project_closing("p2"));
+            assert!(!ws.data().projects[0].is_closing);
+            assert!(!ws.lifecycle.is_worktree_removing("/tmp/p2"));
         });
     }
 

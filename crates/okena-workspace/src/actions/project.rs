@@ -260,15 +260,7 @@ impl Workspace {
         }
 
         let stale_set: HashSet<&str> = stale.iter().map(String::as_str).collect();
-        if let Some(layout) = &mut project.layout {
-            let keep_ids: Vec<String> = layout
-                .collect_terminal_ids()
-                .into_iter()
-                .filter(|id| !stale_set.contains(id.as_str()))
-                .collect();
-            let keep: HashSet<&str> = keep_ids.iter().map(String::as_str).collect();
-            layout.clear_terminal_ids_except(&keep);
-        }
+        LayoutNode::remove_terminal_ids(&mut project.layout, &stale_set);
         project.hook_terminals.clear();
         project
             .terminal_names
@@ -462,14 +454,42 @@ impl Workspace {
         global_hooks: &HooksConfig,
         cx: &mut impl WorkspaceCx,
     ) {
+        self.delete_project_inner(focus_manager, project_id, Some(global_hooks), cx);
+    }
+
+    /// Delete a worktree whose project-close hook already completed before its
+    /// checkout was removed.
+    pub(crate) fn delete_project_without_project_close(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.delete_project_inner(focus_manager, project_id, None, cx);
+    }
+
+    fn delete_project_inner(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        global_hooks: Option<&HooksConfig>,
+        cx: &mut impl WorkspaceCx,
+    ) {
         // Queue all project terminals for killing before removing state.
         // Okena (which owns PtyManager) drains this queue via observer.
         if let Some(project) = self.project(project_id) {
+            let hook_terminal_ids: Vec<String> = project.hook_terminals.keys().cloned().collect();
+            if let Some(monitor) = cx.hook_monitor() {
+                for terminal_id in &hook_terminal_ids {
+                    monitor.finish_by_terminal_id(terminal_id, None);
+                    monitor.notify_exit(terminal_id, None);
+                }
+            }
             let mut kill_ids: Vec<String> = Vec::new();
             if let Some(layout) = &project.layout {
                 kill_ids.extend(layout.collect_terminal_ids());
             }
-            kill_ids.extend(project.hook_terminals.keys().cloned());
+            kill_ids.extend(hook_terminal_ids);
             kill_ids.extend(project.service_terminals.values().cloned());
             self.queue_terminal_kills(kill_ids);
         }
@@ -543,7 +563,9 @@ impl Workspace {
         }
         self.notify_data(cx);
 
-        if let Some((project_hooks, id, name, path)) = hook_info {
+        if let (Some((project_hooks, id, name, path)), Some(global_hooks)) =
+            (hook_info, global_hooks)
+        {
             let monitor = cx.hook_monitor();
             hooks::fire_on_project_close(
                 &project_hooks,
@@ -970,6 +992,39 @@ mod tests {
         let layout = project.layout.as_ref().unwrap();
         assert!(layout.find_terminal_path("stale-hook").is_none());
         assert!(layout.find_terminal_path("layout-terminal").is_some());
+        assert_eq!(layout.collect_terminal_ids(), vec!["layout-terminal"]);
+        assert!(matches!(layout, LayoutNode::Terminal { .. }));
+    }
+
+    #[test]
+    fn clear_stale_hook_terminals_removes_a_legacy_root_leaf() {
+        let mut project = make_project("p1");
+        project.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("stale-hook".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: Default::default(),
+            zoom_level: 1.0,
+        });
+        project.hook_terminals.insert(
+            "stale-hook".to_string(),
+            HookTerminalEntry {
+                label: "on_project_open".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo old".to_string(),
+                cwd: "/tmp".to_string(),
+            },
+        );
+
+        let mut data = make_workspace_data();
+        data.projects.push(project);
+        data.project_order.push("p1".to_string());
+        let mut workspace = Workspace::new(data);
+
+        workspace.clear_stale_hook_terminals("p1", &mut TestCx);
+
+        assert!(workspace.project("p1").unwrap().layout.is_none());
     }
 }
 

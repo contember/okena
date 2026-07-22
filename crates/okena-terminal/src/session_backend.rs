@@ -164,6 +164,21 @@ pub enum ResolvedBackend {
     Psmux,
 }
 
+/// Exact command requested for a newly-created persistent session.
+///
+/// `ShellScript` preserves the historical API used by Unix backends. `Program`
+/// keeps the executable and argv boundary intact for host-Windows psmux, where
+/// rebuilding a cmd wrapper from only the script would lose flags such as
+/// delayed expansion (`/V:ON`).
+#[derive(Debug, Clone, Copy)]
+pub enum SessionCommand<'a> {
+    ShellScript(&'a str),
+    Program {
+        program: &'a str,
+        args: &'a [String],
+    },
+}
+
 /// Session-name prefix for Okena-managed persistent sessions (tmux/screen/dtach).
 /// Shared by the session-name builder and the dtach socket-GC filter so cleanup
 /// only ever considers our own `tm-*.sock` files — never the local daemon socket
@@ -211,6 +226,22 @@ impl ResolvedBackend {
         command: Option<&str>,
         extra_env: &[(String, Option<String>)],
     ) -> Option<(String, Vec<String>)> {
+        self.build_command_with_custom(
+            session_name,
+            cwd,
+            command.map(SessionCommand::ShellScript),
+            extra_env,
+        )
+    }
+
+    /// Build a session command while preserving an exact custom executable and argv.
+    pub fn build_command_with_custom(
+        &self,
+        session_name: &str,
+        cwd: &str,
+        command: Option<SessionCommand<'_>>,
+        extra_env: &[(String, Option<String>)],
+    ) -> Option<(String, Vec<String>)> {
         match self {
             Self::None => None,
             Self::Tmux => {
@@ -228,9 +259,15 @@ impl ResolvedBackend {
                 // rename-window: set meaningful window name from directory
                 let window_name = extract_dir_name(cwd);
                 let initial_program = match command {
-                    Some(cmd) => {
+                    Some(SessionCommand::ShellScript(cmd)) => {
                         let sh = user_shell();
                         format!(" {} '-ic' {}", shell_escape(&sh), shell_escape(cmd))
+                    }
+                    Some(SessionCommand::Program { program, args }) => {
+                        let mut parts = Vec::with_capacity(args.len() + 1);
+                        parts.push(shell_escape(program));
+                        parts.extend(args.iter().map(|arg| shell_escape(arg)));
+                        format!(" {}", parts.join(" "))
                     }
                     None => String::new(),
                 };
@@ -268,10 +305,21 @@ impl ResolvedBackend {
                 // -D -R: reattach if exists, create if not (and detach other attached sessions)
                 // Note: screen doesn't have a direct way to set cwd, we'll handle that separately
                 let mut args = vec!["-D".to_string(), "-R".to_string(), session_name.to_string()];
-                if let Some(cmd) = command {
-                    args.push(user_shell());
-                    args.push("-ic".to_string());
-                    args.push(cmd.to_string());
+                if let Some(command) = command {
+                    match command {
+                        SessionCommand::ShellScript(cmd) => {
+                            args.push(user_shell());
+                            args.push("-ic".to_string());
+                            args.push(cmd.to_string());
+                        }
+                        SessionCommand::Program {
+                            program,
+                            args: command_args,
+                        } => {
+                            args.push(program.to_string());
+                            args.extend(command_args.iter().cloned());
+                        }
+                    }
                 }
                 Some(("screen".to_string(), args))
             }
@@ -287,9 +335,15 @@ impl ResolvedBackend {
                 // 3. Run dtach with the user's shell (or custom command)
                 let socket_path = get_dtach_socket_path(session_name);
                 let program = match command {
-                    Some(cmd) => {
+                    Some(SessionCommand::ShellScript(cmd)) => {
                         let sh = user_shell();
                         format!("{} -ic {}", shell_escape(&sh), shell_escape(cmd))
+                    }
+                    Some(SessionCommand::Program { program, args }) => {
+                        let mut parts = Vec::with_capacity(args.len() + 1);
+                        parts.push(shell_escape(program));
+                        parts.extend(args.iter().map(|arg| shell_escape(arg)));
+                        parts.join(" ")
                     }
                     None => shell_escape(&user_shell()),
                 };
@@ -331,12 +385,22 @@ impl ResolvedBackend {
                 args.push(session_name.to_string());
                 args.push("-c".to_string());
                 args.push(cwd.to_string());
-                if let Some(cmd) = command {
-                    // Wrap custom command in cmd.exe so PATH lookup and quoting
-                    // behave consistently regardless of psmux's default-shell.
-                    args.push("cmd.exe".to_string());
-                    args.push("/c".to_string());
-                    args.push(cmd.to_string());
+                if let Some(command) = command {
+                    match command {
+                        SessionCommand::ShellScript(cmd) => {
+                            // Preserve the legacy script API through cmd.exe.
+                            args.push("cmd.exe".to_string());
+                            args.push("/c".to_string());
+                            args.push(cmd.to_string());
+                        }
+                        SessionCommand::Program {
+                            program,
+                            args: command_args,
+                        } => {
+                            args.push(program.to_string());
+                            args.extend(command_args.iter().cloned());
+                        }
+                    }
                 }
                 let push_cmd = |args: &mut Vec<String>, parts: &[&str]| {
                     args.push(";".to_string());
@@ -1257,6 +1321,36 @@ mod tests {
             .expect("cmd.exe in args");
         assert_eq!(args[cmd_pos + 1], "/c");
         assert_eq!(args[cmd_pos + 2], "npm run dev");
+    }
+
+    #[test]
+    fn test_psmux_preserves_exact_custom_command_argv() {
+        let backend = ResolvedBackend::Psmux;
+        let command_args = vec![
+            "/V:ON".to_string(),
+            "/C".to_string(),
+            "echo !ERRORLEVEL! & cmd /K".to_string(),
+        ];
+        let (_, args) = backend
+            .build_command_with_custom(
+                "tm-test",
+                "C:\\src",
+                Some(SessionCommand::Program {
+                    program: "cmd.exe",
+                    args: &command_args,
+                }),
+                &[],
+            )
+            .unwrap();
+
+        let command_pos = args
+            .iter()
+            .position(|arg| arg == "cmd.exe")
+            .expect("custom executable in psmux argv");
+        assert_eq!(
+            &args[command_pos..command_pos + 4],
+            ["cmd.exe", "/V:ON", "/C", "echo !ERRORLEVEL! & cmd /K"]
+        );
     }
 
     #[test]

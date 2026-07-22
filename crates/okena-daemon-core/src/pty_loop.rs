@@ -127,7 +127,11 @@ pub async fn run_pty_loop(
     // `handle_service_exit`. Built once; `cx()` is re-borrowed per exit batch.
     // It re-locks `service_manager` internally on reentry, so the loop locks the
     // manager itself (below) only while the cx is alive — never across an await.
-    let reactor_ref = ServiceReactorRef::new(service_manager.clone(), runtime, service_tick);
+    let reactor_ref = ServiceReactorRef::new(
+        service_manager.clone(),
+        runtime.clone(),
+        service_tick.clone(),
+    );
 
     loop {
         // Block until at least one event arrives. `Err` means every sender was
@@ -197,6 +201,8 @@ pub async fn run_pty_loop(
                 &pty_manager,
                 &service_manager,
                 &reactor_ref,
+                &service_tick,
+                &runtime,
                 &reactor,
             );
             // Coarse "something changed" tick: the lifecycle mutations above
@@ -221,9 +227,13 @@ fn process_event(
     match event {
         PtyEvent::Data {
             terminal_id,
+            generation,
             data,
             sequence,
         } => {
+            if !pty_manager.is_current_generation(terminal_id, *generation) {
+                return;
+            }
             // Hold the registry lock only for the HashMap lookup — clone the
             // `Arc<Terminal>` out and drop the guard before the (potentially
             // long) ANSI parse, so input/resize/kill on OTHER terminals don't
@@ -237,13 +247,15 @@ fn process_event(
         }
         PtyEvent::Exit {
             terminal_id,
+            generation,
             exit_code,
         } => {
             // Clean up the PtyHandle (reader/writer threads) but don't remove
             // the Terminal yet — the service manager may keep it so users can
             // see crash output.
-            pty_manager.cleanup_exited(terminal_id);
-            exit_events.push((terminal_id.clone(), *exit_code));
+            if pty_manager.cleanup_exited(terminal_id, *generation) {
+                exit_events.push((terminal_id.clone(), *exit_code));
+            }
         }
     }
 }
@@ -381,6 +393,8 @@ fn handle_exits(
     pty_manager: &PtyManager,
     service_manager: &Arc<Mutex<ServiceManager>>,
     reactor_ref: &ServiceReactorRef,
+    service_tick: &watch::Sender<u64>,
+    runtime: &Handle,
     reactor: &PtyLoopReactor,
 ) {
     // ── 1. Service terminals ────────────────────────────────────────────────
@@ -411,7 +425,15 @@ fn handle_exits(
             monitor.notify_exit(terminal_id, *exit_code);
         }
     }
-    let hook_tids = handle_hook_terminal_exits(exit_events, &service_tids, terminals, reactor);
+    let hook_tids = handle_hook_terminal_exits(
+        exit_events,
+        &service_tids,
+        terminals,
+        service_manager,
+        service_tick,
+        runtime,
+        reactor,
+    );
 
     // ── 3. terminal.on_close for plain user terminals ───────────────────────
     // Same gating as the GUI: a global, project, OR parent-worktree on_close
@@ -505,6 +527,9 @@ fn handle_hook_terminal_exits(
     exit_events: &[(String, Option<u32>)],
     service_tids: &HashSet<String>,
     terminals: &TerminalsRegistry,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &Handle,
     reactor: &PtyLoopReactor,
 ) -> HashSet<String> {
     let hook_tids: HashSet<String> = {
@@ -565,9 +590,11 @@ fn handle_hook_terminal_exits(
                 // state (delete_project + worktree_removed) when it completes.
                 match ws.begin_worktree_removal(&pending.project_id, &global_hooks, &mut cx) {
                     Ok(plan) => {
+                        let operation_epoch = ws.data_replacement_epoch();
                         drop(ws);
                         let _ = crate::command_loop::spawn_background_worktree_removal(
                             plan,
+                            operation_epoch,
                             false,
                             &global_hooks,
                             &reactor.workspace,
@@ -577,6 +604,9 @@ fn handle_hook_terminal_exits(
                             &reactor.backend,
                             terminals,
                             &reactor.settings,
+                            service_manager,
+                            service_tick,
+                            runtime,
                         );
                     }
                     Err(e) => {
@@ -1016,7 +1046,6 @@ mod tests {
         terminal_id: &str,
         exit_code: Option<u32>,
     ) {
-        let (tx, events) = async_channel::bounded(4);
         let (pty_manager, _unused_events) = PtyManager::new(SessionBackend::None);
         let pty_manager = Arc::new(pty_manager);
         let service_manager = Arc::new(Mutex::new(ServiceManager::new(
@@ -1024,25 +1053,22 @@ mod tests {
             terminals.clone(),
         )));
         let (service_tick, _service_rx) = watch::channel(0u64);
-        let (state_version, _state_rx) = watch::channel(0u64);
-        let handle = tokio::task::spawn_local(run_pty_loop(
-            events,
-            terminals,
-            pty_manager,
-            service_manager,
-            Handle::current(),
-            service_tick,
-            reactor,
-            state_version,
-        ));
-        tx.send(PtyEvent::Exit {
-            terminal_id: terminal_id.to_string(),
-            exit_code,
-        })
-        .await
-        .expect("send hook exit");
-        drop(tx);
-        handle.await.expect("PTY loop joins");
+        let runtime = Handle::current();
+        let reactor_ref = ServiceReactorRef::new(
+            service_manager.clone(),
+            runtime.clone(),
+            service_tick.clone(),
+        );
+        handle_exits(
+            &[(terminal_id.to_string(), exit_code)],
+            &terminals,
+            &pty_manager,
+            &service_manager,
+            &reactor_ref,
+            &service_tick,
+            &runtime,
+            &reactor,
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1142,22 +1168,27 @@ mod tests {
         // the sender to inject one event and then drop it so the loop ends.
         let (tx, pty_events) = async_channel::bounded::<PtyEvent>(16);
 
-        // A real `PtyManager` (no terminals spawned) provides the
-        // `TerminalTransport` for the test terminal and the `cleanup_exited` /
-        // `kill` no-ops; its own internal channel is unused here.
+        // A real tracked PTY generation validates the synthesized data event.
         let (pty_manager, _pty_manager_events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let terminal_id = pty_manager
+            .create_terminal_with_shell(&cwd, None)
+            .expect("create tracked PTY instance");
+        let generation = pty_manager
+            .current_generation(&terminal_id)
+            .expect("current PTY generation");
         let pty_manager = Arc::new(pty_manager);
 
         let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(Default::default()));
         let transport = pty_manager.clone(); // PtyManager: TerminalTransport
         let term = Arc::new(Terminal::new(
-            "t1".to_string(),
+            terminal_id.clone(),
             terminal_size(),
             transport,
-            "/tmp".to_string(),
+            cwd,
         ));
         let gen_before = term.content_generation();
-        terminals.lock().insert("t1".to_string(), term.clone());
+        terminals.lock().insert(terminal_id.clone(), term.clone());
 
         let backend = Arc::new(LocalBackend::new(pty_manager.clone()));
         let service_manager = Arc::new(Mutex::new(ServiceManager::new(backend, terminals.clone())));
@@ -1184,7 +1215,8 @@ mod tests {
                 ));
 
                 tx.send(PtyEvent::Data {
-                    terminal_id: "t1".to_string(),
+                    terminal_id,
+                    generation,
                     data: b"hello".to_vec(),
                     sequence: 0,
                 })
@@ -1205,5 +1237,89 @@ mod tests {
             "process_output should have advanced content_generation (before={gen_before}, after={})",
             term.content_generation(),
         );
+    }
+
+    #[test]
+    fn duplicate_exit_events_are_claimed_once_across_batches() {
+        let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let terminal_id = pty_manager
+            .create_or_reconnect_terminal(Some("duplicate-exit"), &cwd)
+            .expect("create PTY");
+        let generation = pty_manager
+            .current_generation(&terminal_id)
+            .expect("generation");
+        let event = PtyEvent::Exit {
+            terminal_id,
+            generation,
+            exit_code: Some(0),
+        };
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let mut dirty = Vec::new();
+        let mut bytes = 0;
+
+        let mut first_batch = Vec::new();
+        process_event(
+            &event,
+            &terminals,
+            &pty_manager,
+            &mut first_batch,
+            &mut dirty,
+            &mut bytes,
+        );
+        assert_eq!(first_batch.len(), 1);
+
+        let mut second_batch = Vec::new();
+        process_event(
+            &event,
+            &terminals,
+            &pty_manager,
+            &mut second_batch,
+            &mut dirty,
+            &mut bytes,
+        );
+        assert!(second_batch.is_empty());
+        pty_manager.flush_teardown();
+    }
+
+    #[test]
+    fn delayed_old_generation_exit_does_not_claim_reconnected_terminal() {
+        let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let terminal_id = pty_manager
+            .create_or_reconnect_terminal(Some("reconnected"), &cwd)
+            .expect("create old PTY");
+        let old_generation = pty_manager
+            .current_generation(&terminal_id)
+            .expect("old generation");
+        pty_manager.kill(&terminal_id);
+        pty_manager
+            .create_or_reconnect_terminal(Some(&terminal_id), &cwd)
+            .expect("create new PTY generation");
+        let new_generation = pty_manager
+            .current_generation(&terminal_id)
+            .expect("new generation");
+        assert_ne!(old_generation, new_generation);
+
+        let event = PtyEvent::Exit {
+            terminal_id: terminal_id.clone(),
+            generation: old_generation,
+            exit_code: Some(0),
+        };
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let mut exits = Vec::new();
+        process_event(
+            &event,
+            &terminals,
+            &pty_manager,
+            &mut exits,
+            &mut Vec::new(),
+            &mut 0,
+        );
+
+        assert!(exits.is_empty());
+        assert!(pty_manager.is_current_generation(&terminal_id, new_generation));
+        pty_manager.kill(&terminal_id);
+        pty_manager.flush_teardown();
     }
 }

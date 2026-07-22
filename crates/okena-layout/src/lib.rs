@@ -75,6 +75,29 @@ impl LayoutNode {
         }
     }
 
+    /// Remove terminal leaves with matching IDs, collapsing their parents.
+    ///
+    /// The root is wrapped in `Option` because removing its last terminal leaves
+    /// no representable layout node. Returns the number of removed leaves.
+    pub fn remove_terminal_ids(layout: &mut Option<Self>, terminal_ids: &HashSet<&str>) -> usize {
+        let mut removed = 0;
+        for terminal_id in terminal_ids {
+            let Some(root) = layout.as_mut() else {
+                break;
+            };
+            let Some(path) = root.find_terminal_path(terminal_id) else {
+                continue;
+            };
+            if path.is_empty() {
+                *layout = None;
+                removed += 1;
+            } else if root.remove_at_path(&path).is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Recursively flip every `Split` in this subtree between horizontal and
     /// vertical. `Tabs` and `Terminal` nodes are unaffected (tabs have no
     /// orientation), but the walk descends into both so nested splits inside
@@ -1817,6 +1840,28 @@ mod tests {
             }
             _ => panic!("Expected split"),
         }
+    }
+
+    #[test]
+    fn remove_terminal_ids_removes_leaves_and_collapses_layout() {
+        let mut layout = Some(LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![0.5, 0.5],
+            children: vec![terminal("keep"), terminal("stale")],
+        });
+        let ids = HashSet::from(["stale"]);
+
+        assert_eq!(LayoutNode::remove_terminal_ids(&mut layout, &ids), 1);
+        assert_eq!(layout, Some(terminal("keep")));
+    }
+
+    #[test]
+    fn remove_terminal_ids_clears_a_matching_root() {
+        let mut layout = Some(terminal("stale"));
+        let ids = HashSet::from(["stale"]);
+
+        assert_eq!(LayoutNode::remove_terminal_ids(&mut layout, &ids), 1);
+        assert!(layout.is_none());
     }
 
     #[test]

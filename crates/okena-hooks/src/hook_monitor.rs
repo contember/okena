@@ -1,9 +1,9 @@
 use okena_core::api::{ApiHookExecution, ApiHookStatus};
 use okena_state::Toast;
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 /// Maximum number of hook executions to keep in history.
@@ -144,6 +144,8 @@ struct HookMonitorInner {
     running_count: usize,
     exit_waiters: HashMap<String, mpsc::Sender<Option<u32>>>,
     early_exits: VecDeque<(String, Option<u32>, Instant)>,
+    next_exit_reservation_id: u64,
+    unbound_exit_reservations: HashSet<u64>,
     /// Monotonic counter incremented on every mutation. Allows cheap
     /// "has anything changed?" checks without cloning the full history.
     version: u64,
@@ -155,6 +157,60 @@ struct HookMonitorInner {
 /// Hook threads write start/finish events; the UI thread drains pending toasts.
 #[derive(Clone)]
 pub struct HookMonitor(Arc<Mutex<HookMonitorInner>>);
+
+/// RAII reservation covering the narrow gap between PTY spawn and waiter binding.
+///
+/// While at least one reservation exists, otherwise-unclassified exits may be
+/// held briefly for a just-spawned sync hook. Dropping an unbound reservation
+/// cancels it and clears unmatched provisional exits once no reservation remains.
+pub struct ExitWaitReservation {
+    monitor: Weak<Mutex<HookMonitorInner>>,
+    id: u64,
+    bound: bool,
+}
+
+impl ExitWaitReservation {
+    /// Bind this reservation to the terminal ID returned by PTY creation.
+    pub fn bind(mut self, terminal_id: &str) -> mpsc::Receiver<Option<u32>> {
+        let (tx, rx) = mpsc::channel();
+        let Some(monitor) = self.monitor.upgrade() else {
+            return rx;
+        };
+        let mut inner = monitor.lock();
+        if !inner.unbound_exit_reservations.remove(&self.id) {
+            return rx;
+        }
+        self.bound = true;
+        prune_early_exits(&mut inner.early_exits);
+        if let Some(index) = inner
+            .early_exits
+            .iter()
+            .position(|(id, _, _)| id == terminal_id)
+        {
+            if let Some((_, exit_code, _)) = inner.early_exits.remove(index) {
+                let _ = tx.send(exit_code);
+            }
+        } else {
+            inner.exit_waiters.insert(terminal_id.to_string(), tx);
+        }
+        clear_unmatched_provisional_exits(&mut inner);
+        rx
+    }
+}
+
+impl Drop for ExitWaitReservation {
+    fn drop(&mut self) {
+        if self.bound {
+            return;
+        }
+        let Some(monitor) = self.monitor.upgrade() else {
+            return;
+        };
+        let mut inner = monitor.lock();
+        inner.unbound_exit_reservations.remove(&self.id);
+        clear_unmatched_provisional_exits(&mut inner);
+    }
+}
 
 #[cfg(feature = "gpui")]
 impl gpui::Global for HookMonitor {}
@@ -174,6 +230,8 @@ impl HookMonitor {
             running_count: 0,
             exit_waiters: HashMap::new(),
             early_exits: VecDeque::new(),
+            next_exit_reservation_id: 1,
+            unbound_exit_reservations: HashSet::new(),
             version: 0,
         })))
     }
@@ -346,6 +404,19 @@ impl HookMonitor {
         rx
     }
 
+    /// Reserve an exit waiter before starting a sync-hook PTY.
+    pub fn reserve_exit_waiter(&self) -> ExitWaitReservation {
+        let mut inner = self.0.lock();
+        let id = inner.next_exit_reservation_id;
+        inner.next_exit_reservation_id = inner.next_exit_reservation_id.wrapping_add(1);
+        inner.unbound_exit_reservations.insert(id);
+        ExitWaitReservation {
+            monitor: Arc::downgrade(&self.0),
+            id,
+            bound: false,
+        }
+    }
+
     /// Find and finish a hook execution by its terminal ID.
     /// Returns `true` if a matching running execution was found and finished.
     pub fn finish_by_terminal_id(&self, terminal_id: &str, exit_code: Option<u32>) -> bool {
@@ -381,7 +452,12 @@ impl HookMonitor {
         let mut inner = self.0.lock();
         if let Some(tx) = inner.exit_waiters.remove(terminal_id) {
             let _ = tx.send(exit_code);
-        } else {
+        } else if !inner.unbound_exit_reservations.is_empty()
+            || inner.history.iter().any(|entry| {
+                entry.terminal_id.as_deref() == Some(terminal_id)
+                    && matches!(entry.status, HookStatus::Running)
+            })
+        {
             prune_early_exits(&mut inner.early_exits);
             inner.early_exits.retain(|(id, _, _)| id != terminal_id);
             inner
@@ -391,6 +467,20 @@ impl HookMonitor {
                 inner.early_exits.pop_front();
             }
         }
+    }
+}
+
+fn clear_unmatched_provisional_exits(inner: &mut HookMonitorInner) {
+    if inner.unbound_exit_reservations.is_empty() {
+        let expected: HashSet<&str> = inner
+            .history
+            .iter()
+            .filter(|entry| matches!(entry.status, HookStatus::Running))
+            .filter_map(|entry| entry.terminal_id.as_deref())
+            .collect();
+        inner
+            .early_exits
+            .retain(|(terminal_id, _, _)| expected.contains(terminal_id.as_str()));
     }
 }
 
@@ -529,9 +619,10 @@ mod tests {
     #[test]
     fn exit_waiter_receives_exit_that_arrived_before_registration() {
         let monitor = HookMonitor::new();
+        let reservation = monitor.reserve_exit_waiter();
         monitor.notify_exit("term-early", Some(7));
 
-        let rx = monitor.register_exit_waiter("term-early");
+        let rx = reservation.bind("term-early");
 
         assert_eq!(rx.try_recv().unwrap(), Some(7));
     }
@@ -539,10 +630,11 @@ mod tests {
     #[test]
     fn early_exit_can_finish_execution_recorded_after_the_event() {
         let monitor = HookMonitor::new();
+        let reservation = monitor.reserve_exit_waiter();
         monitor.notify_exit("term-fast", Some(0));
         monitor.record_start("pre_merge", "true", "project", Some("term-fast".into()));
 
-        let rx = monitor.register_exit_waiter("term-fast");
+        let rx = reservation.bind("term-fast");
         let exit_code = rx.try_recv().unwrap();
         assert!(monitor.finish_by_terminal_id("term-fast", exit_code));
 
@@ -555,12 +647,13 @@ mod tests {
     #[test]
     fn early_exit_buffer_is_bounded() {
         let monitor = HookMonitor::new();
+        let reservation = monitor.reserve_exit_waiter();
         for index in 0..=MAX_EARLY_EXITS {
             monitor.notify_exit(&format!("term-{index}"), Some(0));
         }
 
+        let newest = reservation.bind(&format!("term-{MAX_EARLY_EXITS}"));
         let evicted = monitor.register_exit_waiter("term-0");
-        let newest = monitor.register_exit_waiter(&format!("term-{MAX_EARLY_EXITS}"));
 
         assert!(matches!(evicted.try_recv(), Err(mpsc::TryRecvError::Empty)));
         assert_eq!(newest.try_recv().unwrap(), Some(0));
@@ -584,8 +677,21 @@ mod tests {
     #[test]
     fn notify_exit_without_waiter_is_noop() {
         let monitor = HookMonitor::new();
-        // Should not panic
         monitor.notify_exit("nonexistent", Some(1));
+
+        let rx = monitor.register_exit_waiter("nonexistent");
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn dropping_reservation_discards_unmatched_ordinary_exits() {
+        let monitor = HookMonitor::new();
+        let reservation = monitor.reserve_exit_waiter();
+        monitor.notify_exit("ordinary-terminal", Some(0));
+        drop(reservation);
+
+        let rx = monitor.register_exit_waiter("ordinary-terminal");
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
     }
 
     #[test]
