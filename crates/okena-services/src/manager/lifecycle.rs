@@ -440,6 +440,18 @@ impl ServiceManager {
         // Add new services or update definitions for existing ones
         for def in &new_config.services {
             let key = (project_id.to_string(), def.name.clone());
+            let replaces_docker = self
+                .instances
+                .get(&key)
+                .is_some_and(|instance| instance.kind != ServiceKind::Okena);
+            if replaces_docker
+                && let Some(instance) = self.instances.remove(&key)
+                && let Some(terminal_id) = instance.terminal_id
+            {
+                self.backend.kill(&terminal_id);
+                self.terminals.lock().remove(&terminal_id);
+                self.terminal_to_service.remove(&terminal_id);
+            }
             if let Some(instance) = self.instances.get_mut(&key) {
                 instance.definition = def.clone();
             } else {

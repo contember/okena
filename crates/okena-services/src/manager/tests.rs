@@ -806,6 +806,48 @@ fn prepared_reload_does_not_probe_the_project_path() {
 }
 
 #[test]
+fn reload_replaces_docker_name_collision_with_okena_service() {
+    let path = "/project";
+    let key = ("project".to_string(), "web".to_string());
+    let mut manager = manager();
+    manager.project_paths.insert(key.0.clone(), path.into());
+    manager.begin_project_incarnation(&key.0, path);
+    let (_, docker) = make_docker_instance(&key.0, &key.1, ServiceStatus::Running);
+    let old_terminal_id = docker.terminal_id.clone().expect("Docker log terminal");
+    manager.instances.insert(key.clone(), docker);
+    manager
+        .terminal_to_service
+        .insert(old_terminal_id.clone(), key.clone());
+    let mut cx = RecordingCx::default();
+
+    let status = manager.reload_project_services_prepared(
+        &key.0,
+        path,
+        PreparedProjectConfig::Loaded {
+            config: Some(OkenaProjectConfig {
+                services: vec![ServiceDefinition {
+                    name: key.1.clone(),
+                    command: "bun run dev".into(),
+                    cwd: ".".into(),
+                    env: HashMap::new(),
+                    auto_start: false,
+                    restart_on_crash: false,
+                    restart_delay_ms: 1000,
+                }],
+                docker_compose: None,
+            }),
+            detected_compose_file: None,
+        },
+        &mut cx,
+    );
+
+    assert_eq!(status, ServiceLoadStatus::Loaded);
+    assert_eq!(manager.instances[&key].kind, ServiceKind::Okena);
+    assert_eq!(manager.instances[&key].terminal_id, None);
+    assert!(!manager.terminal_to_service.contains_key(&old_terminal_id));
+}
+
+#[test]
 fn malformed_initial_load_reports_failure_without_claiming_path() {
     let project = ProjectDir::with_config("services: [");
     let path = project.path();
