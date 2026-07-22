@@ -8,7 +8,7 @@ use crate::hooks;
 use crate::persistence::HooksConfig;
 use crate::state::{LayoutNode, ProjectData, WindowId, Workspace};
 use okena_core::theme::FolderColor;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Pick a replacement focus target after hiding `hidden_id`.
 ///
@@ -242,6 +242,41 @@ impl Workspace {
         id
     }
 
+    /// Remove hook terminal state restored without a matching live PTY.
+    ///
+    /// Returns the stale terminal ids so the caller can also tear down a
+    /// persistent session backend before the ids become unreachable.
+    pub fn clear_stale_hook_terminals(
+        &mut self,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) -> Vec<String> {
+        let Some(project) = self.project_mut(project_id) else {
+            return Vec::new();
+        };
+        let stale: Vec<String> = project.hook_terminals.keys().cloned().collect();
+        if stale.is_empty() {
+            return stale;
+        }
+
+        let stale_set: HashSet<&str> = stale.iter().map(String::as_str).collect();
+        if let Some(layout) = &mut project.layout {
+            let keep_ids: Vec<String> = layout
+                .collect_terminal_ids()
+                .into_iter()
+                .filter(|id| !stale_set.contains(id.as_str()))
+                .collect();
+            let keep: HashSet<&str> = keep_ids.iter().map(String::as_str).collect();
+            layout.clear_terminal_ids_except(&keep);
+        }
+        project.hook_terminals.clear();
+        project
+            .terminal_names
+            .retain(|terminal_id, _| !stale_set.contains(terminal_id.as_str()));
+        self.notify_data(cx);
+        stale
+    }
+
     /// Re-open an ALREADY-EXISTING project (e.g. one restored from
     /// `workspace.json` at daemon boot): drop its stale hook terminals and fire
     /// its `on_project_open` hook, reading the project's stored hooks/name/path.
@@ -267,6 +302,7 @@ impl Workspace {
         let project_hooks = project.hooks.clone();
         let name = project.name.clone();
         let path = project.path.clone();
+        self.clear_stale_hook_terminals(project_id, cx);
         // Immutable `project` borrow ends here (values cloned); the folder
         // borrow below ends at the fire call, freeing `&mut self` for the
         // mutations that follow.
@@ -286,15 +322,6 @@ impl Workspace {
             runner.as_ref(),
             monitor.as_ref(),
         );
-        // Drop stale (dead-PTY) hook terminals restored from disk before
-        // registering the freshly-fired ones, so the panel shows only live rows.
-        if let Some(p) = self.project_mut(project_id) {
-            let stale: Vec<String> = p.hook_terminals.keys().cloned().collect();
-            for tid in stale {
-                p.hook_terminals.remove(&tid);
-                p.terminal_names.remove(&tid);
-            }
-        }
         self.register_hook_results(hook_results, cx);
     }
 
@@ -654,10 +681,25 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::{expand_tilde, pick_focus_replacement};
+    use crate::context::WorkspaceCx;
     use crate::settings::HooksConfig;
     use crate::state::*;
     use okena_core::theme::FolderColor;
+    use okena_hooks::{HookMonitor, HookRunner};
     use std::collections::HashMap;
+
+    struct TestCx;
+
+    impl WorkspaceCx for TestCx {
+        fn notify(&mut self) {}
+        fn refresh_views(&mut self) {}
+        fn hook_runner(&self) -> Option<HookRunner> {
+            None
+        }
+        fn hook_monitor(&self) -> Option<HookMonitor> {
+            None
+        }
+    }
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
@@ -876,6 +918,58 @@ mod tests {
         let before = s(&["a", "b"]);
         let after = s(&["a", "b"]);
         assert_eq!(pick_focus_replacement(&before, &after, "missing"), None);
+    }
+
+    #[test]
+    fn clear_stale_hook_terminals_clears_metadata_and_legacy_layout_id() {
+        let mut project = make_project("p1");
+        project.layout = Some(LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: vec![
+                LayoutNode::Terminal {
+                    terminal_id: Some("layout-terminal".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: Default::default(),
+                    zoom_level: 1.0,
+                },
+                LayoutNode::Terminal {
+                    terminal_id: Some("stale-hook".to_string()),
+                    minimized: true,
+                    detached: true,
+                    shell_type: Default::default(),
+                    zoom_level: 1.0,
+                },
+            ],
+        });
+        project.hook_terminals.insert(
+            "stale-hook".to_string(),
+            HookTerminalEntry {
+                label: "on_project_open".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo old".to_string(),
+                cwd: "/tmp".to_string(),
+            },
+        );
+        project
+            .terminal_names
+            .insert("stale-hook".to_string(), "Old hook".to_string());
+
+        let mut data = make_workspace_data();
+        data.projects.push(project);
+        data.project_order.push("p1".to_string());
+        let mut workspace = Workspace::new(data);
+        let stale = workspace.clear_stale_hook_terminals("p1", &mut TestCx);
+
+        assert_eq!(stale, vec!["stale-hook".to_string()]);
+        let project = workspace.project("p1").unwrap();
+        assert!(project.hook_terminals.is_empty());
+        assert!(!project.terminal_names.contains_key("stale-hook"));
+        let layout = project.layout.as_ref().unwrap();
+        assert!(layout.find_terminal_path("stale-hook").is_none());
+        assert!(layout.find_terminal_path("layout-terminal").is_some());
     }
 }
 

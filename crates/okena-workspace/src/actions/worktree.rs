@@ -178,8 +178,9 @@ pub fn close_worktree_merge_git(
         return CloseWorktreeGitOutcome::Err(format!("Merge failed: {}", e));
     }
 
-    // post_merge hook (headless, fire-and-forget).
-    let _ = hooks::fire_post_merge(
+    // Finish before teardown: a PTY would have no durable owner, while a
+    // detached headless process could lose its worktree CWD during removal.
+    let _ = hooks::fire_post_merge_headless_sync(
         project_hooks,
         global_hooks,
         project_id,
@@ -191,7 +192,6 @@ pub fn close_worktree_merge_git(
         folder_id,
         folder_name,
         monitor,
-        runner,
     );
 
     if push_enabled
@@ -210,6 +210,122 @@ pub fn close_worktree_merge_git(
     }
 
     CloseWorktreeGitOutcome::Ok { did_stash }
+}
+
+#[cfg(test)]
+mod merge_pipeline_tests {
+    use super::{CloseWorktreeGitOutcome, close_worktree_merge_git};
+    use crate::hook_monitor::{HookMonitor, HookStatus};
+    use crate::settings::{HooksConfig, WorktreeHooks};
+    use std::path::Path;
+    use std::process::Command;
+
+    struct TestRepo {
+        root: std::path::PathBuf,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("okena-post-merge-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn git(args: &[&str]) {
+        let output = Command::new("git").args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn path_str(path: &Path) -> &str {
+        path.to_str().expect("test path is utf-8")
+    }
+
+    #[test]
+    fn post_merge_is_finished_before_merge_pipeline_returns() {
+        let fixture = TestRepo::new();
+        let main_repo = fixture.root.join("main");
+        let worktree = fixture.root.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        std::fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
+        git(&["-C", path_str(&worktree), "add", "feature.txt"]);
+        git(&["-C", path_str(&worktree), "commit", "-m", "feature"]);
+
+        let hooks = HooksConfig {
+            worktree: WorktreeHooks {
+                post_merge: Some("git --version".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let monitor = HookMonitor::new();
+        let outcome = close_worktree_merge_git(
+            false,
+            false,
+            false,
+            false,
+            "p1",
+            "Project",
+            path_str(&worktree),
+            "feature",
+            "main",
+            path_str(&main_repo),
+            &hooks,
+            &HooksConfig::default(),
+            None,
+            None,
+            Some(&monitor),
+            None,
+        );
+
+        assert!(matches!(
+            outcome,
+            CloseWorktreeGitOutcome::Ok { did_stash: false }
+        ));
+        let history = monitor.history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].hook_type, "post_merge");
+        assert!(matches!(history[0].status, HookStatus::Succeeded { .. }));
+        assert!(history[0].terminal_id.is_none());
+    }
 }
 
 impl Workspace {

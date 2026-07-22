@@ -1446,6 +1446,21 @@ pub fn materialize_uninitialized_terminals(
     // Snapshot settings once, mirroring the command loop's `execute_action` arm.
     let app_settings = settings.lock().clone();
 
+    // Hook panels are persisted, but their PTYs are not reconnected. Tear down
+    // persistent backend sessions before dropping the only ids that own them.
+    for project_id in &project_ids {
+        let stale_ids = {
+            let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+            workspace
+                .lock()
+                .clear_stale_hook_terminals(project_id, &mut cx)
+        };
+        for terminal_id in stale_ids {
+            backend.kill(&terminal_id);
+            terminals.lock().remove(&terminal_id);
+        }
+    }
+
     for project_id in &project_ids {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut ws = workspace.lock();
@@ -2347,6 +2362,104 @@ mod tests {
             hooks.len(),
             1,
             "exactly one live hook terminal after re-fire"
+        );
+    }
+
+    #[test]
+    fn restore_boot_path_kills_persistent_stale_hook_session() {
+        struct RecordingKillBackend {
+            killed: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl TerminalBackend for RecordingKillBackend {
+            fn transport(&self) -> Arc<dyn TerminalTransport> {
+                Arc::new(StubTransport)
+            }
+
+            fn create_terminal(
+                &self,
+                _cwd: &str,
+                _shell: Option<&ShellType>,
+            ) -> anyhow::Result<String> {
+                anyhow::bail!("not used")
+            }
+
+            fn reconnect_terminal(
+                &self,
+                _terminal_id: &str,
+                _cwd: &str,
+                _shell: Option<&ShellType>,
+            ) -> anyhow::Result<String> {
+                anyhow::bail!("not used")
+            }
+
+            fn kill(&self, terminal_id: &str) {
+                self.killed.lock().push(terminal_id.to_string());
+            }
+
+            fn supports_buffer_capture(&self) -> bool {
+                false
+            }
+
+            fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+                None
+            }
+
+            fn is_remote(&self) -> bool {
+                false
+            }
+
+            fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+                None
+            }
+
+            fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+                Vec::new()
+            }
+        }
+
+        use okena_workspace::state::{HookTerminalEntry, HookTerminalStatus};
+
+        let mut data = workspace_restored_with_on_open("/tmp", "");
+        data.projects[0].layout = None;
+        data.projects[0].hooks = Default::default();
+        data.projects[0].hook_terminals.insert(
+            "persistent-stale-hook".to_string(),
+            HookTerminalEntry {
+                label: "on_project_open".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo old".to_string(),
+                cwd: "/tmp".to_string(),
+            },
+        );
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let killed = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingKillBackend {
+            killed: killed.clone(),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let settings = Arc::new(Mutex::new(default_settings()));
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+
+        materialize_uninitialized_terminals(
+            &*backend,
+            &workspace,
+            &workspace_tick,
+            &None,
+            &None,
+            &terminals,
+            &settings,
+        );
+
+        assert_eq!(killed.lock().as_slice(), &["persistent-stale-hook"]);
+        assert!(
+            workspace
+                .lock()
+                .project("p1")
+                .unwrap()
+                .hook_terminals
+                .is_empty()
         );
     }
 
