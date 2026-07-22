@@ -300,6 +300,7 @@ pub struct ProjectRuntimeQuiesce {
     pub project_path: String,
     pub teardown_sessions: Vec<TerminalSessionTeardown>,
     pub hook_terminal_ids: Vec<String>,
+    pub pending_close_terminal_ids: Vec<String>,
     layout_slots: Vec<ProjectRuntimeSlot>,
 }
 
@@ -533,6 +534,19 @@ impl Workspace {
                     .map(|(_, terminal_id)| TerminalSessionTeardown::host(terminal_id)),
             );
             hook_terminal_ids.extend(project.hook_terminals.keys().cloned());
+            if !reject_running_hooks {
+                let active_hook_ids: Vec<String> = project
+                    .hook_terminals
+                    .iter()
+                    .filter(|(_, entry)| entry.status == HookTerminalStatus::Running)
+                    .map(|(terminal_id, _)| terminal_id.clone())
+                    .collect();
+                for terminal_id in active_hook_ids {
+                    project.hook_terminals.remove(&terminal_id);
+                    project.terminal_names.remove(&terminal_id);
+                    project.hidden_terminals.remove(&terminal_id);
+                }
+            }
             teardown_sessions.extend(
                 hook_terminal_ids
                     .iter()
@@ -540,9 +554,11 @@ impl Workspace {
                     .map(TerminalSessionTeardown::host),
             );
         }
+        let pending_close_terminal_ids = self.drain_pending_closes_for_project(project_id);
         teardown_sessions.extend(
-            self.drain_pending_closes_for_project(project_id)
-                .into_iter()
+            pending_close_terminal_ids
+                .iter()
+                .cloned()
                 .map(TerminalSessionTeardown::host),
         );
         teardown_sessions.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
@@ -557,6 +573,7 @@ impl Workspace {
             project_path,
             teardown_sessions,
             hook_terminal_ids,
+            pending_close_terminal_ids,
             layout_slots,
         })
     }
@@ -609,6 +626,39 @@ impl Workspace {
         }
         self.finish_closing_project(&snapshot.project_id);
         self.notify_data(cx);
+    }
+
+    /// Clear PTYs created by a failed rematerialization attempt so recovery can
+    /// fail without publishing a half-restored layout or leaking registry ids.
+    pub fn drain_partial_project_runtime_recovery(
+        &mut self,
+        snapshot: &ProjectRuntimeQuiesce,
+        global_default_shell: &ShellType,
+        backend_preference: SessionBackend,
+        cx: &mut impl WorkspaceCx,
+    ) -> Vec<TerminalSessionTeardown> {
+        let Some(project) = self.project_mut(&snapshot.project_id) else {
+            return Vec::new();
+        };
+        let mut teardown_sessions = Vec::new();
+        let mut discarded_slots = Vec::new();
+        if let Some(layout) = &mut project.layout {
+            take_project_layout_runtime(
+                layout,
+                project.default_shell.as_ref(),
+                global_default_shell,
+                backend_preference,
+                &mut project.terminal_names,
+                &mut project.hidden_terminals,
+                &mut Vec::new(),
+                &mut discarded_slots,
+                &mut teardown_sessions,
+            );
+        }
+        if !teardown_sessions.is_empty() {
+            self.notify_data(cx);
+        }
+        teardown_sessions
     }
 
     /// Snapshot and atomically clear all local terminal ownership for migration.
