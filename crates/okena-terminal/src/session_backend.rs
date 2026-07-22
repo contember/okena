@@ -740,7 +740,7 @@ impl ResolvedBackend {
         distro: Option<&str>,
         session_name: &str,
         wsl_cwd: &str,
-        command: Option<&str>,
+        command: Option<SessionCommand<'_>>,
     ) -> Option<(String, Vec<String>)> {
         let inner_cmd = match self {
             // psmux runs on the Windows host, never inside WSL. resolve_for_wsl
@@ -749,12 +749,12 @@ impl ResolvedBackend {
             Self::Tmux => {
                 // Tmux doesn't reference host paths or $SHELL, so delegate to build_command
                 let (_program, inner_args) =
-                    self.build_command(session_name, wsl_cwd, command, &[])?;
+                    self.build_command_with_custom(session_name, wsl_cwd, command, &[])?;
                 inner_args.last()?.to_string()
             }
             Self::Screen => {
                 let (_program, inner_args) =
-                    self.build_command(session_name, wsl_cwd, command, &[])?;
+                    self.build_command_with_custom(session_name, wsl_cwd, command, &[])?;
                 let mut parts = vec!["screen".to_string()];
                 parts.extend(inner_args.iter().map(|a| shell_escape(a)));
                 parts.join(" ")
@@ -764,7 +764,15 @@ impl ResolvedBackend {
                 // (can't delegate to build_command — it uses Windows temp dir and host $SHELL)
                 let socket_path = get_wsl_dtach_socket_path(session_name);
                 let program = match command {
-                    Some(cmd) => format!("sh -c {}", shell_escape(cmd)),
+                    Some(SessionCommand::ShellScript(cmd)) => {
+                        format!("sh -c {}", shell_escape(cmd))
+                    }
+                    Some(SessionCommand::Program { program, args }) => {
+                        let mut parts = Vec::with_capacity(args.len() + 1);
+                        parts.push(shell_escape(program));
+                        parts.extend(args.iter().map(|arg| shell_escape(arg)));
+                        parts.join(" ")
+                    }
                     // Use $SHELL (resolved inside WSL) — not shell_escape'd so it expands
                     None => "\"$SHELL\"".to_string(),
                 };
@@ -1502,6 +1510,30 @@ mod tests {
             inner_cmd.contains("set status off"),
             "inner cmd: {}",
             inner_cmd
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_build_wsl_session_command_preserves_custom_argv() {
+        let backend = ResolvedBackend::Tmux;
+        let command_args = vec!["-lc".to_string(), "printf '%s' \"hello world\"".to_string()];
+        let (_, args) = backend
+            .build_wsl_session_command(
+                Some("Ubuntu"),
+                "tm-12345678",
+                "/home/user/project",
+                Some(SessionCommand::Program {
+                    program: "/bin/bash",
+                    args: &command_args,
+                }),
+            )
+            .unwrap();
+
+        let inner_cmd = args.last().unwrap();
+        assert!(
+            inner_cmd.contains("'/bin/bash' '-lc' 'printf '\\''%s'\\'' \"hello world\"'"),
+            "inner cmd: {inner_cmd}"
         );
     }
 

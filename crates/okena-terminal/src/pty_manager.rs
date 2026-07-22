@@ -63,10 +63,23 @@ pub struct PtyGeneration(u64);
 #[derive(Default)]
 struct PtyInstances {
     current: HashMap<String, PtyGeneration>,
+    creating: HashMap<String, PtyGeneration>,
+    exited: HashMap<String, PtyGeneration>,
+    pending_session_kills: HashMap<String, usize>,
 }
 
 impl PtyInstances {
-    fn register(&mut self, terminal_id: &str, generation: PtyGeneration) {
+    fn begin_creation(&mut self, terminal_id: &str, generation: PtyGeneration) {
+        self.creating.insert(terminal_id.to_string(), generation);
+        self.exited.remove(terminal_id);
+    }
+
+    fn is_creating(&self, terminal_id: &str, generation: PtyGeneration) -> bool {
+        self.creating.get(terminal_id).copied() == Some(generation)
+    }
+
+    fn publish(&mut self, terminal_id: &str, generation: PtyGeneration) {
+        self.creating.remove(terminal_id);
         self.current.insert(terminal_id.to_string(), generation);
     }
 
@@ -80,7 +93,49 @@ impl PtyInstances {
             return false;
         }
         self.current.remove(terminal_id);
+        self.exited.insert(terminal_id.to_string(), generation);
         true
+    }
+
+    fn cancel_creation(&mut self, terminal_id: &str, generation: PtyGeneration) {
+        if self.is_creating(terminal_id, generation) {
+            self.creating.remove(terminal_id);
+        }
+    }
+
+    fn remove_current(&mut self, terminal_id: &str, generation: PtyGeneration) {
+        if self.is_current(terminal_id, generation) {
+            self.current.remove(terminal_id);
+        }
+    }
+
+    fn claim_exited(&mut self, terminal_id: &str, generation: PtyGeneration) -> bool {
+        if self.exited.get(terminal_id).copied() != Some(generation) {
+            return false;
+        }
+        self.exited.remove(terminal_id);
+        true
+    }
+
+    fn queue_session_kill(&mut self, terminal_id: &str) {
+        *self
+            .pending_session_kills
+            .entry(terminal_id.to_string())
+            .or_default() += 1;
+    }
+
+    fn complete_session_kill(&mut self, terminal_id: &str) {
+        let Some(pending) = self.pending_session_kills.get_mut(terminal_id) else {
+            return;
+        };
+        *pending = pending.saturating_sub(1);
+        if *pending == 0 {
+            self.pending_session_kills.remove(terminal_id);
+        }
+    }
+
+    fn has_pending_session_kill(&self, terminal_id: &str) -> bool {
+        self.pending_session_kills.contains_key(terminal_id)
     }
 }
 
@@ -106,6 +161,31 @@ impl PtyShutdownState {
 
     fn mark_broken(&self) {
         self.broken.store(true, Ordering::Relaxed);
+    }
+}
+
+struct PtyReservation<'a> {
+    terminal_id: &'a str,
+    generation: PtyGeneration,
+    instances: &'a Mutex<PtyInstances>,
+    changed: &'a Condvar,
+    active: bool,
+}
+
+impl PtyReservation<'_> {
+    fn publish(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PtyReservation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.instances
+                .lock()
+                .cancel_creation(self.terminal_id, self.generation);
+            self.changed.notify_all();
+        }
     }
 }
 
@@ -157,6 +237,22 @@ struct TeardownJob {
     /// kill runs.
     handle: Option<PtyHandle>,
     kind: TeardownKind,
+    pending_session_kill: Option<PendingSessionKill>,
+}
+
+struct PendingSessionKill {
+    terminal_id: String,
+    instances: Arc<Mutex<PtyInstances>>,
+    changed: Arc<Condvar>,
+}
+
+impl Drop for PendingSessionKill {
+    fn drop(&mut self) {
+        self.instances
+            .lock()
+            .complete_session_kill(&self.terminal_id);
+        self.changed.notify_all();
+    }
 }
 
 #[derive(Default)]
@@ -242,7 +338,8 @@ impl Drop for PtyHandle {
 /// Manages all PTY processes
 pub struct PtyManager {
     terminals: Arc<Mutex<HashMap<String, PtyHandle>>>,
-    instances: Mutex<PtyInstances>,
+    instances: Arc<Mutex<PtyInstances>>,
+    instance_changed: Arc<Condvar>,
     next_generation: AtomicU64,
     event_tx: Sender<PtyEvent>,
     /// Session backend for persistence (tmux/screen/none)
@@ -320,7 +417,8 @@ impl PtyManager {
         (
             Self {
                 terminals: Arc::new(Mutex::new(HashMap::new())),
-                instances: Mutex::new(PtyInstances::default()),
+                instances: Arc::new(Mutex::new(PtyInstances::default())),
+                instance_changed: Arc::new(Condvar::new()),
                 next_generation: AtomicU64::new(1),
                 event_tx: tx,
                 session_backend,
@@ -338,7 +436,7 @@ impl PtyManager {
     /// Execute one teardown job on a worker thread. This is exactly what the old
     /// per-call detached closures did: reap the handle's reader/writer threads (if a
     /// handle is present), then run the session kill (only for `KillSession` jobs).
-    fn run_teardown_job(job: TeardownJob) {
+    fn run_teardown_job(mut job: TeardownJob) {
         if let Some(handle) = job.handle {
             Self::shutdown_handle(handle);
         }
@@ -369,6 +467,7 @@ impl PtyManager {
                 session_backend.kill_session(&session_name);
             }
         }
+        drop(job.pending_session_kill.take());
     }
 
     /// Set the output sink for streaming PTY output to external consumers.
@@ -451,6 +550,29 @@ impl PtyManager {
         cwd: &str,
         shell: Option<&ShellType>,
     ) -> Result<()> {
+        let generation = PtyGeneration(self.next_generation.fetch_add(1, Ordering::Relaxed));
+        let mut instances = self.instances.lock();
+        while instances.has_pending_session_kill(terminal_id)
+            || instances.creating.contains_key(terminal_id)
+        {
+            self.instance_changed.wait(&mut instances);
+        }
+        if instances.current.contains_key(terminal_id) {
+            if self.terminals.lock().contains_key(terminal_id) {
+                return Ok(());
+            }
+            instances.current.remove(terminal_id);
+        }
+        instances.begin_creation(terminal_id, generation);
+        drop(instances);
+        let mut reservation = PtyReservation {
+            terminal_id,
+            generation,
+            instances: &self.instances,
+            changed: &self.instance_changed,
+            active: true,
+        };
+
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: 24,
@@ -487,7 +609,6 @@ impl PtyManager {
         let writer: Arc<Mutex<Box<dyn Write + Send>>> =
             Arc::new(Mutex::new(pair.master.take_writer()?));
 
-        let generation = PtyGeneration(self.next_generation.fetch_add(1, Ordering::Relaxed));
         let shutdown = Arc::new(PtyShutdownState::new(terminal_id.to_string(), generation));
         let child_pid = child.process_id();
 
@@ -496,17 +617,30 @@ impl PtyManager {
         let id = terminal_id.to_string();
         let reader_shutdown = Arc::clone(&shutdown);
         let output_sink = self.output_sink.lock().clone();
+        let reader_instances = Arc::clone(&self.instances);
+        let (reader_start_tx, reader_start_rx) = mpsc::channel::<()>();
         let reader_handle = std::thread::Builder::new()
             .name(format!(
                 "pty-reader-{}",
                 &terminal_id[..8.min(terminal_id.len())]
             ))
             .spawn(move || {
+                if reader_start_rx.recv().is_err() {
+                    return;
+                }
                 let tx_panic = tx.clone();
                 let shutdown_panic = Arc::clone(&reader_shutdown);
                 let id_panic = id.clone();
                 if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Self::read_loop(id, reader, tx, reader_shutdown, child_pid, output_sink);
+                    Self::read_loop(
+                        id,
+                        reader,
+                        tx,
+                        reader_shutdown,
+                        child_pid,
+                        output_sink,
+                        reader_instances,
+                    );
                 })) {
                     log::error!("PTY reader thread panicked: {}", format_panic(&*panic));
                     shutdown_panic.mark_broken();
@@ -523,6 +657,7 @@ impl PtyManager {
         let writer_shutdown = Arc::clone(&shutdown);
         let writer_event_tx = self.event_tx.clone();
         let writer_id = terminal_id.to_string();
+        let (writer_start_tx, writer_start_rx) = mpsc::channel::<()>();
         // The batched writer thread shares the writer with `write_response`.
         let writer_for_thread = Arc::clone(&writer);
         let writer_handle = std::thread::Builder::new()
@@ -531,6 +666,9 @@ impl PtyManager {
                 &terminal_id[..8.min(terminal_id.len())]
             ))
             .spawn(move || {
+                if writer_start_rx.recv().is_err() {
+                    return;
+                }
                 let tx_panic = writer_event_tx.clone();
                 let shutdown_panic = Arc::clone(&writer_shutdown);
                 let id_panic = writer_id.clone();
@@ -553,8 +691,14 @@ impl PtyManager {
                 }
             })?;
 
-        // Store the handle
-        self.instances.lock().register(terminal_id, generation);
+        // Publish the generation and handle before either worker can emit an event.
+        // Taking the locks in lifecycle order keeps exit cleanup from observing a
+        // generation without its handle.
+        let mut instances = self.instances.lock();
+        if !instances.is_creating(terminal_id, generation) {
+            drop(instances);
+            anyhow::bail!("terminal creation was cancelled before publication");
+        }
         self.terminals.lock().insert(
             terminal_id.to_string(),
             PtyHandle {
@@ -572,6 +716,12 @@ impl PtyManager {
                 wsl_backend,
             },
         );
+        instances.publish(terminal_id, generation);
+        drop(instances);
+        reservation.publish();
+        self.instance_changed.notify_all();
+        let _ = reader_start_tx.send(());
+        let _ = writer_start_tx.send(());
 
         Ok(())
     }
@@ -755,6 +905,7 @@ impl PtyManager {
         shutdown: Arc<PtyShutdownState>,
         child_pid: Option<u32>,
         output_sink: Option<Arc<dyn PtyOutputSink>>,
+        instances: Arc<Mutex<PtyInstances>>,
     ) {
         // Use larger buffer like alacritty (they use 1MB, we use 64KB)
         let mut buf = [0u8; 65536];
@@ -786,9 +937,15 @@ impl PtyManager {
                         String::from_utf8_lossy(&data[..n.min(100)])
                     );
                     // Broadcast to external consumers immediately (bypasses UI event loop)
-                    let sequence = output_sink
-                        .as_ref()
-                        .map_or(0, |sink| sink.publish(terminal_id.clone(), data.clone()));
+                    let sequence = {
+                        let instances = instances.lock();
+                        if !instances.is_current(&terminal_id, shutdown.generation) {
+                            break;
+                        }
+                        output_sink
+                            .as_ref()
+                            .map_or(0, |sink| sink.publish(terminal_id.clone(), data.clone()))
+                    };
                     // send_blocking will block when channel is full (backpressure)
                     if tx
                         .send_blocking(PtyEvent::Data {
@@ -919,11 +1076,46 @@ impl PtyManager {
     /// Kill a terminal
     /// Also kills the underlying tmux/screen session if applicable
     pub fn kill(&self, terminal_id: &str) {
-        // Remove handle from map immediately (fast, non-blocking).
-        // `handle` may be `None` if `cleanup_exited` already took it on PTY EOF
-        // (the double-fire). In that case the enqueued job does ONLY the session
-        // kill below — SIGTERMing the lingering session/daemon after the client EOF'd.
-        let handle = self.terminals.lock().remove(terminal_id);
+        let handle = {
+            let mut instances = self.instances.lock();
+            while instances.creating.contains_key(terminal_id) {
+                self.instance_changed.wait(&mut instances);
+            }
+            let mut terminals = self.terminals.lock();
+            let handle = terminals.remove(terminal_id);
+            if let Some(handle) = handle.as_ref() {
+                instances.remove_current(terminal_id, handle.generation);
+            }
+            instances.exited.remove(terminal_id);
+            instances.queue_session_kill(terminal_id);
+            handle
+        };
+        self.enqueue_session_kill(terminal_id, handle);
+    }
+
+    /// Kill the persistent session only if this exact exited generation still
+    /// owns the logical terminal ID. A reconnect either replaces the exit claim
+    /// or waits for the queued backend kill to finish.
+    pub fn kill_exited(&self, terminal_id: &str, generation: PtyGeneration) -> bool {
+        let handle = {
+            let mut instances = self.instances.lock();
+            if !instances.claim_exited(terminal_id, generation) {
+                return false;
+            }
+            let mut terminals = self.terminals.lock();
+            let handle = terminals
+                .get(terminal_id)
+                .is_some_and(|handle| handle.generation == generation)
+                .then(|| terminals.remove(terminal_id))
+                .flatten();
+            instances.queue_session_kill(terminal_id);
+            handle
+        };
+        self.enqueue_session_kill(terminal_id, handle);
+        true
+    }
+
+    fn enqueue_session_kill(&self, terminal_id: &str, handle: Option<PtyHandle>) {
         let session_backend = self.session_backend;
         let session_name = session_backend.session_name(terminal_id);
 
@@ -943,6 +1135,11 @@ impl PtyManager {
                 #[cfg(windows)]
                 wsl_backend,
             },
+            pending_session_kill: Some(PendingSessionKill {
+                terminal_id: terminal_id.to_string(),
+                instances: Arc::clone(&self.instances),
+                changed: Arc::clone(&self.instance_changed),
+            }),
         };
         self.enqueue_teardown(job);
     }
@@ -1030,8 +1227,14 @@ impl PtyManager {
     /// Detach from all terminals without killing sessions
     /// Sessions will persist and can be reconnected on next app start
     pub fn detach_all(&self) {
-        // Drain all handles while holding the lock, then release lock before joining
+        // Drain all handles in lifecycle lock order, then release both locks
+        // before joining worker threads.
+        let mut instances = self.instances.lock();
         let handles: Vec<PtyHandle> = self.terminals.lock().drain().map(|(_, h)| h).collect();
+        for handle in &handles {
+            instances.remove_current(&handle.shutdown.terminal_id, handle.generation);
+        }
+        drop(instances);
         for handle in handles {
             Self::shutdown_handle(handle);
         }
@@ -1353,7 +1556,8 @@ impl PtyManager {
     /// Clean up a PtyHandle after the process exited naturally (reader got EOF).
     /// Removes the handle from the internal map and joins threads in the background.
     pub fn cleanup_exited(&self, terminal_id: &str, generation: PtyGeneration) -> bool {
-        if !self.instances.lock().claim_exit(terminal_id, generation) {
+        let mut instances = self.instances.lock();
+        if !instances.claim_exit(terminal_id, generation) {
             return false;
         }
         let handle = {
@@ -1367,6 +1571,7 @@ impl PtyManager {
                 None
             }
         };
+        drop(instances);
         if let Some(handle) = handle {
             // Process already EOF'd — only reap the reader/writer threads. The later
             // `kill()` in the exit-events loop does the session kill (and finds the
@@ -1374,6 +1579,7 @@ impl PtyManager {
             self.enqueue_teardown(TeardownJob {
                 handle: Some(handle),
                 kind: TeardownKind::ReapOnly,
+                pending_session_kill: None,
             });
         }
         true
@@ -1674,13 +1880,113 @@ mod tests {
         let old = PtyGeneration(1);
         let current = PtyGeneration(2);
 
-        instances.register("t1", old);
-        instances.register("t1", current);
+        instances.publish("t1", old);
+        instances.publish("t1", current);
 
         assert!(!instances.claim_exit("t1", old));
         assert!(instances.is_current("t1", current));
         assert!(instances.claim_exit("t1", current));
         assert!(!instances.claim_exit("t1", current));
+    }
+
+    #[test]
+    fn reconnect_replaces_old_exit_claim_before_session_kill() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let terminal_id = manager
+            .create_or_reconnect_terminal(Some("generation-reconnect"), &cwd)
+            .expect("create old generation");
+        let old_generation = manager
+            .current_generation(&terminal_id)
+            .expect("old generation");
+
+        assert!(manager.cleanup_exited(&terminal_id, old_generation));
+        manager
+            .create_or_reconnect_terminal(Some(&terminal_id), &cwd)
+            .expect("reserve new generation");
+        let new_generation = manager
+            .current_generation(&terminal_id)
+            .expect("new generation");
+
+        assert_ne!(old_generation, new_generation);
+        assert!(!manager.kill_exited(&terminal_id, old_generation));
+        assert!(manager.is_current_generation(&terminal_id, new_generation));
+        manager.kill(&terminal_id);
+        manager.flush_teardown();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn immediate_exit_is_observed_after_handle_publication() {
+        let (manager, events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let shell = ShellType::Custom {
+            path: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exit 0".to_string()],
+        };
+        let terminal_id = manager
+            .create_terminal_with_shell(&cwd, Some(&shell))
+            .expect("create immediate-exit PTY");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let generation = loop {
+            match events.try_recv() {
+                Ok(PtyEvent::Exit {
+                    terminal_id: exited_id,
+                    generation,
+                    ..
+                }) if exited_id == terminal_id => break generation,
+                Ok(_) | Err(async_channel::TryRecvError::Empty)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(_) | Err(async_channel::TryRecvError::Empty) => {
+                    panic!("immediate process did not emit Exit")
+                }
+                Err(async_channel::TryRecvError::Closed) => panic!("PTY event channel closed"),
+            }
+        };
+
+        assert!(manager.cleanup_exited(&terminal_id, generation));
+        assert!(!manager.terminals.lock().contains_key(&terminal_id));
+        manager.flush_teardown();
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        published: Mutex<Vec<(String, Vec<u8>)>>,
+    }
+
+    impl PtyOutputSink for RecordingSink {
+        fn publish(&self, terminal_id: String, data: Vec<u8>) -> u64 {
+            self.published.lock().push((terminal_id, data));
+            1
+        }
+    }
+
+    #[test]
+    fn stale_generation_output_is_not_published_to_sink() {
+        let old = PtyGeneration(1);
+        let current = PtyGeneration(2);
+        let instances = Arc::new(Mutex::new(PtyInstances::default()));
+        instances.lock().publish("reconnected", current);
+        let shutdown = Arc::new(PtyShutdownState::new("reconnected".to_string(), old));
+        let (tx, events) = async_channel::bounded(4);
+        let sink = Arc::new(RecordingSink::default());
+
+        PtyManager::read_loop(
+            "reconnected".to_string(),
+            Box::new(std::io::Cursor::new(b"stale".to_vec())),
+            tx,
+            shutdown,
+            None,
+            Some(sink.clone()),
+            instances,
+        );
+
+        assert!(sink.published.lock().is_empty());
+        assert!(events.try_recv().is_err());
     }
 
     #[test]
