@@ -178,7 +178,7 @@ fn pinned_client_config(
 
 /// Build a reqwest client for a connection. When `tls` is false this is a plain
 /// `reqwest::Client`; when true it uses the pinned rustls config (TOFU/enforce).
-#[cfg(feature = "client")]
+#[cfg(any(feature = "client", feature = "cancellable-http"))]
 pub fn build_reqwest_client(
     tls: bool,
     pinned: Option<String>,

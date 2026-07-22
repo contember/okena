@@ -12,6 +12,9 @@ client = ["dep:tokio", "dep:reqwest", "dep:tokio-tungstenite", "dep:async-channe
 # file/git read paths). TLS deps are shared with the async client so blocking
 # remote actions enforce the same pinned-certificate policy.
 blocking-http = ["dep:reqwest", "reqwest/blocking", "dep:rustls", "dep:rustls-pki-types", "dep:sha2"]
+# Request-cancellable blocking facade used by remote content search. It runs
+# only the HTTP future on Tokio without pulling in the WebSocket client stack.
+cancellable-http = ["blocking-http", "dep:tokio"]
 # Exposes the in-memory HTTP mock to downstream crates' tests.
 test-support = []
 

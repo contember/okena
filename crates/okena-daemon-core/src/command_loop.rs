@@ -5443,6 +5443,109 @@ mod tests {
         std::fs::remove_dir_all(fixture).expect("remove content search fixture");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_search_reply_cancels_only_its_worker_and_releases_its_permit() {
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-content-search-cancel-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&fixture).expect("create content search fixture");
+        let fixture_path = fixture.to_str().expect("fixture path is utf-8");
+        let workspace = Workspace::new(workspace_with_uninitialized_terminal(fixture_path));
+        let prepare_search = || {
+            prepare_content_search(
+                &workspace,
+                "p1".to_string(),
+                "needle".to_string(),
+                false,
+                "literal".to_string(),
+                1000,
+                None,
+                0,
+                false,
+            )
+            .expect("prepare content search")
+        };
+        let permits = Arc::new(Semaphore::new(2));
+
+        let (a_started_tx, a_started_rx) = oneshot::channel();
+        let (a_cancelled_tx, a_cancelled_rx) = oneshot::channel();
+        let (a_reply_tx, a_reply_rx) = oneshot::channel();
+        spawn_content_search_with(
+            prepare_search(),
+            Some(a_reply_tx),
+            &tokio::runtime::Handle::current(),
+            permits.clone(),
+            move |_search, cancelled| {
+                a_started_tx.send(()).expect("signal search A started");
+                while !cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                a_cancelled_tx.send(()).expect("signal search A cancelled");
+                CommandResult::Ok(None)
+            },
+        );
+        a_started_rx.await.expect("search A started");
+
+        let (b_started_tx, b_started_rx) = oneshot::channel();
+        let (b_release_tx, b_release_rx) = std::sync::mpsc::channel();
+        let (b_reply_tx, b_reply_rx) = oneshot::channel();
+        spawn_content_search_with(
+            prepare_search(),
+            Some(b_reply_tx),
+            &tokio::runtime::Handle::current(),
+            permits.clone(),
+            move |_search, cancelled| {
+                b_started_tx.send(()).expect("signal search B started");
+                b_release_rx.recv().expect("release search B");
+                assert!(
+                    !cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                    "cancelling search A must not cancel search B"
+                );
+                CommandResult::Ok(Some(serde_json::json!(["b"])))
+            },
+        );
+        b_started_rx.await.expect("search B started");
+
+        let (c_started_tx, mut c_started_rx) = oneshot::channel();
+        let (c_reply_tx, c_reply_rx) = oneshot::channel();
+        spawn_content_search_with(
+            prepare_search(),
+            Some(c_reply_tx),
+            &tokio::runtime::Handle::current(),
+            permits,
+            move |_search, cancelled| {
+                assert!(!cancelled.load(std::sync::atomic::Ordering::Relaxed));
+                c_started_tx.send(()).expect("signal search C started");
+                CommandResult::Ok(Some(serde_json::json!(["c"])))
+            },
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut c_started_rx)
+                .await
+                .is_err(),
+            "search C must wait while A and B own both permits"
+        );
+
+        drop(a_reply_rx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), a_cancelled_rx)
+            .await
+            .expect("search A cancellation timeout")
+            .expect("search A observes cancellation");
+        tokio::time::timeout(std::time::Duration::from_secs(1), c_started_rx)
+            .await
+            .expect("search C start timeout")
+            .expect("search C starts after A releases its permit");
+
+        b_release_tx.send(()).expect("release search B");
+        let b_result = b_reply_rx.await.expect("search B reply");
+        let c_result = c_reply_rx.await.expect("search C reply");
+        assert!(matches!(b_result, CommandResult::Ok(Some(_))));
+        assert!(matches!(c_result, CommandResult::Ok(Some(_))));
+
+        std::fs::remove_dir_all(fixture).expect("remove content search fixture");
+    }
+
     /// `materialize_uninitialized_terminals` assigns a real `terminal_id` to a
     /// restored `terminal_id: None` slot, creates the backing PTY (so it lands
     /// in the registry), bumps `data_version` (so the autosave observer persists

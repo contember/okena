@@ -5,6 +5,9 @@ use okena_core::api::ActionRequest;
 #[cfg(feature = "blocking-http")]
 use std::sync::{Arc, OnceLock};
 
+#[cfg(feature = "cancellable-http")]
+const CANCELLATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// Total request timeout for "fast" actions (terminal control, listings,
 /// metadata). 10 s is generous for these; longer would mask real failures.
 const FAST_TIMEOUT_SECS: u64 = 10;
@@ -51,6 +54,9 @@ fn timeout_for(action: &ActionRequest) -> u64 {
 #[cfg(feature = "blocking-http")]
 type ClientAndUrl = (reqwest::blocking::Client, String);
 
+#[cfg(feature = "cancellable-http")]
+type AsyncClientAndUrl = (reqwest::Client, String);
+
 #[cfg(feature = "blocking-http")]
 struct RemoteActionClientInner {
     config: RemoteConnectionConfig,
@@ -58,6 +64,8 @@ struct RemoteActionClientInner {
     fast: OnceLock<Result<ClientAndUrl, String>>,
     bytes: OnceLock<Result<ClientAndUrl, String>>,
     search: OnceLock<Result<ClientAndUrl, String>>,
+    #[cfg(feature = "cancellable-http")]
+    async_search: OnceLock<Result<AsyncClientAndUrl, String>>,
 }
 
 /// Cloneable blocking action client backed by one complete connection config.
@@ -79,6 +87,8 @@ impl RemoteActionClient {
                 fast: OnceLock::new(),
                 bytes: OnceLock::new(),
                 search: OnceLock::new(),
+                #[cfg(feature = "cancellable-http")]
+                async_search: OnceLock::new(),
             }),
         }
     }
@@ -100,6 +110,128 @@ impl RemoteActionClient {
         };
         post_action_inner(client, url, &self.inner.token, action)
     }
+
+    /// Post a content search while observing the request-local cancellation flag.
+    ///
+    /// The HTTP future runs on a shared async runtime, while this blocking API
+    /// waits through a bounded channel so synchronous filesystem providers can
+    /// still cancel an in-flight request. Dropping the future closes the HTTP
+    /// response and, in turn, the daemon bridge reply receiver.
+    #[cfg(feature = "cancellable-http")]
+    pub fn post_action_cancellable(
+        &self,
+        action: ActionRequest,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<serde_json::Value>, String> {
+        if !matches!(action, ActionRequest::SearchContent { .. }) {
+            return Err("cancellable remote actions only support content search".to_string());
+        }
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("content search cancelled".to_string());
+        }
+
+        let runtime = cancellable_runtime()?;
+        let client_and_url = self.inner.async_search.get_or_init(|| {
+            crate::remote_http::async_client_and_url(&self.inner.config, "/v1/actions")
+        });
+        let (client, url) = match client_and_url {
+            Ok((client, url)) => (client.clone(), url.clone()),
+            Err(error) => return Err(error.clone()),
+        };
+        let token = self.inner.token.clone();
+        let timeout = std::time::Duration::from_secs(timeout_for(&action));
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let mut cancellation = RequestCancellation::new(cancel_tx);
+
+        runtime.spawn(async move {
+            let request = post_action_async_with_client(&client, &url, &token, action);
+            let result = await_cancellable_request(request, cancel_rx, timeout).await;
+            let _ = result_tx.send(result);
+        });
+
+        loop {
+            match result_rx.recv_timeout(CANCELLATION_POLL_INTERVAL) {
+                Ok(result) => {
+                    cancellation.disarm();
+                    return result;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        cancellation.cancel();
+                        return result_rx
+                            .recv_timeout(std::time::Duration::from_secs(1))
+                            .unwrap_or_else(|_| {
+                                Err("content search cancellation failed".to_string())
+                            });
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    cancellation.disarm();
+                    return Err("content search request task stopped".to_string());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "cancellable-http")]
+fn cancellable_runtime() -> Result<&'static tokio::runtime::Handle, String> {
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    match RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("okena-remote-search")
+            .build()
+            .map_err(|error| format!("Cannot initialise content search runtime: {error}"))
+    }) {
+        Ok(runtime) => Ok(runtime.handle()),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+#[cfg(feature = "cancellable-http")]
+struct RequestCancellation(Option<tokio::sync::oneshot::Sender<()>>);
+
+#[cfg(feature = "cancellable-http")]
+impl RequestCancellation {
+    fn new(sender: tokio::sync::oneshot::Sender<()>) -> Self {
+        Self(Some(sender))
+    }
+
+    fn cancel(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(feature = "cancellable-http")]
+impl Drop for RequestCancellation {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+#[cfg(feature = "cancellable-http")]
+async fn await_cancellable_request<F, T>(
+    request: F,
+    cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    timeout: std::time::Duration,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    tokio::select! {
+        result = request => result,
+        _ = cancel_rx => Err("content search cancelled".to_string()),
+        _ = tokio::time::sleep(timeout) => Err("content search request timed out".to_string()),
+    }
 }
 
 /// Post an action asynchronously using the same connection-aware transport and
@@ -117,7 +249,7 @@ pub async fn post_action_async(
 /// Post through an already-selected async client. Connection setup uses this
 /// while it is still negotiating the final config, but keeps action response
 /// parsing and size limits on the same path as every other caller.
-#[cfg(feature = "client")]
+#[cfg(any(feature = "client", feature = "cancellable-http"))]
 pub async fn post_action_async_with_client(
     client: &reqwest::Client,
     base_url: &str,
@@ -226,6 +358,9 @@ fn parse_action_response(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "cancellable-http")]
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     fn search_action() -> ActionRequest {
         ActionRequest::SearchContent {
             project_id: "project".to_string(),
@@ -236,6 +371,21 @@ mod tests {
             file_glob: None,
             context_lines: 0,
             show_ignored: false,
+        }
+    }
+
+    #[cfg(feature = "cancellable-http")]
+    fn remote_config(port: u16) -> RemoteConnectionConfig {
+        RemoteConnectionConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+            saved_token: None,
+            token_obtained_at: None,
+            tls: false,
+            pinned_cert_sha256: None,
+            local_endpoint: None,
         }
     }
 
@@ -261,6 +411,127 @@ mod tests {
                 relative_path: "image.png".to_string(),
             }),
             ActionClientKind::Bytes
+        );
+    }
+
+    #[cfg(feature = "cancellable-http")]
+    struct PendingRequest {
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[cfg(feature = "cancellable-http")]
+    impl std::future::Future for PendingRequest {
+        type Output = Result<(), String>;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[cfg(feature = "cancellable-http")]
+    impl Drop for PendingRequest {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "cancellable-http")]
+    #[tokio::test]
+    async fn cancellation_drops_the_request_future() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let request = PendingRequest {
+            dropped: dropped.clone(),
+        };
+
+        cancel_tx.send(()).unwrap();
+        let error =
+            await_cancellable_request(request, cancel_rx, std::time::Duration::from_secs(3600))
+                .await
+                .unwrap_err();
+
+        assert_eq!(error, "content search cancelled");
+        assert!(dropped.load(Ordering::Relaxed));
+    }
+
+    #[cfg(feature = "cancellable-http")]
+    #[tokio::test]
+    async fn timeout_drops_the_request_future() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let request = PendingRequest {
+            dropped: dropped.clone(),
+        };
+
+        let error =
+            await_cancellable_request(request, cancel_rx, std::time::Duration::from_millis(1))
+                .await
+                .unwrap_err();
+
+        assert_eq!(error, "content search request timed out");
+        assert!(dropped.load(Ordering::Relaxed));
+    }
+
+    #[cfg(feature = "cancellable-http")]
+    #[test]
+    fn blocking_facade_closes_the_in_flight_request_on_cancellation() {
+        use std::io::Read as _;
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (request_started_tx, request_started_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+            request_started_tx.send(()).unwrap();
+            stream.read(&mut buffer).unwrap_or_default() == 0
+        });
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let client = RemoteActionClient::new(remote_config(port), "token".to_string());
+        let request = std::thread::spawn(move || {
+            client.post_action_cancellable(search_action(), &worker_cancelled)
+        });
+
+        request_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        cancelled.store(true, Ordering::Relaxed);
+        let error = request.join().unwrap().unwrap_err();
+
+        assert_eq!(error, "content search cancelled");
+        assert!(
+            server.join().unwrap(),
+            "cancelled request must close its socket"
         );
     }
 }
