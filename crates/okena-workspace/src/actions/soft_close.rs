@@ -18,7 +18,7 @@ use okena_terminal::backend::TerminalBackend;
 
 use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
-use crate::state::{LayoutNode, PendingClose, RestoredClose, Workspace};
+use crate::state::{ClosingTerminalOwner, LayoutNode, PendingClose, RestoredClose, Workspace};
 
 /// Shared `terminal_id -> grace deadline` map for in-flight soft-closes.
 ///
@@ -289,6 +289,34 @@ pub enum PendingDecision {
 }
 
 impl Workspace {
+    /// Retain the owner while a terminal is absent from the layout but its PTY
+    /// exit event is still in flight.
+    pub fn remember_closing_terminal_owner(&mut self, project_id: &str, terminal_id: &str) {
+        let Some(project) = self.project(project_id) else {
+            return;
+        };
+        let owner = ClosingTerminalOwner {
+            project_id: project_id.to_string(),
+            terminal_name: project.terminal_names.get(terminal_id).cloned(),
+        };
+        self.closing_terminal_owners
+            .insert(terminal_id.to_string(), owner);
+    }
+
+    /// Consume retained ownership exactly once when the PTY exit is handled.
+    pub fn take_closing_terminal_owner(
+        &mut self,
+        terminal_id: &str,
+    ) -> Option<(String, Option<String>)> {
+        self.closing_terminal_owners
+            .remove(terminal_id)
+            .map(|owner| (owner.project_id, owner.terminal_name))
+    }
+
+    fn forget_closing_terminal_owner(&mut self, terminal_id: &str) {
+        self.closing_terminal_owners.remove(terminal_id);
+    }
+
     /// Begin a soft close: snapshot the project's layout, remove the terminal
     /// from the tree (focusing a sibling, exactly like a normal close), and
     /// record the pending close so it can be undone or finalized later.
@@ -305,6 +333,8 @@ impl Workspace {
         cx: &mut impl WorkspaceCx,
     ) {
         let pre_close_layout = self.project(project_id).and_then(|p| p.layout.clone());
+
+        self.remember_closing_terminal_owner(project_id, terminal_id);
 
         // Remove from the layout + focus a sibling (same as a hard close).
         self.close_terminal_and_focus_sibling(focus_manager, project_id, path, cx);
@@ -398,6 +428,7 @@ impl Workspace {
             Some(p) => p,
             None => return false,
         };
+        let retained_owner = self.take_closing_terminal_owner(terminal_id);
 
         if !alive {
             // The shell exited during the grace window — nothing to bring back.
@@ -438,6 +469,14 @@ impl Workspace {
                     }
                 }
             }
+        }
+
+        if let Some((_, Some(terminal_name))) = retained_owner
+            && let Some(project) = self.project_mut(&project_id)
+        {
+            project
+                .terminal_names
+                .insert(terminal_id.to_string(), terminal_name);
         }
 
         // Focus the restored terminal.
@@ -494,10 +533,14 @@ impl Workspace {
     /// quit to make sure soft-closed PTYs are actually torn down (and don't
     /// leak as orphaned session-backend sessions).
     pub fn drain_pending_closes(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pending_closes)
+        let ids: Vec<String> = std::mem::take(&mut self.pending_closes)
             .into_iter()
             .map(|p| p.terminal_id)
-            .collect()
+            .collect();
+        for terminal_id in &ids {
+            self.forget_closing_terminal_owner(terminal_id);
+        }
+        ids
     }
 
     /// Drain pending soft-closes belonging to `project_id`, returning their
@@ -514,6 +557,9 @@ impl Workspace {
                 true
             }
         });
+        for terminal_id in &ids {
+            self.forget_closing_terminal_owner(terminal_id);
+        }
         ids
     }
 
@@ -522,7 +568,9 @@ impl Workspace {
     /// and return its toast id so the caller can dismiss the now-useless undo
     /// toast. Returns `None` if the terminal wasn't mid soft-close.
     pub fn cancel_pending_close(&mut self, terminal_id: &str) -> Option<String> {
-        self.take_pending_close(terminal_id).map(|p| p.toast_id)
+        let pending = self.take_pending_close(terminal_id);
+        self.forget_closing_terminal_owner(terminal_id);
+        pending.map(|p| p.toast_id)
     }
 }
 
@@ -605,7 +653,10 @@ mod tests {
 
     #[gpui::test]
     fn undo_restores_exact_tree_when_unchanged(cx: &mut gpui::TestAppContext) {
-        let data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        let mut data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        data.projects[0]
+            .terminal_names
+            .insert("a".to_string(), "Named terminal".to_string());
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
@@ -625,6 +676,15 @@ mod tests {
             let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
             assert_eq!(layout.find_terminal_path("a"), Some(vec![0]));
             assert_eq!(layout.find_terminal_path("b"), Some(vec![1]));
+            assert_eq!(
+                ws.project("p1")
+                    .unwrap()
+                    .terminal_names
+                    .get("a")
+                    .map(String::as_str),
+                Some("Named terminal")
+            );
+            assert!(ws.take_closing_terminal_owner("a").is_none());
         });
     }
 
@@ -660,6 +720,11 @@ mod tests {
             assert!(ws.finalize_soft_close("a", cx));
             assert!(!ws.has_pending_close("a"));
             assert_eq!(ws.drain_pending_terminal_kills(), vec!["a".to_string()]);
+            assert_eq!(
+                ws.take_closing_terminal_owner("a"),
+                Some(("p1".to_string(), None)),
+                "ownership remains until the PTY exit"
+            );
 
             // Idempotent — second finalize is a no-op.
             assert!(!ws.finalize_soft_close("a", cx));
@@ -814,6 +879,7 @@ mod tests {
             let drained = ws.drain_pending_closes();
             assert_eq!(drained, vec!["a".to_string()]);
             assert!(!ws.has_pending_close("a"));
+            assert!(ws.take_closing_terminal_owner("a").is_none());
         });
     }
 
@@ -829,6 +895,7 @@ mod tests {
             // Shell exited on its own → cancel returns the toast id to dismiss.
             assert_eq!(ws.cancel_pending_close("a"), Some("toast-a".to_string()));
             assert!(!ws.has_pending_close("a"));
+            assert!(ws.take_closing_terminal_owner("a").is_none());
             // Idempotent — nothing left to cancel.
             assert_eq!(ws.cancel_pending_close("a"), None);
         });

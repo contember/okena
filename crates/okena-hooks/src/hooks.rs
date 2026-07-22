@@ -67,63 +67,8 @@ impl HookRunner {
         project_path: &str,
         keep_alive: bool,
     ) -> Result<(String, String), String> {
-        // Build the full command with env vars baked in.
-        // Filter out any keys that aren't valid shell identifiers to prevent injection.
-        let safe_env: Vec<_> = env_vars
-            .iter()
-            .filter(|(k, _)| {
-                if is_valid_env_key(k) {
-                    true
-                } else {
-                    log::warn!("Skipping invalid env var key in hook terminal: {:?}", k);
-                    false
-                }
-            })
-            .collect();
-
-        let full_cmd = if cfg!(windows) {
-            // Escape all cmd.exe special characters in env var values.
-            // ^ must be escaped first since it's the cmd.exe escape character.
-            let env_prefix = safe_env
-                .iter()
-                .map(|(k, v)| {
-                    // Escape all cmd.exe special characters.
-                    // ^ must be first since it's the escape character itself.
-                    let escaped = v
-                        .replace('^', "^^")
-                        .replace('%', "%%")
-                        .replace('"', "\\\"")
-                        .replace('&', "^&")
-                        .replace('|', "^|")
-                        .replace('<', "^<")
-                        .replace('>', "^>")
-                        .replace('(', "^(")
-                        .replace(')', "^)");
-                    format!("set \"{}={}\"", k, escaped)
-                })
-                .collect::<Vec<_>>()
-                .join(" && ");
-            if env_prefix.is_empty() {
-                command.to_string()
-            } else {
-                format!("{} && {}", env_prefix, command)
-            }
-        } else {
-            // POSIX single-quote escaping: wrap values in '...' and replace each
-            // embedded ' with the sequence '\'' (end current single-quoted string,
-            // insert an escaped literal quote, re-open single-quoted string).
-            // This is the standard POSIX single-quote escape pattern.
-            let env_prefix = safe_env
-                .iter()
-                .map(|(k, v)| format!("{}='{}'", k, v.replace('\'', "'\\''")))
-                .collect::<Vec<_>>()
-                .join(" ");
-            if env_prefix.is_empty() {
-                command.to_string()
-            } else {
-                format!("{} {}", env_prefix, command)
-            }
-        };
+        // Store an independently rerunnable command, including persistent env setup.
+        let full_cmd = format!("{}{}", build_export_prefix(env_vars), command);
 
         let cwd = if project_path.is_empty() {
             "."
@@ -132,28 +77,14 @@ impl HookRunner {
         };
 
         let terminal_id = if keep_alive {
-            // Build a shell command that:
-            // 1. Exports env vars (available to the hook and the interactive shell)
-            // 2. Runs the hook command
-            // 3. Execs into the user's default shell so the terminal stays alive
-            // This avoids noisy export echoing and zsh session restore issues.
-            let mut script = String::new();
-            for (k, v) in &safe_env {
-                let escaped_v = v.replace('\'', "'\\''");
-                script.push_str(&format!("export {}='{}'; ", k, escaped_v));
-            }
-            script.push_str(command);
-            // Capture exit code and report it via OSC title before exec-ing
-            // into the interactive shell. The PTY event loop detects titles
-            // matching __okena_hook_exit:<code> and updates hook status.
-            script.push_str("; __okena_rc=$?; printf '\\033]0;__okena_hook_exit:%d\\007' \"$__okena_rc\"; exec \"${SHELL:-sh}\"");
-            let shell = ShellType::for_command(script);
+            let shell = keep_alive_hook_shell(&full_cmd);
             self.backend.create_terminal(cwd, Some(&shell))
         } else {
             // Use sh -c so the PTY exits when the command completes.
             let shell = ShellType::for_command(full_cmd.clone());
             self.backend.create_terminal(cwd, Some(&shell))
-        }.map_err(|e| format!("Failed to create hook terminal: {}", e))?;
+        }
+        .map_err(|e| format!("Failed to create hook terminal: {}", e))?;
 
         let transport = self.backend.transport();
         let terminal = Arc::new(Terminal::new(
@@ -165,6 +96,29 @@ impl HookRunner {
         self.terminals.lock().insert(terminal_id.clone(), terminal);
 
         Ok((terminal_id, full_cmd))
+    }
+}
+
+/// Wrap a rerunnable hook command so it reports completion and stays interactive.
+pub fn keep_alive_hook_shell(command: &str) -> ShellType {
+    build_keep_alive_hook_shell(command, cfg!(windows))
+}
+
+fn build_keep_alive_hook_shell(command: &str, windows: bool) -> ShellType {
+    if windows {
+        let script = format!(
+            "{} & set \"__okena_rc=!ERRORLEVEL!\" & <nul set /p \"=\x1b]0;__okena_hook_exit:!__okena_rc!\x07\" & cmd /K",
+            command
+        );
+        ShellType::Custom {
+            path: "cmd".to_string(),
+            args: vec!["/V:ON".to_string(), "/C".to_string(), script],
+        }
+    } else {
+        ShellType::for_command(format!(
+            "{}; __okena_rc=$?; printf '\\033]0;__okena_hook_exit:%d\\007' \"$__okena_rc\"; exec \"${{SHELL:-sh}}\"",
+            command
+        ))
     }
 }
 
@@ -189,7 +143,14 @@ fn is_valid_env_key(key: &str) -> bool {
 fn build_export_prefix(env_vars: &HashMap<String, String>) -> String {
     let safe_env: Vec<_> = env_vars
         .iter()
-        .filter(|(k, _)| is_valid_env_key(k))
+        .filter(|(k, _)| {
+            if is_valid_env_key(k) {
+                true
+            } else {
+                log::warn!("Skipping invalid env var key in hook terminal: {:?}", k);
+                false
+            }
+        })
         .collect();
 
     if safe_env.is_empty() {
@@ -559,9 +520,9 @@ fn run_hook_sync(
                 }
             })?;
 
-        // Do NOT call record_finish here — the main thread's handle_hook_terminal_exits
-        // calls finish_by_terminal_id which is the sole authority for PTY hook completion
-        // (avoids duplicate toast notifications).
+        // The PTY loop normally finishes this first. The idempotent fallback covers
+        // a very fast exit that arrived before the execution and waiter were registered.
+        monitor.finish_by_terminal_id(&terminal_id, exit_code);
         let success = exit_code == Some(0);
 
         if success {
@@ -961,6 +922,47 @@ pub fn fire_post_merge(
         }
     }
     Vec::new()
+}
+
+/// Run `post_merge` synchronously without creating a PTY or detached thread.
+pub fn fire_post_merge_headless_sync(
+    project_hooks: &HooksConfig,
+    global_hooks: &HooksConfig,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    branch: &str,
+    target_branch: &str,
+    main_repo_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+    monitor: Option<&HookMonitor>,
+) -> Result<(), String> {
+    let Some(command) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.post_merge)
+    else {
+        return Ok(());
+    };
+    let env = merge_env(
+        project_id,
+        project_name,
+        project_path,
+        branch,
+        target_branch,
+        main_repo_path,
+        folder_id,
+        folder_name,
+    );
+    log::info!("Running post_merge hook synchronously for project '{project_name}'");
+    run_hook_sync(
+        &command,
+        env,
+        monitor,
+        "post_merge",
+        project_name,
+        None,
+        project_id,
+    )?;
+    Ok(())
 }
 
 /// Fire the `before_worktree_remove` hook synchronously. Returns Err if hook fails.
@@ -1560,6 +1562,38 @@ mod tests {
     }
 
     #[test]
+    fn post_merge_headless_sync_finishes_before_returning() {
+        let hooks = HooksConfig {
+            worktree: WorktreeHooks {
+                post_merge: Some("true".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let monitor = HookMonitor::new();
+
+        fire_post_merge_headless_sync(
+            &hooks,
+            &HooksConfig::default(),
+            "project-id",
+            "project",
+            ".",
+            "feature",
+            "main",
+            ".",
+            None,
+            None,
+            Some(&monitor),
+        )
+        .expect("post_merge should complete synchronously");
+
+        let history = monitor.history();
+        assert_eq!(history.len(), 1);
+        assert!(history[0].terminal_id.is_none());
+        assert!(matches!(history[0].status, HookStatus::Succeeded { .. }));
+    }
+
+    #[test]
     fn build_hook_label_uses_branch() {
         let mut env = HashMap::new();
         env.insert("OKENA_BRANCH".into(), "feature/foo".into());
@@ -1737,6 +1771,36 @@ mod tests {
         assert!(prefix.contains("GOOD_KEY"), "got: {}", prefix);
         assert!(!prefix.contains("BAD;KEY"), "got: {}", prefix);
         assert!(!prefix.contains("123BAD"), "got: {}", prefix);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn keep_alive_hook_shell_reports_exit_and_reopens_shell_on_unix() {
+        let shell = build_keep_alive_hook_shell("export KEY='value'; false", false);
+        let ShellType::Custom { args, .. } = shell else {
+            panic!("expected custom command shell");
+        };
+        let script = &args[1];
+
+        assert!(script.contains("export KEY='value'; false"));
+        assert!(script.contains("__okena_hook_exit:%d"));
+        assert!(script.contains("exec \"${SHELL:-sh}\""));
+    }
+
+    #[test]
+    fn keep_alive_hook_shell_uses_cmd_completion_protocol_on_windows() {
+        let shell = build_keep_alive_hook_shell("set \"KEY=value\" && exit /B 4", true);
+        let ShellType::Custom { path, args } = shell else {
+            panic!("expected custom command shell");
+        };
+
+        assert_eq!(path, "cmd");
+        assert_eq!(args[0], "/V:ON");
+        assert_eq!(args[1], "/C");
+        assert!(args[2].contains("!ERRORLEVEL!"));
+        assert!(args[2].contains("__okena_hook_exit:!__okena_rc!"));
+        assert!(args[2].contains("cmd /K"));
+        assert!(!args[2].contains("${SHELL:-sh}"));
     }
 
     #[test]

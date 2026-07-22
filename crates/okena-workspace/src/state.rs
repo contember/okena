@@ -62,6 +62,9 @@ pub struct Workspace {
     /// Terminals just brought back by an undo whose PTY might still be racing an
     /// in-flight exit event — see [`RestoredClose`].
     pub(crate) restored_closes: Vec<RestoredClose>,
+    /// Ownership retained after a terminal leaves the layout but before its PTY
+    /// exit is processed, so daemon lifecycle hooks still have project context.
+    pub(crate) closing_terminal_owners: HashMap<String, ClosingTerminalOwner>,
 }
 
 /// A terminal that was soft-closed and is waiting out its grace period.
@@ -94,6 +97,13 @@ pub struct RestoredClose {
     pub project_id: String,
 }
 
+/// Transient ownership metadata for a terminal awaiting its PTY exit event.
+#[derive(Clone, Debug)]
+pub(crate) struct ClosingTerminalOwner {
+    pub project_id: String,
+    pub terminal_name: Option<String>,
+}
+
 impl Workspace {
     pub fn new(data: WorkspaceData) -> Self {
         Self {
@@ -106,6 +116,7 @@ impl Workspace {
             pending_terminal_kills: Vec::new(),
             pending_closes: Vec::new(),
             restored_closes: Vec::new(),
+            closing_terminal_owners: HashMap::new(),
         }
     }
 
@@ -178,6 +189,7 @@ impl Workspace {
         // restore-race breadcrumbs refer to the old layout too.
         self.pending_closes.clear();
         self.restored_closes.clear();
+        self.closing_terminal_owners.clear();
         focus_manager.clear_all();
         cx.notify();
         cx.refresh_views();
