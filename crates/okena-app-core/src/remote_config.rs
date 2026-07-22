@@ -82,20 +82,33 @@ pub fn get_settings_schema() -> CommandResult {
 /// then replace and persist via the backend.
 pub fn set_settings<B: ConfigBackend>(b: &mut B, patch: Value) -> CommandResult {
     let current = b.load_settings();
+    let new = match preview_settings_patch(&current, patch) {
+        Ok(settings) => settings,
+        Err(error) => return CommandResult::Err(error),
+    };
+    store_prevalidated_settings(b, &new)
+}
+
+/// Merge and validate a settings patch without persisting or mutating live state.
+pub fn preview_settings_patch(current: &AppSettings, patch: Value) -> Result<AppSettings, String> {
     let mut value = match serde_json::to_value(&current) {
         Ok(v) => v,
-        Err(e) => return CommandResult::Err(format!("failed to read settings: {e}")),
+        Err(e) => return Err(format!("failed to read settings: {e}")),
     };
     merge_json(&mut value, patch);
-    let new: AppSettings = match serde_json::from_value(value) {
-        Ok(s) => s,
-        Err(e) => return CommandResult::Err(format!("invalid settings: {e}")),
-    };
-    let out = match serde_json::to_value(&new) {
+    serde_json::from_value(value).map_err(|e| format!("invalid settings: {e}"))
+}
+
+/// Persist settings that have already passed [`preview_settings_patch`].
+pub fn store_prevalidated_settings<B: ConfigBackend>(
+    b: &mut B,
+    new: &AppSettings,
+) -> CommandResult {
+    let out = match serde_json::to_value(new) {
         Ok(v) => v,
         Err(e) => return CommandResult::Err(format!("failed to serialize settings: {e}")),
     };
-    if let Err(e) = b.store_settings(&new) {
+    if let Err(e) = b.store_settings(new) {
         return CommandResult::Err(format!("failed to save settings: {e}"));
     }
     CommandResult::Ok(Some(out))
@@ -368,6 +381,37 @@ mod tests {
         let mut base = json!({ "k": 5 });
         merge_json(&mut base, json!({ "k": { "deep": true } }));
         assert_eq!(base, json!({ "k": { "deep": true } }));
+    }
+
+    #[test]
+    fn settings_preview_validates_without_mutating_current_settings() {
+        let current = AppSettings::default();
+        let preview = preview_settings_patch(
+            &current,
+            json!({ "session_backend": "None", "font_size": 19.0 }),
+        )
+        .expect("valid settings patch");
+
+        assert_eq!(
+            preview.session_backend,
+            okena_terminal::session_backend::SessionBackend::None
+        );
+        assert_eq!(preview.font_size, 19.0);
+        assert_ne!(current.font_size, preview.font_size);
+        assert_eq!(
+            current.session_backend,
+            AppSettings::default().session_backend
+        );
+    }
+
+    #[test]
+    fn invalid_settings_preview_returns_before_store() {
+        let current = AppSettings::default();
+        let error = preview_settings_patch(&current, json!({ "font_size": "huge" }))
+            .expect_err("invalid settings patch");
+
+        assert!(error.starts_with("invalid settings:"));
+        assert_eq!(current.font_size, AppSettings::default().font_size);
     }
 
     #[test]

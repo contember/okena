@@ -226,6 +226,8 @@ pub struct Workspace {
     data_version: u64,
     /// Monotonic counter incremented when all workspace data is replaced.
     data_replacement_epoch: u64,
+    /// Active live session-backend migration, fenced by its replacement epoch.
+    terminal_backend_migration_epoch: Option<u64>,
     /// Terminal IDs queued for killing by the app layer (drained by Okena observer).
     pending_terminal_kills: Vec<String>,
     /// Terminals closed with the grace-period "soft close": removed from the
@@ -286,6 +288,7 @@ impl Workspace {
             access_history: ProjectAccessHistory::new(),
             data_version: 0,
             data_replacement_epoch: 0,
+            terminal_backend_migration_epoch: None,
             pending_terminal_kills: Vec::new(),
             pending_closes: Vec::new(),
             restored_closes: Vec::new(),
@@ -319,6 +322,39 @@ impl Workspace {
     /// Current wholesale data replacement epoch.
     pub fn data_replacement_epoch(&self) -> u64 {
         self.data_replacement_epoch
+    }
+
+    /// Start an exclusive live session-backend migration.
+    pub fn begin_terminal_backend_migration(&mut self) -> Result<u64, String> {
+        if self.terminal_backend_migration_epoch.is_some() {
+            return Err("terminal backend migration already in progress".to_string());
+        }
+        self.data_replacement_epoch = self
+            .data_replacement_epoch
+            .checked_add(1)
+            .ok_or_else(|| "workspace replacement epoch exhausted".to_string())?;
+        let epoch = self.data_replacement_epoch;
+        self.terminal_backend_migration_epoch = Some(epoch);
+        Ok(epoch)
+    }
+
+    /// Return the active migration epoch, if terminal ownership is provisional.
+    pub fn terminal_backend_migration_epoch(&self) -> Option<u64> {
+        self.terminal_backend_migration_epoch
+    }
+
+    /// Clear only the migration that owns `epoch` and wake skipped observers.
+    pub fn finish_terminal_backend_migration(
+        &mut self,
+        epoch: u64,
+        cx: &mut impl WorkspaceCx,
+    ) -> bool {
+        if self.terminal_backend_migration_epoch != Some(epoch) {
+            return false;
+        }
+        self.terminal_backend_migration_epoch = None;
+        cx.notify();
+        true
     }
 
     /// Resolve a path for physical ownership checks, including mount/drive
@@ -1471,6 +1507,7 @@ impl Workspace {
 #[cfg(test)]
 mod workspace_tests {
     use super::normalize_unresolved_component;
+    use crate::context::WorkspaceCx;
     use crate::settings::HooksConfig;
     use crate::state::{
         FolderData, LayoutNode, ProjectData, SplitDirection, WindowId, WindowState, Workspace,
@@ -1479,6 +1516,50 @@ mod workspace_tests {
     use okena_core::theme::FolderColor;
     use okena_terminal::shell_config::ShellType;
     use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct RecordingCx {
+        notifications: usize,
+    }
+
+    impl WorkspaceCx for RecordingCx {
+        fn notify(&mut self) {
+            self.notifications += 1;
+        }
+
+        fn refresh_views(&mut self) {}
+
+        fn hook_runner(&self) -> Option<okena_hooks::HookRunner> {
+            None
+        }
+
+        fn hook_monitor(&self) -> Option<okena_hooks::HookMonitor> {
+            None
+        }
+    }
+
+    #[test]
+    fn terminal_backend_migration_gate_is_exclusive_and_epoch_fenced() {
+        let mut workspace = Workspace::new(WorkspaceData::empty());
+        let initial_epoch = workspace.data_replacement_epoch();
+        let migration_epoch = workspace
+            .begin_terminal_backend_migration()
+            .expect("begin migration");
+
+        assert_eq!(migration_epoch, initial_epoch + 1);
+        assert_eq!(
+            workspace.terminal_backend_migration_epoch(),
+            Some(migration_epoch)
+        );
+        assert!(workspace.begin_terminal_backend_migration().is_err());
+
+        let mut cx = RecordingCx::default();
+        assert!(!workspace.finish_terminal_backend_migration(migration_epoch + 1, &mut cx));
+        assert_eq!(cx.notifications, 0);
+        assert!(workspace.finish_terminal_backend_migration(migration_epoch, &mut cx));
+        assert_eq!(workspace.terminal_backend_migration_epoch(), None);
+        assert_eq!(cx.notifications, 1);
+    }
 
     #[test]
     fn case_insensitive_unresolved_components_share_identity() {

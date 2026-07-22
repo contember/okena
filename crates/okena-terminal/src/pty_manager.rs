@@ -6,7 +6,7 @@ use crate::session_backend::{ResolvedBackend, SessionBackend};
 use crate::shell_config::{ShellCommandExt, ShellType};
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, RwLock};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -261,6 +261,12 @@ fn format_panic(payload: &dyn std::any::Any) -> String {
 /// instead of spawning one detached OS thread per `kill()`/`cleanup_exited()` call.
 const TEARDOWN_WORKERS: usize = 4;
 
+#[derive(Clone, Copy)]
+struct SessionBackendSelection {
+    preference: SessionBackend,
+    resolved: ResolvedBackend,
+}
+
 /// What a teardown worker should do with a job. Modeling the two paths explicitly
 /// keeps the deliberate double-fire behavior (see `kill` / `cleanup_exited`) legible.
 enum TeardownKind {
@@ -397,11 +403,8 @@ pub struct PtyManager {
     instance_changed: Arc<Condvar>,
     next_generation: AtomicU64,
     event_tx: Sender<PtyEvent>,
-    /// Session backend for persistence (tmux/screen/none)
-    session_backend: ResolvedBackend,
-    /// Raw user preference (needed for WSL per-terminal resolution)
-    #[cfg(windows)]
-    session_backend_preference: SessionBackend,
+    /// Live session route; changed only after every old session is drained.
+    session_backend: RwLock<SessionBackendSelection>,
     /// Optional sink for streaming PTY output to external consumers (e.g. remote clients).
     /// Publishing happens directly from reader threads to avoid UI event loop latency.
     output_sink: Arc<Mutex<Option<Arc<dyn PtyOutputSink>>>>,
@@ -476,9 +479,10 @@ impl PtyManager {
                 instance_changed: Arc::new(Condvar::new()),
                 next_generation: AtomicU64::new(1),
                 event_tx: tx,
-                session_backend,
-                #[cfg(windows)]
-                session_backend_preference: backend,
+                session_backend: RwLock::new(SessionBackendSelection {
+                    preference: backend,
+                    resolved: session_backend,
+                }),
                 output_sink: Arc::new(Mutex::new(None)),
                 extra_env: Mutex::new(Vec::new()),
                 teardown_tx: Some(teardown_tx),
@@ -536,6 +540,49 @@ impl PtyManager {
     /// environment. Replaces any previously configured overrides.
     pub fn set_extra_env(&self, env: Vec<(String, Option<String>)>) {
         *self.extra_env.lock() = env;
+    }
+
+    fn session_backend(&self) -> ResolvedBackend {
+        self.session_backend.read().resolved
+    }
+
+    pub fn session_backend_preference(&self) -> SessionBackend {
+        self.session_backend.read().preference
+    }
+
+    /// Confirm that every PTY and queued old-backend teardown has drained.
+    pub fn ensure_session_backend_reconfigurable(&self) -> Result<()> {
+        if !self.terminals.lock().is_empty() {
+            anyhow::bail!("cannot switch session backend while terminals are still active");
+        }
+        let instances = self.instances.lock();
+        if !instances.current.is_empty()
+            || !instances.creating.is_empty()
+            || !instances.pending_session_kills.is_empty()
+        {
+            anyhow::bail!("cannot switch session backend while terminal teardown is pending");
+        }
+        Ok(())
+    }
+
+    /// Apply a new route after [`Self::ensure_session_backend_reconfigurable`].
+    pub fn apply_session_backend(&self, preference: SessionBackend) {
+        let resolved = preference.resolve();
+        *self.session_backend.write() = SessionBackendSelection {
+            preference,
+            resolved,
+        };
+        if resolved.supports_persistence() {
+            log::info!("Session persistence switched to {:?}", resolved);
+        }
+        #[cfg(unix)]
+        if matches!(resolved, ResolvedBackend::Dtach)
+            && let Err(error) = std::thread::Builder::new()
+                .name("dtach-socket-gc".into())
+                .spawn(crate::session_backend::cleanup_stale_dtach_sockets)
+        {
+            log::warn!("failed to spawn dtach cleanup thread: {error}");
+        }
     }
 
     /// Return whether an event belongs to the currently attached PTY instance.
@@ -822,6 +869,7 @@ impl PtyManager {
         plan: &TerminalLaunchPlan,
         launch_environment: &[(String, Option<String>)],
     ) -> CommandBuilder {
+        let session_backend = self.session_backend();
         // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
         // so it can be passed to the session backend
         let custom_command = plan.initial_command.as_ref().map_or_else(
@@ -841,8 +889,8 @@ impl PtyManager {
             },
         );
 
-        let mut cmd = if let Some((program, args)) = self.session_backend.build_command_with_custom(
-            &self.session_backend.session_name(terminal_id),
+        let mut cmd = if let Some((program, args)) = session_backend.build_command_with_custom(
+            &session_backend.session_name(terminal_id),
             cwd,
             custom_command,
             launch_environment,
@@ -852,7 +900,7 @@ impl PtyManager {
                 cmd.arg(arg);
             }
             // For screen, we need to set cwd separately as it doesn't have -c flag
-            if matches!(self.session_backend, ResolvedBackend::Screen) {
+            if matches!(session_backend, ResolvedBackend::Screen) {
                 cmd.cwd(cwd);
             }
             cmd
@@ -887,6 +935,8 @@ impl PtyManager {
     ) -> (CommandBuilder, Option<String>, Option<ResolvedBackend>) {
         use crate::session_backend::resolve_for_wsl;
         use crate::shell_config::windows_path_to_wsl;
+        let session_backend = self.session_backend();
+        let session_backend_preference = self.session_backend_preference();
 
         // Preserve the exact executable and argv for psmux. In particular,
         // keep-alive hooks require cmd.exe delayed expansion via `/V:ON`.
@@ -910,11 +960,11 @@ impl PtyManager {
         // is available. WSL terminals get their own per-distro backend below
         // because the daemon must live inside WSL, not on the host.
         let wrap_with_host_backend = |fallback: CommandBuilder| -> CommandBuilder {
-            if !self.session_backend.supports_persistence() {
+            if !session_backend.supports_persistence() {
                 return fallback;
             }
-            let session_name = self.session_backend.session_name(terminal_id);
-            match self.session_backend.build_command_with_custom(
+            let session_name = session_backend.session_name(terminal_id);
+            match session_backend.build_command_with_custom(
                 &session_name,
                 cwd,
                 custom_command,
@@ -933,8 +983,7 @@ impl PtyManager {
 
         let (mut cmd, wsl_distro, wsl_backend) = match &plan.route {
             ShellType::Wsl { distro } => {
-                let wsl_backend =
-                    resolve_for_wsl(distro.as_deref(), self.session_backend_preference);
+                let wsl_backend = resolve_for_wsl(distro.as_deref(), session_backend_preference);
                 let session_name = wsl_backend.session_name(terminal_id);
                 let wsl_cwd = windows_path_to_wsl(cwd);
 
@@ -1266,7 +1315,7 @@ impl PtyManager {
         handle: Option<PtyHandle>,
         _exited: Option<ExitedPty>,
     ) {
-        let session_backend = self.session_backend;
+        let session_backend = self.session_backend();
         let session_name = session_backend.session_name(terminal_id);
 
         // Read WSL info before moving the handle
@@ -1306,7 +1355,7 @@ impl PtyManager {
         self.enqueue_teardown(TeardownJob {
             handle,
             kind: TeardownKind::KillSession {
-                session_backend: self.session_backend,
+                session_backend: self.session_backend(),
                 session_name,
                 wsl_distro,
                 wsl_backend: Some(wsl_backend),
@@ -1446,7 +1495,7 @@ impl PtyManager {
     pub fn get_foreground_shell_pid(&self, terminal_id: &str) -> Option<u32> {
         #[cfg(unix)]
         {
-            match self.session_backend {
+            match self.session_backend() {
                 ResolvedBackend::Dtach => {
                     if let Some(daemon) =
                         self.get_dtach_service_pids(terminal_id).into_iter().next()
@@ -1471,7 +1520,7 @@ impl PtyManager {
     pub fn get_service_pids(&self, terminal_id: &str) -> Vec<u32> {
         #[cfg(unix)]
         {
-            match self.session_backend {
+            match self.session_backend() {
                 ResolvedBackend::Dtach => {
                     return self.get_dtach_service_pids(terminal_id);
                 }
@@ -1489,8 +1538,9 @@ impl PtyManager {
     /// Linux — a per-poll `lsof -t` was ~1s each).
     #[cfg(unix)]
     fn get_dtach_service_pids(&self, terminal_id: &str) -> Vec<u32> {
-        let session_name = self.session_backend.session_name(terminal_id);
-        let socket_path = match self.session_backend.socket_path(&session_name) {
+        let session_backend = self.session_backend();
+        let session_name = session_backend.session_name(terminal_id);
+        let socket_path = match session_backend.socket_path(&session_name) {
             Some(p) if p.exists() => p,
             _ => return self.get_shell_pid(terminal_id).into_iter().collect(),
         };
@@ -1515,7 +1565,7 @@ impl PtyManager {
     /// Find the shell PID inside a tmux session pane.
     #[cfg(unix)]
     fn get_tmux_service_pids(&self, terminal_id: &str) -> Vec<u32> {
-        let session_name = self.session_backend.session_name(terminal_id);
+        let session_name = self.session_backend().session_name(terminal_id);
         let output = match crate::process::safe_output(crate::process::command("tmux").args([
             "list-panes",
             "-t",
@@ -1545,7 +1595,7 @@ impl PtyManager {
     pub fn get_batch_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
         #[cfg(unix)]
         {
-            if self.session_backend == ResolvedBackend::Dtach {
+            if self.session_backend() == ResolvedBackend::Dtach {
                 return self.get_batch_dtach_service_pids(terminal_ids);
             }
         }
@@ -1560,13 +1610,14 @@ impl PtyManager {
     /// once for all sockets. On other Unix, falls back to lsof per terminal.
     #[cfg(unix)]
     fn get_batch_dtach_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
+        let session_backend = self.session_backend();
         // Collect socket paths for all terminals
         let mut socket_to_terminal: HashMap<std::path::PathBuf, &str> = HashMap::new();
         let mut attach_pids: HashMap<&str, Option<u32>> = HashMap::new();
 
         for &tid in terminal_ids {
-            let session_name = self.session_backend.session_name(tid);
-            if let Some(p) = self.session_backend.socket_path(&session_name)
+            let session_name = session_backend.session_name(tid);
+            if let Some(p) = session_backend.socket_path(&session_name)
                 && p.exists()
             {
                 socket_to_terminal.insert(p, tid);
@@ -1581,8 +1632,8 @@ impl PtyManager {
         // Build result map
         let mut result: HashMap<String, Vec<u32>> = HashMap::new();
         for &tid in attach_pids.keys() {
-            let session_name = self.session_backend.session_name(tid);
-            let socket_path = match self.session_backend.socket_path(&session_name) {
+            let session_name = session_backend.session_name(tid);
+            let socket_path = match session_backend.socket_path(&session_name) {
                 Some(p) => p,
                 None => {
                     result.insert(
@@ -1626,7 +1677,7 @@ impl PtyManager {
 
     /// Check if the session backend handles mouse events (tmux with mouse on)
     pub fn uses_mouse_backend(&self) -> bool {
-        matches!(self.session_backend, ResolvedBackend::Tmux)
+        matches!(self.session_backend(), ResolvedBackend::Tmux)
     }
 
     /// Capture the terminal buffer to a file (only works with tmux backend)
@@ -1689,12 +1740,12 @@ impl PtyManager {
             }
         }
 
-        if !matches!(self.session_backend, ResolvedBackend::Tmux) {
+        if !matches!(self.session_backend(), ResolvedBackend::Tmux) {
             log::warn!("Buffer capture only supported with tmux backend");
             return None;
         }
 
-        let session_name = self.session_backend.session_name(terminal_id);
+        let session_name = self.session_backend().session_name(terminal_id);
         let output_path = std::env::temp_dir().join(format!(
             "terminal-{}.txt",
             &terminal_id[..8.min(terminal_id.len())]
@@ -1739,7 +1790,7 @@ impl PtyManager {
 
     /// Check if buffer capture is supported (tmux backend)
     pub fn supports_buffer_capture(&self) -> bool {
-        matches!(self.session_backend, ResolvedBackend::Tmux)
+        matches!(self.session_backend(), ResolvedBackend::Tmux)
     }
 
     /// Clean up a PtyHandle after the process exited naturally (reader got EOF).
@@ -2234,5 +2285,17 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("flush returns after completion");
         waiter.join().unwrap();
+    }
+
+    #[test]
+    fn drained_manager_can_switch_session_backend_preference() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+
+        manager
+            .ensure_session_backend_reconfigurable()
+            .expect("new manager is drained");
+        manager.apply_session_backend(SessionBackend::Tmux);
+
+        assert_eq!(manager.session_backend_preference(), SessionBackend::Tmux);
     }
 }

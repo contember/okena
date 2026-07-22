@@ -1,6 +1,7 @@
 use crate::pty_manager::PtyManager;
 #[cfg(windows)]
 use crate::session_backend::ResolvedBackend;
+use crate::session_backend::SessionBackend;
 use crate::shell_config::ShellType;
 use crate::terminal::TerminalTransport;
 use anyhow::Result;
@@ -112,6 +113,18 @@ pub trait TerminalBackend: Send + Sync {
     }
     /// Wait for teardown work queued before this call to finish.
     fn flush_teardown(&self) {}
+    /// Whether this backend can switch persistence routes without replacement.
+    fn supports_session_backend_reconfiguration(&self) -> bool {
+        false
+    }
+    /// Verify that the old persistence route no longer owns live work.
+    fn ensure_session_backend_reconfigurable(&self) -> Result<()> {
+        anyhow::bail!("terminal backend does not support live session route changes")
+    }
+    /// Switch the live persistence route after old teardown and settings commit.
+    fn apply_session_backend(&self, _backend: SessionBackend) -> Result<()> {
+        anyhow::bail!("terminal backend does not support live session route changes")
+    }
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf>;
     fn supports_buffer_capture(&self) -> bool;
     fn is_remote(&self) -> bool;
@@ -190,6 +203,19 @@ impl TerminalBackend for LocalBackend {
 
     fn flush_teardown(&self) {
         self.pty_manager.flush_teardown()
+    }
+
+    fn supports_session_backend_reconfiguration(&self) -> bool {
+        true
+    }
+
+    fn ensure_session_backend_reconfigurable(&self) -> Result<()> {
+        self.pty_manager.ensure_session_backend_reconfigurable()
+    }
+
+    fn apply_session_backend(&self, backend: SessionBackend) -> Result<()> {
+        self.pty_manager.apply_session_backend(backend);
+        Ok(())
     }
 
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf> {
