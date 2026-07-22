@@ -397,7 +397,7 @@ struct TerminalBackendMigrationGuard {
     workspace_tick: watch::Sender<u64>,
     hook_runner: Option<okena_hooks::HookRunner>,
     hook_monitor: Option<okena_hooks::HookMonitor>,
-    epoch: u64,
+    migration: TerminalBackendMigration,
     active: bool,
 }
 
@@ -407,14 +407,14 @@ impl TerminalBackendMigrationGuard {
         workspace_tick: watch::Sender<u64>,
         hook_runner: Option<okena_hooks::HookRunner>,
         hook_monitor: Option<okena_hooks::HookMonitor>,
-        epoch: u64,
+        migration: TerminalBackendMigration,
     ) -> Self {
         Self {
             workspace,
             workspace_tick,
             hook_runner,
             hook_monitor,
-            epoch,
+            migration,
             active: true,
         }
     }
@@ -425,14 +425,52 @@ impl TerminalBackendMigrationGuard {
         }
         let mut cx =
             DaemonWorkspaceCx::new(&self.workspace_tick, &self.hook_runner, &self.hook_monitor);
-        self.workspace
-            .lock()
-            .finish_terminal_backend_migration(self.epoch, &mut cx);
+        let mut workspace = self.workspace.lock();
+        if workspace.terminal_backend_migration_epoch() == Some(self.migration.epoch) {
+            if let Err(error) = workspace.restore_terminal_backend_migration_slots(&self.migration)
+            {
+                log::error!(
+                    "failed to restore terminal ownership while releasing migration: {error}"
+                );
+            }
+            workspace.finish_terminal_backend_migration(self.migration.epoch, &mut cx);
+        }
         self.active = false;
     }
 
     fn finish(mut self) {
         self.release();
+    }
+}
+
+struct BackendReconfigurationGuard {
+    backend: Arc<dyn TerminalBackend>,
+    active: bool,
+}
+
+impl BackendReconfigurationGuard {
+    fn new(backend: Arc<dyn TerminalBackend>) -> Self {
+        Self {
+            backend,
+            active: true,
+        }
+    }
+
+    fn cancel(&mut self) {
+        if self.active {
+            self.backend.cancel_session_backend_reconfiguration();
+            self.active = false;
+        }
+    }
+
+    fn applied(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for BackendReconfigurationGuard {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -550,6 +588,13 @@ async fn set_settings_with_backend_migration(
         );
     }
 
+    if let Err(error) = backend.begin_session_backend_reconfiguration() {
+        return CommandResult::Err(format!(
+            "failed to begin terminal backend migration: {error}"
+        ));
+    }
+    let mut backend_guard = BackendReconfigurationGuard::new(backend.clone());
+
     let mut migration = {
         let mut ws = workspace.lock();
         match ws.begin_terminal_backend_migration(
@@ -557,7 +602,10 @@ async fn set_settings_with_backend_migration(
             &old_settings.default_shell,
         ) {
             Ok(migration) => migration,
-            Err(error) => return CommandResult::Err(error),
+            Err(error) => {
+                backend_guard.cancel();
+                return CommandResult::Err(error);
+            }
         }
     };
     let guard = TerminalBackendMigrationGuard::new(
@@ -565,7 +613,7 @@ async fn set_settings_with_backend_migration(
         workspace_tick.clone(),
         hook_runner.clone(),
         hook_monitor.clone(),
-        migration.epoch,
+        migration.clone(),
     );
 
     let service_reactor = ServiceReactorRef::new(
@@ -614,8 +662,7 @@ async fn set_settings_with_backend_migration(
     }
     if let Some(monitor) = hook_monitor {
         for terminal_id in &migration.hook_terminal_ids {
-            monitor.cancel_exit_waiter(terminal_id);
-            monitor.finish_by_terminal_id(terminal_id, None);
+            monitor.cancel_by_terminal_id(terminal_id);
         }
     }
 
@@ -635,6 +682,7 @@ async fn set_settings_with_backend_migration(
         Err(error) => Err(format!("terminal teardown task failed: {error}")),
     };
     if let Err(error) = teardown_result {
+        backend_guard.cancel();
         let recovery = rematerialize_terminal_backend_migration(
             &migration,
             &old_settings,
@@ -658,6 +706,7 @@ async fn set_settings_with_backend_migration(
 
     let store_result = daemon_config.store_prevalidated_settings(&new_settings);
     if let CommandResult::Err(error) = store_result {
+        backend_guard.cancel();
         let recovery = rematerialize_terminal_backend_migration(
             &migration,
             &old_settings,
@@ -680,6 +729,7 @@ async fn set_settings_with_backend_migration(
     }
 
     if let Err(error) = backend.apply_session_backend(new_settings.session_backend) {
+        backend_guard.cancel();
         let restore_settings = daemon_config.store_prevalidated_settings(&old_settings);
         let recovery = rematerialize_terminal_backend_migration(
             &migration,
@@ -705,6 +755,7 @@ async fn set_settings_with_backend_migration(
         }
         return CommandResult::Err(failures.join("; "));
     }
+    backend_guard.applied();
 
     let recovery = rematerialize_terminal_backend_migration(
         &migration,
@@ -2492,6 +2543,7 @@ mod tests {
     struct RecordingMigrationBackend {
         events: Arc<Mutex<Vec<String>>>,
         session_backend: Mutex<SessionBackend>,
+        reconfiguration: AtomicBool,
     }
 
     impl RecordingMigrationBackend {
@@ -2499,6 +2551,7 @@ mod tests {
             Self {
                 events,
                 session_backend: Mutex::new(session_backend),
+                reconfiguration: AtomicBool::new(false),
             }
         }
     }
@@ -2541,7 +2594,14 @@ mod tests {
             true
         }
 
+        fn begin_session_backend_reconfiguration(&self) -> anyhow::Result<()> {
+            assert!(!self.reconfiguration.swap(true, Ordering::SeqCst));
+            self.events.lock().push("begin".to_string());
+            Ok(())
+        }
+
         fn ensure_session_backend_reconfigurable(&self) -> anyhow::Result<()> {
+            assert!(self.reconfiguration.load(Ordering::SeqCst));
             self.events.lock().push("preflight".to_string());
             Ok(())
         }
@@ -2549,7 +2609,14 @@ mod tests {
         fn apply_session_backend(&self, backend: SessionBackend) -> anyhow::Result<()> {
             self.events.lock().push(format!("switch:{backend:?}"));
             *self.session_backend.lock() = backend;
+            self.reconfiguration.store(false, Ordering::SeqCst);
             Ok(())
+        }
+
+        fn cancel_session_backend_reconfiguration(&self) {
+            if self.reconfiguration.swap(false, Ordering::SeqCst) {
+                self.events.lock().push("cancel".to_string());
+            }
         }
 
         fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
@@ -2670,6 +2737,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                "begin",
                 "kill:hook",
                 "kill:ordinary",
                 "flush",
@@ -2706,11 +2774,13 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                "begin",
                 "kill:hook",
                 "kill:ordinary",
                 "flush",
                 "preflight",
                 "store",
+                "cancel",
                 "reconnect:None:ordinary",
             ]
         );
@@ -2732,7 +2802,7 @@ mod tests {
 
     #[test]
     fn backend_migration_guard_releases_the_gate_and_publishes_a_fresh_tick() {
-        let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
+        let workspace = Arc::new(Mutex::new(workspace_with_migration_terminals("/tmp")));
         let (workspace_tick, workspace_rx) = watch::channel(0u64);
         let migration = workspace
             .lock()
@@ -2744,10 +2814,20 @@ mod tests {
             workspace_tick,
             None,
             None,
-            migration.epoch,
+            migration,
         ));
 
-        assert_eq!(workspace.lock().terminal_backend_migration_epoch(), None);
+        let workspace = workspace.lock();
+        assert_eq!(workspace.terminal_backend_migration_epoch(), None);
+        assert!(matches!(
+            workspace
+                .project("p1")
+                .and_then(|project| project.layout.as_ref()),
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal_id),
+                ..
+            }) if terminal_id == "ordinary"
+        ));
         assert_eq!(*workspace_rx.borrow(), 1);
     }
 

@@ -424,6 +424,23 @@ impl HookMonitor {
         inner.early_exits.retain(|(id, _, _)| id != terminal_id);
     }
 
+    /// Silently remove an intentionally cancelled hook terminal.
+    pub fn cancel_by_terminal_id(&self, terminal_id: &str) -> bool {
+        let mut inner = self.0.lock();
+        inner.exit_waiters.remove(terminal_id);
+        inner.early_exits.retain(|(id, _, _)| id != terminal_id);
+        let Some(index) = inner.history.iter().position(|entry| {
+            entry.terminal_id.as_deref() == Some(terminal_id)
+                && matches!(entry.status, HookStatus::Running)
+        }) else {
+            return false;
+        };
+        inner.history.remove(index);
+        inner.running_count = inner.running_count.saturating_sub(1);
+        inner.version += 1;
+        true
+    }
+
     /// Find and finish a hook execution by its terminal ID.
     /// Returns `true` if a matching running execution was found and finished.
     pub fn finish_by_terminal_id(&self, terminal_id: &str, exit_code: Option<u32>) -> bool {
@@ -630,6 +647,27 @@ mod tests {
 
         monitor.cancel_exit_waiter("term-timeout");
 
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn intentional_terminal_cancellation_is_silent() {
+        let monitor = HookMonitor::new();
+        monitor.record_start(
+            "on_project_open",
+            "echo hook",
+            "project",
+            Some("term-cancelled".into()),
+        );
+        let rx = monitor.register_exit_waiter("term-cancelled");
+
+        assert!(monitor.cancel_by_terminal_id("term-cancelled"));
+
+        assert!(monitor.history().is_empty());
+        assert!(monitor.drain_pending_toasts().is_empty());
         assert!(matches!(
             rx.try_recv(),
             Err(mpsc::TryRecvError::Disconnected)

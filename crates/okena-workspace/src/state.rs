@@ -523,7 +523,11 @@ impl Workspace {
                     )
                 })?;
             match node {
-                LayoutNode::Terminal { terminal_id, .. } if terminal_id.is_none() => {
+                LayoutNode::Terminal { terminal_id, .. }
+                    if terminal_id
+                        .as_ref()
+                        .is_none_or(|terminal_id| terminal_id == &slot.terminal_id) =>
+                {
                     *terminal_id = Some(slot.terminal_id.clone());
                 }
                 LayoutNode::Terminal { .. } => {
