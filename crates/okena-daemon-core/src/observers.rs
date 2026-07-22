@@ -1290,13 +1290,13 @@ mod tests {
             }],
         );
 
-        assert_eq!(
+        assert!(
             workspace
                 .lock()
                 .project("project")
                 .expect("project")
-                .service_terminals,
-            HashMap::from([("web".into(), "owned-terminal".into())])
+                .service_terminals
+                .is_empty()
         );
     }
 
