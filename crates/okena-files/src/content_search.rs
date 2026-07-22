@@ -16,6 +16,11 @@ use std::sync::{Arc, Mutex};
 /// Skip files larger than this for content search. Lockfiles, bundles, and
 /// generated code are typically uninteresting and dominate I/O time.
 const MAX_FILE_SIZE: u64 = 1_000_000;
+const MAX_RESULTS: usize = 10_000;
+const MAX_CONTEXT_LINES: usize = 20;
+const MAX_MATCH_RANGES_PER_LINE: usize = 2_048;
+const MAX_SNIPPET_BYTES: usize = 64 * 1024;
+const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// A single search match within a file.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -38,13 +43,18 @@ pub struct ContentMatch {
 /// the raw text would be misaligned. This function applies the same expansion
 /// and adjusts all ranges to match the expanded string.
 fn expand_tabs(text: &str, ranges: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
-    let mut expanded = String::with_capacity(text.len());
-    // Map from original byte offset to expanded byte offset
-    let mut offset_map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+    let mut expanded = String::with_capacity(text.len().min(MAX_SNIPPET_BYTES));
+    // Match boundaries are UTF-8 boundaries, so only character boundaries need
+    // entries in this byte-indexed map.
+    let mut offset_map = vec![None; text.len() + 1];
     let mut expanded_pos: usize = 0;
 
     for (orig_pos, ch) in text.char_indices() {
-        offset_map.resize(orig_pos + 1, expanded_pos);
+        offset_map[orig_pos] = Some(expanded_pos);
+        let expanded_len = if ch == '\t' { 4 } else { ch.len_utf8() };
+        if expanded_pos + expanded_len > MAX_SNIPPET_BYTES {
+            break;
+        }
         if ch == '\t' {
             expanded.push_str("    ");
             expanded_pos += 4;
@@ -52,29 +62,49 @@ fn expand_tabs(text: &str, ranges: &[Range<usize>]) -> (String, Vec<Range<usize>
             expanded.push(ch);
             expanded_pos += ch.len_utf8();
         }
+        offset_map[orig_pos + ch.len_utf8()] = Some(expanded_pos);
     }
-    // Sentinel for end-of-string
-    offset_map.resize(text.len() + 1, expanded_pos);
 
     let new_ranges = ranges
         .iter()
         .filter_map(|r| {
-            let start = *offset_map.get(r.start)?;
-            let end = *offset_map.get(r.end)?;
+            let start = offset_map.get(r.start).copied().flatten()?;
+            let end = offset_map
+                .get(r.end)
+                .copied()
+                .flatten()
+                .unwrap_or(expanded.len());
             Some(start..end)
         })
+        .filter(|range| range.start < range.end && range.end <= expanded.len())
         .collect();
 
     (expanded, new_ranges)
 }
 
+fn expand_bounded_match_line(text: &str, ranges: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
+    if text.len() <= MAX_SNIPPET_BYTES {
+        return expand_tabs(text, ranges);
+    }
+
+    // Keep the first match visible when a generated/minified line exceeds the
+    // snippet cap. Matcher offsets are UTF-8 boundaries.
+    let start = ranges.first().map_or(0, |range| range.start);
+    let mut end = (start + MAX_SNIPPET_BYTES).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let adjusted_ranges: Vec<_> = ranges
+        .iter()
+        .filter(|range| range.end > start && range.start < end)
+        .map(|range| range.start.saturating_sub(start)..range.end.min(end) - start)
+        .collect();
+    expand_tabs(&text[start..end], &adjusted_ranges)
+}
+
 /// Expand tabs to 4 spaces in a string (no range remapping needed).
 fn expand_tabs_simple(text: &str) -> String {
-    if text.contains('\t') {
-        text.replace('\t', "    ")
-    } else {
-        text.to_string()
-    }
+    expand_tabs(text, &[]).0
 }
 
 /// Search results grouped by file.
@@ -219,6 +249,41 @@ fn reserve_match_slots(total: &AtomicUsize, max_results: usize, requested: usize
     }
 }
 
+fn estimated_payload_bytes(result: &FileSearchResult) -> usize {
+    // JSON may escape each input byte as a six-byte sequence. The fixed costs
+    // also cover field names, numbers, commas, and collection delimiters.
+    let escaped = |len: usize| len.saturating_mul(6);
+    let mut bytes = 512usize
+        .saturating_add(escaped(result.file_path.to_string_lossy().len()))
+        .saturating_add(escaped(result.relative_path.len()));
+    for found in &result.matches {
+        bytes = bytes
+            .saturating_add(256)
+            .saturating_add(escaped(found.line_content.len()))
+            .saturating_add(found.match_ranges.len().saturating_mul(48));
+        for (_, line) in found.context_before.iter().chain(&found.context_after) {
+            bytes = bytes.saturating_add(64).saturating_add(escaped(line.len()));
+        }
+    }
+    bytes
+}
+
+fn reserve_payload_bytes(total: &AtomicUsize, requested: usize) -> bool {
+    let mut current = total.load(Ordering::Acquire);
+    loop {
+        let Some(next) = current.checked_add(requested) else {
+            return false;
+        };
+        if next > MAX_PAYLOAD_BYTES {
+            return false;
+        }
+        match total.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 /// Run a content search in the given project directory.
 ///
 /// Streams results back via the `on_result` callback. Returns when the search
@@ -236,12 +301,28 @@ pub fn search_content(
         return Ok(());
     }
 
-    let walker = configure_walker(project_path, config)?;
-    match config.mode {
-        SearchMode::Fuzzy => {
-            search_content_fuzzy(walker, project_path, query, config, cancelled, on_result)
-        }
-        _ => search_content_grep(walker, project_path, query, config, cancelled, on_result),
+    let mut effective_config = config.clone();
+    effective_config.max_results = effective_config.max_results.min(MAX_RESULTS);
+    effective_config.context_lines = effective_config.context_lines.min(MAX_CONTEXT_LINES);
+
+    let walker = configure_walker(project_path, &effective_config)?;
+    match effective_config.mode {
+        SearchMode::Fuzzy => search_content_fuzzy(
+            walker,
+            project_path,
+            query,
+            &effective_config,
+            cancelled,
+            on_result,
+        ),
+        _ => search_content_grep(
+            walker,
+            project_path,
+            query,
+            &effective_config,
+            cancelled,
+            on_result,
+        ),
     }
 }
 
@@ -273,6 +354,7 @@ fn search_content_grep(
     };
 
     let total_matches = AtomicUsize::new(0);
+    let total_payload_bytes = AtomicUsize::new(0);
     let max_results = config.max_results;
     let context_lines = config.context_lines;
     let on_result = Mutex::new(on_result);
@@ -281,6 +363,7 @@ fn search_content_grep(
         let matcher = matcher.clone();
         let mut searcher = Searcher::new();
         let total_matches = &total_matches;
+        let total_payload_bytes = &total_payload_bytes;
         let on_result = &on_result;
 
         Box::new(move |entry| {
@@ -325,12 +408,13 @@ fn search_content_grep(
                             if start < line_trimmed.len() {
                                 match_ranges.push(start..end);
                             }
-                            true
+                            match_ranges.len() < MAX_MATCH_RANGES_PER_LINE
                         })
                         .ok();
 
                     // Expand tabs to match syntax highlighter output
-                    let (line_expanded, match_ranges) = expand_tabs(line_trimmed, &match_ranges);
+                    let (line_expanded, match_ranges) =
+                        expand_bounded_match_line(line_trimmed, &match_ranges);
 
                     file_matches.push(ContentMatch {
                         line_number: line_number as usize,
@@ -370,6 +454,10 @@ fn search_content_grep(
                 best_score: 0,
             };
 
+            if !reserve_payload_bytes(total_payload_bytes, estimated_payload_bytes(&result)) {
+                return WalkState::Quit;
+            }
+
             if let Ok(mut cb) = on_result.lock() {
                 cb(result);
             }
@@ -395,6 +483,7 @@ fn search_content_fuzzy(
     use nucleo_matcher::{Config as NucleoConfig, Matcher, Utf32Str};
 
     let total_matches = AtomicUsize::new(0);
+    let total_payload_bytes = AtomicUsize::new(0);
     let max_results = config.max_results;
     let context_lines = config.context_lines;
     let on_result = Mutex::new(on_result);
@@ -411,6 +500,7 @@ fn search_content_fuzzy(
     walker.build_parallel().run(|| {
         let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
         let total_matches = &total_matches;
+        let total_payload_bytes = &total_payload_bytes;
         let on_result = &on_result;
 
         Box::new(move |entry| {
@@ -461,6 +551,7 @@ fn search_content_fuzzy(
                     let char_to_byte: Vec<(usize, char)> = line.char_indices().collect();
                     let match_ranges: Vec<Range<usize>> = indices
                         .iter()
+                        .take(MAX_MATCH_RANGES_PER_LINE)
                         .filter_map(|&idx| {
                             let (byte_pos, ch) = char_to_byte.get(idx as usize)?;
                             Some(*byte_pos..*byte_pos + ch.len_utf8())
@@ -468,7 +559,8 @@ fn search_content_fuzzy(
                         .collect();
 
                     // Expand tabs to match syntax highlighter output
-                    let (line_expanded, match_ranges) = expand_tabs(line, &match_ranges);
+                    let (line_expanded, match_ranges) =
+                        expand_bounded_match_line(line, &match_ranges);
 
                     scored_matches.push((
                         score,
@@ -515,6 +607,10 @@ fn search_content_fuzzy(
                 matches: file_matches,
                 best_score,
             };
+
+            if !reserve_payload_bytes(total_payload_bytes, estimated_payload_bytes(&result)) {
+                return WalkState::Quit;
+            }
 
             if let Ok(mut cb) = on_result.lock() {
                 cb(result);
@@ -707,5 +803,120 @@ mod tests {
 
         assert!(error.contains("Invalid regular expression"), "{error}");
         assert_eq!(result_count, 0);
+    }
+
+    #[test]
+    fn minified_line_has_bounded_ranges_and_payload() {
+        let dir = TempDir::new();
+        fs::write(dir.path.join("minified.js"), "a".repeat(900_000)).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let mut results = Vec::new();
+
+        search_content(
+            &dir.path,
+            "a",
+            &ContentSearchConfig::default(),
+            &cancelled,
+            &mut |result| results.push(result),
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        let found = &results[0].matches[0];
+        assert!(found.line_content.len() <= MAX_SNIPPET_BYTES);
+        assert_eq!(found.match_ranges.len(), MAX_MATCH_RANGES_PER_LINE);
+        assert!(
+            found
+                .match_ranges
+                .iter()
+                .all(|range| range.end <= found.line_content.len())
+        );
+        assert!(serde_json::to_vec(&results).unwrap().len() < 1_000_000);
+    }
+
+    #[test]
+    fn parallel_files_share_one_payload_budget() {
+        let dir = TempDir::new();
+        let line = format!("needle{}", "x".repeat(MAX_SNIPPET_BYTES));
+        for file_index in 0..300 {
+            fs::write(dir.path.join(format!("large-{file_index}.txt")), &line).unwrap();
+        }
+        let cancelled = AtomicBool::new(false);
+        let config = ContentSearchConfig {
+            max_results: usize::MAX,
+            ..ContentSearchConfig::default()
+        };
+        let mut results = Vec::new();
+
+        search_content(&dir.path, "needle", &config, &cancelled, &mut |result| {
+            results.push(result)
+        })
+        .unwrap();
+
+        let estimated: usize = results.iter().map(estimated_payload_bytes).sum();
+        assert!(estimated <= MAX_PAYLOAD_BYTES);
+        assert!(results.len() < 300);
+    }
+
+    #[test]
+    fn unicode_lines_and_context_are_bounded_at_char_boundaries() {
+        let dir = TempDir::new();
+        let long_unicode = "🦀".repeat(MAX_SNIPPET_BYTES);
+        fs::write(
+            dir.path.join("unicode.txt"),
+            format!("{long_unicode}\nneedle{long_unicode}\n{long_unicode}\n"),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let config = ContentSearchConfig {
+            context_lines: usize::MAX,
+            ..ContentSearchConfig::default()
+        };
+        let mut results = Vec::new();
+
+        search_content(&dir.path, "needle", &config, &cancelled, &mut |result| {
+            results.push(result)
+        })
+        .unwrap();
+
+        let found = &results[0].matches[0];
+        assert!(found.line_content.len() <= MAX_SNIPPET_BYTES);
+        assert!(
+            found
+                .context_before
+                .iter()
+                .chain(&found.context_after)
+                .all(|(_, line)| line.len() <= MAX_SNIPPET_BYTES
+                    && line.is_char_boundary(line.len()))
+        );
+        assert!(std::str::from_utf8(found.line_content.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn ordinary_search_results_remain_complete() {
+        let dir = TempDir::new();
+        fs::write(
+            dir.path.join("ordinary.txt"),
+            "before\n\tneedle and needle\nafter\n",
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let config = ContentSearchConfig {
+            case_sensitive: true,
+            context_lines: 1,
+            ..ContentSearchConfig::default()
+        };
+        let mut results = Vec::new();
+
+        search_content(&dir.path, "needle", &config, &cancelled, &mut |result| {
+            results.push(result)
+        })
+        .unwrap();
+
+        let found = &results[0].matches[0];
+        assert_eq!(found.line_content, "    needle and needle");
+        assert_eq!(found.match_ranges, vec![4..10, 15..21]);
+        assert_eq!(found.context_before, vec![(1, "before".to_string())]);
+        assert_eq!(found.context_after, vec![(3, "after".to_string())]);
     }
 }
