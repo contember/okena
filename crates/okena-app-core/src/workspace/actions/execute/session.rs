@@ -263,7 +263,7 @@ pub(super) fn load_session_action(
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     load_session_action_with_loader(ws, focus_manager, backend, terminals, settings, cx, || {
-        load_session_data(&name, settings.session_backend)
+        load_session_data_for_shell(&name, settings.session_backend, &settings.default_shell)
     })
 }
 
