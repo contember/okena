@@ -86,10 +86,9 @@ impl Terminal {
     /// sidebar bell/idle indicators read `has_bell()` / `is_waiting_for_input()`
     /// *before* the `TerminalContent` child drains. For local terminals the
     /// equivalent state is set eagerly in `process_output`; remote terminals only
-    /// buffer via `enqueue_output`, so without an eager parse those indicators
-    /// render one frame stale and only appear once unrelated local input forces a
-    /// second repaint. The remote dirty loop calls this so the flags are current
-    /// when the frame is built. GPUI thread only.
+    /// buffer via `enqueue_output`. The remote manager's activity pump calls this
+    /// before emitting targeted pane/sidebar notifications, so derived state is
+    /// current when the frame is built without per-pane polling. GPUI thread only.
     pub fn process_pending_output(&self) {
         self.drain_pending_output();
     }

@@ -75,6 +75,7 @@ impl DetachedTerminalView {
             request_broker,
             terminal.clone(),
         );
+        crate::register_content_pane(terminal_id.clone(), content.downgrade());
 
         // Observe workspace for changes (to detect when re-attached)
         let terminal_id_for_observer = terminal_id.clone();
@@ -86,37 +87,6 @@ impl DetachedTerminalView {
                 // Terminal was re-attached, close the window
                 this.should_close = true;
                 cx.notify();
-            }
-        })
-        .detach();
-
-        // Refresh timer - checks terminal dirty flag and notifies only when content changed
-        let terminal_for_refresh = terminal.clone();
-        cx.spawn(async move |this: WeakEntity<DetachedTerminalView>, cx| {
-            loop {
-                smol::Timer::after(std::time::Duration::from_millis(8)).await; // ~120fps check rate
-
-                // Only notify if terminal has new content
-                if terminal_for_refresh.take_dirty() {
-                    let should_continue = this.update(cx, |this, cx| {
-                        if this.should_close {
-                            return false;
-                        }
-                        cx.notify();
-                        true
-                    });
-                    match should_continue {
-                        Ok(true) => continue,
-                        _ => break,
-                    }
-                } else {
-                    // Check if view still exists
-                    let should_continue = this.update(cx, |this, _| !this.should_close);
-                    match should_continue {
-                        Ok(true) => continue,
-                        _ => break,
-                    }
-                }
             }
         })
         .detach();
