@@ -1600,10 +1600,22 @@ impl PtyManager {
                 join_reader_handle(handle.reader_handle.take(), &id);
             }
             Err(e) => {
-                // ECHILD commonly means the reader already reaped it. There is
-                // no child left to wait for, so join the reader normally.
-                log::debug!("PTY child {} already reaped or wait failed: {}", id, e);
-                join_reader_handle(handle.reader_handle.take(), &id);
+                // An indeterminate child status must not synchronously join the
+                // reader: a transient wait error can still leave both child and
+                // reader live. Retain the handle in the bounded reaper instead.
+                log::debug!("PTY child {} status is indeterminate: {}", id, e);
+                if let Some(tracker) = tracker {
+                    tracker.queued();
+                }
+                if let Some(tx) = reaper_tx {
+                    if let Err(error) = tx.send_blocking(ReaperJob { handle }) {
+                        log::error!("PTY reaper queue closed for {}; retaining live handle", id);
+                        std::mem::forget(error.into_inner());
+                    }
+                } else {
+                    log::error!("PTY reaper unavailable for {}; retaining live handle", id);
+                    std::mem::forget(handle);
+                }
             }
             Ok(None) => {
                 // Transfer the still-live handle to the manager-owned fixed reaper
@@ -2402,6 +2414,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct DelayedTerminationChild {
         release: Arc<(Mutex<bool>, Condvar)>,
+        try_wait_error: bool,
     }
 
     #[cfg(unix)]
@@ -2418,6 +2431,9 @@ mod tests {
     #[cfg(unix)]
     impl Child for DelayedTerminationChild {
         fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            if self.try_wait_error {
+                return Err(std::io::Error::other("indeterminate child status"));
+            }
             let released = *self.release.0.lock();
             Ok(released.then(|| portable_pty::ExitStatus::with_exit_code(0)))
         }
@@ -2437,7 +2453,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn shutdown_does_not_block_on_a_child_or_reader_that_ignores_termination() {
+    fn shutdown_transfers_try_wait_errors_with_blocking_wait_to_reaper() {
         let child_release = Arc::new((Mutex::new(false), Condvar::new()));
         let reader_release = Arc::new((Mutex::new(false), Condvar::new()));
         let reader_wait = reader_release.clone();
@@ -2459,6 +2475,7 @@ mod tests {
             master: None,
             child: Box::new(DelayedTerminationChild {
                 release: child_release.clone(),
+                try_wait_error: true,
             }),
             input_tx: None,
             writer: None,
@@ -2531,6 +2548,7 @@ mod tests {
             master: None,
             child: Box::new(DelayedTerminationChild {
                 release: child_release,
+                try_wait_error: false,
             }),
             input_tx: None,
             writer: Some(Arc::new(Mutex::new(Box::new(DropNotifyingWriter(Some(
@@ -2582,6 +2600,7 @@ mod tests {
                 master: None,
                 child: Box::new(DelayedTerminationChild {
                     release: Arc::clone(&child_release),
+                    try_wait_error: false,
                 }),
                 input_tx: None,
                 writer: None,
