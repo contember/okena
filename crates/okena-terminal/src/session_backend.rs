@@ -431,20 +431,9 @@ impl ResolvedBackend {
     pub fn kill_session(&self, session_name: &str) -> bool {
         match self {
             Self::None => true,
-            Self::Tmux => verify_session_kill(
-                session_backend_output("tmux", &["kill-session", "-t", session_name]),
-                || {
-                    session_backend_output("tmux", &["has-session", "-t", session_name])
-                        .map(|output| output.status.success())
-                },
-                std::time::Duration::from_secs(2),
-            ),
-            Self::Screen => verify_session_kill(
-                session_backend_output("screen", &["-S", session_name, "-X", "quit"]),
-                || {
-                    session_backend_output("screen", &["-S", session_name, "-Q", "select", "."])
-                        .map(|output| output.status.success())
-                },
+            Self::Tmux | Self::Screen | Self::Psmux => self.kill_session_with_executor(
+                session_name,
+                session_backend_output,
                 std::time::Duration::from_secs(2),
             ),
             Self::Dtach => {
@@ -531,15 +520,38 @@ impl ResolvedBackend {
                 }
                 true
             }
-            Self::Psmux => verify_session_kill(
-                session_backend_output("psmux", &["kill-session", "-t", session_name]),
-                || {
-                    session_backend_output("psmux", &["has-session", "-t", session_name])
-                        .map(|output| output.status.success())
-                },
-                std::time::Duration::from_secs(2),
-            ),
         }
+    }
+
+    fn kill_session_with_executor(
+        &self,
+        session_name: &str,
+        mut execute: impl FnMut(&str, &[&str]) -> std::io::Result<std::process::Output>,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let (program, kill_args, probe_args) = match self {
+            Self::Tmux => (
+                "tmux",
+                vec!["kill-session", "-t", session_name],
+                vec!["has-session", "-t", session_name],
+            ),
+            Self::Screen => (
+                "screen",
+                vec!["-S", session_name, "-X", "quit"],
+                vec!["-S", session_name, "-Q", "select", "."],
+            ),
+            Self::Psmux => (
+                "psmux",
+                vec!["kill-session", "-t", session_name],
+                vec!["has-session", "-t", session_name],
+            ),
+            Self::None | Self::Dtach => unreachable!("backend does not use command verification"),
+        };
+        verify_session_kill(
+            execute(program, &kill_args),
+            || execute(program, &probe_args).map(|output| output.status.success()),
+            timeout,
+        )
     }
 }
 
@@ -1279,14 +1291,22 @@ fn is_screen_available() -> bool {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    fn successful_command_output() -> std::process::Output {
-        std::process::Command::new("true")
-            .output()
-            .expect("run true")
+    fn command_output(success: bool) -> std::process::Output {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("cmd.exe");
+            command.args(["/C", if success { "exit 0" } else { "exit 1" }]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = std::process::Command::new(if success { "true" } else { "false" });
+        command.output().expect("run command")
     }
 
-    #[cfg(unix)]
+    fn successful_command_output() -> std::process::Output {
+        command_output(true)
+    }
+
     #[test]
     fn verified_session_kill_rejects_command_failure() {
         assert!(!verify_session_kill(
@@ -1296,7 +1316,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn verified_session_kill_rejects_session_that_survives() {
         let mut probes = 0;
@@ -1311,7 +1330,6 @@ mod tests {
         assert_eq!(probes, 1, "the live session was probed before failure");
     }
 
-    #[cfg(unix)]
     #[test]
     fn verified_session_kill_accepts_confirmed_disappearance() {
         assert!(verify_session_kill(
@@ -1319,6 +1337,91 @@ mod tests {
             || Ok(false),
             std::time::Duration::ZERO,
         ));
+    }
+
+    #[test]
+    fn command_backends_issue_exact_kill_and_probe_commands() {
+        let cases = [
+            (
+                ResolvedBackend::Tmux,
+                "tmux",
+                ["kill-session", "-t", "tm-test"].as_slice(),
+                ["has-session", "-t", "tm-test"].as_slice(),
+            ),
+            (
+                ResolvedBackend::Screen,
+                "screen",
+                ["-S", "tm-test", "-X", "quit"].as_slice(),
+                ["-S", "tm-test", "-Q", "select", "."].as_slice(),
+            ),
+            (
+                ResolvedBackend::Psmux,
+                "psmux",
+                ["kill-session", "-t", "tm-test"].as_slice(),
+                ["has-session", "-t", "tm-test"].as_slice(),
+            ),
+        ];
+
+        for (backend, program, kill_args, probe_args) in cases {
+            let mut calls = Vec::new();
+            let mut invocation = 0;
+            assert!(backend.kill_session_with_executor(
+                "tm-test",
+                |actual_program, actual_args| {
+                    calls.push((
+                        actual_program.to_string(),
+                        actual_args
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>(),
+                    ));
+                    invocation += 1;
+                    Ok(command_output(invocation == 1))
+                },
+                std::time::Duration::ZERO,
+            ));
+            assert_eq!(
+                calls,
+                vec![
+                    (
+                        program.to_string(),
+                        kill_args.iter().map(ToString::to_string).collect(),
+                    ),
+                    (
+                        program.to_string(),
+                        probe_args.iter().map(ToString::to_string).collect(),
+                    ),
+                ],
+                "{backend:?} must verify its exact session after killing it"
+            );
+        }
+    }
+
+    #[test]
+    fn command_backend_kill_failure_preserves_dependent_checkout() {
+        for backend in [
+            ResolvedBackend::Tmux,
+            ResolvedBackend::Screen,
+            ResolvedBackend::Psmux,
+        ] {
+            let mut calls = Vec::new();
+            assert!(!backend.kill_session_with_executor(
+                "tm-test",
+                |program, args| {
+                    calls.push((
+                        program.to_string(),
+                        args.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    ));
+                    Err(std::io::Error::other("kill failed"))
+                },
+                std::time::Duration::ZERO,
+            ));
+            assert_eq!(
+                calls.len(),
+                1,
+                "{backend:?} must not probe after kill failure"
+            );
+        }
     }
 
     #[test]

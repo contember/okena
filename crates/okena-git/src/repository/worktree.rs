@@ -350,6 +350,13 @@ pub fn remove_worktree(verified: &VerifiedWorktree, force: bool) -> GitResult<()
 /// This is safe because prune only acts on entries whose directories no longer exist,
 /// and we only delete the single target directory before pruning.
 pub fn remove_worktree_fast(verified: &VerifiedWorktree) -> GitResult<()> {
+    remove_worktree_fast_with(verified, |path| std::fs::remove_dir_all(path))
+}
+
+fn remove_worktree_fast_with(
+    verified: &VerifiedWorktree,
+    remove_dir_all: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> GitResult<()> {
     revalidate_verified_worktree(verified)?;
     let worktree_path = &verified.checkout_path;
     let parent = worktree_path
@@ -381,7 +388,7 @@ pub fn remove_worktree_fast(verified: &VerifiedWorktree) -> GitResult<()> {
         return Err(unsafe_worktree(worktree_path, reason));
     }
 
-    match std::fs::remove_dir_all(&quarantine) {
+    match remove_dir_all(&quarantine) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -554,6 +561,18 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn path_identity_matches_a_directory_symlink_alias() {
+        let parent = tempfile::tempdir().expect("create identity parent");
+        let actual = parent.path().join("actual");
+        let alias = parent.path().join("alias");
+        std::fs::create_dir(&actual).expect("create actual directory");
+        std::os::unix::fs::symlink(&actual, &alias).expect("create directory alias");
+
+        assert_eq!(path_identity(&actual), path_identity(&alias));
+    }
+
     #[test]
     fn list_linked_worktree_paths_excludes_main_worktree() {
         let (_tmp, repo) = init_temp_repo();
@@ -564,7 +583,13 @@ mod tests {
             &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
         );
 
-        assert_eq!(list_linked_worktree_paths(&repo), vec![wt_path]);
+        assert_eq!(
+            list_linked_worktree_paths(&repo)
+                .iter()
+                .map(|path| path_identity(path))
+                .collect::<Vec<_>>(),
+            vec![path_identity(&wt_path)]
+        );
     }
 
     #[test]
@@ -615,6 +640,54 @@ mod tests {
         assert!(!remove_benign_residual(&residual).expect("inspect foreign residual"));
         assert_eq!(
             std::fs::read_to_string(sentinel).expect("sentinel survives"),
+            "foreign data"
+        );
+    }
+
+    #[test]
+    fn fast_removal_cleans_partial_ds_store_residual_and_preserves_old_path_replacement() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+        let verified = verify_linked_worktree_fresh(&repo, &wt_path).expect("verify worktree");
+        let replacement_path = wt_path.clone();
+
+        let result = remove_worktree_fast_with(&verified, |quarantine| {
+            std::fs::remove_dir_all(quarantine).expect("remove quarantined checkout contents");
+            std::fs::create_dir(quarantine).expect("recreate partial quarantine residual");
+            std::fs::write(quarantine.join(".DS_Store"), "finder metadata")
+                .expect("write partial residual");
+            std::fs::create_dir(&replacement_path).expect("recreate old checkout path");
+            std::fs::write(replacement_path.join("must-survive.txt"), "foreign data")
+                .expect("write replacement sentinel");
+            Err(std::io::Error::other(
+                "simulated partial remove_dir_all failure",
+            ))
+        });
+
+        assert!(
+            result.is_err(),
+            "foreign old-path replacement must stop pruning"
+        );
+        assert!(
+            !wt_tmp
+                .path()
+                .read_dir()
+                .expect("inspect worktree parent")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".okena-removing-")),
+            "benign .DS_Store quarantine residual must be removed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt_path.join("must-survive.txt"))
+                .expect("foreign replacement survives"),
             "foreign data"
         );
     }
