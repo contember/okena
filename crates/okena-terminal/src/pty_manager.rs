@@ -256,6 +256,18 @@ fn format_panic(payload: &dyn std::any::Any) -> String {
     }
 }
 
+fn join_reader_handle(reader_handle: Option<JoinHandle<()>>, terminal_id: &str) {
+    if let Some(handle) = reader_handle
+        && let Err(error) = handle.join()
+    {
+        log::warn!(
+            "PTY reader thread for {} panicked on join: {}",
+            terminal_id,
+            format_panic(&*error)
+        );
+    }
+}
+
 /// Number of shared teardown worker threads. Bounds how many PTY teardowns
 /// (thread joins + `lsof`/`tmux kill-session`/SIGTERM subprocess calls) can run
 /// concurrently. On bulk shutdown we enqueue N jobs but only this many run at once,
@@ -1449,7 +1461,7 @@ impl PtyManager {
 
     /// Perform coordinated shutdown of a single PTY handle
     fn shutdown_handle(mut handle: PtyHandle) {
-        let id = &handle.shutdown.terminal_id;
+        let id = handle.shutdown.terminal_id.clone();
 
         // 1. Signal shutdown to threads
         handle.shutdown.mark_broken();
@@ -1465,28 +1477,57 @@ impl PtyManager {
         // 4. Drop master - safety net to unblock reader if still stuck
         drop(handle.master.take());
 
-        // 5. Join writer thread (should exit quickly after input_tx drop)
+        // 5. Join writer thread (should exit quickly after input_tx drop), then
+        // close the manager's synchronous-response writer clone. Keeping this
+        // clone alive while waiting for the child leaves the PTY master open and
+        // can prevent session clients such as dtach from completing their exit.
         if let Some(h) = handle.writer_handle.take()
             && let Err(e) = h.join()
         {
             log::warn!("PTY writer thread panicked on join: {}", format_panic(&*e));
         }
+        drop(handle.writer.take());
 
-        // 6. Join reader thread (should exit after child kill + master drop)
-        if let Some(h) = handle.reader_handle.take()
-            && let Err(e) = h.join()
-        {
-            log::warn!("PTY reader thread panicked on join: {}", format_panic(&*e));
-        }
-
-        // 7. Reap the child to prevent a zombie. The reader normally reaps via
-        //    `wait_for_exit_code` on EOF, but that is a bounded `WNOHANG` poll that
-        //    gives up if the SIGKILL'd child is briefly unreapable (e.g. stuck in
-        //    D-state on slow IO). Now that the reader has joined, a blocking wait
-        //    guarantees the PID is reaped. If the reader already reaped it via raw
-        //    `waitpid`, this just returns ECHILD, which is harmless.
-        if let Err(e) = handle.child.wait() {
-            log::debug!("PTY child {} already reaped or wait failed: {}", id, e);
+        // 6. Decide whether the child has exited BEFORE joining the reader. A
+        // child that ignores termination can retain its slave PTY indefinitely,
+        // which in turn keeps the reader blocked; joining it here would consume
+        // one of the bounded teardown workers forever.
+        match handle.child.try_wait() {
+            Ok(Some(_)) => {
+                // Exit is confirmed, so EOF should be available after every
+                // manager-held master clone above was dropped. Joining here keeps
+                // normal teardown synchronous and catches reader panics.
+                join_reader_handle(handle.reader_handle.take(), &id);
+            }
+            Err(e) => {
+                // ECHILD commonly means the reader already reaped it. There is
+                // no child left to wait for, so join the reader normally.
+                log::debug!("PTY child {} already reaped or wait failed: {}", id, e);
+                join_reader_handle(handle.reader_handle.take(), &id);
+            }
+            Ok(None) => {
+                // Keep BOTH ownership pieces in a rare detached reaper. It waits
+                // for child termination first, then joins the reader that EOF
+                // unblocks, leaving the shared teardown worker available.
+                let id = id.to_string();
+                let short_id = id[..8.min(id.len())].to_string();
+                let reaper_id = id.clone();
+                if let Err(e) = std::thread::Builder::new()
+                    .name(format!("pty-reaper-{short_id}"))
+                    .spawn(move || {
+                        if let Err(e) = handle.child.wait() {
+                            log::debug!("PTY child {} reaper wait failed: {}", reaper_id, e);
+                        }
+                        join_reader_handle(handle.reader_handle.take(), &reaper_id);
+                    })
+                {
+                    // Thread creation failure is exceptional. Dropping the
+                    // handles is still non-blocking and avoids pinning a shared
+                    // teardown worker; the child/reader Drop backstops have
+                    // already been signalled above.
+                    log::warn!("Failed to spawn PTY child reaper for {}: {}", id, e);
+                }
+            }
         }
     }
 
@@ -2256,6 +2297,202 @@ mod tests {
         manager.flush_teardown();
     }
 
+    #[cfg(unix)]
+    #[derive(Clone, Debug)]
+    struct DelayedTerminationChild {
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    #[cfg(unix)]
+    impl portable_pty::ChildKiller for DelayedTerminationChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Child for DelayedTerminationChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            let released = *self.release.0.lock();
+            Ok(released.then(|| portable_pty::ExitStatus::with_exit_code(0)))
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            let mut released = self.release.0.lock();
+            while !*released {
+                self.release.1.wait(&mut released);
+            }
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_does_not_block_on_a_child_or_reader_that_ignores_termination() {
+        let child_release = Arc::new((Mutex::new(false), Condvar::new()));
+        let reader_release = Arc::new((Mutex::new(false), Condvar::new()));
+        let reader_wait = reader_release.clone();
+        let (reader_started_tx, reader_started_rx) = mpsc::channel();
+        let (reader_done_tx, reader_done_rx) = mpsc::channel();
+        let reader_handle = std::thread::spawn(move || {
+            reader_started_tx.send(()).expect("reader starts");
+            let mut released = reader_wait.0.lock();
+            while !*released {
+                reader_wait.1.wait(&mut released);
+            }
+            reader_done_tx.send(()).expect("reader finishes");
+        });
+        reader_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader waits before teardown");
+        let handle = PtyHandle {
+            generation: PtyGeneration(1),
+            master: None,
+            child: Box::new(DelayedTerminationChild {
+                release: child_release.clone(),
+            }),
+            input_tx: None,
+            writer: None,
+            reader_handle: Some(reader_handle),
+            writer_handle: None,
+            shutdown: Arc::new(PtyShutdownState::new(
+                "non-terminating".to_string(),
+                PtyGeneration(1),
+            )),
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            PtyManager::shutdown_handle(handle);
+            let _ = done_tx.send(());
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("PTY teardown must not wait forever for child or reader");
+        assert!(
+            reader_done_rx.try_recv().is_err(),
+            "reader is still owned by detached reaper until child/reader release"
+        );
+        *child_release.0.lock() = true;
+        child_release.1.notify_all();
+        *reader_release.0.lock() = true;
+        reader_release.1.notify_all();
+        reader_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detached reaper joins released reader");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_drops_manager_writer_clone_before_waiting_for_reader_eof() {
+        struct DropNotifyingWriter(Option<mpsc::Sender<()>>);
+
+        impl Write for DropNotifyingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Drop for DropNotifyingWriter {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let child_release = Arc::new((Mutex::new(true), Condvar::new()));
+        let (writer_dropped_tx, writer_dropped_rx) = mpsc::channel();
+        let (reader_done_tx, reader_done_rx) = mpsc::channel();
+        let reader_handle = std::thread::spawn(move || {
+            writer_dropped_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("manager writer clone is dropped before reader join");
+            reader_done_tx.send(()).expect("reader reaches EOF");
+        });
+        let handle = PtyHandle {
+            generation: PtyGeneration(1),
+            master: None,
+            child: Box::new(DelayedTerminationChild {
+                release: child_release,
+            }),
+            input_tx: None,
+            writer: Some(Arc::new(Mutex::new(Box::new(DropNotifyingWriter(Some(
+                writer_dropped_tx,
+            )))))),
+            reader_handle: Some(reader_handle),
+            writer_handle: None,
+            shutdown: Arc::new(PtyShutdownState::new(
+                "writer-clone".to_string(),
+                PtyGeneration(1),
+            )),
+        };
+
+        PtyManager::shutdown_handle(handle);
+        reader_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader joins after observing writer clone closure");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dtach_kill_does_not_stall_teardown_flush() {
+        if SessionBackend::Dtach.resolve() != ResolvedBackend::Dtach {
+            return;
+        }
+
+        let (manager, _events) = PtyManager::new(SessionBackend::Dtach);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let plan = TerminalLaunchPlan {
+            route: ShellType::Default,
+            initial_command: Some(crate::backend::TerminalLaunchCommand {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "sleep 30".to_string()],
+            }),
+            environment: Vec::new(),
+        };
+        let terminal_id = manager
+            .create_terminal_with_plan(&cwd, &plan)
+            .expect("create dtach-backed PTY");
+        let session_name = ResolvedBackend::Dtach.session_name(&terminal_id);
+        let socket_path = ResolvedBackend::Dtach
+            .socket_path(&session_name)
+            .expect("dtach socket path");
+        let socket_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !socket_path.exists() && std::time::Instant::now() < socket_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(socket_path.exists(), "dtach session socket was not created");
+
+        manager.kill(&terminal_id);
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            manager.flush_teardown();
+            let _ = done_tx.send(());
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("dtach teardown flush must complete");
+        assert!(
+            !socket_path.exists(),
+            "dtach session socket must be removed"
+        );
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         published: Mutex<Vec<(String, Vec<u8>)>>,
@@ -2301,18 +2538,22 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let waiter_tracker = Arc::clone(&tracker);
         let waiter = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
+            started_tx
+                .send(())
+                .expect("announce teardown flush waiter start");
             waiter_tracker.flush();
-            done_tx.send(()).unwrap();
+            done_tx
+                .send(())
+                .expect("announce teardown flush waiter completion");
         });
 
-        started_rx.recv().unwrap();
+        started_rx.recv().expect("teardown flush waiter must start");
         assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
         tracker.completed();
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("flush returns after completion");
-        waiter.join().unwrap();
+        waiter.join().expect("teardown flush waiter must join");
     }
 
     #[test]
