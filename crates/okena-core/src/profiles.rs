@@ -1246,7 +1246,19 @@ mod tests {
         assert!(socket_path.exists());
 
         drop(listener);
-        ensure_profile_runtime_removable(dir.path(), "work").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match ensure_profile_runtime_removable(dir.path(), "work") {
+                Ok(()) => break,
+                Err(error)
+                    if error.to_string().contains("persistent terminal sessions")
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("dead socket did not become removable: {error}"),
+            }
+        }
         assert!(!socket_path.exists());
     }
 
