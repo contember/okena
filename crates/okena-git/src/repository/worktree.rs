@@ -497,13 +497,23 @@ pub fn list_linked_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
     let Some(repo) = crate::gix_helpers::open(repo_path) else {
         return Vec::new();
     };
+    // macOS exposes `/var` through `/private/var`. gix may report either spelling
+    // for the main worktree, so compare existing paths by canonical filesystem
+    // identity instead of lexical components. Missing paths retain the portable
+    // lexical fallback used elsewhere in this module.
+    let main_worktree = repo.workdir().map(path_identity);
     let Ok(worktrees) = repo.worktrees() else {
         return Vec::new();
     };
     worktrees
         .into_iter()
         .filter_map(|proxy| proxy.base().ok())
+        .filter(|path| main_worktree.as_ref() != Some(&path_identity(path)))
         .collect()
+}
+
+fn path_identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| crate::repository::normalize_path(path))
 }
 
 #[cfg(test)]
@@ -532,6 +542,16 @@ mod tests {
         entries.sort_by(|a, b| a.1.cmp(&b.1));
         let branches: Vec<&str> = entries.iter().map(|(_, b)| b.as_str()).collect();
         assert_eq!(branches, vec!["feat", "main"]);
+    }
+
+    #[test]
+    fn path_identity_prefers_canonical_filesystem_path() {
+        let directory = tempfile::tempdir().expect("create identity directory");
+        let dotted = directory.path().join(".");
+        assert_eq!(
+            path_identity(&dotted),
+            directory.path().canonicalize().unwrap()
+        );
     }
 
     #[test]
