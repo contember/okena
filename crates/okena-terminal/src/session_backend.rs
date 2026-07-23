@@ -535,49 +535,6 @@ fn verify_session_kill(
 }
 
 #[cfg(unix)]
-fn process_is_live(pid: i32) -> bool {
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(unix)]
-fn wait_for_pids_to_exit(pids: &[i32]) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        let live: Vec<i32> = pids
-            .iter()
-            .copied()
-            .filter(|pid| process_is_live(*pid))
-            .collect();
-        if live.is_empty() {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            for pid in live {
-                // The PID was verified as a holder of this Okena-owned socket
-                // immediately before TERM; this is the bounded escalation path.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-    loop {
-        let any_live = pids.iter().any(|pid| process_is_live(*pid));
-        if !any_live {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TrackedProcess {
     pid: i32,
@@ -599,21 +556,27 @@ fn process_start_marker(pid: i32) -> Option<u128> {
     Some(((seconds as u128) << 64) | micros as u128)
 }
 
-#[cfg(target_os = "linux")]
-fn linux_process_stat(pid: i32) -> Option<(i32, u64)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_process_stat(stat: &str) -> Option<(i32, u8, u64)> {
     // `comm` is parenthesized and may itself contain spaces or `)`; the final
     // ") " delimiter is the only safe place to begin fixed-field parsing.
     let suffix = stat.rsplit_once(") ")?.1;
     let fields: Vec<&str> = suffix.split_whitespace().collect();
+    let state = *fields.first()?.as_bytes().first()?; // field 3
     let parent_pid = fields.get(1)?.parse().ok()?; // field 4
     let start_ticks = fields.get(19)?.parse().ok()?; // field 22
-    Some((parent_pid, start_ticks))
+    Some((parent_pid, state, start_ticks))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_stat(pid: i32) -> Option<(i32, u8, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_linux_process_stat(&stat)
 }
 
 #[cfg(target_os = "linux")]
 fn process_start_marker(pid: i32) -> Option<u128> {
-    linux_process_stat(pid).map(|(_, start_ticks)| start_ticks as u128)
+    linux_process_stat(pid).map(|(_, _, start_ticks)| start_ticks as u128)
 }
 
 #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
@@ -628,7 +591,18 @@ fn tracked_process(pid: i32) -> Option<TrackedProcess> {
         .then_some(TrackedProcess { pid, start_marker })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn same_process_is_alive(process: TrackedProcess) -> bool {
+    let Some((_, state, start_ticks)) = linux_process_stat(process.pid) else {
+        return false;
+    };
+    // A killed child remains in /proc as a zombie until its stopped dtach
+    // parent resumes and reaps it. It is already dead and must not make a
+    // verified teardown fail merely because the birth marker still matches.
+    state != b'Z' && process.start_marker == Some(start_ticks as u128)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn same_process_is_alive(process: TrackedProcess) -> bool {
     match process.start_marker {
         Some(marker) => process_start_marker(process.pid) == Some(marker),
@@ -663,7 +637,7 @@ fn process_tree_snapshot() -> std::collections::HashMap<i32, Vec<i32>> {
         else {
             continue;
         };
-        if let Some((parent_pid, _)) = linux_process_stat(pid) {
+        if let Some((parent_pid, _, _)) = linux_process_stat(pid) {
             tree.entry(parent_pid).or_insert_with(Vec::new).push(pid);
         }
     }
@@ -1687,6 +1661,16 @@ mod tests {
 
     fn successful_command_output() -> std::process::Output {
         command_output(true)
+    }
+
+    #[test]
+    fn linux_process_stat_parser_reports_zombies_and_birth_markers() {
+        let mut fields = vec!["Z", "42"];
+        fields.extend(std::iter::repeat_n("0", 17));
+        fields.push("987");
+        let stat = format!("123 (worker ) name) {}", fields.join(" "));
+
+        assert_eq!(parse_linux_process_stat(&stat), Some((42, b'Z', 987)));
     }
 
     #[test]
