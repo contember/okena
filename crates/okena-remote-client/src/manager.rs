@@ -250,28 +250,17 @@ impl RemoteConnectionManager {
     /// woken by the `activity_rx` doorbell rather than by polling.
     ///
     /// Remote output arrives on a tokio task that only buffers bytes via
-    /// `Terminal::enqueue_output` — it never touches GPUI. The per-pane dirty
-    /// loop (`TerminalPane::start_remote_dirty_check_loop`) repaints the
-    /// *focused* terminal grid, but two server-driven indicators are left
-    /// stale until unrelated local input forces a global repaint (issue #128):
+    /// `Terminal::enqueue_output`; it cannot touch GPUI directly. Each enqueue
+    /// rings a capacity-1 doorbell (`try_send`, so bursts coalesce). On every
+    /// wake this drains and parses pending output for all remote terminals on
+    /// the GPUI thread, then watches `content_generation` to identify which
+    /// terminals advanced.
     ///
-    /// 1. **Background (unmounted) terminals never get parsed.** A sidebar
-    ///    entry whose pane isn't mounted has no per-pane loop, so its pending
-    ///    bytes are never drained — `has_bell()` stays false and the bell
-    ///    badge never appears.
-    /// 2. **The sidebar is never notified.** It reads bell/idle straight from
-    ///    the `TerminalsRegistry` (a plain `Arc<Mutex<..>>`, invisible to
-    ///    GPUI's automatic per-entity dependency tracking), so nothing tells
-    ///    it to re-render when a terminal's derived state changes.
-    ///
-    /// Each `enqueue_output` rings the capacity-1 doorbell (`try_send`, so
-    /// bursts coalesce). On every wake this drains+parses pending output for all
-    /// remote terminals on the GPUI thread (fixing #1) and watches
-    /// `content_generation` to confirm something actually advanced — regardless
-    /// of whether the per-pane loop also drained it. When so it emits
-    /// `RemoteManagerEvent::TerminalActivity`, which repaints every window's
-    /// sidebar via the subscription in `WindowView::set_remote_manager`
-    /// (fixing #2). Idle ⇒ the task simply parks on `recv()`, no CPU.
+    /// `RemoteManagerEvent::TerminalActivity` carries those terminal ids to
+    /// `WindowView`, which directly notifies their registered content panes and
+    /// repaints each window's sidebar. This keeps mounted and background bell /
+    /// idle state current without a per-pane 8 ms polling task. While idle this
+    /// task parks on `recv()`, consuming no CPU.
     fn start_terminal_activity_pump(
         &self,
         activity_rx: async_channel::Receiver<()>,
@@ -304,9 +293,12 @@ impl RemoteConnectionManager {
                     // fire.
                     let mut advanced: Vec<String> = Vec::new();
                     for (id, terminal) in &terminals {
+                        // Consume the edge-triggered dirty marker before parsing.
+                        // Any bytes arriving after this point enqueue another
+                        // activity wake, so no per-pane polling is needed.
+                        terminal.take_dirty();
                         // Parse on the GPUI thread so bell/idle flags are
                         // current even for terminals with no mounted pane.
-                        // No-op when the pending buffer is empty.
                         terminal.process_pending_output();
                         let generation = terminal.content_generation();
                         if last_generations.get(id) != Some(&generation) {

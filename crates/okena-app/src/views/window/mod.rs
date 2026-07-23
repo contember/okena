@@ -61,6 +61,31 @@ pub fn notify_pane_weaks<T: 'static>(weaks: &mut Vec<WeakEntity<T>>, cx: &mut Ap
     any_alive
 }
 
+/// Notify panes for terminals whose remote content actually advanced. Empty
+/// registrations are removed so repeated activity cannot grow stale weak lists.
+pub fn notify_registered_panes<T: 'static>(
+    registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
+    terminal_ids: &[String],
+    cx: &mut App,
+) -> usize {
+    let mut notified = 0;
+    let mut empty = Vec::new();
+    for terminal_id in terminal_ids {
+        if let Some(weaks) = registry.get_mut(terminal_id) {
+            if notify_pane_weaks(weaks, cx) {
+                notified += 1;
+            }
+            if weaks.is_empty() {
+                empty.push(terminal_id.clone());
+            }
+        }
+    }
+    for terminal_id in empty {
+        registry.remove(&terminal_id);
+    }
+    notified
+}
+
 /// Per-window view of the application: one instance per OS window.
 ///
 /// Owns the per-window UI state (sidebar, overlays, toasts, scroll handles,
@@ -569,9 +594,8 @@ impl WindowView {
             // observer above.
             let sidebar_for_activity = self.sidebar.clone();
             cx.subscribe(&manager, move |_this, _rm, event, cx| match event {
-                // The payload (advanced terminal ids) is for `Okena`'s
-                // notification drain; the sidebar re-reads every terminal's
-                // bell/idle flags, so it just repaints.
+                // The app-wide manager subscription performs targeted terminal
+                // pane fan-out once; each WindowView only owns its sidebar repaint.
                 RemoteManagerEvent::TerminalActivity(_) => {
                     sidebar_for_activity.update(cx, |_, cx| cx.notify());
                 }
@@ -883,10 +907,42 @@ impl EventEmitter<WindowViewEvent> for WindowView {}
 
 #[cfg(test)]
 mod tests {
-    use super::notify_pane_weaks;
+    use super::{notify_pane_weaks, notify_registered_panes};
     use gpui::AppContext as _;
+    use std::collections::HashMap;
 
     struct Stub;
+
+    #[gpui::test]
+    fn activity_notifies_only_registered_terminal_panes(cx: &mut gpui::TestAppContext) {
+        let (target, other, mut registry) = cx.update(|cx| {
+            let target = cx.new(|_| Stub);
+            let other = cx.new(|_| Stub);
+            let registry = HashMap::from([
+                ("target".to_string(), vec![target.downgrade()]),
+                ("other".to_string(), vec![other.downgrade()]),
+            ]);
+            (target, other, registry)
+        });
+
+        cx.update(|cx| {
+            assert_eq!(
+                notify_registered_panes(&mut registry, &["target".to_string()], cx),
+                1
+            );
+            assert_eq!(registry.len(), 2, "unrelated registrations stay intact");
+        });
+
+        drop(target);
+        cx.update(|cx| {
+            assert_eq!(
+                notify_registered_panes(&mut registry, &["target".to_string()], cx),
+                0
+            );
+            assert!(!registry.contains_key("target"), "dead pane key is pruned");
+        });
+        drop(other);
+    }
 
     #[gpui::test]
     fn fans_out_to_every_alive_weak_and_prunes_dead(cx: &mut gpui::TestAppContext) {

@@ -935,14 +935,14 @@ fn main() {
                     })
                     .detach();
 
-                // Wire up content pane registration so PTY events can notify terminal views
+                // Wire up content pane registration so remote activity events can notify terminal views
                 okena_views_terminal::set_register_content_pane_fn(Box::new(|terminal_id, weak_content| {
                     let mut registry = okena_app::views::window::content_pane_registry().lock();
                     let panes = registry.entry(terminal_id).or_default();
                     // Re-layouts (e.g. workspace switch) re-register the same
                     // terminal, minting fresh panes. Drop dead weaks and skip an
                     // entity already present so the vec stays bounded by live
-                    // viewers and a live pane isn't notified twice per PTY event.
+                    // viewers and a live pane isn't notified twice per activity event.
                     let new_id = weak_content.entity_id();
                     panes.retain(|w| w.upgrade().is_some());
                     if !panes.iter().any(|w| w.entity_id() == new_id) {

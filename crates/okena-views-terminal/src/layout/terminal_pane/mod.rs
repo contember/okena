@@ -137,13 +137,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             pane.create_new_terminal(cx);
         }
 
-        if pane
-            .terminal_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with("remote:"))
-        {
-            pane.start_remote_dirty_check_loop(cx);
-        }
         pane.start_cursor_blink_loop(cx);
         pane.start_idle_check_loop(cx);
 
@@ -204,34 +197,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 }
             }
         }
-    }
-
-    fn start_remote_dirty_check_loop(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this: WeakEntity<TerminalPane<D>>, cx| {
-            let interval = Duration::from_millis(8);
-            loop {
-                smol::Timer::after(interval).await;
-                let result = this.update(cx, |pane, cx| {
-                    if let Some(terminal) = pane.terminal.as_ref()
-                        && terminal.take_dirty()
-                    {
-                        // Parse the freshly-arrived bytes up front so derived
-                        // state (bell, waiting) is current before the frame is
-                        // built. Otherwise the lazy parse inside the content
-                        // child's `with_content` runs *after* the pane border
-                        // and sidebar read `has_bell()`, leaving those server-
-                        // driven indicators stale until local input forces a
-                        // second repaint (issue #128).
-                        terminal.process_pending_output();
-                        pane.content.update(cx, |_, cx| cx.notify());
-                    }
-                });
-                if result.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 
     fn start_cursor_blink_loop(&self, cx: &mut Context<Self>) {
