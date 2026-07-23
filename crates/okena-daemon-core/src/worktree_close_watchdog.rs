@@ -145,9 +145,16 @@ mod tests {
     }
 
     #[test]
-    fn vanished_hook_aborts_close_and_heals_monitor_once() {
+    fn vanished_hook_pty_aborts_close_heals_once_and_allows_immediate_retry() {
         let workspace = Arc::new(Mutex::new(workspace_with_pending_close("hook-1")));
         let (manager, _events) = PtyManager::new(SessionBackend::None);
+        manager
+            .create_or_reconnect_terminal(Some("hook-1"), &std::env::temp_dir().to_string_lossy())
+            .expect("create hook PTY");
+        // Deliberately do not dispatch a PtyEvent::Exit: this reproduces the
+        // daemon teardown race where the hook PTY disappears first.
+        manager.kill("hook-1");
+        manager.flush_teardown();
         let (tick, tick_rx) = watch::channel(0u64);
         let monitor = HookMonitor::new();
         monitor.record_start(
@@ -194,6 +201,18 @@ mod tests {
             "late/duplicate reconciliation must not rewrite status or toast"
         );
         assert!(monitor.drain_pending_toasts().is_empty());
+        workspace
+            .lock()
+            .register_pending_worktree_close(okena_state::PendingWorktreeClose {
+                project_id: "worktree".into(),
+                hook_terminal_id: "hook-retry".into(),
+                branch: "feature".into(),
+                main_repo_path: std::env::temp_dir().to_string_lossy().into_owned(),
+            });
+        assert!(
+            workspace.lock().is_project_closing("worktree"),
+            "retry can claim close immediately"
+        );
     }
 
     #[test]

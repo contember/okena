@@ -426,10 +426,11 @@ impl ResolvedBackend {
         }
     }
 
-    /// Kill a session
-    pub fn kill_session(&self, session_name: &str) {
+    /// Stop a persistent session. Returns false only when a verified dtach
+    /// holder survives bounded TERM/KILL escalation and may retain its CWD.
+    pub fn kill_session(&self, session_name: &str) -> bool {
         match self {
-            Self::None => {}
+            Self::None => true,
             Self::Tmux => {
                 #[cfg(target_os = "macos")]
                 let _ = crate::process::safe_output(
@@ -444,6 +445,7 @@ impl ResolvedBackend {
                     "-t",
                     session_name,
                 ]));
+                true
             }
             Self::Screen => {
                 #[cfg(target_os = "macos")]
@@ -460,6 +462,7 @@ impl ResolvedBackend {
                     "-X",
                     "quit",
                 ]));
+                true
             }
             Self::Dtach => {
                 let socket_path = get_dtach_socket_path(session_name);
@@ -480,6 +483,7 @@ impl ResolvedBackend {
                         let holders = crate::pty_manager::find_pids_for_unix_sockets(
                             std::slice::from_ref(&socket_path),
                         );
+                        let mut signalled = Vec::new();
                         for &pid in holders.get(&socket_path).into_iter().flatten() {
                             let pid = pid as i32;
                             if pid == my_pid {
@@ -504,24 +508,77 @@ impl ResolvedBackend {
                             unsafe {
                                 libc::kill(pid, libc::SIGTERM);
                             }
+                            signalled.push(pid);
                             log::debug!(
                                 "Sent SIGTERM to dtach process {} for session {}",
                                 pid,
                                 session_name
                             );
                         }
+                        if !wait_for_pids_to_exit(&signalled) {
+                            log::error!(
+                                "dtach session {} still has a live holder after SIGKILL; preserving dependent checkout",
+                                session_name
+                            );
+                            return false;
+                        }
                     }
                     let _ = std::fs::remove_file(&socket_path);
                     log::debug!("Removed dtach socket: {:?}", socket_path);
                 }
+                true
             }
             Self::Psmux => {
                 let mut cmd = crate::process::command("psmux");
                 cmd.args(["kill-session", "-t", session_name]);
                 let _ = crate::process::safe_output(&mut cmd);
                 log::debug!("Killed psmux session {}", session_name);
+                true
             }
         }
+    }
+}
+
+#[cfg(unix)]
+fn process_is_live(pid: i32) -> bool {
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn wait_for_pids_to_exit(pids: &[i32]) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let live: Vec<i32> = pids
+            .iter()
+            .copied()
+            .filter(|pid| process_is_live(*pid))
+            .collect();
+        if live.is_empty() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            for pid in live {
+                // The PID was verified as a holder of this Okena-owned socket
+                // immediately before TERM; this is the bounded escalation path.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        let any_live = pids.iter().any(|pid| process_is_live(*pid));
+        if !any_live {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 

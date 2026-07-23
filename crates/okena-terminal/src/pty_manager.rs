@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 #[cfg(windows)]
 fn append_wsl_environment(cmd: &mut CommandBuilder, environment: &[(String, Option<String>)]) {
@@ -333,6 +334,7 @@ impl Drop for PendingSessionKill {
 struct TeardownTracker {
     pending: Mutex<usize>,
     drained: Condvar,
+    failed: AtomicBool,
 }
 
 impl TeardownTracker {
@@ -353,6 +355,24 @@ impl TeardownTracker {
         while *pending != 0 {
             self.drained.wait(&mut pending);
         }
+        self.failed.store(false, Ordering::Release);
+    }
+
+    fn mark_failed(&self) {
+        self.failed.store(true, Ordering::Release);
+    }
+
+    fn flush_timeout(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut pending = self.pending.lock();
+        while *pending != 0 {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            self.drained.wait_for(&mut pending, deadline - now);
+        }
+        !self.failed.swap(false, Ordering::AcqRel)
     }
 }
 
@@ -471,7 +491,7 @@ impl PtyManager {
                     // sender, then `recv_blocking` returns Err once buffered jobs run).
                     while let Ok(job) = rx.recv_blocking() {
                         if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                            Self::run_teardown_job(job);
+                            Self::run_teardown_job(job, &tracker);
                         })) {
                             log::error!("PTY teardown worker panicked: {}", format_panic(&*panic));
                         }
@@ -505,13 +525,13 @@ impl PtyManager {
         )
     }
 
-    /// Execute one teardown job on a worker thread. This is exactly what the old
-    /// per-call detached closures did: reap the handle's reader/writer threads (if a
-    /// handle is present), then run the session kill (only for `KillSession` jobs).
-    fn run_teardown_job(mut job: TeardownJob) {
-        if let Some(handle) = job.handle {
-            Self::shutdown_handle(handle);
-        }
+    /// Execute one teardown job on a worker thread. A persistent session is
+    /// stopped first, then the attach handle is reaped without blocking a worker
+    /// indefinitely on a child that ignores termination.
+    fn run_teardown_job(mut job: TeardownJob, tracker: &Arc<TeardownTracker>) {
+        // End persistent sessions before waiting for the attach client. In
+        // particular, dtach can otherwise keep its shell (and checkout CWD)
+        // alive after the client has been signalled.
         match job.kind {
             // Process already EOF'd; nothing to SIGTERM from our side.
             TeardownKind::ReapOnly => {}
@@ -533,11 +553,20 @@ impl PtyManager {
                             wsl_distro.as_deref(),
                             &session_name,
                         );
-                        return;
+                    } else {
+                        if !session_backend.kill_session(&session_name) {
+                            tracker.mark_failed();
+                        }
                     }
                 }
-                session_backend.kill_session(&session_name);
+                #[cfg(not(windows))]
+                if !session_backend.kill_session(&session_name) {
+                    tracker.mark_failed();
+                }
             }
+        }
+        if let Some(handle) = job.handle.take() {
+            Self::shutdown_handle(handle, Some(tracker));
         }
         drop(job.pending_session_kill.take());
     }
@@ -1443,9 +1472,9 @@ impl PtyManager {
     }
 
     fn run_tracked_teardown(&self, job: TeardownJob) {
-        if let Err(panic) =
-            std::panic::catch_unwind(AssertUnwindSafe(|| Self::run_teardown_job(job)))
-        {
+        if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            Self::run_teardown_job(job, &self.teardown_tracker)
+        })) {
             log::error!("PTY teardown panicked: {}", format_panic(&*panic));
         }
         self.teardown_tracker.completed();
@@ -1459,8 +1488,14 @@ impl PtyManager {
         self.teardown_tracker.flush();
     }
 
+    /// Wait only a bounded interval for queued teardown and detached reapers.
+    /// `false` means a process may still own its former working directory.
+    pub fn flush_teardown_with_timeout(&self, timeout: Duration) -> bool {
+        self.teardown_tracker.flush_timeout(timeout)
+    }
+
     /// Perform coordinated shutdown of a single PTY handle
-    fn shutdown_handle(mut handle: PtyHandle) {
+    fn shutdown_handle(mut handle: PtyHandle, tracker: Option<&Arc<TeardownTracker>>) {
         let id = handle.shutdown.terminal_id.clone();
 
         // 1. Signal shutdown to threads
@@ -1512,20 +1547,61 @@ impl PtyManager {
                 let id = id.to_string();
                 let short_id = id[..8.min(id.len())].to_string();
                 let reaper_id = id.clone();
+                let reaper_tracker = tracker.cloned();
+                if let Some(tracker) = &reaper_tracker {
+                    // A teardown job is not complete until this child has exited
+                    // and its reader has joined. `flush_teardown_with_timeout`
+                    // uses this count to prevent destructive CWD removal races.
+                    tracker.queued();
+                }
+                // Retain the handle outside the closure until thread creation
+                // succeeds. `Builder::spawn` drops a moved closure on failure,
+                // which would otherwise trigger PtyHandle's intentionally
+                // non-killing Drop path.
+                let reap_handle = Arc::new(Mutex::new(Some(handle)));
+                let reaper_handle = Arc::clone(&reap_handle);
                 if let Err(e) = std::thread::Builder::new()
                     .name(format!("pty-reaper-{short_id}"))
                     .spawn(move || {
+                        let Some(mut handle) = reaper_handle.lock().take() else {
+                            log::error!("PTY child {} reaper lost its handle", reaper_id);
+                            if let Some(tracker) = reaper_tracker {
+                                tracker.completed();
+                            }
+                            return;
+                        };
                         if let Err(e) = handle.child.wait() {
                             log::debug!("PTY child {} reaper wait failed: {}", reaper_id, e);
                         }
                         join_reader_handle(handle.reader_handle.take(), &reaper_id);
+                        if let Some(tracker) = reaper_tracker {
+                            tracker.completed();
+                        }
                     })
                 {
-                    // Thread creation failure is exceptional. Dropping the
-                    // handles is still non-blocking and avoids pinning a shared
-                    // teardown worker; the child/reader Drop backstops have
-                    // already been signalled above.
-                    log::warn!("Failed to spawn PTY child reaper for {}: {}", id, e);
+                    // Do not drop a live `PtyHandle`: its Drop intentionally
+                    // neither kills nor waits. A worker already owns this
+                    // exceptional path, so synchronously retain and reap it.
+                    if let Some(tracker) = tracker {
+                        tracker.completed();
+                    }
+                    log::warn!(
+                        "Failed to spawn PTY child reaper for {}: {}; reaping inline",
+                        id,
+                        e
+                    );
+                    if let Some(mut handle) = reap_handle.lock().take() {
+                        if let Err(wait_error) = handle.child.wait() {
+                            log::debug!(
+                                "PTY child {} inline reaper wait failed: {}",
+                                id,
+                                wait_error
+                            );
+                        }
+                        join_reader_handle(handle.reader_handle.take(), &id);
+                    } else {
+                        log::error!("PTY child {} failed reaper lost its handle", id);
+                    }
                 }
             }
         }
@@ -1543,7 +1619,7 @@ impl PtyManager {
         }
         drop(instances);
         for handle in handles {
-            Self::shutdown_handle(handle);
+            Self::shutdown_handle(handle, None);
         }
     }
 
@@ -2371,7 +2447,7 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
 
         std::thread::spawn(move || {
-            PtyManager::shutdown_handle(handle);
+            PtyManager::shutdown_handle(handle, None);
             let _ = done_tx.send(());
         });
 
@@ -2441,7 +2517,7 @@ mod tests {
             )),
         };
 
-        PtyManager::shutdown_handle(handle);
+        PtyManager::shutdown_handle(handle, None);
         reader_done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("reader joins after observing writer clone closure");
