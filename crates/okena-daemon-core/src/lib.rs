@@ -40,6 +40,7 @@ pub mod service_cx;
 pub mod soft_close;
 pub mod toast_poll;
 pub mod workspace_cx;
+pub mod worktree_close_watchdog;
 
 #[cfg(test)]
 mod test_support;
