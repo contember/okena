@@ -132,6 +132,13 @@ impl ProjectLifecycleTracker {
             .insert(pending.hook_terminal_id.clone(), pending);
     }
 
+    /// Snapshot hook terminal IDs with a worktree close awaiting authoritative
+    /// completion. Callers must still claim a particular ID through
+    /// [`Self::cancel_pending_close`] because the snapshot can become stale.
+    pub fn pending_close_terminal_ids(&self) -> Vec<String> {
+        self.pending_worktree_closes.keys().cloned().collect()
+    }
+
     /// Take a pending worktree close for the given hook terminal ID (removes it).
     pub fn take_pending_close(&mut self, hook_terminal_id: &str) -> Option<PendingWorktreeClose> {
         self.pending_worktree_closes.remove(hook_terminal_id)
@@ -212,6 +219,18 @@ mod tests {
         tracker.register_pending_close(pending("p1", "hook1"));
         tracker.cancel_pending_close("hook1");
         assert!(!tracker.is_closing("p1"));
+    }
+
+    #[test]
+    fn pending_close_terminal_ids_is_a_snapshot() {
+        let mut tracker = ProjectLifecycleTracker::new();
+        tracker.register_pending_close(pending("p1", "hook1"));
+        tracker.register_pending_close(pending("p2", "hook2"));
+        let mut ids = tracker.pending_close_terminal_ids();
+        ids.sort();
+        assert_eq!(ids, ["hook1", "hook2"]);
+        tracker.cancel_pending_close("hook1");
+        assert_eq!(ids, ["hook1", "hook2"], "snapshot remains independent");
     }
 
     #[test]

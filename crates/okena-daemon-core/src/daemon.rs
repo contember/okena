@@ -473,6 +473,16 @@ impl DaemonCore {
                 reactor.hook_monitor.clone(),
                 soft_close_deadlines.clone(),
             ));
+            // Missing-PTY reconciliation deliberately has no hook-duration
+            // timeout: it only aborts a pending worktree close after the PTY
+            // manager itself no longer owns that hook terminal.
+            tokio::task::spawn_local(crate::worktree_close_watchdog::run_worktree_close_watchdog(
+                reactor.workspace.clone(),
+                pty_manager.clone(),
+                reactor.workspace_tick.clone(),
+                reactor.hook_runner.clone(),
+                reactor.hook_monitor.clone(),
+            ));
 
             // The command loop is the "main" task; it runs until the bridge
             // closes. Race it against ctrl-c so the daemon can shut down cleanly.
