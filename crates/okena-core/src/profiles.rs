@@ -308,11 +308,88 @@ pub fn all_profiles() -> Result<Vec<ProfileEntry>> {
     Ok(ProfileIndex::load(&root)?.profiles)
 }
 
-/// Delete a profile. Refuses to delete the active profile, the default profile, or a
-/// profile whose `remote.json` points to a live PID. Removes the profile directory and
-/// updates `profiles.json` (index written first so partial FS failure leaves index clean).
-/// Claude credentials at `~/.claude-<id>/` are intentionally preserved.
+/// Runtime root used by persistent dtach sessions.
+pub fn dtach_socket_base_dir() -> PathBuf {
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(runtime_dir).join("okena")
+    } else {
+        #[cfg(unix)]
+        {
+            // SAFETY: `getuid(2)` takes no arguments, dereferences no pointers,
+            // and is documented as never failing.
+            let uid = unsafe { libc::getuid() };
+            PathBuf::from(format!("/tmp/okena-{uid}"))
+        }
+        #[cfg(not(unix))]
+        {
+            std::env::temp_dir().join("okena")
+        }
+    }
+}
+
+/// Profile-isolated dtach directory. The default retains the legacy root for
+/// backward compatibility; named profiles use a nested runtime directory.
+pub fn dtach_socket_dir_for_profile(profile_id: &str) -> PathBuf {
+    let base = dtach_socket_base_dir();
+    if profile_id == "default" {
+        base
+    } else {
+        base.join("profiles").join(profile_id)
+    }
+}
+
+#[cfg(unix)]
+fn ensure_profile_runtime_removable(runtime_dir: &Path, profile_id: &str) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(runtime_dir) else {
+        return Ok(());
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let is_dtach_socket = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("tm-") && name.ends_with(".sock"));
+        if !is_dtach_socket {
+            continue;
+        }
+        match std::os::unix::net::UnixStream::connect(&path) {
+            Ok(_) => {
+                bail!(
+                    "Cannot delete profile '{profile_id}' while persistent terminal sessions are still running; open the profile and close its terminals first"
+                );
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                let _ = std::fs::remove_file(path);
+            }
+            Err(error) => {
+                bail!("Cannot verify terminal cleanup for profile '{profile_id}': {error}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_profile_runtime_removable(_runtime_dir: &Path, _profile_id: &str) -> Result<()> {
+    Ok(())
+}
+
+/// Delete a profile. Refuses to delete the active profile, the default profile, a
+/// profile whose `remote.json` points to a live PID, or one with live persistent
+/// terminal sessions. Removes the profile directory and updates `profiles.json`
+/// (index written first so partial FS failure leaves index clean). Claude
+/// credentials at `~/.claude-<id>/` are intentionally preserved.
 pub fn delete_profile(id: &str) -> Result<()> {
+    delete_profile_with_cleanup(id, || Ok(()))
+}
+
+/// Delete a profile after running a caller-provided terminal cleanup, but only
+/// after the usual default/active/running guards have succeeded.
+pub fn delete_profile_with_cleanup(id: &str, cleanup: impl FnOnce() -> Result<()>) -> Result<()> {
     let root = config_root();
     let mut index = ProfileIndex::load(&root)?;
 
@@ -335,6 +412,9 @@ pub fn delete_profile(id: &str) -> Result<()> {
     if is_profile_running(&paths) {
         bail!("Profile '{id}' is currently in use by another Okena instance");
     }
+    cleanup()?;
+    let runtime_dir = dtach_socket_dir_for_profile(id);
+    ensure_profile_runtime_removable(&runtime_dir, id)?;
 
     index.profiles.retain(|p| p.id != id);
     if index.last_used.as_deref() == Some(id) {
@@ -343,6 +423,7 @@ pub fn delete_profile(id: &str) -> Result<()> {
     index.save(&root)?;
 
     let _ = std::fs::remove_dir_all(&paths.root);
+    let _ = std::fs::remove_dir_all(runtime_dir);
     Ok(())
 }
 
@@ -1151,6 +1232,22 @@ mod tests {
         let idx = make_test_index_with_two(&dir);
         let loaded = ProfileIndex::load(dir.path()).unwrap();
         assert_eq!(loaded.profiles.len(), idx.profiles.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_runtime_guard_refuses_live_sessions_and_removes_dead_sockets() {
+        let dir = temp_root();
+        let socket_path = dir.path().join("tm-live.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        let error = ensure_profile_runtime_removable(dir.path(), "work").unwrap_err();
+        assert!(error.to_string().contains("persistent terminal sessions"));
+        assert!(socket_path.exists());
+
+        drop(listener);
+        ensure_profile_runtime_removable(dir.path(), "work").unwrap();
+        assert!(!socket_path.exists());
     }
 
     #[test]

@@ -36,5 +36,6 @@ See the doc comments on `pub struct Terminal` in `terminal.rs` for per-field thr
 
 - **`TerminalsRegistry`**: `Arc<Mutex<HashMap<String, Arc<Terminal>>>>` — shared registry for PTY event routing.
 - **Batched PTY processing**: The PTY reader thread sends `PtyEvent::Data` via `async_channel`. The GPUI thread drains all pending events before notifying, avoiding per-byte UI updates.
-- **Remote output decoupling**: Remote tokio reader calls `enqueue_output` (just appends to `pending_output` + sets `dirty`). The GPUI thread drains via `drain_pending_output` inside `with_content`, so `term.lock()` is never held on the tokio thread.
+- **Remote output decoupling**: Remote tokio readers call `enqueue_output` (append to `pending_output` + set `dirty`) and ring the manager's capacity-1 activity doorbell. The GPUI-thread activity pump drains/parses output, then emits targeted pane/sidebar notifications; `with_content` remains the fallback drain. Never restore per-pane polling or hold `term.lock()` on the tokio thread.
+- **Persistent dtach teardown**: `SIGTERM` to the dtach master does not propagate to its PTY child tree. Teardown must keep the socket discoverable, revalidate PID birth markers, quiesce/reap descendants before the master, and unlink only after socket death is verified.
 - **Shell detection**: Auto-detects available shells on the system. On Windows, detects WSL distros and converts paths (`C:\` → `/mnt/c/`).
