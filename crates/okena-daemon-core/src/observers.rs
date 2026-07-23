@@ -1793,7 +1793,11 @@ mod tests {
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
                 wait_for_test_condition(|| {
-                    backend.reconnected.lock().expect("reconnect lock").len() >= 1
+                    !backend
+                        .reconnected
+                        .lock()
+                        .expect("reconnect lock")
+                        .is_empty()
                 })
                 .await;
 
@@ -1868,7 +1872,11 @@ mod tests {
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
                 wait_for_test_condition(|| {
-                    backend.reconnected.lock().expect("reconnect lock").len() >= 1
+                    !backend
+                        .reconnected
+                        .lock()
+                        .expect("reconnect lock")
+                        .is_empty()
                 })
                 .await;
 
@@ -1949,7 +1957,11 @@ mod tests {
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
                 wait_for_test_condition(|| {
-                    backend.reconnected.lock().expect("reconnect lock").len() >= 1
+                    !backend
+                        .reconnected
+                        .lock()
+                        .expect("reconnect lock")
+                        .is_empty()
                 })
                 .await;
 
@@ -2111,7 +2123,11 @@ mod tests {
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
                 wait_for_test_condition(|| {
-                    backend.reconnected.lock().expect("reconnect lock").len() >= 1
+                    !backend
+                        .reconnected
+                        .lock()
+                        .expect("reconnect lock")
+                        .is_empty()
                 })
                 .await;
 

@@ -32,11 +32,13 @@ use okena_workspace::settings::save_settings;
 use parking_lot::Mutex;
 use serde_json::Value;
 
+type SettingsPersister = Arc<dyn Fn(&AppSettings) -> Result<(), String> + Send + Sync>;
+
 /// GPUI-free settings & theme handler backed by a shared
 /// `Arc<parking_lot::Mutex<AppSettings>>`.
 pub struct DaemonConfig {
     settings: Arc<Mutex<AppSettings>>,
-    persist_settings: Arc<dyn Fn(&AppSettings) -> Result<(), String> + Send + Sync>,
+    persist_settings: SettingsPersister,
 }
 
 impl DaemonConfig {
@@ -57,7 +59,7 @@ impl DaemonConfig {
     #[cfg(test)]
     pub(crate) fn with_persistence(
         settings: Arc<Mutex<AppSettings>>,
-        persist_settings: Arc<dyn Fn(&AppSettings) -> Result<(), String> + Send + Sync>,
+        persist_settings: SettingsPersister,
     ) -> Self {
         Self {
             settings,

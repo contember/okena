@@ -91,7 +91,7 @@ pub fn set_settings<B: ConfigBackend>(b: &mut B, patch: Value) -> CommandResult 
 
 /// Merge and validate a settings patch without persisting or mutating live state.
 pub fn preview_settings_patch(current: &AppSettings, patch: Value) -> Result<AppSettings, String> {
-    let mut value = match serde_json::to_value(&current) {
+    let mut value = match serde_json::to_value(current) {
         Ok(v) => v,
         Err(e) => return Err(format!("failed to read settings: {e}")),
     };

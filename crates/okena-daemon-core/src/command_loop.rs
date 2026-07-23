@@ -612,40 +612,43 @@ async fn recover_quiesced_project_runtime(
         )
     };
 
-    {
+    let stale_project_id = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut workspace = workspace.lock();
+        let mut stale_project_id = None;
         for snapshot in &quiesced.workspace {
             let expected_path = expected_paths
                 .get(&snapshot.project_id)
                 .ok_or_else(|| format!("missing recovery path: {}", snapshot.project_id))?;
             if !workspace.project_runtime_quiesce_is_current_at(snapshot, expected_path) {
-                drop(workspace);
-                if let Some(owners) = owners {
-                    let cleanup_backend = backend.clone();
-                    runtime
-                        .spawn_blocking(move || {
-                            cleanup_stale_prepared_terminal_launches(
-                                &owners,
-                                cleanup_backend.as_ref(),
-                            );
-                            cleanup_backend.flush_teardown();
-                        })
-                        .await
-                        .map_err(|error| format!("stale terminal cleanup failed: {error}"))?;
-                }
-                return Err(format!(
-                    "project changed while runtimes were recovering: {}",
-                    snapshot.project_id
-                ));
+                stale_project_id = Some(snapshot.project_id.clone());
+                break;
             }
         }
-        clear_failed_terminal_launch_reservations(
-            &mut workspace,
-            &launches,
-            &failed_terminal_ids,
-            &mut cx,
-        );
+        if stale_project_id.is_none() {
+            clear_failed_terminal_launch_reservations(
+                &mut workspace,
+                &launches,
+                &failed_terminal_ids,
+                &mut cx,
+            );
+        }
+        stale_project_id
+    };
+    if let Some(stale_project_id) = stale_project_id {
+        if let Some(owners) = owners {
+            let cleanup_backend = backend.clone();
+            runtime
+                .spawn_blocking(move || {
+                    cleanup_stale_prepared_terminal_launches(&owners, cleanup_backend.as_ref());
+                    cleanup_backend.flush_teardown();
+                })
+                .await
+                .map_err(|error| format!("stale terminal cleanup failed: {error}"))?;
+        }
+        return Err(format!(
+            "project changed while runtimes were recovering: {stale_project_id}"
+        ));
     }
 
     if let Some(owners) = &owners {
@@ -1045,32 +1048,40 @@ impl Drop for TerminalBackendMigrationGuard {
     }
 }
 
+struct TerminalBackendRematerializationContext<'a> {
+    workspace: &'a Arc<Mutex<Workspace>>,
+    workspace_tick: &'a watch::Sender<u64>,
+    hook_runner: &'a Option<okena_hooks::HookRunner>,
+    hook_monitor: &'a Option<okena_hooks::HookMonitor>,
+    backend: &'a Arc<dyn TerminalBackend>,
+    terminals: &'a TerminalsRegistry,
+    service_manager: &'a Arc<Mutex<ServiceManager>>,
+    service_tick: &'a watch::Sender<u64>,
+    runtime: &'a tokio::runtime::Handle,
+    active_services: &'a HashMap<String, Vec<String>>,
+}
+
 fn rematerialize_terminal_backend_migration(
     migration: &TerminalBackendMigration,
     app_settings: &AppSettings,
-    workspace: &Arc<Mutex<Workspace>>,
-    workspace_tick: &watch::Sender<u64>,
-    hook_runner: &Option<okena_hooks::HookRunner>,
-    hook_monitor: &Option<okena_hooks::HookMonitor>,
-    backend: &Arc<dyn TerminalBackend>,
-    terminals: &TerminalsRegistry,
-    service_manager: &Arc<Mutex<ServiceManager>>,
-    service_tick: &watch::Sender<u64>,
-    runtime: &tokio::runtime::Handle,
-    active_services: &HashMap<String, Vec<String>>,
+    context: &TerminalBackendRematerializationContext<'_>,
 ) -> Result<(), String> {
     let mut errors = Vec::new();
     {
-        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
-        let mut ws = workspace.lock();
+        let mut cx = DaemonWorkspaceCx::new(
+            context.workspace_tick,
+            context.hook_runner,
+            context.hook_monitor,
+        );
+        let mut ws = context.workspace.lock();
         if let Err(error) = ws.restore_terminal_backend_migration_slots(migration) {
             errors.push(error);
         } else {
             for slot in &migration.ordinary_slots {
                 if ensure_terminal(
                     &slot.terminal_id,
-                    terminals,
-                    backend.as_ref(),
+                    context.terminals,
+                    context.backend.as_ref(),
                     &ws,
                     app_settings,
                 )
@@ -1089,21 +1100,21 @@ fn rematerialize_terminal_backend_migration(
     for project_id in &migration.project_ids {
         recover_project_services_for_backend_migration(
             project_id,
-            workspace,
-            service_manager,
-            service_tick,
-            runtime,
+            context.workspace,
+            context.service_manager,
+            context.service_tick,
+            context.runtime,
         );
     }
 
     let service_reactor = ServiceReactorRef::new(
-        service_manager.clone(),
-        runtime.clone(),
-        service_tick.clone(),
+        context.service_manager.clone(),
+        context.runtime.clone(),
+        context.service_tick.clone(),
     );
-    let mut manager = service_manager.lock();
+    let mut manager = context.service_manager.lock();
     let mut cx = service_reactor.cx();
-    for (project_id, service_names) in active_services {
+    for (project_id, service_names) in context.active_services {
         for service_name in service_names {
             if let CommandResult::Err(error) =
                 manager.start_service_action(project_id, service_name, &mut cx)
@@ -1205,6 +1216,18 @@ async fn set_settings_with_backend_migration(
             );
         }
     }
+    let rematerialization_context = TerminalBackendRematerializationContext {
+        workspace,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+        backend,
+        terminals,
+        service_manager,
+        service_tick,
+        runtime,
+        active_services: &active_services,
+    };
 
     let registry_ids: Vec<String> = terminals.lock().keys().cloned().collect();
     migration.teardown_sessions.extend(
@@ -1253,16 +1276,7 @@ async fn set_settings_with_backend_migration(
         let recovery = rematerialize_terminal_backend_migration(
             &migration,
             &old_settings,
-            workspace,
-            workspace_tick,
-            hook_runner,
-            hook_monitor,
-            backend,
-            terminals,
-            service_manager,
-            service_tick,
-            runtime,
-            &active_services,
+            &rematerialization_context,
         );
         guard.finish();
         return SettingsUpdateOutcome::uncommitted(CommandResult::Err(match recovery {
@@ -1277,16 +1291,7 @@ async fn set_settings_with_backend_migration(
         let recovery = rematerialize_terminal_backend_migration(
             &migration,
             &old_settings,
-            workspace,
-            workspace_tick,
-            hook_runner,
-            hook_monitor,
-            backend,
-            terminals,
-            service_manager,
-            service_tick,
-            runtime,
-            &active_services,
+            &rematerialization_context,
         );
         guard.finish();
         return SettingsUpdateOutcome::uncommitted(CommandResult::Err(match recovery {
@@ -1301,16 +1306,7 @@ async fn set_settings_with_backend_migration(
         let recovery = rematerialize_terminal_backend_migration(
             &migration,
             &old_settings,
-            workspace,
-            workspace_tick,
-            hook_runner,
-            hook_monitor,
-            backend,
-            terminals,
-            service_manager,
-            service_tick,
-            runtime,
-            &active_services,
+            &rematerialization_context,
         );
         guard.finish();
         let mut failures = vec![format!("failed to switch terminal backend: {error}")];
@@ -1327,16 +1323,7 @@ async fn set_settings_with_backend_migration(
     let recovery = rematerialize_terminal_backend_migration(
         &migration,
         &new_settings,
-        workspace,
-        workspace_tick,
-        hook_runner,
-        hook_monitor,
-        backend,
-        terminals,
-        service_manager,
-        service_tick,
-        runtime,
-        &active_services,
+        &rematerialization_context,
     );
     guard.finish();
     let result = match recovery {
@@ -1976,39 +1963,43 @@ pub(crate) fn spawn_background_worktree_removal(
                             plan.project_id
                         );
                         let app_settings = settings.lock().clone();
-                        let mut cx =
-                            DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                        let mut ws = workspace.lock();
-                        if ws.data_replacement_epoch() != operation_epoch {
-                            log::info!(
-                                "worktree-close: ignoring stale failure for {}",
-                                plan.project_id
+                        {
+                            let mut cx = DaemonWorkspaceCx::new(
+                                &workspace_tick,
+                                &hook_runner,
+                                &hook_monitor,
                             );
-                            return;
+                            let mut ws = workspace.lock();
+                            if ws.data_replacement_epoch() != operation_epoch {
+                                log::info!(
+                                    "worktree-close: ignoring stale failure for {}",
+                                    plan.project_id
+                                );
+                                return;
+                            }
+                            if let okena_app_core::workspace::actions::execute::ActionResult::Err(
+                                spawn_error,
+                            ) = spawn_uninitialized_terminals(
+                                &mut ws,
+                                &plan.project_id,
+                                backend.as_ref(),
+                                &terminals,
+                                &app_settings,
+                                None,
+                                &mut cx,
+                            ) {
+                                log::error!(
+                                    "worktree-close: failed to restore terminals for {}: {spawn_error}",
+                                    plan.project_id
+                                );
+                            }
+                            if let Some(hm) = &hook_monitor {
+                                hm.push_toast(okena_state::Toast::error(format!(
+                                    "Worktree checkout could not be removed and remains open at {}: {e}",
+                                    plan.worktree_path.display()
+                                )));
+                            }
                         }
-                        if let okena_app_core::workspace::actions::execute::ActionResult::Err(
-                            spawn_error,
-                        ) = spawn_uninitialized_terminals(
-                            &mut ws,
-                            &plan.project_id,
-                            backend.as_ref(),
-                            &terminals,
-                            &app_settings,
-                            None,
-                            &mut cx,
-                        ) {
-                            log::error!(
-                                "worktree-close: failed to restore terminals for {}: {spawn_error}",
-                                plan.project_id
-                            );
-                        }
-                        if let Some(hm) = &hook_monitor {
-                            hm.push_toast(okena_state::Toast::error(format!(
-                                "Worktree checkout could not be removed and remains open at {}: {e}",
-                                plan.worktree_path.display()
-                            )));
-                        }
-                        drop(ws);
                         if let Err(error) = recover_project_services(
                             &plan.project_id,
                             &active_service_names,
@@ -2037,14 +2028,19 @@ pub(crate) fn spawn_background_worktree_removal(
             Err(e) => {
                 log::error!("worktree-close: removal task failed: {e}");
                 let app_settings = settings.lock().clone();
-                let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                let mut ws = workspace.lock();
-                if ws.data_replacement_epoch() != operation_epoch {
-                    log::info!("worktree-close: ignoring stale task failure for {task_project_id}");
-                    return;
-                }
-                if let okena_app_core::workspace::actions::execute::ActionResult::Err(spawn_error) =
-                    spawn_uninitialized_terminals(
+                {
+                    let mut cx =
+                        DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                    let mut ws = workspace.lock();
+                    if ws.data_replacement_epoch() != operation_epoch {
+                        log::info!(
+                            "worktree-close: ignoring stale task failure for {task_project_id}"
+                        );
+                        return;
+                    }
+                    if let okena_app_core::workspace::actions::execute::ActionResult::Err(
+                        spawn_error,
+                    ) = spawn_uninitialized_terminals(
                         &mut ws,
                         &task_project_id,
                         backend.as_ref(),
@@ -2052,13 +2048,12 @@ pub(crate) fn spawn_background_worktree_removal(
                         &app_settings,
                         None,
                         &mut cx,
-                    )
-                {
-                    log::error!(
-                        "worktree-close: failed to restore terminals for {task_project_id}: {spawn_error}"
-                    );
+                    ) {
+                        log::error!(
+                            "worktree-close: failed to restore terminals for {task_project_id}: {spawn_error}"
+                        );
+                    }
                 }
-                drop(ws);
                 if let Err(error) = recover_project_services(
                     &task_project_id,
                     &active_service_names,
@@ -5489,10 +5484,11 @@ mod tests {
                     &result,
                     CommandResult::Err(error) if error == "worktree is already closing"
                 ));
-                let workspace = workspace_for_assert.lock();
-                assert!(workspace.project("wt1").is_some());
-                assert!(workspace.is_project_closing("wt1"));
-                drop(workspace);
+                {
+                    let workspace = workspace_for_assert.lock();
+                    assert!(workspace.project("wt1").is_some());
+                    assert!(workspace.is_project_closing("wt1"));
+                }
 
                 drop(bridge_tx);
                 handle.await.expect("loop task joins");
