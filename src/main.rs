@@ -406,8 +406,34 @@ fn main() {
     };
     // SAFETY: called before any threads are spawned; no concurrent reads of the environment.
     unsafe { std::env::set_var("OKENA_PROFILE", &profile_paths.id) };
-    let profile_log = profile_paths.log_path();
-    let profile_log_prev = profile_paths.root.join("okena.log.1");
+    // Pick the log filename BEFORE rotating/creating it. A single-binary daemon
+    // (`okena --headless [--ui-owned]`) reuses this same `src/main.rs` logging
+    // init as the GUI, so if both wrote `okena.log` they would rotate+clobber
+    // each other's history (and the standalone `okena-daemon.log` tee — which
+    // only exists in the separate `okena-daemon` binary — is never produced in
+    // ui-owned mode). Give the headless process its own `okena-headless.log`
+    // (with its own `.1` rotation) so the GUI's `okena.log` stays legible. This
+    // mirrors the headless detection performed in full further down (explicit
+    // `--headless`, or Linux `--listen`/`--remote` with no display); it is
+    // recomputed here only because logging is initialized before that block.
+    let log_is_headless = {
+        let explicit_headless = args.iter().any(|a| a == "--headless");
+        let wants_listen = args.iter().any(|a| a == "--listen" || a == "--remote");
+        let has_display =
+            std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
+        explicit_headless || (cfg!(target_os = "linux") && wants_listen && !has_display)
+    };
+    let (profile_log, profile_log_prev) = if log_is_headless {
+        (
+            profile_paths.root.join("okena-headless.log"),
+            profile_paths.root.join("okena-headless.log.1"),
+        )
+    } else {
+        (
+            profile_paths.log_path(),
+            profile_paths.root.join("okena.log.1"),
+        )
+    };
     profiles::init_profile(profile_paths);
 
     // Migrate legacy flat-layout state into profiles/default/ if needed.
