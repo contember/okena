@@ -426,44 +426,27 @@ impl ResolvedBackend {
         }
     }
 
-    /// Stop a persistent session. Returns false only when a verified dtach
-    /// holder survives bounded TERM/KILL escalation and may retain its CWD.
+    /// Stop a persistent session. Success means both the kill command and a
+    /// bounded liveness probe confirm that the session no longer exists.
     pub fn kill_session(&self, session_name: &str) -> bool {
         match self {
             Self::None => true,
-            Self::Tmux => {
-                #[cfg(target_os = "macos")]
-                let _ = crate::process::safe_output(
-                    crate::process::command("tmux")
-                        .args(["kill-session", "-t", session_name])
-                        .env("PATH", get_extended_path()),
-                );
-
-                #[cfg(all(unix, not(target_os = "macos")))]
-                let _ = crate::process::safe_output(crate::process::command("tmux").args([
-                    "kill-session",
-                    "-t",
-                    session_name,
-                ]));
-                true
-            }
-            Self::Screen => {
-                #[cfg(target_os = "macos")]
-                let _ = crate::process::safe_output(
-                    crate::process::command("screen")
-                        .args(["-S", session_name, "-X", "quit"])
-                        .env("PATH", get_extended_path()),
-                );
-
-                #[cfg(all(unix, not(target_os = "macos")))]
-                let _ = crate::process::safe_output(crate::process::command("screen").args([
-                    "-S",
-                    session_name,
-                    "-X",
-                    "quit",
-                ]));
-                true
-            }
+            Self::Tmux => verify_session_kill(
+                session_backend_output("tmux", &["kill-session", "-t", session_name]),
+                || {
+                    session_backend_output("tmux", &["has-session", "-t", session_name])
+                        .map(|output| output.status.success())
+                },
+                std::time::Duration::from_secs(2),
+            ),
+            Self::Screen => verify_session_kill(
+                session_backend_output("screen", &["-S", session_name, "-X", "quit"]),
+                || {
+                    session_backend_output("screen", &["-S", session_name, "-Q", "select", "."])
+                        .map(|output| output.status.success())
+                },
+                std::time::Duration::from_secs(2),
+            ),
             Self::Dtach => {
                 let socket_path = get_dtach_socket_path(session_name);
                 if socket_path.exists() {
@@ -522,18 +505,81 @@ impl ResolvedBackend {
                             );
                             return false;
                         }
+                        let remaining = crate::pty_manager::find_pids_for_unix_sockets(
+                            std::slice::from_ref(&socket_path),
+                        );
+                        if remaining
+                            .get(&socket_path)
+                            .into_iter()
+                            .flatten()
+                            .any(|pid| *pid as i32 != my_pid)
+                        {
+                            log::error!(
+                                "dtach session {} still has a socket owner; preserving dependent checkout",
+                                session_name
+                            );
+                            return false;
+                        }
                     }
-                    let _ = std::fs::remove_file(&socket_path);
+                    if let Err(error) = std::fs::remove_file(&socket_path)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        log::error!("failed to remove dtach socket {:?}: {}", socket_path, error);
+                        return false;
+                    }
                     log::debug!("Removed dtach socket: {:?}", socket_path);
                 }
                 true
             }
-            Self::Psmux => {
-                let mut cmd = crate::process::command("psmux");
-                cmd.args(["kill-session", "-t", session_name]);
-                let _ = crate::process::safe_output(&mut cmd);
-                log::debug!("Killed psmux session {}", session_name);
-                true
+            Self::Psmux => verify_session_kill(
+                session_backend_output("psmux", &["kill-session", "-t", session_name]),
+                || {
+                    session_backend_output("psmux", &["has-session", "-t", session_name])
+                        .map(|output| output.status.success())
+                },
+                std::time::Duration::from_secs(2),
+            ),
+        }
+    }
+}
+
+fn session_backend_output(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut command = crate::process::command(program);
+    command.args(args);
+    #[cfg(target_os = "macos")]
+    command.env("PATH", get_extended_path());
+    crate::process::safe_output(&mut command)
+}
+
+fn verify_session_kill(
+    kill_result: std::io::Result<std::process::Output>,
+    mut session_is_live: impl FnMut() -> std::io::Result<bool>,
+    timeout: std::time::Duration,
+) -> bool {
+    match kill_result {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            log::error!("session kill command exited with {}", output.status);
+            return false;
+        }
+        Err(error) => {
+            log::error!("failed to run session kill command: {error}");
+            return false;
+        }
+    }
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match session_is_live() {
+            Ok(false) => return true,
+            Ok(true) if std::time::Instant::now() >= deadline => {
+                log::error!("session survived bounded kill verification");
+                return false;
+            }
+            Ok(true) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(error) => {
+                log::error!("failed to verify session liveness: {error}");
+                return false;
             }
         }
     }
@@ -1232,6 +1278,48 @@ fn is_screen_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn successful_command_output() -> std::process::Output {
+        std::process::Command::new("true")
+            .output()
+            .expect("run true")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_session_kill_rejects_command_failure() {
+        assert!(!verify_session_kill(
+            Err(std::io::Error::other("kill command failed")),
+            || panic!("liveness must not be checked after command failure"),
+            std::time::Duration::ZERO,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_session_kill_rejects_session_that_survives() {
+        let mut probes = 0;
+        assert!(!verify_session_kill(
+            Ok(successful_command_output()),
+            || {
+                probes += 1;
+                Ok(true)
+            },
+            std::time::Duration::ZERO,
+        ));
+        assert_eq!(probes, 1, "the live session was probed before failure");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_session_kill_accepts_confirmed_disappearance() {
+        assert!(verify_session_kill(
+            Ok(successful_command_output()),
+            || Ok(false),
+            std::time::Duration::ZERO,
+        ));
+    }
 
     #[test]
     fn test_parse_backend() {

@@ -551,7 +551,13 @@ impl DaemonCore {
             &*shutdown_backend,
             &shutdown_terminals,
             || shutdown_autosaves.flush(),
-            || shutdown_pty_manager.flush_teardown(),
+            || {
+                if !shutdown_pty_manager
+                    .flush_teardown_with_timeout(std::time::Duration::from_secs(5))
+                {
+                    log::warn!("terminal teardown still owns a process at daemon shutdown");
+                }
+            },
             persistence::save_workspace,
         )?;
         remote_server.stop();

@@ -521,10 +521,15 @@ async fn flush_project_runtime_teardown(
             for teardown in &teardown_sessions {
                 backend.kill_session(teardown);
             }
-            backend.flush_teardown();
+            if backend.flush_teardown_with_timeout(Duration::from_secs(5)) {
+                Ok(())
+            } else {
+                Err("terminal teardown did not release project paths in time; checkout preserved")
+            }
         })
         .await
-        .map_err(|error| format!("terminal teardown task failed: {error}"))
+        .map_err(|error| format!("terminal teardown task failed: {error}"))?
+        .map_err(str::to_string)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6511,6 +6516,7 @@ mod tests {
         killed: std::sync::atomic::AtomicBool,
         flush_started: std::sync::atomic::AtomicBool,
         release: Mutex<std::sync::mpsc::Receiver<()>>,
+        timeout_result: Option<bool>,
     }
 
     struct RenameRecordingBackend {
@@ -6677,6 +6683,21 @@ mod tests {
                 .lock()
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .expect("test releases teardown barrier");
+        }
+
+        fn flush_teardown_with_timeout(&self, _timeout: Duration) -> bool {
+            if let Some(result) = self.timeout_result {
+                assert!(
+                    self.killed.load(std::sync::atomic::Ordering::SeqCst),
+                    "project PTYs must be killed before bounded teardown verification"
+                );
+                self.flush_started
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                result
+            } else {
+                self.flush_teardown();
+                true
+            }
         }
 
         fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
@@ -7107,6 +7128,7 @@ mod tests {
                     killed: std::sync::atomic::AtomicBool::new(false),
                     flush_started: std::sync::atomic::AtomicBool::new(false),
                     release: Mutex::new(teardown_release_rx),
+                    timeout_result: None,
                 });
                 let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
                 let service_manager = Arc::new(Mutex::new(ServiceManager::new(
@@ -8209,6 +8231,7 @@ mod tests {
             killed: std::sync::atomic::AtomicBool::new(false),
             flush_started: std::sync::atomic::AtomicBool::new(false),
             release: Mutex::new(release_rx),
+            timeout_result: None,
         });
         let backend: Arc<dyn TerminalBackend> = barrier_backend.clone();
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
