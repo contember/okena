@@ -440,76 +440,13 @@ impl ResolvedBackend {
                 let socket_path = get_dtach_socket_path(session_name);
                 if socket_path.exists() {
                     #[cfg(unix)]
-                    {
-                        let my_pid = std::process::id() as i32;
-                        // Discover the PIDs holding the dtach socket open. This is a
-                        // best-effort, point-in-time snapshot (now via the /proc socket
-                        // scan instead of an `lsof -t` spawn), with an inherent TOCTOU
-                        // window between reading it here and signalling below. By the
-                        // time we call `kill`, the dtach process may have already exited
-                        // and its PID been recycled onto an unrelated process. We accept
-                        // this risk because there is no portable, race-free way to
-                        // atomically "signal whoever holds this socket"; the window is
-                        // short and the dtach socket is user-private (see
-                        // get_dtach_socket_dir).
-                        let holders = crate::pty_manager::find_pids_for_unix_sockets(
-                            std::slice::from_ref(&socket_path),
-                        );
-                        let mut signalled = Vec::new();
-                        for &pid in holders.get(&socket_path).into_iter().flatten() {
-                            let pid = pid as i32;
-                            if pid == my_pid {
-                                log::debug!(
-                                    "Skipping own PID {} when killing dtach session {}",
-                                    pid,
-                                    session_name
-                                );
-                                continue;
-                            }
-                            // SAFETY: `libc::kill` is a thin FFI wrapper over the
-                            // `kill(2)` syscall. It takes two plain `i32` values
-                            // (a pid and a signal number) by value, dereferences no
-                            // pointers, and has no memory-safety preconditions, so
-                            // the call itself cannot cause UB regardless of the
-                            // argument values. The only hazard is *logical*, not a
-                            // memory-safety one: per the TOCTOU note above, `pid`
-                            // may have been recycled since the scan, so we could
-                            // signal an unrelated process. We tolerate that as
-                            // best-effort cleanup and intentionally ignore the
-                            // return value (the process may already be gone).
-                            unsafe {
-                                libc::kill(pid, libc::SIGTERM);
-                            }
-                            signalled.push(pid);
-                            log::debug!(
-                                "Sent SIGTERM to dtach process {} for session {}",
-                                pid,
-                                session_name
-                            );
-                        }
-                        if !wait_for_pids_to_exit(&signalled) {
-                            log::error!(
-                                "dtach session {} still has a live holder after SIGKILL; preserving dependent checkout",
-                                session_name
-                            );
-                            return false;
-                        }
-                        let remaining = crate::pty_manager::find_pids_for_unix_sockets(
-                            std::slice::from_ref(&socket_path),
-                        );
-                        if remaining
-                            .get(&socket_path)
-                            .into_iter()
-                            .flatten()
-                            .any(|pid| *pid as i32 != my_pid)
-                        {
-                            log::error!(
-                                "dtach session {} still has a socket owner; preserving dependent checkout",
-                                session_name
-                            );
-                            return false;
-                        }
+                    if !terminate_dtach_process_tree(&socket_path, session_name) {
+                        // Keep the socket path as the durable retry handle. Unlinking
+                        // it while either the master or its child tree survives is
+                        // what made leaked agent trees invisible to later cleanup.
+                        return false;
                     }
+
                     if let Err(error) = std::fs::remove_file(&socket_path)
                         && error.kind() != std::io::ErrorKind::NotFound
                     {
@@ -640,10 +577,319 @@ fn wait_for_pids_to_exit(pids: &[i32]) -> bool {
     }
 }
 
-/// Minimum age before a `tm-*.sock` file is a GC candidate. A socket created
-/// just before this scan may not yet appear in the `/proc` snapshot, so treat
-/// recent files as live (TOCTOU defense-in-depth on top of the name filter).
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TrackedProcess {
+    pid: i32,
+    /// Platform process-birth marker. Revalidating this before every signal
+    /// prevents a recycled PID from targeting an unrelated process.
+    start_marker: Option<u128>,
+}
+
+#[cfg(unix)]
+fn raw_process_is_alive(pid: i32) -> bool {
+    // SAFETY: signal 0 performs existence/permission checking only and takes no
+    // pointers. All callers pass a positive PID discovered from process state.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn process_start_marker(pid: i32) -> Option<u128> {
+    let (seconds, micros) = crate::macos_proc::process_start_time(pid as u32)?;
+    Some(((seconds as u128) << 64) | micros as u128)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_stat(pid: i32) -> Option<(i32, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `comm` is parenthesized and may itself contain spaces or `)`; the final
+    // ") " delimiter is the only safe place to begin fixed-field parsing.
+    let suffix = stat.rsplit_once(") ")?.1;
+    let fields: Vec<&str> = suffix.split_whitespace().collect();
+    let parent_pid = fields.get(1)?.parse().ok()?; // field 4
+    let start_ticks = fields.get(19)?.parse().ok()?; // field 22
+    Some((parent_pid, start_ticks))
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_marker(pid: i32) -> Option<u128> {
+    linux_process_stat(pid).map(|(_, start_ticks)| start_ticks as u128)
+}
+
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
+fn process_start_marker(_pid: i32) -> Option<u128> {
+    None
+}
+
+#[cfg(unix)]
+fn tracked_process(pid: i32) -> Option<TrackedProcess> {
+    let start_marker = process_start_marker(pid);
+    (start_marker.is_some() || raw_process_is_alive(pid))
+        .then_some(TrackedProcess { pid, start_marker })
+}
+
+#[cfg(unix)]
+fn same_process_is_alive(process: TrackedProcess) -> bool {
+    match process.start_marker {
+        Some(marker) => process_start_marker(process.pid) == Some(marker),
+        None => raw_process_is_alive(process.pid),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_tree_snapshot() -> std::collections::HashMap<i32, Vec<i32>> {
+    crate::macos_proc::process_tree()
+        .into_iter()
+        .map(|(parent, children)| {
+            (
+                parent as i32,
+                children.into_iter().map(|pid| pid as i32).collect(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn process_tree_snapshot() -> std::collections::HashMap<i32, Vec<i32>> {
+    let mut tree = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return tree;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if let Some((parent_pid, _)) = linux_process_stat(pid) {
+            tree.entry(parent_pid).or_insert_with(Vec::new).push(pid);
+        }
+    }
+    tree
+}
+
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
+fn process_tree_snapshot() -> std::collections::HashMap<i32, Vec<i32>> {
+    let mut tree = std::collections::HashMap::new();
+    let Ok(output) = crate::process::command("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+    else {
+        return tree;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some(parent)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if let (Ok(pid), Ok(parent)) = (pid.parse::<i32>(), parent.parse::<i32>()) {
+            tree.entry(parent).or_insert_with(Vec::new).push(pid);
+        }
+    }
+    tree
+}
+
+#[cfg(unix)]
+fn tracked_descendants(roots: &[TrackedProcess]) -> Vec<TrackedProcess> {
+    fn visit(
+        pid: i32,
+        tree: &std::collections::HashMap<i32, Vec<i32>>,
+        visited: &mut std::collections::HashSet<i32>,
+        descendants: &mut Vec<TrackedProcess>,
+    ) {
+        let Some(children) = tree.get(&pid) else {
+            return;
+        };
+        for &child in children {
+            if !visited.insert(child) {
+                continue;
+            }
+            visit(child, tree, visited, descendants);
+            if let Some(process) = tracked_process(child) {
+                descendants.push(process);
+            }
+        }
+    }
+
+    let tree = process_tree_snapshot();
+    let mut visited: std::collections::HashSet<i32> =
+        roots.iter().map(|process| process.pid).collect();
+    let mut descendants = Vec::new();
+    for &root in roots {
+        if same_process_is_alive(root) {
+            visit(root.pid, &tree, &mut visited, &mut descendants);
+        }
+    }
+    descendants
+}
+
+#[cfg(unix)]
+fn signal_tracked_processes(processes: &[TrackedProcess], signal: i32, session_name: &str) {
+    for &process in processes {
+        if !same_process_is_alive(process) {
+            continue;
+        }
+        // SAFETY: `kill(2)` takes plain integer values and no pointers. The PID
+        // has just been revalidated against its platform birth marker.
+        unsafe {
+            libc::kill(process.pid, signal);
+        }
+        log::debug!(
+            "Sent signal {signal} to process {} for dtach session {session_name}",
+            process.pid
+        );
+    }
+}
+
+#[cfg(unix)]
+fn dtach_socket_holders(socket_path: &std::path::PathBuf) -> Vec<i32> {
+    let my_pid = std::process::id() as i32;
+    crate::pty_manager::find_pids_for_unix_sockets(std::slice::from_ref(socket_path))
+        .remove(socket_path)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|pid| pid as i32)
+        .filter(|pid| *pid != my_pid)
+        .collect()
+}
+
+#[cfg(unix)]
+fn tracked_dtach_socket_holders(socket_path: &std::path::PathBuf) -> Vec<TrackedProcess> {
+    let tracked: Vec<TrackedProcess> = dtach_socket_holders(socket_path)
+        .into_iter()
+        .filter_map(tracked_process)
+        .collect();
+    let current: std::collections::HashSet<i32> =
+        dtach_socket_holders(socket_path).into_iter().collect();
+    tracked
+        .into_iter()
+        .filter(|process| current.contains(&process.pid) && same_process_is_alive(*process))
+        .collect()
+}
+
+#[cfg(unix)]
+fn dtach_socket_is_definitively_dead(socket_path: &std::path::Path) -> bool {
+    match std::os::unix::net::UnixStream::connect(socket_path) {
+        Ok(_) => false,
+        Err(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn terminate_dtach_process_tree(socket_path: &std::path::PathBuf, session_name: &str) -> bool {
+    let mut holders = tracked_dtach_socket_holders(socket_path);
+    if holders.is_empty() {
+        if dtach_socket_is_definitively_dead(socket_path) {
+            return true;
+        }
+        log::warn!(
+            "Refusing to unlink live dtach session {session_name}: no socket holder PID was discoverable"
+        );
+        return false;
+    }
+
+    // Freeze verified holders first. Besides pinning their PID identities, this
+    // keeps the dtach master as a stable parentage anchor while descendants are
+    // discovered and frozen below.
+    signal_tracked_processes(&holders, libc::SIGSTOP, session_name);
+    let stopped_holders = holders.clone();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let confirmed_holders: std::collections::HashSet<TrackedProcess> =
+        tracked_dtach_socket_holders(socket_path)
+            .into_iter()
+            .collect();
+    holders.retain(|holder| confirmed_holders.contains(holder));
+    if holders.is_empty() {
+        signal_tracked_processes(&stopped_holders, libc::SIGCONT, session_name);
+        return dtach_socket_is_definitively_dead(socket_path);
+    }
+
+    // dtach exits on SIGTERM without forwarding it to the child PTY process
+    // group. Iteratively freeze descendants parent-first until two snapshots are
+    // stable. Once every anchored process is SIGSTOPed, none can fork during the
+    // destructive pass and the socket remains a durable retry handle on failure.
+    let mut descendants = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stable_snapshots = 0;
+    for _ in 0..8 {
+        let snapshot = tracked_descendants(&holders);
+        let mut newly_seen: Vec<TrackedProcess> = snapshot
+            .into_iter()
+            .filter(|process| seen.insert(*process))
+            .collect();
+        if newly_seen.is_empty() {
+            stable_snapshots += 1;
+            if stable_snapshots == 2 {
+                break;
+            }
+        } else {
+            stable_snapshots = 0;
+            // `tracked_descendants` is child-first; reverse it so spawning
+            // parents are stopped before their children.
+            newly_seen.reverse();
+            signal_tracked_processes(&newly_seen, libc::SIGSTOP, session_name);
+            descendants.extend(newly_seen);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    if stable_snapshots < 2 {
+        signal_tracked_processes(&descendants, libc::SIGCONT, session_name);
+        signal_tracked_processes(&stopped_holders, libc::SIGCONT, session_name);
+        log::error!(
+            "Dtach session {session_name} descendant tree did not quiesce; preserving {:?} for retry",
+            socket_path
+        );
+        return false;
+    }
+
+    signal_tracked_processes(&descendants, libc::SIGKILL, session_name);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let surviving_descendants = descendants
+        .iter()
+        .filter(|process| same_process_is_alive(**process))
+        .count();
+    if surviving_descendants > 0 {
+        signal_tracked_processes(&descendants, libc::SIGCONT, session_name);
+        signal_tracked_processes(&stopped_holders, libc::SIGCONT, session_name);
+        log::error!(
+            "Dtach session {session_name} still has {surviving_descendants} live descendant(s); preserving {:?} for retry",
+            socket_path
+        );
+        return false;
+    }
+
+    // SIGTERM is queued while holders are stopped; SIGCONT lets dtach run its
+    // normal exit/unlink path. Escalate only freshly revalidated survivors.
+    signal_tracked_processes(&stopped_holders, libc::SIGTERM, session_name);
+    signal_tracked_processes(&stopped_holders, libc::SIGCONT, session_name);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let surviving_holders = tracked_dtach_socket_holders(socket_path);
+    if !surviving_holders.is_empty() {
+        signal_tracked_processes(&surviving_holders, libc::SIGKILL, session_name);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let terminated = dtach_socket_holders(socket_path).is_empty()
+        && dtach_socket_is_definitively_dead(socket_path);
+    if !terminated {
+        log::error!(
+            "Dtach session {session_name} is still live after teardown; preserving {:?} for retry",
+            socket_path
+        );
+    }
+    terminated
+}
+
+/// Minimum age before a `tm-*.sock` file is a GC candidate. A socket created
+/// just before this scan may not yet appear in the process/socket snapshot, so
+/// treat recent files as live.
 const DTACH_SOCKET_GC_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Whether a filename matches the dtach/tmux socket naming scheme (`tm-*.sock`).
@@ -668,6 +914,105 @@ fn is_too_fresh_to_gc(age: std::time::Duration) -> bool {
 fn socket_age(path: &std::path::Path) -> Option<std::time::Duration> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     Some(modified.elapsed().unwrap_or(std::time::Duration::ZERO))
+}
+
+#[cfg(unix)]
+fn dtach_session_name_from_path(path: &std::path::Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    is_stale_gc_candidate(file_name)
+        .then(|| file_name.strip_suffix(".sock").map(str::to_owned))
+        .flatten()
+}
+
+#[cfg(unix)]
+fn orphaned_dtach_session_names<'a>(
+    socket_paths: impl IntoIterator<Item = &'a std::path::PathBuf>,
+    retained_session_names: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut orphaned: Vec<String> = socket_paths
+        .into_iter()
+        .filter_map(|path| dtach_session_name_from_path(path))
+        .filter(|name| !retained_session_names.contains(name))
+        .collect();
+    orphaned.sort();
+    orphaned.dedup();
+    orphaned
+}
+
+/// Reconcile live dtach sessions against the workspace that owns this profile.
+/// Sessions absent from authoritative state are leftovers from an interrupted or
+/// incomplete close and must not survive another daemon start.
+#[cfg(unix)]
+pub fn reconcile_dtach_sessions(retained_terminal_ids: &std::collections::HashSet<String>) {
+    // Always reconcile dtach artifacts, even when the newly selected backend is
+    // tmux/screen/none or Auto now resolves differently.
+    let backend = ResolvedBackend::Dtach;
+    let dir = get_dtach_socket_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let socket_paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_stale_gc_candidate)
+        })
+        // A recently-created socket may belong to a terminal added after the
+        // caller's last disk snapshot. Reconciliation never destroys it.
+        .filter(|path| socket_age(path).is_some_and(|age| !is_too_fresh_to_gc(age)))
+        .collect();
+    let retained_session_names: std::collections::HashSet<String> = retained_terminal_ids
+        .iter()
+        .map(|terminal_id| backend.session_name(terminal_id))
+        .collect();
+    let orphaned = orphaned_dtach_session_names(socket_paths.iter(), &retained_session_names);
+
+    for session_name in &orphaned {
+        backend.kill_session(session_name);
+    }
+    if !orphaned.is_empty() {
+        log::info!(
+            "Reconciled {} orphaned dtach session(s) in {:?}",
+            orphaned.len(),
+            dir
+        );
+    }
+}
+
+#[cfg(not(unix))]
+pub fn reconcile_dtach_sessions(_retained_terminal_ids: &std::collections::HashSet<String>) {}
+
+/// Tear down every persistent dtach session in a stopped profile before its
+/// authoritative profile directory is deleted.
+#[cfg(unix)]
+pub fn reap_dtach_profile_sessions(profile_id: &str) -> std::io::Result<usize> {
+    let dir = okena_core::profiles::dtach_socket_dir_for_profile(profile_id);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut reaped = 0;
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let Some(session_name) = dtach_session_name_from_path(&path) else {
+            continue;
+        };
+        if !terminate_dtach_process_tree(&path, &session_name) {
+            return Err(std::io::Error::other(format!(
+                "persistent terminal session {session_name} did not terminate"
+            )));
+        }
+        let _ = std::fs::remove_file(path);
+        reaped += 1;
+    }
+    Ok(reaped)
+}
+
+#[cfg(not(unix))]
+pub fn reap_dtach_profile_sessions(_profile_id: &str) -> std::io::Result<usize> {
+    Ok(0)
 }
 
 /// Remove dtach socket files whose dtach process is no longer running.
@@ -705,7 +1050,7 @@ pub fn cleanup_stale_dtach_sockets() {
     let mut removed = 0;
     for path in &socket_paths {
         let has_listener = holders.get(path).map(|v| !v.is_empty()).unwrap_or(false);
-        if !has_listener {
+        if !has_listener && dtach_socket_is_definitively_dead(path) {
             let _ = std::fs::remove_file(path);
             removed += 1;
         }
@@ -983,34 +1328,71 @@ fn shell_escape(s: &str) -> String {
 
 /// Get the socket directory for dtach sessions
 #[allow(dead_code)]
-fn get_dtach_socket_dir() -> std::path::PathBuf {
-    // Use XDG_RUNTIME_DIR if available (Linux), otherwise fall back to temp dir
-    // XDG_RUNTIME_DIR is preferred as it's user-specific and cleaned on logout
-    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        std::path::PathBuf::from(runtime_dir).join("okena")
+fn profile_scoped_dtach_socket_dir(
+    base: std::path::PathBuf,
+    profile_id: Option<&str>,
+) -> std::path::PathBuf {
+    let Some(profile_id) = profile_id else {
+        return base;
+    };
+    let safe = !profile_id.is_empty()
+        && !profile_id.contains('/')
+        && !profile_id.contains('\\')
+        && !profile_id.contains("..")
+        && !profile_id.contains('\0');
+    if profile_id == "default" || !safe {
+        base
     } else {
-        // Fallback: /tmp/okena-<uid> for security
-        #[cfg(unix)]
-        {
-            // SAFETY: `libc::getuid` is a thin FFI wrapper over the `getuid(2)`
-            // syscall. It takes no arguments, dereferences no pointers, always
-            // succeeds (it is documented as never failing), and returns a plain
-            // `uid_t` by value. There are no memory-safety preconditions, so the
-            // call cannot cause UB.
-            let uid = unsafe { libc::getuid() };
-            std::path::PathBuf::from(format!("/tmp/okena-{}", uid))
-        }
-        #[cfg(not(unix))]
-        {
-            std::env::temp_dir().join("okena")
-        }
+        base.join("profiles").join(profile_id)
     }
 }
 
-/// Get the socket path for a specific dtach session
+fn dtach_socket_base_dir() -> std::path::PathBuf {
+    okena_core::profiles::dtach_socket_base_dir()
+}
+
+fn active_profile_id() -> Option<String> {
+    okena_core::profiles::try_current()
+        .map(|profile| profile.id.clone())
+        .or_else(|| std::env::var("OKENA_PROFILE").ok())
+}
+
+fn get_dtach_socket_dir() -> std::path::PathBuf {
+    // Keep the default profile in the legacy root so existing sessions survive
+    // the profile migration. Every named profile gets an isolated socket pool.
+    profile_scoped_dtach_socket_dir(dtach_socket_base_dir(), active_profile_id().as_deref())
+}
+
+fn profile_dtach_socket_path(
+    base: &std::path::Path,
+    profile_id: Option<&str>,
+    session_name: &str,
+) -> std::path::PathBuf {
+    let file_name = format!("{session_name}.sock");
+    let scoped = profile_scoped_dtach_socket_dir(base.to_path_buf(), profile_id).join(&file_name);
+    if scoped.exists() {
+        return scoped;
+    }
+
+    let legacy = base.join(file_name);
+    if scoped != legacy && legacy.exists() {
+        legacy
+    } else {
+        scoped
+    }
+}
+
+/// Get the socket path for a specific dtach session. A named profile first looks
+/// in its isolated directory, then falls back to the pre-upgrade shared root so
+/// retained legacy sessions remain attachable and closable. New sessions are
+/// created in the isolated path once no legacy socket exists.
 #[allow(dead_code)]
 fn get_dtach_socket_path(session_name: &str) -> std::path::PathBuf {
-    get_dtach_socket_dir().join(format!("{}.sock", session_name))
+    profile_dtach_socket_path(
+        &dtach_socket_base_dir(),
+        active_profile_id().as_deref(),
+        session_name,
+    )
 }
 
 /// Extract directory name from a path for use as window name
@@ -1463,6 +1845,184 @@ mod tests {
         assert!(!is_stale_gc_candidate("tm-x.txt"));
         assert!(!is_stale_gc_candidate("okena.lock"));
         assert!(!is_stale_gc_candidate("remote.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_reconciliation_preserves_retained_sessions() {
+        let sockets = [
+            std::path::PathBuf::from("/runtime/tm-keep1234.sock"),
+            std::path::PathBuf::from("/runtime/tm-drop5678.sock"),
+            std::path::PathBuf::from("/runtime/daemon.sock"),
+        ];
+        let retained = std::collections::HashSet::from(["tm-keep1234".to_string()]);
+
+        assert_eq!(
+            orphaned_dtach_session_names(sockets.iter(), &retained),
+            vec!["tm-drop5678".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_default_profiles_get_isolated_dtach_socket_directories() {
+        let base = std::path::PathBuf::from("/tmp/okena-501");
+
+        assert_eq!(profile_scoped_dtach_socket_dir(base.clone(), None), base);
+        assert_eq!(
+            profile_scoped_dtach_socket_dir(base.clone(), Some("default")),
+            base
+        );
+        assert_eq!(
+            profile_scoped_dtach_socket_dir(base.clone(), Some("work-client")),
+            base.join("profiles").join("work-client")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_profile_reuses_legacy_socket_before_creating_an_isolated_one() {
+        let base = std::env::temp_dir().join(format!(
+            "okena-profile-socket-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let legacy = base.join("tm-legacy.sock");
+        std::fs::write(&legacy, b"").unwrap();
+
+        assert_eq!(
+            profile_dtach_socket_path(&base, Some("work"), "tm-legacy"),
+            legacy
+        );
+        std::fs::remove_file(&legacy).unwrap();
+        assert_eq!(
+            profile_dtach_socket_path(&base, Some("work"), "tm-legacy"),
+            base.join("profiles/work/tm-legacy.sock")
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_reaping_refuses_live_sessions_and_removes_dead_sockets() {
+        let profile_id = format!("test-profile-{}", uuid::Uuid::new_v4());
+        let dir = okena_core::profiles::dtach_socket_dir_for_profile(&profile_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("tm-profile-test.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        assert!(reap_dtach_profile_sessions(&profile_id).is_err());
+        assert!(socket_path.exists());
+
+        drop(listener);
+        assert_eq!(reap_dtach_profile_sessions(&profile_id).unwrap(), 1);
+        assert!(!socket_path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dtach_teardown_preserves_socket_until_its_master_is_dead() {
+        let session_name = format!("tm-live-test-{}", std::process::id());
+        let socket_path = get_dtach_socket_path(&session_name);
+        std::fs::create_dir_all(socket_path.parent().expect("socket parent")).unwrap();
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        ResolvedBackend::Dtach.kill_session(&session_name);
+        assert!(
+            socket_path.exists(),
+            "a socket that still accepts connections must stay discoverable"
+        );
+
+        drop(listener);
+        ResolvedBackend::Dtach.kill_session(&session_name);
+        assert!(
+            !socket_path.exists(),
+            "a dead socket should be removed once liveness is verified"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dtach_teardown_reaps_the_real_child_process_tree() {
+        if std::process::Command::new("dtach")
+            .arg("--help")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let unique = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4());
+        let session_name = format!("tm-tree-test-{unique}");
+        let socket_path = get_dtach_socket_path(&session_name);
+        std::fs::create_dir_all(socket_path.parent().expect("socket parent")).unwrap();
+        let _ = std::fs::remove_file(&socket_path);
+        let temp_dir = std::env::temp_dir().join(format!("okena-dtach-tree-{unique}"));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let shell_pid_file = temp_dir.join("shell.pid");
+        let child_pid_file = temp_dir.join("child.pid");
+        let command = format!(
+            "echo $$ > {}; sleep 30 & echo $! > {}; wait",
+            shell_escape(&shell_pid_file.to_string_lossy()),
+            shell_escape(&child_pid_file.to_string_lossy())
+        );
+        let status = std::process::Command::new("dtach")
+            .args([
+                "-n",
+                socket_path.to_str().unwrap(),
+                "-E",
+                "sh",
+                "-c",
+                &command,
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        for _ in 0..100 {
+            if socket_path.exists() && shell_pid_file.exists() && child_pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let shell_pid: i32 = std::fs::read_to_string(&shell_pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        ResolvedBackend::Dtach.kill_session(&session_name);
+        for _ in 0..100 {
+            if !raw_process_is_alive(shell_pid) && !raw_process_is_alive(child_pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let shell_alive = raw_process_is_alive(shell_pid);
+        let child_alive = raw_process_is_alive(child_pid);
+        if shell_alive {
+            // SAFETY: positive PID was written by this test-owned shell; kill(2)
+            // takes no pointers and cleanup ignores a concurrent exit.
+            unsafe { libc::kill(shell_pid, libc::SIGKILL) };
+        }
+        if child_alive {
+            // SAFETY: positive PID was written by this test-owned child; kill(2)
+            // takes no pointers and cleanup ignores a concurrent exit.
+            unsafe { libc::kill(child_pid, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert!(!shell_alive, "dtach shell survived teardown");
+        assert!(!child_alive, "dtach grandchild survived teardown");
     }
 
     #[cfg(unix)]

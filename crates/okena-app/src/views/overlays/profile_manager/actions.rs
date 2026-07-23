@@ -45,7 +45,11 @@ impl ProfileManager {
     }
 
     pub(super) fn delete_profile(&mut self, id: &str, cx: &mut Context<Self>) {
-        match okena_core::profiles::delete_profile(id) {
+        match okena_core::profiles::delete_profile_with_cleanup(id, || {
+            okena_terminal::session_backend::reap_dtach_profile_sessions(id)
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        }) {
             Ok(()) => {
                 self.show_delete_confirmation = None;
                 self.refresh_profiles();
