@@ -151,6 +151,56 @@ fn revalidate_verified_worktree(verified: &VerifiedWorktree) -> GitResult<()> {
     Ok(())
 }
 
+/// Remove only a directory that is absent, empty, or contains regular
+/// `.DS_Store` files. This handles Finder metadata recreated after the verified
+/// checkout was quarantined without ever deleting a replacement directory.
+fn remove_benign_residual(path: &Path) -> std::io::Result<bool> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    };
+
+    let mut ds_store_files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if entry.file_name() != ".DS_Store" || !file_type.is_file() || file_type.is_symlink() {
+            return Ok(false);
+        }
+        ds_store_files.push(entry.path());
+    }
+    for ds_store in ds_store_files {
+        match std::fs::remove_file(ds_store) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match std::fs::remove_dir(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        // A concurrent Finder write is harmless only if a subsequent inspection
+        // again proves the residual is exclusively benign metadata.
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn cleanup_benign_residual(path: &Path) -> GitResult<()> {
+    match remove_benign_residual(path) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(unsafe_worktree(
+            path,
+            "checkout path was recreated with non-benign content; preserved it",
+        )),
+        Err(source) => Err(GitError::RemoveFailed {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 /// Refuse every existing target. An unregistered directory is not proof that
 /// Okena owns its contents, so create must never remove it speculatively.
 fn require_absent_worktree_target(target_path: &Path) -> GitResult<()> {
@@ -333,24 +383,36 @@ pub fn remove_worktree_fast(verified: &VerifiedWorktree) -> GitResult<()> {
 
     match std::fs::remove_dir_all(&quarantine) {
         Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            let source = match std::fs::rename(&quarantine, worktree_path) {
-                Ok(()) => e,
-                Err(restore_error) => std::io::Error::new(
-                    e.kind(),
-                    format!(
-                        "{e}; remaining checkout preserved at '{}'; restore failed: {restore_error}",
-                        quarantine.display()
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            // `remove_dir_all` can have already removed the checkout and leave
+            // only Finder metadata behind. Delete that narrow, verified class of
+            // debris; otherwise restore the still-owned quarantine and fail closed.
+            if let Err(cleanup_error) = cleanup_benign_residual(&quarantine) {
+                let source = match std::fs::rename(&quarantine, worktree_path) {
+                    Ok(()) => std::io::Error::other(format!(
+                        "{error}; residual cleanup refused: {cleanup_error}"
+                    )),
+                    Err(restore_error) => std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{error}; residual cleanup refused: {cleanup_error}; remaining checkout preserved at '{}'; restore failed: {restore_error}",
+                            quarantine.display()
+                        ),
                     ),
-                ),
-            };
-            return Err(GitError::RemoveFailed {
-                path: worktree_path.to_path_buf(),
-                source,
-            });
+                };
+                return Err(GitError::RemoveFailed {
+                    path: worktree_path.to_path_buf(),
+                    source,
+                });
+            }
         }
     }
+
+    // A process such as Finder can recreate the old path after the atomic
+    // quarantine. It is safe to delete only an empty directory or `.DS_Store`;
+    // any other replacement is foreign data and must survive without pruning.
+    cleanup_benign_residual(worktree_path)?;
 
     // Prune stale worktree entries from the main repo
     let main_str = path_str(&verified.parent_path)?;
@@ -507,6 +569,33 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(sentinel).expect("replacement survives"),
             "independent data"
+        );
+    }
+
+    #[test]
+    fn benign_residual_cleanup_accepts_ds_store_and_absence() {
+        let parent = tempfile::tempdir().expect("create residual parent");
+        let residual = parent.path().join("worktree");
+        std::fs::create_dir(&residual).expect("create residual");
+        std::fs::write(residual.join(".DS_Store"), "finder metadata").expect("write metadata");
+
+        assert!(remove_benign_residual(&residual).expect("remove benign metadata"));
+        assert!(!residual.exists());
+        assert!(remove_benign_residual(&residual).expect("already absent is benign"));
+    }
+
+    #[test]
+    fn benign_residual_cleanup_preserves_foreign_replacement() {
+        let parent = tempfile::tempdir().expect("create residual parent");
+        let residual = parent.path().join("worktree");
+        std::fs::create_dir(&residual).expect("create residual");
+        let sentinel = residual.join("must-survive.txt");
+        std::fs::write(&sentinel, "foreign data").expect("write sentinel");
+
+        assert!(!remove_benign_residual(&residual).expect("inspect foreign residual"));
+        assert_eq!(
+            std::fs::read_to_string(sentinel).expect("sentinel survives"),
+            "foreign data"
         );
     }
 

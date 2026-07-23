@@ -89,6 +89,52 @@ impl std::io::Write for TeeWriter {
     }
 }
 
+/// Rotate one log without relying on platform-specific replacement semantics.
+/// Windows does not let `rename` overwrite an existing destination, so remove
+/// the old rotation target first and fail rather than truncating the active log.
+fn rotate_log_file(active: &std::path::Path, previous: &std::path::Path) -> std::io::Result<()> {
+    if !active.exists() {
+        return Ok(());
+    }
+    match std::fs::remove_file(previous) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::rename(active, previous)
+}
+
+#[cfg(test)]
+mod log_rotation_tests {
+    use super::rotate_log_file;
+
+    #[test]
+    fn rotation_replaces_existing_previous_file_without_truncating_active() {
+        let directory = std::env::temp_dir().join(format!(
+            "okena-log-rotation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).expect("create log directory");
+        let active = directory.join("okena-headless.log");
+        let previous = directory.join("okena-headless.log.1");
+        std::fs::write(&active, "active log").expect("write active log");
+        std::fs::write(&previous, "old rotation").expect("write old rotation");
+
+        rotate_log_file(&active, &previous).expect("rotate log");
+
+        assert!(!active.exists());
+        assert_eq!(
+            std::fs::read_to_string(&previous).expect("read rotation"),
+            "active log"
+        );
+        std::fs::remove_dir_all(directory).expect("remove log directory");
+    }
+}
+
 use crate::assets::{Assets, embedded_fonts};
 use okena_app::app::Okena;
 use okena_app::keybindings;
@@ -482,11 +528,31 @@ fn main() {
     // Set up file logging: rotate previous log, write to both stderr and file
     let log_target = (|| -> Option<env_logger::fmt::Target> {
         let root = &profiles::current().root;
-        std::fs::create_dir_all(root).ok()?;
-        if profile_log.exists() {
-            let _ = std::fs::rename(&profile_log, &profile_log_prev);
+        if let Err(error) = std::fs::create_dir_all(root) {
+            eprintln!(
+                "Warning: could not create log directory '{}': {error}",
+                root.display()
+            );
+            return None;
         }
-        let file = std::fs::File::create(&profile_log).ok()?;
+        if let Err(error) = rotate_log_file(&profile_log, &profile_log_prev) {
+            eprintln!(
+                "Warning: could not rotate log '{}' to '{}'; leaving the active log intact: {error}",
+                profile_log.display(),
+                profile_log_prev.display()
+            );
+            return None;
+        }
+        let file = match std::fs::File::create(&profile_log) {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!(
+                    "Warning: could not create log '{}': {error}",
+                    profile_log.display()
+                );
+                return None;
+            }
+        };
         Some(env_logger::fmt::Target::Pipe(Box::new(TeeWriter {
             stderr: std::io::stderr(),
             file,

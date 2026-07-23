@@ -39,6 +39,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use okena_app_core::remote_snapshot::build_state_response;
 #[cfg(test)]
@@ -1901,9 +1902,16 @@ pub(crate) fn spawn_background_worktree_removal(
         let monitor = hook_monitor.clone();
         let teardown_backend = backend.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            // `kill` is asynchronous for local PTYs. Wait off-reactor until the
-            // queued handles and persistent sessions release their checkout CWD.
-            teardown_backend.flush_teardown();
+            // `kill` is asynchronous for local PTYs. Do not race destructive
+            // removal with a process that may still own the checkout CWD: a
+            // bounded failure restores the project instead of deleting it.
+            if !teardown_backend.flush_teardown_with_timeout(Duration::from_secs(5)) {
+                return (
+                    plan,
+                    Err("terminal teardown did not release the worktree in time; checkout preserved".to_string()),
+                    None,
+                );
+            }
             let worktree_path = plan.worktree_path.clone();
             // force_remove = is_dirty && !did_stash — same condition the sync
             // close_worktree path uses to fire the dirty-close safety net. Runs
