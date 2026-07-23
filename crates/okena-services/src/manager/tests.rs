@@ -137,10 +137,8 @@ impl ServiceAsyncCx for ExecutingAsyncCx {
         smol::unblock(task)
     }
 
-    fn timer(&self, duration: Duration) -> impl Future<Output = ()> {
-        async move {
-            smol::Timer::after(duration).await;
-        }
+    async fn timer(&self, duration: Duration) {
+        smol::Timer::after(duration).await;
     }
 }
 
@@ -163,6 +161,19 @@ struct ProjectBarrierDockerRunner {
 struct RecordingTerminalBackend {
     local: LocalBackend,
     plans: async_channel::Sender<TerminalLaunchPlan>,
+}
+
+#[test]
+fn generation_counter_wraps_without_emitting_zero() {
+    let mut default_generation = 0;
+    let mut next_generation = u64::MAX;
+
+    assert_eq!(take_generation(&mut default_generation), 1);
+    assert_eq!(default_generation, 2);
+    assert_eq!(take_generation(&mut next_generation), u64::MAX);
+    assert_eq!(next_generation, 1);
+    assert_eq!(take_generation(&mut next_generation), 1);
+    assert_eq!(next_generation, 2);
 }
 
 struct BarrierRestartBackend {

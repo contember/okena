@@ -22,6 +22,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+fn take_generation(next_generation: &mut u64) -> u64 {
+    let generation = (*next_generation).max(1);
+    *next_generation = generation.wrapping_add(1).max(1);
+    generation
+}
+
 pub struct ServiceManager {
     pub(super) configs: HashMap<String, Vec<ServiceDefinition>>,
     pub(super) instances: HashMap<(String, String), ServiceInstance>,
@@ -181,10 +187,7 @@ impl DockerMutationQueue {
         compose_file: String,
         kind: DockerMutationKind,
     ) -> Option<DockerMutation> {
-        let generation = self.next_generation.max(1);
-        self.next_generation = generation
-            .checked_add(1)
-            .expect("Docker mutation generation exhausted");
+        let generation = take_generation(&mut self.next_generation);
         let mutation = DockerMutation {
             generation,
             project_incarnation,
@@ -279,14 +282,11 @@ struct ProjectLifecycles {
 
 impl ProjectLifecycles {
     fn begin(&mut self, project_id: &str, project_path: &str) -> ProjectIncarnation {
-        let generation = self.next_generation.max(1);
+        let generation = take_generation(&mut self.next_generation);
         let incarnation = ProjectIncarnation {
             generation,
             path: project_path.to_string(),
         };
-        self.next_generation = generation
-            .checked_add(1)
-            .expect("service project generation exhausted");
         self.current
             .insert(project_id.to_string(), incarnation.clone());
         incarnation
@@ -727,10 +727,7 @@ impl ServiceManager {
         key: &(String, String),
         project_path: &str,
     ) -> OkenaLaunchToken {
-        let generation = self.next_okena_launch_generation;
-        self.next_okena_launch_generation = generation
-            .checked_add(1)
-            .expect("Okena service launch generation exhausted");
+        let generation = take_generation(&mut self.next_okena_launch_generation);
         let token = OkenaLaunchToken {
             generation,
             project_path: project_path.to_string(),
@@ -766,10 +763,7 @@ impl ServiceManager {
         terminal_id: Option<String>,
     ) -> OkenaRestartToken {
         self.invalidate_okena_restart(key, true);
-        let generation = self.next_okena_restart_generation;
-        self.next_okena_restart_generation = generation
-            .checked_add(1)
-            .expect("Okena service restart generation exhausted");
+        let generation = take_generation(&mut self.next_okena_restart_generation);
         let token = OkenaRestartToken {
             generation,
             project_path: project_path.to_string(),
