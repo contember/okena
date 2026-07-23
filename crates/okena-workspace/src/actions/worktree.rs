@@ -264,193 +264,6 @@ pub fn close_worktree_merge_git(
     CloseWorktreeGitOutcome::Ok { did_stash }
 }
 
-#[cfg(test)]
-mod merge_pipeline_tests {
-    use super::{CloseWorktreeGitOutcome, WorktreeRemovalPlan, close_worktree_merge_git};
-    use crate::hook_monitor::{HookMonitor, HookStatus};
-    use crate::settings::{HooksConfig, ProjectHooks, WorktreeHooks};
-    use std::path::Path;
-    use std::process::Command;
-
-    struct TestRepo {
-        root: std::path::PathBuf,
-    }
-
-    impl TestRepo {
-        fn new() -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("okena-post-merge-test-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&root).unwrap();
-            Self { root }
-        }
-    }
-
-    impl Drop for TestRepo {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-
-    fn git(args: &[&str]) {
-        let output = Command::new("git").args(args).output().unwrap();
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn path_str(path: &Path) -> &str {
-        path.to_str().expect("test path is utf-8")
-    }
-
-    #[test]
-    fn post_merge_is_finished_before_merge_pipeline_returns() {
-        let fixture = TestRepo::new();
-        let main_repo = fixture.root.join("main");
-        let worktree = fixture.root.join("worktree");
-        git(&["init", "-b", "main", path_str(&main_repo)]);
-        git(&[
-            "-C",
-            path_str(&main_repo),
-            "config",
-            "user.email",
-            "okena@example.invalid",
-        ]);
-        git(&[
-            "-C",
-            path_str(&main_repo),
-            "config",
-            "user.name",
-            "Okena Test",
-        ]);
-        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
-        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
-        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
-        git(&[
-            "-C",
-            path_str(&main_repo),
-            "worktree",
-            "add",
-            "-b",
-            "feature",
-            path_str(&worktree),
-        ]);
-        std::fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
-        git(&["-C", path_str(&worktree), "add", "feature.txt"]);
-        git(&["-C", path_str(&worktree), "commit", "-m", "feature"]);
-
-        let hooks = HooksConfig {
-            worktree: WorktreeHooks {
-                post_merge: Some("git --version".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let monitor = HookMonitor::new();
-        let outcome = close_worktree_merge_git(
-            false,
-            false,
-            false,
-            false,
-            "p1",
-            "Project",
-            path_str(&worktree),
-            "feature",
-            "main",
-            path_str(&main_repo),
-            &hooks,
-            &HooksConfig::default(),
-            None,
-            None,
-            Some(&monitor),
-        );
-
-        assert!(matches!(
-            outcome,
-            CloseWorktreeGitOutcome::Ok { did_stash: false }
-        ));
-        let history = monitor.history();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].hook_type, "post_merge");
-        assert!(matches!(history[0].status, HookStatus::Succeeded { .. }));
-        assert!(history[0].terminal_id.is_none());
-    }
-
-    #[test]
-    fn removal_plan_finishes_close_hooks_while_checkout_exists() {
-        let fixture = TestRepo::new();
-        let main_repo = fixture.root.join("main");
-        let worktree = fixture.root.join("worktree");
-        git(&["init", "-b", "main", path_str(&main_repo)]);
-        git(&[
-            "-C",
-            path_str(&main_repo),
-            "config",
-            "user.email",
-            "okena@example.invalid",
-        ]);
-        git(&[
-            "-C",
-            path_str(&main_repo),
-            "config",
-            "user.name",
-            "Okena Test",
-        ]);
-        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
-        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
-        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
-        git(&[
-            "-C",
-            path_str(&main_repo),
-            "worktree",
-            "add",
-            "-b",
-            "feature",
-            path_str(&worktree),
-        ]);
-        let verified_worktree =
-            okena_git::verify_linked_worktree_fresh(&main_repo, &worktree).unwrap();
-        let hooks = HooksConfig {
-            project: ProjectHooks {
-                on_close: Some("echo project > project-close.txt".to_string()),
-                ..Default::default()
-            },
-            worktree: WorktreeHooks {
-                on_close: Some("echo worktree > worktree-close.txt".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let plan = WorktreeRemovalPlan {
-            project_id: "p1".to_string(),
-            worktree_path: worktree.clone(),
-            main_repo_path: main_repo.to_string_lossy().into_owned(),
-            verified_worktree,
-            branch: "feature".to_string(),
-            project_hooks: hooks,
-            project_name: "Project".to_string(),
-            project_path: worktree.to_string_lossy().into_owned(),
-            folder_id: None,
-            folder_name: None,
-        };
-        let monitor = HookMonitor::new();
-
-        plan.fire_close_hooks_headless(&HooksConfig::default(), Some(&monitor));
-
-        assert!(worktree.join("worktree-close.txt").exists());
-        assert!(worktree.join("project-close.txt").exists());
-        let history = monitor.history();
-        assert_eq!(history.len(), 2);
-        assert!(
-            history
-                .iter()
-                .all(|entry| matches!(entry.status, HookStatus::Succeeded { .. }))
-        );
-    }
-}
-
 impl Workspace {
     /// Toggle visibility for a single worktree (no propagation to children).
     ///
@@ -1410,5 +1223,192 @@ impl Workspace {
             // worktree, and deletes the project.
             self.remove_worktree_project(focus_manager, project_id, force_remove, global_hooks, cx)
         }
+    }
+}
+
+#[cfg(test)]
+mod merge_pipeline_tests {
+    use super::{CloseWorktreeGitOutcome, WorktreeRemovalPlan, close_worktree_merge_git};
+    use crate::hook_monitor::{HookMonitor, HookStatus};
+    use crate::settings::{HooksConfig, ProjectHooks, WorktreeHooks};
+    use std::path::Path;
+    use std::process::Command;
+
+    struct TestRepo {
+        root: std::path::PathBuf,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("okena-post-merge-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn git(args: &[&str]) {
+        let output = Command::new("git").args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn path_str(path: &Path) -> &str {
+        path.to_str().expect("test path is utf-8")
+    }
+
+    #[test]
+    fn post_merge_is_finished_before_merge_pipeline_returns() {
+        let fixture = TestRepo::new();
+        let main_repo = fixture.root.join("main");
+        let worktree = fixture.root.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        std::fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
+        git(&["-C", path_str(&worktree), "add", "feature.txt"]);
+        git(&["-C", path_str(&worktree), "commit", "-m", "feature"]);
+
+        let hooks = HooksConfig {
+            worktree: WorktreeHooks {
+                post_merge: Some("git --version".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let monitor = HookMonitor::new();
+        let outcome = close_worktree_merge_git(
+            false,
+            false,
+            false,
+            false,
+            "p1",
+            "Project",
+            path_str(&worktree),
+            "feature",
+            "main",
+            path_str(&main_repo),
+            &hooks,
+            &HooksConfig::default(),
+            None,
+            None,
+            Some(&monitor),
+        );
+
+        assert!(matches!(
+            outcome,
+            CloseWorktreeGitOutcome::Ok { did_stash: false }
+        ));
+        let history = monitor.history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].hook_type, "post_merge");
+        assert!(matches!(history[0].status, HookStatus::Succeeded { .. }));
+        assert!(history[0].terminal_id.is_none());
+    }
+
+    #[test]
+    fn removal_plan_finishes_close_hooks_while_checkout_exists() {
+        let fixture = TestRepo::new();
+        let main_repo = fixture.root.join("main");
+        let worktree = fixture.root.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        let verified_worktree =
+            okena_git::verify_linked_worktree_fresh(&main_repo, &worktree).unwrap();
+        let hooks = HooksConfig {
+            project: ProjectHooks {
+                on_close: Some("echo project > project-close.txt".to_string()),
+                ..Default::default()
+            },
+            worktree: WorktreeHooks {
+                on_close: Some("echo worktree > worktree-close.txt".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = WorktreeRemovalPlan {
+            project_id: "p1".to_string(),
+            worktree_path: worktree.clone(),
+            main_repo_path: main_repo.to_string_lossy().into_owned(),
+            verified_worktree,
+            branch: "feature".to_string(),
+            project_hooks: hooks,
+            project_name: "Project".to_string(),
+            project_path: worktree.to_string_lossy().into_owned(),
+            folder_id: None,
+            folder_name: None,
+        };
+        let monitor = HookMonitor::new();
+
+        plan.fire_close_hooks_headless(&HooksConfig::default(), Some(&monitor));
+
+        assert!(worktree.join("worktree-close.txt").exists());
+        assert!(worktree.join("project-close.txt").exists());
+        let history = monitor.history();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .all(|entry| matches!(entry.status, HookStatus::Succeeded { .. }))
+        );
     }
 }

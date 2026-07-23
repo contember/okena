@@ -195,16 +195,16 @@ pub async fn run_pty_loop(
         }
 
         if !exit_events.is_empty() {
-            handle_exits(
-                &exit_events,
-                &terminals,
-                &pty_manager,
-                &service_manager,
-                &reactor_ref,
-                &service_tick,
-                &runtime,
-                &reactor,
-            );
+            let context = ExitHandlingContext {
+                terminals: &terminals,
+                pty_manager: pty_manager.as_ref(),
+                service_manager: &service_manager,
+                reactor_ref: &reactor_ref,
+                service_tick: &service_tick,
+                runtime: &runtime,
+                reactor: &reactor,
+            };
+            handle_exits(&exit_events, &context);
             // Coarse "something changed" tick: the lifecycle mutations above
             // (hook status, project deletion, soft-close cleanup) are now visible
             // to clients on their next resync.
@@ -371,6 +371,16 @@ fn process_activity_edges(
     true
 }
 
+struct ExitHandlingContext<'a> {
+    terminals: &'a TerminalsRegistry,
+    pty_manager: &'a PtyManager,
+    service_manager: &'a Arc<Mutex<ServiceManager>>,
+    reactor_ref: &'a ServiceReactorRef,
+    service_tick: &'a watch::Sender<u64>,
+    runtime: &'a Handle,
+    reactor: &'a PtyLoopReactor,
+}
+
 /// Handle the exits collected in one batch:
 /// 1. Let the service manager claim its service terminals (restart /
 ///    keep-crash-output) — yields the `service_tids` set.
@@ -389,13 +399,7 @@ fn process_activity_edges(
 /// (the soft-close *state* cleanup still runs).
 fn handle_exits(
     exit_events: &[(String, PtyGeneration, Option<u32>)],
-    terminals: &TerminalsRegistry,
-    pty_manager: &PtyManager,
-    service_manager: &Arc<Mutex<ServiceManager>>,
-    reactor_ref: &ServiceReactorRef,
-    service_tick: &watch::Sender<u64>,
-    runtime: &Handle,
-    reactor: &PtyLoopReactor,
+    context: &ExitHandlingContext<'_>,
 ) {
     // ── 1. Service terminals ────────────────────────────────────────────────
     // For a crashed service with `restart_on_crash`, `handle_service_exit` calls
@@ -405,8 +409,8 @@ fn handle_exits(
     // daemon's equivalent of the GUI's (always-empty, since services run here)
     // `service_tids`.
     let service_tids: HashSet<String> = {
-        let mut sm = service_manager.lock();
-        let mut cx = reactor_ref.cx();
+        let mut sm = context.service_manager.lock();
+        let mut cx = context.reactor_ref.cx();
         let mut handled = HashSet::new();
         for (terminal_id, _, exit_code) in exit_events {
             if sm.handle_service_exit(terminal_id, *exit_code, &mut cx) {
@@ -420,35 +424,26 @@ fn handle_exits(
     // Phase 1 (here): `notify_exit` unblocks any sync hook threads waiting on a
     // PTY terminal. This MUST happen before phase 2 (status updates / pending
     // worktree-close resolution) which may delete a project.
-    if let Some(monitor) = reactor.hook_monitor.as_ref() {
+    if let Some(monitor) = context.reactor.hook_monitor.as_ref() {
         for (terminal_id, _, exit_code) in exit_events {
             monitor.notify_exit(terminal_id, *exit_code);
         }
     }
-    let hook_tids = handle_hook_terminal_exits(
-        exit_events,
-        &service_tids,
-        terminals,
-        pty_manager,
-        service_manager,
-        service_tick,
-        runtime,
-        reactor,
-    );
+    let hook_tids = handle_hook_terminal_exits(exit_events, &service_tids, context);
 
     // ── 3. terminal.on_close for plain user terminals ───────────────────────
     // Same gating as the GUI: a global, project, OR parent-worktree on_close
     // must be present. Collect the args under a workspace read lock, then fire
     // the hooks (which spawn background subprocesses) outside it.
-    let global_hooks = reactor.settings.lock().hooks.clone();
+    let global_hooks = context.reactor.settings.lock().hooks.clone();
     let close_infos = collect_terminal_close_infos(
         exit_events,
         &service_tids,
         &hook_tids,
-        reactor,
+        context.reactor,
         &global_hooks,
     );
-    let monitor = reactor.hook_monitor.as_ref();
+    let monitor = context.reactor.hook_monitor.as_ref();
     for info in close_infos {
         okena_hooks::fire_terminal_on_close_with_services(
             &info.project_hooks,
@@ -472,10 +467,10 @@ fn handle_exits(
     // disconnected, but the dtach daemon keeps running — `kill` SIGTERMs it and
     // removes the socket file.
     {
-        let mut reg = terminals.lock();
+        let mut reg = context.terminals.lock();
         for (terminal_id, generation, _) in exit_events {
             if !service_tids.contains(terminal_id) && !hook_tids.contains(terminal_id) {
-                pty_manager.kill_exited(terminal_id, *generation);
+                context.pty_manager.kill_exited(terminal_id, *generation);
                 reg.remove(terminal_id);
             }
         }
@@ -488,8 +483,8 @@ fn handle_exits(
     // it back out. The daemon has no undo toast, so the returned toast id is
     // intentionally dropped (no UI dismissal to do).
     {
-        let mut cx = reactor.workspace_cx();
-        let mut ws = reactor.workspace.lock();
+        let mut cx = context.reactor.workspace_cx();
+        let mut ws = context.reactor.workspace.lock();
         for (tid, _, _) in exit_events {
             let _stale_toast = ws.cancel_pending_close(tid);
             ws.reap_restored_close(tid, &mut cx);
@@ -527,15 +522,10 @@ fn handle_exits(
 fn handle_hook_terminal_exits(
     exit_events: &[(String, PtyGeneration, Option<u32>)],
     service_tids: &HashSet<String>,
-    terminals: &TerminalsRegistry,
-    pty_manager: &PtyManager,
-    service_manager: &Arc<Mutex<ServiceManager>>,
-    service_tick: &watch::Sender<u64>,
-    runtime: &Handle,
-    reactor: &PtyLoopReactor,
+    context: &ExitHandlingContext<'_>,
 ) -> HashSet<String> {
     let hook_tids: HashSet<String> = {
-        let ws = reactor.workspace.lock();
+        let ws = context.reactor.workspace.lock();
         exit_events
             .iter()
             .filter(|(tid, _, _)| !service_tids.contains(tid))
@@ -544,7 +534,7 @@ fn handle_hook_terminal_exits(
             .collect()
     };
 
-    let global_hooks = reactor.settings.lock().hooks.clone();
+    let global_hooks = context.reactor.settings.lock().hooks.clone();
 
     for (terminal_id, generation, exit_code) in exit_events {
         if !hook_tids.contains(terminal_id) {
@@ -555,8 +545,8 @@ fn handle_hook_terminal_exits(
         let tid = terminal_id.clone();
 
         // Set hook status + resolve any pending worktree close.
-        let mut cx = reactor.workspace_cx();
-        let mut ws = reactor.workspace.lock();
+        let mut cx = context.reactor.workspace_cx();
+        let mut ws = context.reactor.workspace.lock();
         let hook_is_running = ws.projects().iter().any(|project| {
             project
                 .hook_terminals
@@ -569,7 +559,7 @@ fn handle_hook_terminal_exits(
             continue;
         }
 
-        if let Some(monitor) = reactor.hook_monitor.as_ref() {
+        if let Some(monitor) = context.reactor.hook_monitor.as_ref() {
             monitor.finish_by_terminal_id(&tid, *exit_code);
         }
 
@@ -604,22 +594,27 @@ fn handle_hook_terminal_exits(
                     Ok(plan) => {
                         let operation_epoch = ws.data_replacement_epoch();
                         drop(ws);
-                        teardown_completed_pending_hook(&tid, *generation, terminals, pty_manager);
+                        teardown_completed_pending_hook(
+                            &tid,
+                            *generation,
+                            context.terminals,
+                            context.pty_manager,
+                        );
                         let _ = crate::command_loop::spawn_background_worktree_removal(
                             plan,
                             operation_epoch,
                             false,
                             &global_hooks,
-                            &reactor.workspace,
-                            &reactor.workspace_tick,
-                            &reactor.hook_runner,
-                            &reactor.hook_monitor,
-                            &reactor.backend,
-                            terminals,
-                            &reactor.settings,
-                            service_manager,
-                            service_tick,
-                            runtime,
+                            &context.reactor.workspace,
+                            &context.reactor.workspace_tick,
+                            &context.reactor.hook_runner,
+                            &context.reactor.hook_monitor,
+                            &context.reactor.backend,
+                            context.terminals,
+                            &context.reactor.settings,
+                            context.service_manager,
+                            context.service_tick,
+                            context.runtime,
                         );
                     }
                     Err(e) => {
@@ -639,13 +634,18 @@ fn handle_hook_terminal_exits(
                             .unwrap_or_else(|| pending.project_id.clone());
                         ws.finish_closing_project(&pending.project_id);
                         cx.notify();
-                        if let Some(hm) = reactor.hook_monitor.as_ref() {
+                        if let Some(hm) = context.reactor.hook_monitor.as_ref() {
                             hm.push_toast(okena_state::Toast::error(format!(
                                 "\"{project_name}\" was not closed: {e}"
                             )));
                         }
                         drop(ws);
-                        teardown_completed_pending_hook(&tid, *generation, terminals, pty_manager);
+                        teardown_completed_pending_hook(
+                            &tid,
+                            *generation,
+                            context.terminals,
+                            context.pty_manager,
+                        );
                     }
                 }
             } else {
@@ -659,7 +659,7 @@ fn handle_hook_terminal_exits(
                     .unwrap_or_else(|| pending.project_id.clone());
                 ws.finish_closing_project(&pending.project_id);
                 cx.notify();
-                if let Some(hm) = reactor.hook_monitor.as_ref() {
+                if let Some(hm) = context.reactor.hook_monitor.as_ref() {
                     hm.push_toast(okena_state::Toast::error(format!(
                         "before_worktree_remove hook failed — \"{project_name}\" was not closed"
                     )));
@@ -1111,15 +1111,18 @@ mod tests {
             runtime.clone(),
             service_tick.clone(),
         );
+        let context = ExitHandlingContext {
+            terminals: &terminals,
+            pty_manager: pty_manager.as_ref(),
+            service_manager: &service_manager,
+            reactor_ref: &reactor_ref,
+            service_tick: &service_tick,
+            runtime: &runtime,
+            reactor: &reactor,
+        };
         handle_exits(
             &[(terminal_id.to_string(), generation, exit_code)],
-            &terminals,
-            &pty_manager,
-            &service_manager,
-            &reactor_ref,
-            &service_tick,
-            &runtime,
-            &reactor,
+            &context,
         );
     }
 
@@ -1184,16 +1187,16 @@ mod tests {
                 .await
                 .expect("before-remove hook exits");
 
-                handle_exits(
-                    &exit_events,
-                    &terminals,
-                    &pty_manager,
-                    &service_manager,
-                    &reactor_ref,
-                    &service_tick,
-                    &runtime,
-                    &reactor,
-                );
+                let context = ExitHandlingContext {
+                    terminals: &terminals,
+                    pty_manager: pty_manager.as_ref(),
+                    service_manager: &service_manager,
+                    reactor_ref: &reactor_ref,
+                    service_tick: &service_tick,
+                    runtime: &runtime,
+                    reactor: &reactor,
+                };
+                handle_exits(&exit_events, &context);
 
                 assert!(
                     !terminals.lock().contains_key(&hook_terminal_id),
