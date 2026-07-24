@@ -104,37 +104,6 @@ fn rotate_log_file(active: &std::path::Path, previous: &std::path::Path) -> std:
     std::fs::rename(active, previous)
 }
 
-#[cfg(test)]
-mod log_rotation_tests {
-    use super::rotate_log_file;
-
-    #[test]
-    fn rotation_replaces_existing_previous_file_without_truncating_active() {
-        let directory = std::env::temp_dir().join(format!(
-            "okena-log-rotation-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock is after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir(&directory).expect("create log directory");
-        let active = directory.join("okena-headless.log");
-        let previous = directory.join("okena-headless.log.1");
-        std::fs::write(&active, "active log").expect("write active log");
-        std::fs::write(&previous, "old rotation").expect("write old rotation");
-
-        rotate_log_file(&active, &previous).expect("rotate log");
-
-        assert!(!active.exists());
-        assert_eq!(
-            std::fs::read_to_string(&previous).expect("read rotation"),
-            "active log"
-        );
-        std::fs::remove_dir_all(directory).expect("remove log directory");
-    }
-}
-
 use crate::assets::{Assets, embedded_fonts};
 use okena_app::app::Okena;
 use okena_app::keybindings;
@@ -984,4 +953,35 @@ fn main() {
         }
 
     });
+}
+
+#[cfg(test)]
+mod log_rotation_tests {
+    use super::rotate_log_file;
+
+    #[test]
+    fn rotation_replaces_existing_previous_file_without_truncating_active() {
+        let directory = std::env::temp_dir().join(format!(
+            "okena-log-rotation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).expect("create log directory");
+        let active = directory.join("okena-headless.log");
+        let previous = directory.join("okena-headless.log.1");
+        std::fs::write(&active, "active log").expect("write active log");
+        std::fs::write(&previous, "old rotation").expect("write old rotation");
+
+        rotate_log_file(&active, &previous).expect("rotate log");
+
+        assert!(!active.exists());
+        assert_eq!(
+            std::fs::read_to_string(&previous).expect("read rotation"),
+            "active log"
+        );
+        std::fs::remove_dir_all(directory).expect("remove log directory");
+    }
 }
