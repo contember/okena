@@ -1604,42 +1604,49 @@ impl PtyManager {
                 // reader: a transient wait error can still leave both child and
                 // reader live. Retain the handle in the bounded reaper instead.
                 log::debug!("PTY child {} status is indeterminate: {}", id, e);
-                if let Some(tracker) = tracker {
-                    tracker.queued();
-                }
-                if let Some(tx) = reaper_tx {
-                    if let Err(error) = tx.send_blocking(ReaperJob { handle }) {
-                        log::error!("PTY reaper queue closed for {}; retaining live handle", id);
-                        std::mem::forget(error.into_inner());
-                    }
-                } else {
-                    log::error!("PTY reaper unavailable for {}; retaining live handle", id);
-                    std::mem::forget(handle);
-                }
+                Self::retain_in_reaper(handle, &id, tracker, reaper_tx);
             }
             Ok(None) => {
                 // Transfer the still-live handle to the manager-owned fixed reaper
                 // pool. The extra tracker count is the destructive-operation gate:
                 // worktree removal may proceed only after this child exits and its
                 // reader has joined. Normal manager Drop never flushes this count.
-                if let Some(tracker) = tracker {
-                    tracker.queued();
-                }
-                if let Some(tx) = reaper_tx {
-                    if let Err(error) = tx.send_blocking(ReaperJob { handle }) {
-                        // A live handle must never fall through to PtyHandle::Drop.
-                        // A closed reaper queue can only occur during manager drop;
-                        // retain it until process exit rather than blocking shutdown.
-                        log::error!("PTY reaper queue closed for {}; retaining live handle", id);
-                        std::mem::forget(error.into_inner());
-                    }
-                } else {
-                    // This is only reachable from direct unit-test helpers. Keep the
-                    // handle alive rather than silently dropping a CWD-owning child.
-                    log::error!("PTY reaper unavailable for {}; retaining live handle", id);
-                    std::mem::forget(handle);
-                }
+                Self::retain_in_reaper(handle, &id, tracker, reaper_tx);
             }
+        }
+    }
+
+    /// Hand a possibly-live handle to the bounded reaper pool. The tracker count
+    /// is taken only while a reaper owns the job, so `queued`/`completed` can
+    /// never disagree — an uncounted job would let a destructive flush finish
+    /// early, and an unmatched count would hang it forever.
+    fn retain_in_reaper(
+        handle: PtyHandle,
+        id: &str,
+        tracker: Option<&Arc<TeardownTracker>>,
+        reaper_tx: Option<&Sender<ReaperJob>>,
+    ) {
+        let Some(tx) = reaper_tx else {
+            // Reachable from direct unit-test helpers and from teardown that
+            // races manager Drop. Keep the handle alive rather than silently
+            // dropping a CWD-owning child.
+            log::error!("PTY reaper unavailable for {}; retaining live handle", id);
+            std::mem::forget(handle);
+            return;
+        };
+        if let Some(tracker) = tracker {
+            tracker.queued();
+        }
+        if let Err(error) = tx.send_blocking(ReaperJob { handle }) {
+            // A live handle must never fall through to PtyHandle::Drop. A closed
+            // reaper queue can only occur during manager drop; retain it until
+            // process exit rather than blocking shutdown, and release the count
+            // again because no reaper will ever complete it.
+            if let Some(tracker) = tracker {
+                tracker.completed();
+            }
+            log::error!("PTY reaper queue closed for {}; retaining live handle", id);
+            std::mem::forget(error.into_inner());
         }
     }
 
@@ -1655,7 +1662,10 @@ impl PtyManager {
         }
         drop(instances);
         for handle in handles {
-            Self::shutdown_handle(handle, None, self.reaper_tx.as_ref());
+            // Pass the tracker even though only `Drop` calls this today: a
+            // handle that reaches the reaper is always counted there, so the
+            // pair can never disagree if this is ever wired to a live path.
+            Self::shutdown_handle(handle, Some(&self.teardown_tracker), self.reaper_tx.as_ref());
         }
     }
 
