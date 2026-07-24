@@ -8,7 +8,7 @@ use anyhow::Result;
 use async_channel::{Receiver, Sender};
 use parking_lot::{Condvar, Mutex, RwLock};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -259,6 +259,21 @@ fn format_panic(payload: &dyn std::any::Any) -> String {
     }
 }
 
+/// Kill a persistent session and record the outcome against its terminal. A
+/// later successful teardown of the same terminal clears an earlier failure.
+fn record_session_kill(
+    tracker: &TeardownTracker,
+    terminal_id: &str,
+    session_backend: &ResolvedBackend,
+    session_name: &str,
+) {
+    if session_backend.kill_session(session_name) {
+        tracker.mark_verified(terminal_id);
+    } else {
+        tracker.mark_unverified(terminal_id);
+    }
+}
+
 fn join_reader_handle(reader_handle: Option<JoinHandle<()>>, terminal_id: &str) {
     if let Some(handle) = reader_handle
         && let Err(error) = handle.join()
@@ -301,6 +316,9 @@ enum TeardownKind {
     /// "client already exited (cleanup_exited ran first), SIGTERM the lingering
     /// session/daemon" path — in that case the worker does ONLY the session kill.
     KillSession {
+        /// Owning terminal, so a failed kill can be attributed to the exact
+        /// terminal a destructive flush later asks about.
+        terminal_id: String,
         session_backend: ResolvedBackend,
         session_name: String,
         /// WSL distro for the session (Windows only).
@@ -348,7 +366,16 @@ impl Drop for PendingSessionKill {
 struct TeardownTracker {
     pending: Mutex<usize>,
     drained: Condvar,
-    failed: AtomicBool,
+    /// Terminals whose persistent session could not be verified as gone, so a
+    /// process may still own their working directory.
+    ///
+    /// Deliberately keyed per terminal and never cleared by a flush: a global
+    /// one-shot flag both misattributed one terminal's failure to the next
+    /// destructive operation and discarded the signal the moment anything read
+    /// it, so a second waiter — or a later close of the terminal that actually
+    /// failed — saw success. An entry is dropped only when a later teardown of
+    /// the same terminal succeeds.
+    unverified: Mutex<HashSet<String>>,
 }
 
 impl TeardownTracker {
@@ -369,14 +396,20 @@ impl TeardownTracker {
         while *pending != 0 {
             self.drained.wait(&mut pending);
         }
-        self.failed.store(false, Ordering::Release);
     }
 
-    fn mark_failed(&self) {
-        self.failed.store(true, Ordering::Release);
+    fn mark_unverified(&self, terminal_id: &str) {
+        self.unverified.lock().insert(terminal_id.to_string());
     }
 
-    fn flush_timeout(&self, timeout: Duration) -> bool {
+    fn mark_verified(&self, terminal_id: &str) {
+        self.unverified.lock().remove(terminal_id);
+    }
+
+    /// Wait for queued teardown to drain, then report whether every terminal in
+    /// `terminal_ids` released its session. An empty slice asks only about the
+    /// drain. Reading is non-destructive, so concurrent waiters agree.
+    fn flush_timeout(&self, timeout: Duration, terminal_ids: &[String]) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let mut pending = self.pending.lock();
         while *pending != 0 {
@@ -386,7 +419,9 @@ impl TeardownTracker {
             }
             self.drained.wait_for(&mut pending, deadline - now);
         }
-        !self.failed.swap(false, Ordering::AcqRel)
+        drop(pending);
+        let unverified = self.unverified.lock();
+        terminal_ids.iter().all(|id| !unverified.contains(id))
     }
 }
 
@@ -597,6 +632,7 @@ impl PtyManager {
             // Process already EOF'd; nothing to SIGTERM from our side.
             TeardownKind::ReapOnly => {}
             TeardownKind::KillSession {
+                terminal_id,
                 session_backend,
                 session_name,
                 #[cfg(windows)]
@@ -607,23 +643,17 @@ impl PtyManager {
                 // On Windows, if this was a WSL terminal with a session backend,
                 // kill the session inside WSL instead of on the host.
                 #[cfg(windows)]
-                {
-                    if let Some(backend) = wsl_backend {
-                        crate::session_backend::kill_wsl_session(
-                            backend,
-                            wsl_distro.as_deref(),
-                            &session_name,
-                        );
-                    } else {
-                        if !session_backend.kill_session(&session_name) {
-                            tracker.mark_failed();
-                        }
-                    }
+                if let Some(backend) = wsl_backend {
+                    crate::session_backend::kill_wsl_session(
+                        backend,
+                        wsl_distro.as_deref(),
+                        &session_name,
+                    );
+                } else {
+                    record_session_kill(tracker, &terminal_id, &session_backend, &session_name);
                 }
                 #[cfg(not(windows))]
-                if !session_backend.kill_session(&session_name) {
-                    tracker.mark_failed();
-                }
+                record_session_kill(tracker, &terminal_id, &session_backend, &session_name);
             }
         }
         if let Some(handle) = job.handle.take() {
@@ -1456,6 +1486,7 @@ impl PtyManager {
         let job = TeardownJob {
             handle,
             kind: TeardownKind::KillSession {
+                terminal_id: terminal_id.to_string(),
                 session_backend,
                 session_name,
                 #[cfg(windows)]
@@ -1485,6 +1516,7 @@ impl PtyManager {
         self.enqueue_teardown(TeardownJob {
             handle,
             kind: TeardownKind::KillSession {
+                terminal_id: terminal_id.to_string(),
                 session_backend: self.session_backend(),
                 session_name,
                 wsl_distro,
@@ -1550,9 +1582,13 @@ impl PtyManager {
     }
 
     /// Wait only a bounded interval for queued teardown and detached reapers.
-    /// `false` means a process may still own its former working directory.
-    pub fn flush_teardown_with_timeout(&self, timeout: Duration) -> bool {
-        self.teardown_tracker.flush_timeout(timeout)
+    ///
+    /// `false` means the wait timed out, or one of `terminal_ids` could not be
+    /// verified as having released its persistent session — i.e. a process may
+    /// still own its former working directory. Pass the terminals the caller is
+    /// about to delete; an empty slice asks only about the drain.
+    pub fn flush_teardown_with_timeout(&self, timeout: Duration, terminal_ids: &[String]) -> bool {
+        self.teardown_tracker.flush_timeout(timeout, terminal_ids)
     }
 
     /// Perform coordinated shutdown of a single PTY handle
@@ -1665,7 +1701,11 @@ impl PtyManager {
             // Pass the tracker even though only `Drop` calls this today: a
             // handle that reaches the reaper is always counted there, so the
             // pair can never disagree if this is ever wired to a live path.
-            Self::shutdown_handle(handle, Some(&self.teardown_tracker), self.reaper_tx.as_ref());
+            Self::shutdown_handle(
+                handle,
+                Some(&self.teardown_tracker),
+                self.reaper_tx.as_ref(),
+            );
         }
     }
 
@@ -2518,7 +2558,7 @@ mod tests {
         reader_done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("manager reaper joins released reader");
-        assert!(manager.flush_teardown_with_timeout(Duration::from_secs(1)));
+        assert!(manager.flush_teardown_with_timeout(Duration::from_secs(1), &[]));
     }
 
     #[cfg(unix)]
@@ -2635,7 +2675,7 @@ mod tests {
         );
         assert_eq!(*manager.teardown_tracker.pending.lock(), STUCK_CHILDREN);
         assert!(
-            !manager.flush_teardown_with_timeout(Duration::from_millis(50)),
+            !manager.flush_teardown_with_timeout(Duration::from_millis(50), &[]),
             "destructive flush must remain blocked while children may own a CWD"
         );
 
@@ -2648,7 +2688,7 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .expect("all reaper-owned readers finish");
         }
-        assert!(manager.flush_teardown_with_timeout(Duration::from_secs(1)));
+        assert!(manager.flush_teardown_with_timeout(Duration::from_secs(1), &[]));
     }
 
     #[cfg(unix)]
@@ -2731,6 +2771,35 @@ mod tests {
 
         assert!(sink.published.lock().is_empty());
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn unverified_teardown_is_scoped_to_its_own_terminal() {
+        let tracker = TeardownTracker::default();
+        tracker.mark_unverified("term-a");
+
+        assert!(
+            !tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]),
+            "the terminal that failed must block its own destructive flush"
+        );
+        assert!(
+            tracker.flush_timeout(Duration::ZERO, &["term-b".to_string()]),
+            "an unrelated terminal must not inherit that failure"
+        );
+        assert!(
+            !tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]),
+            "reading the failure must not consume it"
+        );
+
+        // A plain drain must not erase the signal either.
+        tracker.flush();
+        assert!(!tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]));
+
+        tracker.mark_verified("term-a");
+        assert!(
+            tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]),
+            "a later successful teardown clears the terminal"
+        );
     }
 
     #[test]

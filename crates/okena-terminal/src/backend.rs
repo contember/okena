@@ -114,9 +114,10 @@ pub trait TerminalBackend: Send + Sync {
     }
     /// Wait for teardown work queued before this call to finish.
     fn flush_teardown(&self) {}
-    /// Bounded teardown wait for destructive operations. `false` means a
-    /// terminal/session may still own its former working directory.
-    fn flush_teardown_with_timeout(&self, _timeout: Duration) -> bool {
+    /// Bounded teardown wait for destructive operations. `false` means the wait
+    /// timed out, or one of `terminal_ids` may still own its former working
+    /// directory. An empty slice asks only about the drain.
+    fn flush_teardown_with_timeout(&self, _timeout: Duration, _terminal_ids: &[String]) -> bool {
         self.flush_teardown();
         true
     }
@@ -218,8 +219,9 @@ impl TerminalBackend for LocalBackend {
         self.pty_manager.flush_teardown()
     }
 
-    fn flush_teardown_with_timeout(&self, timeout: Duration) -> bool {
-        self.pty_manager.flush_teardown_with_timeout(timeout)
+    fn flush_teardown_with_timeout(&self, timeout: Duration, terminal_ids: &[String]) -> bool {
+        self.pty_manager
+            .flush_teardown_with_timeout(timeout, terminal_ids)
     }
 
     fn supports_session_backend_reconfiguration(&self) -> bool {
