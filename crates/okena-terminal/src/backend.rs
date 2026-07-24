@@ -8,6 +8,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Exact startup command carried separately from the shell used to route it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +114,12 @@ pub trait TerminalBackend: Send + Sync {
     }
     /// Wait for teardown work queued before this call to finish.
     fn flush_teardown(&self) {}
+    /// Bounded teardown wait for destructive operations. `false` means a
+    /// terminal/session may still own its former working directory.
+    fn flush_teardown_with_timeout(&self, _timeout: Duration) -> bool {
+        self.flush_teardown();
+        true
+    }
     /// Whether this backend can switch persistence routes without replacement.
     fn supports_session_backend_reconfiguration(&self) -> bool {
         false
@@ -209,6 +216,10 @@ impl TerminalBackend for LocalBackend {
 
     fn flush_teardown(&self) {
         self.pty_manager.flush_teardown()
+    }
+
+    fn flush_teardown_with_timeout(&self, timeout: Duration) -> bool {
+        self.pty_manager.flush_teardown_with_timeout(timeout)
     }
 
     fn supports_session_backend_reconfiguration(&self) -> bool {

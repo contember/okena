@@ -181,7 +181,22 @@ pub async fn run_pty_loop(
         // independent of any PTY `Exit`. Mirror the GUI's post-batch dirty-title
         // scan. (Runs whether or not there were exits.)
         if !dirty_terminal_ids.is_empty() {
-            process_osc_hook_exits(&dirty_terminal_ids, &terminals, &reactor);
+            let osc_hook_exits = process_osc_hook_exits(&dirty_terminal_ids, &terminals, &reactor);
+            if !osc_hook_exits.is_empty() {
+                resolve_osc_worktree_closes(
+                    &osc_hook_exits,
+                    &terminals,
+                    &pty_manager,
+                    &service_manager,
+                    &service_tick,
+                    &runtime,
+                    &reactor,
+                );
+                // The workspace tick carries the authoritative mutation to the
+                // state observer, but bump the coarse version here too so a
+                // client resync is not delayed behind another PTY event.
+                state_version.send_modify(|v| *v += 1);
+            }
             // Activity edges — OSC 133 ;D command-finish, bell, and OSC 9/777
             // notification — stamp `last_activity_at` on the owning project so the
             // activity-sorted sidebar floats it up. Bump `state_version` if
@@ -262,16 +277,16 @@ fn process_event(
 
 /// Hook-exit-via-OSC-title: for any terminal that produced output this batch and
 /// IS a hook terminal, if its title is `__okena_hook_exit:<code>`, set the hook
-/// status and HookMonitor execution to Succeeded (code 0) / Failed otherwise.
+/// status and HookMonitor execution to Succeeded (code 0) / Failed otherwise,
+/// and return its authoritative result for pending worktree-close resolution.
 ///
-/// Mirrors the GUI's post-batch dirty-title scan (`app/mod.rs`). This happens for
-/// keep-alive hooks whose command finished but whose PTY stays alive as an
-/// interactive shell, so there is no PTY `Exit` to drive the status.
+/// This happens for keep-alive hooks whose command finished but whose PTY stays
+/// alive as an interactive shell, so there is no PTY `Exit` to drive completion.
 fn process_osc_hook_exits(
     dirty_terminal_ids: &[String],
     terminals: &TerminalsRegistry,
     reactor: &PtyLoopReactor,
-) {
+) -> Vec<(String, i32)> {
     // Collect status updates under the registry + workspace read locks, then
     // apply them under a single workspace write lock (matching the GUI's split).
     let mut status_updates: Vec<(String, HookTerminalStatus, Option<u32>)> = Vec::new();
@@ -296,6 +311,7 @@ fn process_osc_hook_exits(
             }
         }
     }
+    let mut results = Vec::with_capacity(status_updates.len());
     if !status_updates.is_empty() {
         let mut cx = reactor.workspace_cx();
         let mut ws = reactor.workspace.lock();
@@ -303,7 +319,88 @@ fn process_osc_hook_exits(
             if let Some(monitor) = reactor.hook_monitor.as_ref() {
                 monitor.finish_by_terminal_id(&tid, exit_code);
             }
+            let code = match &status {
+                HookTerminalStatus::Succeeded => 0,
+                HookTerminalStatus::Failed { exit_code } => *exit_code,
+                HookTerminalStatus::Running => unreachable!("OSC produces a completed hook status"),
+            };
             ws.update_hook_terminal_status(&tid, status, &mut cx);
+            results.push((tid, code));
+        }
+    }
+    results
+}
+
+/// Resolve before-remove hooks that reported an authoritative result through
+/// OSC while their PTY remains alive. The pending map is the exactly-once claim:
+/// a late PTY Exit or repeated title observes no pending entry and cannot delete
+/// a project or overwrite the completed hook state.
+#[allow(clippy::too_many_arguments)]
+fn resolve_osc_worktree_closes(
+    osc_hook_exits: &[(String, i32)],
+    terminals: &TerminalsRegistry,
+    pty_manager: &PtyManager,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    runtime: &Handle,
+    reactor: &PtyLoopReactor,
+) {
+    let global_hooks = reactor.settings.lock().hooks.clone();
+    for (terminal_id, exit_code) in osc_hook_exits {
+        let mut cx = reactor.workspace_cx();
+        let mut ws = reactor.workspace.lock();
+        let Some(pending) = ws.take_pending_worktree_close(terminal_id) else {
+            continue;
+        };
+
+        if *exit_code == 0 {
+            // A keep-alive shell can retain the worktree CWD after reporting
+            // success. Tear down its PTY before starting the canonical removal;
+            // unlike the watchdog this result is authoritative, not inferred.
+            ws.remove_hook_terminal(terminal_id, &mut cx);
+            match ws.begin_worktree_removal(&pending.project_id, &global_hooks, &mut cx) {
+                Ok(plan) => {
+                    let operation_epoch = ws.data_replacement_epoch();
+                    drop(ws);
+                    pty_manager.kill(terminal_id);
+                    terminals.lock().remove(terminal_id);
+                    let _ = crate::command_loop::spawn_background_worktree_removal(
+                        plan,
+                        operation_epoch,
+                        false,
+                        &global_hooks,
+                        &reactor.workspace,
+                        &reactor.workspace_tick,
+                        &reactor.hook_runner,
+                        &reactor.hook_monitor,
+                        &reactor.backend,
+                        terminals,
+                        &reactor.settings,
+                        service_manager,
+                        service_tick,
+                        runtime,
+                    );
+                }
+                Err(error) => {
+                    let project_name = ws
+                        .project(&pending.project_id)
+                        .map(|project| project.name.clone())
+                        .unwrap_or_else(|| pending.project_id.clone());
+                    ws.finish_closing_project(&pending.project_id);
+                    cx.notify();
+                    if let Some(monitor) = reactor.hook_monitor.as_ref() {
+                        monitor.push_toast(okena_state::Toast::error(format!(
+                            "\"{project_name}\" was not closed: {error}"
+                        )));
+                    }
+                }
+            }
+        } else {
+            ws.finish_closing_project(&pending.project_id);
+            cx.notify();
+            // `process_osc_hook_exits` already completed the HookMonitor with
+            // this authoritative nonzero code, which queues its single failure
+            // toast. Do not enqueue a second toast for the same hook result.
         }
     }
 }
@@ -1085,6 +1182,76 @@ mod tests {
         assert_eq!(monitor.drain_pending_toasts().len(), 1);
     }
 
+    #[tokio::test]
+    async fn nonzero_osc_hook_exit_aborts_pending_worktree_close_once() {
+        let repo = std::env::temp_dir().join("okena-osc-hook-failure-main");
+        let worktree = std::env::temp_dir().join("okena-osc-hook-failure-worktree");
+        let reactor = test_reactor(
+            workspace_with_pending_close(&repo, &worktree, "hook-osc"),
+            AppSettings::default(),
+        );
+        let monitor = reactor.hook_monitor.clone().expect("hook monitor");
+        monitor.record_start(
+            "before_worktree_remove",
+            "exit 7",
+            "Feature",
+            Some("hook-osc".into()),
+        );
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let terminal = Arc::new(Terminal::new(
+            "hook-osc".into(),
+            terminal_size(),
+            reactor.backend.transport(),
+            worktree.to_string_lossy().into_owned(),
+        ));
+        terminal.process_output(b"\x1b]0;__okena_hook_exit:7\x07");
+        terminals.lock().insert("hook-osc".into(), terminal);
+        let osc_results = process_osc_hook_exits(&["hook-osc".into()], &terminals, &reactor);
+        assert_eq!(osc_results, vec![("hook-osc".into(), 7)]);
+
+        let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+        let services = Arc::new(Mutex::new(ServiceManager::new(
+            reactor.backend.clone(),
+            terminals.clone(),
+        )));
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        resolve_osc_worktree_closes(
+            &osc_results,
+            &terminals,
+            &pty_manager,
+            &services,
+            &service_tick,
+            &Handle::current(),
+            &reactor,
+        );
+        let workspace = reactor.workspace.lock();
+        let project = workspace
+            .project("wt1")
+            .expect("failed hook retains worktree");
+        assert!(!workspace.is_project_closing("wt1"));
+        assert!(!project.is_closing);
+        assert!(matches!(
+            project.hook_terminals["hook-osc"].status,
+            HookTerminalStatus::Failed { exit_code: 7 }
+        ));
+        drop(workspace);
+        assert_eq!(monitor.drain_pending_toasts().len(), 1);
+
+        resolve_osc_worktree_closes(
+            &osc_results,
+            &terminals,
+            &pty_manager,
+            &services,
+            &service_tick,
+            &Handle::current(),
+            &reactor,
+        );
+        assert!(
+            monitor.drain_pending_toasts().is_empty(),
+            "late OSC is a no-op"
+        );
+    }
+
     async fn drive_hook_exit_through_pty_loop(
         reactor: PtyLoopReactor,
         terminals: TerminalsRegistry,
@@ -1241,6 +1408,79 @@ mod tests {
                 .worktree_ids
                 .is_empty()
         );
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn successful_osc_hook_exit_removes_worktree_once() {
+        let (repo, worktree) = real_git_worktree();
+        let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+        let hook_terminal_id = pty_manager
+            .create_terminal_with_shell(
+                worktree.to_str().expect("utf-8 worktree path"),
+                Some(&ShellType::for_command("sleep 30".to_string())),
+            )
+            .expect("create keep-alive before-remove hook PTY");
+        let pty_manager = Arc::new(pty_manager);
+        let reactor = test_reactor_with_manager(
+            workspace_with_pending_close(&repo, &worktree, &hook_terminal_id),
+            AppSettings::default(),
+            pty_manager.clone(),
+        );
+        let workspace = reactor.workspace.clone();
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let terminal = Arc::new(Terminal::new(
+            hook_terminal_id.clone(),
+            terminal_size(),
+            pty_manager.clone(),
+            worktree.to_string_lossy().into_owned(),
+        ));
+        terminal.process_output(b"\x1b]0;__okena_hook_exit:0\x07");
+        terminals.lock().insert(hook_terminal_id.clone(), terminal);
+        let osc_results = process_osc_hook_exits(
+            std::slice::from_ref(&hook_terminal_id),
+            &terminals,
+            &reactor,
+        );
+        assert_eq!(osc_results, vec![(hook_terminal_id.clone(), 0)]);
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            reactor.backend.clone(),
+            terminals.clone(),
+        )));
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                resolve_osc_worktree_closes(
+                    &osc_results,
+                    &terminals,
+                    &pty_manager,
+                    &service_manager,
+                    &service_tick,
+                    &Handle::current(),
+                    &reactor,
+                );
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while workspace.lock().project("wt1").is_some() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("OSC success removes worktree through canonical path");
+                resolve_osc_worktree_closes(
+                    &osc_results,
+                    &terminals,
+                    &pty_manager,
+                    &service_manager,
+                    &service_tick,
+                    &Handle::current(),
+                    &reactor,
+                );
+            })
+            .await;
+
+        assert!(!worktree.exists(), "checkout was physically removed once");
+        assert!(workspace.lock().project("wt1").is_none());
         std::fs::remove_dir_all(repo).ok();
     }
 

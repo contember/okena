@@ -39,6 +39,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use okena_app_core::remote_snapshot::build_state_response;
 #[cfg(test)]
@@ -520,10 +521,15 @@ async fn flush_project_runtime_teardown(
             for teardown in &teardown_sessions {
                 backend.kill_session(teardown);
             }
-            backend.flush_teardown();
+            if backend.flush_teardown_with_timeout(Duration::from_secs(5)) {
+                Ok(())
+            } else {
+                Err("terminal teardown did not release project paths in time; checkout preserved")
+            }
         })
         .await
-        .map_err(|error| format!("terminal teardown task failed: {error}"))
+        .map_err(|error| format!("terminal teardown task failed: {error}"))?
+        .map_err(str::to_string)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1901,9 +1907,16 @@ pub(crate) fn spawn_background_worktree_removal(
         let monitor = hook_monitor.clone();
         let teardown_backend = backend.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            // `kill` is asynchronous for local PTYs. Wait off-reactor until the
-            // queued handles and persistent sessions release their checkout CWD.
-            teardown_backend.flush_teardown();
+            // `kill` is asynchronous for local PTYs. Do not race destructive
+            // removal with a process that may still own the checkout CWD: a
+            // bounded failure restores the project instead of deleting it.
+            if !teardown_backend.flush_teardown_with_timeout(Duration::from_secs(5)) {
+                return (
+                    plan,
+                    Err("terminal teardown did not release the worktree in time; checkout preserved".to_string()),
+                    None,
+                );
+            }
             let worktree_path = plan.worktree_path.clone();
             // force_remove = is_dirty && !did_stash — same condition the sync
             // close_worktree path uses to fire the dirty-close safety net. Runs
@@ -6503,6 +6516,7 @@ mod tests {
         killed: std::sync::atomic::AtomicBool,
         flush_started: std::sync::atomic::AtomicBool,
         release: Mutex<std::sync::mpsc::Receiver<()>>,
+        timeout_result: Option<bool>,
     }
 
     struct RenameRecordingBackend {
@@ -6669,6 +6683,21 @@ mod tests {
                 .lock()
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .expect("test releases teardown barrier");
+        }
+
+        fn flush_teardown_with_timeout(&self, _timeout: Duration) -> bool {
+            if let Some(result) = self.timeout_result {
+                assert!(
+                    self.killed.load(std::sync::atomic::Ordering::SeqCst),
+                    "project PTYs must be killed before bounded teardown verification"
+                );
+                self.flush_started
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                result
+            } else {
+                self.flush_teardown();
+                true
+            }
         }
 
         fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
@@ -7099,6 +7128,7 @@ mod tests {
                     killed: std::sync::atomic::AtomicBool::new(false),
                     flush_started: std::sync::atomic::AtomicBool::new(false),
                     release: Mutex::new(teardown_release_rx),
+                    timeout_result: None,
                 });
                 let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
                 let service_manager = Arc::new(Mutex::new(ServiceManager::new(
@@ -8201,6 +8231,7 @@ mod tests {
             killed: std::sync::atomic::AtomicBool::new(false),
             flush_started: std::sync::atomic::AtomicBool::new(false),
             release: Mutex::new(release_rx),
+            timeout_result: None,
         });
         let backend: Arc<dyn TerminalBackend> = barrier_backend.clone();
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));

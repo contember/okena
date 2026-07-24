@@ -54,6 +54,12 @@ pub fn process_tree() -> HashMap<u32, Vec<u32>> {
     tree
 }
 
+/// Stable process birth marker used to revalidate a PID before signalling it.
+pub fn process_start_time(pid: u32) -> Option<(u64, u64)> {
+    let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
+    Some((info.pbi_start_tvsec, info.pbi_start_tvusec))
+}
+
 /// Map each given unix-socket path to the pids that have it open — equivalent to
 /// `lsof <paths>`. Scans every process's socket fds and matches the bound
 /// unix-domain address against the requested paths (exact match, like the lsof

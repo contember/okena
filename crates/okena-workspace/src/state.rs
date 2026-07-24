@@ -28,6 +28,13 @@ pub use okena_state::{
     WorkspaceData, WorktreeMetadata,
 };
 
+/// Diagnostics returned after atomically aborting a vanished before-remove hook.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbortedWorktreeClose {
+    pub project_id: String,
+    pub project_name: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FilesystemObjectIdentity {
     #[cfg(unix)]
@@ -1756,6 +1763,48 @@ impl Workspace {
         }
     }
 
+    /// Snapshot before-remove hook terminal IDs awaiting authoritative completion.
+    ///
+    /// The returned IDs are only candidates; callers must use
+    /// [`Self::abort_orphaned_worktree_close`] to atomically claim an orphan.
+    pub fn pending_worktree_close_terminal_ids(&self) -> Vec<String> {
+        self.lifecycle.pending_close_terminal_ids()
+    }
+
+    /// Abort a pending close whose before-remove hook PTY vanished without an
+    /// authoritative exit result. This is intentionally state-only: it retains
+    /// the project and worktree, does not run removal hooks, and is idempotent.
+    ///
+    /// The lifecycle record, in-memory closing marker, wire-facing closing flag,
+    /// and still-running hook entry are healed in one workspace mutation. A
+    /// caller that sees `None` lost the race to a normal exit, rerun, data
+    /// replacement, or another watchdog pass.
+    pub fn abort_orphaned_worktree_close(
+        &mut self,
+        terminal_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) -> Option<AbortedWorktreeClose> {
+        let project_id = self.lifecycle.cancel_pending_close(terminal_id)?;
+        let project = self.data.projects.iter_mut().find(|p| p.id == project_id);
+        let project_name = project
+            .as_ref()
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| project_id.clone());
+        if let Some(project) = project {
+            project.is_closing = false;
+            if let Some(entry) = project.hook_terminals.get_mut(terminal_id)
+                && entry.status == HookTerminalStatus::Running
+            {
+                entry.status = HookTerminalStatus::Failed { exit_code: -1 };
+            }
+        }
+        cx.notify();
+        Some(AbortedWorktreeClose {
+            project_id,
+            project_name,
+        })
+    }
+
     /// Check if a project is currently being closed (hook running or removal in progress).
     pub fn is_project_closing(&self, project_id: &str) -> bool {
         self.lifecycle.is_closing(project_id)
@@ -2100,6 +2149,55 @@ mod workspace_tests {
         fn hook_monitor(&self) -> Option<okena_hooks::HookMonitor> {
             None
         }
+    }
+
+    #[test]
+    fn orphaned_worktree_close_aborts_atomically_and_idempotently() {
+        let mut project = make_project("wt1");
+        project.name = "Feature".into();
+        project.hook_terminals.insert(
+            "hook-1".into(),
+            HookTerminalEntry {
+                label: "Before remove".into(),
+                status: HookTerminalStatus::Running,
+                hook_type: "before_worktree_remove".into(),
+                command: "true".into(),
+                cwd: "/tmp".into(),
+            },
+        );
+        let mut workspace = Workspace::new(make_workspace_data(vec![project], vec!["wt1"]));
+        workspace.register_pending_worktree_close(crate::state::PendingWorktreeClose {
+            project_id: "wt1".into(),
+            hook_terminal_id: "hook-1".into(),
+            branch: "feature".into(),
+            main_repo_path: "/tmp".into(),
+        });
+        assert!(workspace.is_project_closing("wt1"));
+        assert!(workspace.project("wt1").unwrap().is_closing);
+
+        let mut cx = RecordingCx::default();
+        assert_eq!(
+            workspace.abort_orphaned_worktree_close("hook-1", &mut cx),
+            Some(crate::state::AbortedWorktreeClose {
+                project_id: "wt1".into(),
+                project_name: "Feature".into(),
+            })
+        );
+        assert!(!workspace.is_project_closing("wt1"));
+        let project = workspace.project("wt1").expect("project retained");
+        assert!(!project.is_closing);
+        assert!(matches!(
+            project.hook_terminals["hook-1"].status,
+            HookTerminalStatus::Failed { exit_code: -1 }
+        ));
+        assert_eq!(cx.notifications, 1);
+        assert!(workspace.pending_worktree_close_terminal_ids().is_empty());
+        assert!(
+            workspace
+                .abort_orphaned_worktree_close("hook-1", &mut cx)
+                .is_none()
+        );
+        assert_eq!(cx.notifications, 1, "second claim is a no-op");
     }
 
     #[test]

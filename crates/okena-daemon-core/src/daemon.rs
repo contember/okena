@@ -67,7 +67,7 @@ use okena_remote_server::server::RemoteServer;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{LocalBackend, TerminalBackend, TerminalSessionTeardown};
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
-use okena_terminal::session_backend::SessionBackend;
+use okena_terminal::session_backend::{SessionBackend, reconcile_dtach_sessions};
 use okena_workspace::persistence::{self, AppSettings, LockGuard, acquire_instance_lock};
 use okena_workspace::state::{Workspace, WorkspaceData};
 use parking_lot::Mutex;
@@ -75,6 +75,77 @@ use tokio::sync::{mpsc, watch};
 
 use crate::daemon_config::DaemonConfig;
 use crate::reactor::DaemonReactor;
+
+fn workspace_terminal_ids(data: &WorkspaceData) -> HashSet<String> {
+    data.projects
+        .iter()
+        .flat_map(|project| {
+            let mut ids = project
+                .layout
+                .as_ref()
+                .map_or_else(Vec::new, okena_state::LayoutNode::collect_terminal_ids);
+            ids.extend(project.service_terminals.values().cloned());
+            ids.extend(project.hook_terminals.keys().cloned());
+            ids
+        })
+        .collect()
+}
+
+/// The default profile owns the pre-profile shared dtach directory. During the
+/// migration window, preserve terminals referenced by every profile before
+/// classifying a legacy socket as orphaned. Named profiles reconcile only their
+/// isolated directories, so they need no cross-profile state.
+fn reconciliation_terminal_ids(data: &WorkspaceData) -> Option<HashSet<String>> {
+    let mut retained = workspace_terminal_ids(data);
+    let Some(active_profile) = okena_core::profiles::try_current() else {
+        return Some(retained);
+    };
+    if active_profile.id != "default" {
+        return Some(retained);
+    }
+
+    let index = match okena_core::profiles::ProfileIndex::load(&active_profile.config_root) {
+        Ok(index) => index,
+        Err(error) => {
+            log::warn!("Skipping dtach reconciliation: cannot read profile index: {error:#}");
+            return None;
+        }
+    };
+    for profile in index
+        .profiles
+        .iter()
+        .filter(|profile| profile.id != active_profile.id)
+    {
+        let path = active_profile
+            .config_root
+            .join("profiles")
+            .join(&profile.id)
+            .join("workspace.json");
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                log::warn!(
+                    "Skipping dtach reconciliation: cannot read {}: {error}",
+                    path.display()
+                );
+                return None;
+            }
+        };
+        let profile_workspace: WorkspaceData = match serde_json::from_str(&content) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                log::warn!(
+                    "Skipping dtach reconciliation: cannot parse {}: {error}",
+                    path.display()
+                );
+                return None;
+            }
+        };
+        retained.extend(workspace_terminal_ids(&profile_workspace));
+    }
+    Some(retained)
+}
 
 fn kill_stale_terminal_sessions(
     backend: &dyn TerminalBackend,
@@ -203,6 +274,7 @@ impl DaemonCore {
     /// The reactor tasks are NOT started here — that is [`run`](DaemonCore::run)'s
     /// job (they need a `LocalSet`).
     pub fn new(params: DaemonParams) -> anyhow::Result<Self> {
+        let mut params = params;
         // ── 0. Acquire the single-writer instance lock FIRST ─────────────────
         // §5: exactly one process owns the profile's persistence + lock. The
         // daemon is that process; the `--daemon-client` GUI deliberately skips
@@ -210,6 +282,38 @@ impl DaemonCore {
         // collision fails fast with no side effects. Held for the daemon's
         // lifetime (dropped at the end of `run`).
         let instance_lock = acquire_instance_lock()?;
+
+        // The caller loads before it can acquire this lock. Re-read now so an
+        // outgoing owner cannot save newer authoritative state between that
+        // initial snapshot and our reconciliation pass.
+        let workspace_revalidated = match persistence::load_workspace_with_cleanup_for_shell(
+            params.session_backend,
+            &params.settings.default_shell,
+        ) {
+            Ok(latest) => {
+                params.workspace_data = latest.data;
+                params.stale_terminal_ids = latest.stale_terminal_ids;
+                true
+            }
+            Err(error) => {
+                // The caller snapshot predates this lock and is therefore not
+                // safe authority for destructive reconciliation.
+                log::warn!(
+                    "Could not revalidate workspace after acquiring the instance lock; skipping dtach reconciliation and using the caller snapshot: {error:#}"
+                );
+                false
+            }
+        };
+
+        // Reconcile only after acquiring the profile's single-writer lock and
+        // successfully reloading authoritative state, before starting a PTY
+        // manager. This closes the crash window where workspace state no longer
+        // owns a terminal but its persistent dtach process tree survived.
+        if workspace_revalidated
+            && let Some(retained_terminal_ids) = reconciliation_terminal_ids(&params.workspace_data)
+        {
+            reconcile_dtach_sessions(&retained_terminal_ids);
+        }
 
         // ── 1. Multi-thread tokio runtime backing the reactor ────────────────
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -473,6 +577,16 @@ impl DaemonCore {
                 reactor.hook_monitor.clone(),
                 soft_close_deadlines.clone(),
             ));
+            // Missing-PTY reconciliation deliberately has no hook-duration
+            // timeout: it only aborts a pending worktree close after the PTY
+            // manager itself no longer owns that hook terminal.
+            tokio::task::spawn_local(crate::worktree_close_watchdog::run_worktree_close_watchdog(
+                reactor.workspace.clone(),
+                pty_manager.clone(),
+                reactor.workspace_tick.clone(),
+                reactor.hook_runner.clone(),
+                reactor.hook_monitor.clone(),
+            ));
 
             // The command loop is the "main" task; it runs until the bridge
             // closes. Race it against ctrl-c so the daemon can shut down cleanly.
@@ -541,7 +655,13 @@ impl DaemonCore {
             &*shutdown_backend,
             &shutdown_terminals,
             || shutdown_autosaves.flush(),
-            || shutdown_pty_manager.flush_teardown(),
+            || {
+                if !shutdown_pty_manager
+                    .flush_teardown_with_timeout(std::time::Duration::from_secs(5))
+                {
+                    log::warn!("terminal teardown still owns a process at daemon shutdown");
+                }
+            },
             persistence::save_workspace,
         )?;
         remote_server.stop();
@@ -654,6 +774,60 @@ mod shutdown_tests {
         fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
             Vec::new()
         }
+    }
+
+    #[test]
+    fn startup_retains_every_workspace_owned_terminal_kind() {
+        let mut data = WorkspaceData::empty();
+        let mut project = okena_state::ProjectData {
+            id: "p1".to_string(),
+            name: "Project".to_string(),
+            path: "/tmp".to_string(),
+            layout: Some(okena_state::LayoutNode::Terminal {
+                terminal_id: Some("layout".to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: Default::default(),
+                zoom_level: 1.0,
+            }),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::from([("web".to_string(), "service".to_string())]),
+            default_shell: None,
+            hook_terminals: HashMap::from([(
+                "hook".to_string(),
+                okena_state::HookTerminalEntry {
+                    label: "Hook".to_string(),
+                    status: okena_state::HookTerminalStatus::Running,
+                    hook_type: "on_project_open".to_string(),
+                    command: "true".to_string(),
+                    cwd: "/tmp".to_string(),
+                },
+            )]),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        };
+        project
+            .terminal_names
+            .insert("layout".to_string(), "Shell".to_string());
+        data.projects.push(project);
+
+        assert_eq!(
+            workspace_terminal_ids(&data),
+            HashSet::from([
+                "layout".to_string(),
+                "service".to_string(),
+                "hook".to_string(),
+            ])
+        );
     }
 
     #[test]

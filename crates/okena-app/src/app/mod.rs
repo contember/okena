@@ -7,7 +7,9 @@ mod notifications;
 pub use detached_overlays::open_detached_overlay;
 
 use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
-use crate::views::window::{TerminalsRegistry, WindowView};
+use crate::views::window::{
+    TerminalsRegistry, WindowView, content_pane_registry, notify_registered_panes,
+};
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use gpui::*;
 use std::collections::{HashMap, HashSet};
@@ -359,6 +361,13 @@ impl Okena {
         cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
             RemoteManagerEvent::TerminalActivity(terminal_ids) => {
                 if !terminal_ids.is_empty() {
+                    // One app-wide fan-out refreshes panes in every main, extra,
+                    // and detached window. Keeping this out of WindowView avoids
+                    // duplicate notifications and does not depend on a specific
+                    // OS window entity remaining alive.
+                    let mut registry = content_pane_registry().lock();
+                    notify_registered_panes(&mut registry, terminal_ids, cx);
+                    drop(registry);
                     this.process_terminal_notifications(terminal_ids, cx);
                     // Answer (or, when disabled, drop) OSC 52 clipboard *read*
                     // requests for remote terminals. The clipboard physically

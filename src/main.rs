@@ -89,6 +89,21 @@ impl std::io::Write for TeeWriter {
     }
 }
 
+/// Rotate one log without relying on platform-specific replacement semantics.
+/// Windows does not let `rename` overwrite an existing destination, so remove
+/// the old rotation target first and fail rather than truncating the active log.
+fn rotate_log_file(active: &std::path::Path, previous: &std::path::Path) -> std::io::Result<()> {
+    if !active.exists() {
+        return Ok(());
+    }
+    match std::fs::remove_file(previous) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::rename(active, previous)
+}
+
 use crate::assets::{Assets, embedded_fonts};
 use okena_app::app::Okena;
 use okena_app::keybindings;
@@ -406,8 +421,34 @@ fn main() {
     };
     // SAFETY: called before any threads are spawned; no concurrent reads of the environment.
     unsafe { std::env::set_var("OKENA_PROFILE", &profile_paths.id) };
-    let profile_log = profile_paths.log_path();
-    let profile_log_prev = profile_paths.root.join("okena.log.1");
+    // Pick the log filename BEFORE rotating/creating it. A single-binary daemon
+    // (`okena --headless [--ui-owned]`) reuses this same `src/main.rs` logging
+    // init as the GUI, so if both wrote `okena.log` they would rotate+clobber
+    // each other's history (and the standalone `okena-daemon.log` tee — which
+    // only exists in the separate `okena-daemon` binary — is never produced in
+    // ui-owned mode). Give the headless process its own `okena-headless.log`
+    // (with its own `.1` rotation) so the GUI's `okena.log` stays legible. This
+    // mirrors the headless detection performed in full further down (explicit
+    // `--headless`, or Linux `--listen`/`--remote` with no display); it is
+    // recomputed here only because logging is initialized before that block.
+    let log_is_headless = {
+        let explicit_headless = args.iter().any(|a| a == "--headless");
+        let wants_listen = args.iter().any(|a| a == "--listen" || a == "--remote");
+        let has_display =
+            std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
+        explicit_headless || (cfg!(target_os = "linux") && wants_listen && !has_display)
+    };
+    let (profile_log, profile_log_prev) = if log_is_headless {
+        (
+            profile_paths.root.join("okena-headless.log"),
+            profile_paths.root.join("okena-headless.log.1"),
+        )
+    } else {
+        (
+            profile_paths.log_path(),
+            profile_paths.root.join("okena.log.1"),
+        )
+    };
     profiles::init_profile(profile_paths);
 
     // Migrate legacy flat-layout state into profiles/default/ if needed.
@@ -456,11 +497,31 @@ fn main() {
     // Set up file logging: rotate previous log, write to both stderr and file
     let log_target = (|| -> Option<env_logger::fmt::Target> {
         let root = &profiles::current().root;
-        std::fs::create_dir_all(root).ok()?;
-        if profile_log.exists() {
-            let _ = std::fs::rename(&profile_log, &profile_log_prev);
+        if let Err(error) = std::fs::create_dir_all(root) {
+            eprintln!(
+                "Warning: could not create log directory '{}': {error}",
+                root.display()
+            );
+            return None;
         }
-        let file = std::fs::File::create(&profile_log).ok()?;
+        if let Err(error) = rotate_log_file(&profile_log, &profile_log_prev) {
+            eprintln!(
+                "Warning: could not rotate log '{}' to '{}'; leaving the active log intact: {error}",
+                profile_log.display(),
+                profile_log_prev.display()
+            );
+            return None;
+        }
+        let file = match std::fs::File::create(&profile_log) {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!(
+                    "Warning: could not create log '{}': {error}",
+                    profile_log.display()
+                );
+                return None;
+            }
+        };
         Some(env_logger::fmt::Target::Pipe(Box::new(TeeWriter {
             stderr: std::io::stderr(),
             file,
@@ -843,14 +904,14 @@ fn main() {
                     })
                     .detach();
 
-                // Wire up content pane registration so PTY events can notify terminal views
+                // Wire up content pane registration so remote activity events can notify terminal views
                 okena_views_terminal::set_register_content_pane_fn(Box::new(|terminal_id, weak_content| {
                     let mut registry = okena_app::views::window::content_pane_registry().lock();
                     let panes = registry.entry(terminal_id).or_default();
                     // Re-layouts (e.g. workspace switch) re-register the same
                     // terminal, minting fresh panes. Drop dead weaks and skip an
                     // entity already present so the vec stays bounded by live
-                    // viewers and a live pane isn't notified twice per PTY event.
+                    // viewers and a live pane isn't notified twice per activity event.
                     let new_id = weak_content.entity_id();
                     panes.retain(|w| w.upgrade().is_some());
                     if !panes.iter().any(|w| w.entity_id() == new_id) {
@@ -892,4 +953,35 @@ fn main() {
         }
 
     });
+}
+
+#[cfg(test)]
+mod log_rotation_tests {
+    use super::rotate_log_file;
+
+    #[test]
+    fn rotation_replaces_existing_previous_file_without_truncating_active() {
+        let directory = std::env::temp_dir().join(format!(
+            "okena-log-rotation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).expect("create log directory");
+        let active = directory.join("okena-headless.log");
+        let previous = directory.join("okena-headless.log.1");
+        std::fs::write(&active, "active log").expect("write active log");
+        std::fs::write(&previous, "old rotation").expect("write old rotation");
+
+        rotate_log_file(&active, &previous).expect("rotate log");
+
+        assert!(!active.exists());
+        assert_eq!(
+            std::fs::read_to_string(&previous).expect("read rotation"),
+            "active log"
+        );
+        std::fs::remove_dir_all(directory).expect("remove log directory");
+    }
 }

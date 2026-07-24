@@ -151,6 +151,56 @@ fn revalidate_verified_worktree(verified: &VerifiedWorktree) -> GitResult<()> {
     Ok(())
 }
 
+/// Remove only a directory that is absent, empty, or contains regular
+/// `.DS_Store` files. This handles Finder metadata recreated after the verified
+/// checkout was quarantined without ever deleting a replacement directory.
+fn remove_benign_residual(path: &Path) -> std::io::Result<bool> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    };
+
+    let mut ds_store_files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if entry.file_name() != ".DS_Store" || !file_type.is_file() || file_type.is_symlink() {
+            return Ok(false);
+        }
+        ds_store_files.push(entry.path());
+    }
+    for ds_store in ds_store_files {
+        match std::fs::remove_file(ds_store) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match std::fs::remove_dir(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        // A concurrent Finder write is harmless only if a subsequent inspection
+        // again proves the residual is exclusively benign metadata.
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn cleanup_benign_residual(path: &Path) -> GitResult<()> {
+    match remove_benign_residual(path) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(unsafe_worktree(
+            path,
+            "checkout path was recreated with non-benign content; preserved it",
+        )),
+        Err(source) => Err(GitError::RemoveFailed {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 /// Refuse every existing target. An unregistered directory is not proof that
 /// Okena owns its contents, so create must never remove it speculatively.
 fn require_absent_worktree_target(target_path: &Path) -> GitResult<()> {
@@ -300,6 +350,13 @@ pub fn remove_worktree(verified: &VerifiedWorktree, force: bool) -> GitResult<()
 /// This is safe because prune only acts on entries whose directories no longer exist,
 /// and we only delete the single target directory before pruning.
 pub fn remove_worktree_fast(verified: &VerifiedWorktree) -> GitResult<()> {
+    remove_worktree_fast_with(verified, |path| std::fs::remove_dir_all(path))
+}
+
+fn remove_worktree_fast_with(
+    verified: &VerifiedWorktree,
+    remove_dir_all: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> GitResult<()> {
     revalidate_verified_worktree(verified)?;
     let worktree_path = &verified.checkout_path;
     let parent = worktree_path
@@ -331,26 +388,38 @@ pub fn remove_worktree_fast(verified: &VerifiedWorktree) -> GitResult<()> {
         return Err(unsafe_worktree(worktree_path, reason));
     }
 
-    match std::fs::remove_dir_all(&quarantine) {
+    match remove_dir_all(&quarantine) {
         Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            let source = match std::fs::rename(&quarantine, worktree_path) {
-                Ok(()) => e,
-                Err(restore_error) => std::io::Error::new(
-                    e.kind(),
-                    format!(
-                        "{e}; remaining checkout preserved at '{}'; restore failed: {restore_error}",
-                        quarantine.display()
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            // `remove_dir_all` can have already removed the checkout and leave
+            // only Finder metadata behind. Delete that narrow, verified class of
+            // debris; otherwise restore the still-owned quarantine and fail closed.
+            if let Err(cleanup_error) = cleanup_benign_residual(&quarantine) {
+                let source = match std::fs::rename(&quarantine, worktree_path) {
+                    Ok(()) => std::io::Error::other(format!(
+                        "{error}; residual cleanup refused: {cleanup_error}"
+                    )),
+                    Err(restore_error) => std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{error}; residual cleanup refused: {cleanup_error}; remaining checkout preserved at '{}'; restore failed: {restore_error}",
+                            quarantine.display()
+                        ),
                     ),
-                ),
-            };
-            return Err(GitError::RemoveFailed {
-                path: worktree_path.to_path_buf(),
-                source,
-            });
+                };
+                return Err(GitError::RemoveFailed {
+                    path: worktree_path.to_path_buf(),
+                    source,
+                });
+            }
         }
     }
+
+    // A process such as Finder can recreate the old path after the atomic
+    // quarantine. It is safe to delete only an empty directory or `.DS_Store`;
+    // any other replacement is foreign data and must survive without pruning.
+    cleanup_benign_residual(worktree_path)?;
 
     // Prune stale worktree entries from the main repo
     let main_str = path_str(&verified.parent_path)?;
@@ -435,13 +504,23 @@ pub fn list_linked_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
     let Some(repo) = crate::gix_helpers::open(repo_path) else {
         return Vec::new();
     };
+    // macOS exposes `/var` through `/private/var`. gix may report either spelling
+    // for the main worktree, so compare existing paths by canonical filesystem
+    // identity instead of lexical components. Missing paths retain the portable
+    // lexical fallback used elsewhere in this module.
+    let main_worktree = repo.workdir().map(path_identity);
     let Ok(worktrees) = repo.worktrees() else {
         return Vec::new();
     };
     worktrees
         .into_iter()
         .filter_map(|proxy| proxy.base().ok())
+        .filter(|path| main_worktree.as_ref() != Some(&path_identity(path)))
         .collect()
+}
+
+fn path_identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| crate::repository::normalize_path(path))
 }
 
 #[cfg(test)]
@@ -473,6 +552,28 @@ mod tests {
     }
 
     #[test]
+    fn path_identity_prefers_canonical_filesystem_path() {
+        let directory = tempfile::tempdir().expect("create identity directory");
+        let dotted = directory.path().join(".");
+        assert_eq!(
+            path_identity(&dotted),
+            directory.path().canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_identity_matches_a_directory_symlink_alias() {
+        let parent = tempfile::tempdir().expect("create identity parent");
+        let actual = parent.path().join("actual");
+        let alias = parent.path().join("alias");
+        std::fs::create_dir(&actual).expect("create actual directory");
+        std::os::unix::fs::symlink(&actual, &alias).expect("create directory alias");
+
+        assert_eq!(path_identity(&actual), path_identity(&alias));
+    }
+
+    #[test]
     fn list_linked_worktree_paths_excludes_main_worktree() {
         let (_tmp, repo) = init_temp_repo();
         let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
@@ -482,7 +583,13 @@ mod tests {
             &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
         );
 
-        assert_eq!(list_linked_worktree_paths(&repo), vec![wt_path]);
+        assert_eq!(
+            list_linked_worktree_paths(&repo)
+                .iter()
+                .map(|path| path_identity(path))
+                .collect::<Vec<_>>(),
+            vec![path_identity(&wt_path)]
+        );
     }
 
     #[test]
@@ -507,6 +614,81 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(sentinel).expect("replacement survives"),
             "independent data"
+        );
+    }
+
+    #[test]
+    fn benign_residual_cleanup_accepts_ds_store_and_absence() {
+        let parent = tempfile::tempdir().expect("create residual parent");
+        let residual = parent.path().join("worktree");
+        std::fs::create_dir(&residual).expect("create residual");
+        std::fs::write(residual.join(".DS_Store"), "finder metadata").expect("write metadata");
+
+        assert!(remove_benign_residual(&residual).expect("remove benign metadata"));
+        assert!(!residual.exists());
+        assert!(remove_benign_residual(&residual).expect("already absent is benign"));
+    }
+
+    #[test]
+    fn benign_residual_cleanup_preserves_foreign_replacement() {
+        let parent = tempfile::tempdir().expect("create residual parent");
+        let residual = parent.path().join("worktree");
+        std::fs::create_dir(&residual).expect("create residual");
+        let sentinel = residual.join("must-survive.txt");
+        std::fs::write(&sentinel, "foreign data").expect("write sentinel");
+
+        assert!(!remove_benign_residual(&residual).expect("inspect foreign residual"));
+        assert_eq!(
+            std::fs::read_to_string(sentinel).expect("sentinel survives"),
+            "foreign data"
+        );
+    }
+
+    #[test]
+    fn fast_removal_cleans_partial_ds_store_residual_and_preserves_old_path_replacement() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+        let verified = verify_linked_worktree_fresh(&repo, &wt_path).expect("verify worktree");
+        let replacement_path = wt_path.clone();
+
+        let result = remove_worktree_fast_with(&verified, |quarantine| {
+            std::fs::remove_dir_all(quarantine).expect("remove quarantined checkout contents");
+            std::fs::create_dir(quarantine).expect("recreate partial quarantine residual");
+            std::fs::write(quarantine.join(".DS_Store"), "finder metadata")
+                .expect("write partial residual");
+            std::fs::create_dir(&replacement_path).expect("recreate old checkout path");
+            std::fs::write(replacement_path.join("must-survive.txt"), "foreign data")
+                .expect("write replacement sentinel");
+            Err(std::io::Error::other(
+                "simulated partial remove_dir_all failure",
+            ))
+        });
+
+        assert!(
+            result.is_err(),
+            "foreign old-path replacement must stop pruning"
+        );
+        assert!(
+            !wt_tmp
+                .path()
+                .read_dir()
+                .expect("inspect worktree parent")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".okena-removing-")),
+            "benign .DS_Store quarantine residual must be removed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt_path.join("must-survive.txt"))
+                .expect("foreign replacement survives"),
+            "foreign data"
         );
     }
 
