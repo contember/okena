@@ -508,8 +508,15 @@ fn verify_session_kill(
     match kill_result {
         Ok(output) if output.status.success() => {}
         Ok(output) => {
-            log::error!("session kill command exited with {}", output.status);
-            return false;
+            // A session that already ended makes the kill exit non-zero
+            // (`tmux`: "can't find session", `screen`: "No screen session
+            // found."). The liveness probe is authoritative for what teardown
+            // actually needs, so fall through instead of reporting a failure
+            // for work that is already done.
+            log::debug!(
+                "session kill command exited with {}; verifying liveness",
+                output.status
+            );
         }
         Err(error) => {
             log::error!("failed to run session kill command: {error}");
@@ -1678,6 +1685,31 @@ mod tests {
         assert!(!verify_session_kill(
             Err(std::io::Error::other("kill command failed")),
             || panic!("liveness must not be checked after command failure"),
+            std::time::Duration::ZERO,
+        ));
+    }
+
+    #[test]
+    fn verified_session_kill_accepts_already_dead_session() {
+        // `tmux kill-session` / `screen -X quit` exit non-zero when the session
+        // is already gone — the common case after a shell exits on its own.
+        let mut probes = 0;
+        assert!(verify_session_kill(
+            Ok(command_output(false)),
+            || {
+                probes += 1;
+                Ok(false)
+            },
+            std::time::Duration::ZERO,
+        ));
+        assert_eq!(probes, 1, "a failed kill is resolved by the probe");
+    }
+
+    #[test]
+    fn verified_session_kill_rejects_failed_kill_of_live_session() {
+        assert!(!verify_session_kill(
+            Ok(command_output(false)),
+            || Ok(true),
             std::time::Duration::ZERO,
         ));
     }
