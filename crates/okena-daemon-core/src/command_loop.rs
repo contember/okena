@@ -516,12 +516,16 @@ async fn flush_project_runtime_teardown(
         .iter()
         .flat_map(|snapshot| snapshot.teardown_sessions.iter().cloned())
         .collect::<Vec<_>>();
+    let teardown_terminal_ids = teardown_sessions
+        .iter()
+        .map(|teardown| teardown.terminal_id.clone())
+        .collect::<Vec<_>>();
     runtime
         .spawn_blocking(move || {
             for teardown in &teardown_sessions {
                 backend.kill_session(teardown);
             }
-            if backend.flush_teardown_with_timeout(Duration::from_secs(5)) {
+            if backend.flush_teardown_with_timeout(Duration::from_secs(5), &teardown_terminal_ids) {
                 Ok(())
             } else {
                 Err("terminal teardown did not release project paths in time; checkout preserved")
@@ -1852,11 +1856,17 @@ where
 /// Run physical worktree removal off the reactor while the daemon keeps the
 /// authoritative project row in `is_closing` state. State is deleted only after
 /// Git confirms the checkout is gone; failures restore normal terminal slots.
+///
+/// `extra_teardown_terminal_ids` names terminals inside the checkout that the
+/// caller already killed and the project row therefore no longer lists (a
+/// completed before-remove hook shell); they are verified as released alongside
+/// the project's own terminals before anything is deleted.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_background_worktree_removal(
     plan: WorktreeRemovalPlan,
     operation_epoch: u64,
     did_stash: bool,
+    extra_teardown_terminal_ids: &[String],
     global_hooks: &okena_workspace::persistence::HooksConfig,
     workspace: &Arc<Mutex<Workspace>>,
     workspace_tick: &watch::Sender<u64>,
@@ -1885,10 +1895,15 @@ pub(crate) fn spawn_background_worktree_removal(
         service_tick,
         runtime,
     );
-    for id in terminal_ids {
-        backend.kill(&id);
-        terminals.lock().remove(&id);
+    for id in &terminal_ids {
+        backend.kill(id);
+        terminals.lock().remove(id);
     }
+    // Every terminal whose CWD is inside the checkout, including any the caller
+    // already tore down (a keep-alive before-remove hook shell), must be
+    // verified as released before the directory is deleted.
+    let mut teardown_terminal_ids = terminal_ids;
+    teardown_terminal_ids.extend(extra_teardown_terminal_ids.iter().cloned());
 
     let workspace = workspace.clone();
     let workspace_tick = workspace_tick.clone();
@@ -1910,7 +1925,9 @@ pub(crate) fn spawn_background_worktree_removal(
             // `kill` is asynchronous for local PTYs. Do not race destructive
             // removal with a process that may still own the checkout CWD: a
             // bounded failure restores the project instead of deleting it.
-            if !teardown_backend.flush_teardown_with_timeout(Duration::from_secs(5)) {
+            if !teardown_backend
+                .flush_teardown_with_timeout(Duration::from_secs(5), &teardown_terminal_ids)
+            {
                 return (
                     plan,
                     Err("terminal teardown did not release the worktree in time; checkout preserved".to_string()),
@@ -2335,6 +2352,7 @@ fn spawn_merge_worktree_close(
                         plan,
                         operation_epoch,
                         did_stash,
+                        &[],
                         &global_hooks,
                         &workspace,
                         &workspace_tick,
@@ -3132,6 +3150,7 @@ pub async fn daemon_command_loop(
                                         plan,
                                         operation_epoch,
                                         false,
+                                        &[],
                                         &global_hooks,
                                         &workspace,
                                         &workspace_tick,
@@ -6685,7 +6704,11 @@ mod tests {
                 .expect("test releases teardown barrier");
         }
 
-        fn flush_teardown_with_timeout(&self, _timeout: Duration) -> bool {
+        fn flush_teardown_with_timeout(
+            &self,
+            _timeout: Duration,
+            _terminal_ids: &[String],
+        ) -> bool {
             if let Some(result) = self.timeout_result {
                 assert!(
                     self.killed.load(std::sync::atomic::Ordering::SeqCst),
@@ -8106,6 +8129,7 @@ mod tests {
                     plan,
                     operation_epoch,
                     false,
+                    &[],
                     &Default::default(),
                     &workspace,
                     &workspace_tick,
@@ -8272,6 +8296,7 @@ mod tests {
                     plan,
                     operation_epoch,
                     false,
+                    &[],
                     &global_hooks,
                     &workspace,
                     &workspace_tick,
