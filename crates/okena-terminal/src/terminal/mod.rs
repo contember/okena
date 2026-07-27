@@ -162,8 +162,8 @@ pub struct Terminal {
     pub(super) has_notification: AtomicBool,
 
     /// Pending OSC 52 clipboard writes requested by the running app. `Arc`
-    /// shared with `ZedEventListener`: pushed during `process_output`,
-    /// drained by the GPUI render path via `drain_clipboard_writes`.
+    /// shared with `ZedEventListener`: pushed during `process_output`, then
+    /// drained by the GPUI activity handler (or render fallback).
     /// GPUI thread only.
     pub(super) pending_clipboard: Arc<Mutex<Vec<String>>>,
 

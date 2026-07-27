@@ -8,14 +8,21 @@ pub use detached_overlays::open_detached_overlay;
 
 use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
 use crate::views::window::{
-    TerminalsRegistry, WindowView, content_pane_registry, notify_registered_panes,
+    TerminalsRegistry, WindowView, content_pane_registry, request_registered_content_pane_repaints,
 };
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use gpui::*;
+use okena_ui::activity_repaint::ActivityRepaintBatch;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+
+/// Repaint-only terminal activity is limited to one app-wide presentation frame.
+/// A ~30 FPS terminal scene keeps interactive output fluid without allowing
+/// independent TUI animations to drive the same OS window at aggregate rates.
+/// Parsing, notifications, and OSC clipboard replies are intentionally not delayed.
+const TERMINAL_ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Default)]
 struct WindowLayoutSaveTracker {
@@ -190,6 +197,10 @@ pub struct Okena {
     /// be wired with the same singleton main was wired with at startup
     /// (`open_extra_window` calls `set_remote_manager` on the new view).
     remote_manager: Entity<RemoteConnectionManager>,
+    /// Exact terminal panes dirtied during the current app-wide frame window.
+    /// Keeps parsing/notification handling immediate while all OS windows share
+    /// one repaint cadence under multi-stream terminal activity.
+    terminal_activity_repaints: ActivityRepaintBatch<String>,
     /// Sender handed to desktop-notification threads. When a user clicks an
     /// XDG notification, the thread sends a `NotificationJump` here and the
     /// click loop focuses the originating pane. See `app/notifications.rs`.
@@ -312,6 +323,7 @@ impl Okena {
             terminals,
             opened_detached_windows: HashSet::new(),
             remote_manager: remote_manager.clone(),
+            terminal_activity_repaints: ActivityRepaintBatch::default(),
             notification_jump_tx,
             spawned_daemon,
             preserve_daemon_on_quit: false,
@@ -361,14 +373,12 @@ impl Okena {
         cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
             RemoteManagerEvent::TerminalActivity(terminal_ids) => {
                 if !terminal_ids.is_empty() {
-                    // One app-wide fan-out refreshes panes in every main, extra,
-                    // and detached window. Keeping this out of WindowView avoids
-                    // duplicate notifications and does not depend on a specific
-                    // OS window entity remaining alive.
-                    let mut registry = content_pane_registry().lock();
-                    notify_registered_panes(&mut registry, terminal_ids, cx);
-                    drop(registry);
+                    // Parsing already happened in the manager pump. Keep
+                    // notification/clipboard semantics immediate, but collect
+                    // exact pane ids behind one app-wide display-frame repaint.
+                    this.queue_terminal_activity_repaints(terminal_ids, cx);
                     this.process_terminal_notifications(terminal_ids, cx);
+                    this.process_clipboard_writes(terminal_ids, cx);
                     // Answer (or, when disabled, drop) OSC 52 clipboard *read*
                     // requests for remote terminals. The clipboard physically
                     // lives on this client machine, so the reply must be
@@ -615,6 +625,47 @@ impl Okena {
 }
 
 impl Okena {
+    fn queue_terminal_activity_repaints(
+        &mut self,
+        terminal_ids: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .terminal_activity_repaints
+            .queue(terminal_ids.iter().cloned())
+        {
+            return;
+        }
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            cx.background_executor()
+                .timer(TERMINAL_ACTIVITY_REPAINT_INTERVAL)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let terminal_ids: Vec<_> =
+                    this.terminal_activity_repaints.take().into_iter().collect();
+
+                // Pane and sidebar notifications happen in this single app
+                // update so GPUI can present one frame for all windows rather
+                // than racing independent per-view timers.
+                {
+                    let mut registry = content_pane_registry().lock();
+                    request_registered_content_pane_repaints(&mut registry, &terminal_ids, cx);
+                }
+
+                let mut window_views = Vec::with_capacity(1 + this.extra_windows.len());
+                window_views.push(this.main_window.clone());
+                window_views.extend(this.extra_windows.values().cloned());
+                for window_view in window_views {
+                    window_view.update(cx, |window_view, cx| {
+                        window_view.request_sidebar_activity_repaint(cx);
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Mark the app as quitting before the platform loop stops. Called from
     /// the main window's close handler (main.rs) ahead of `cx.quit()` so
     /// deferred extra-window forgets and daemon recovery bail immediately —
