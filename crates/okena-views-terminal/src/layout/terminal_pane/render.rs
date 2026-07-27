@@ -62,7 +62,7 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             window.focus(&self.focus_handle, cx);
         }
 
-        let is_focused = focus_handle.is_focused(window);
+        let is_focused = window.is_window_active() && focus_handle.is_focused(window);
 
         let has_bell = self.terminal.as_ref().is_some_and(|t| t.has_bell());
         if is_focused

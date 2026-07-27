@@ -4,7 +4,7 @@ mod render;
 mod sidebar;
 mod terminal_actions;
 
-use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
 use crate::settings::settings;
 use crate::views::chrome::title_bar::TitleBar;
@@ -19,6 +19,7 @@ use crate::workspace::focus::FocusManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, Workspace};
 use gpui::*;
+use okena_ui::activity_repaint::ActivityRepaintGate;
 use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -49,9 +50,13 @@ pub fn content_pane_registry() -> &'static ContentPaneRegistry {
 /// whether any UI update was actually triggered). Generic over the target
 /// type so the same helper services the multi-window terminal fan-out and is
 /// testable without standing up a `TerminalContent`.
-pub fn notify_pane_weaks<T: 'static>(weaks: &mut Vec<WeakEntity<T>>, cx: &mut App) -> bool {
+fn update_pane_weaks<T: 'static>(
+    weaks: &mut Vec<WeakEntity<T>>,
+    cx: &mut App,
+    mut update: impl FnMut(&mut T, &mut Context<T>),
+) -> bool {
     let mut any_alive = false;
-    weaks.retain(|w| match w.update(cx, |_, cx| cx.notify()) {
+    weaks.retain(|weak| match weak.update(cx, |pane, cx| update(pane, cx)) {
         Ok(_) => {
             any_alive = true;
             true
@@ -61,6 +66,10 @@ pub fn notify_pane_weaks<T: 'static>(weaks: &mut Vec<WeakEntity<T>>, cx: &mut Ap
     any_alive
 }
 
+pub fn notify_pane_weaks<T: 'static>(weaks: &mut Vec<WeakEntity<T>>, cx: &mut App) -> bool {
+    update_pane_weaks(weaks, cx, |_, cx| cx.notify())
+}
+
 /// Notify panes for terminals whose remote content actually advanced. Empty
 /// registrations are removed so repeated activity cannot grow stale weak lists.
 pub fn notify_registered_panes<T: 'static>(
@@ -68,11 +77,36 @@ pub fn notify_registered_panes<T: 'static>(
     terminal_ids: &[String],
     cx: &mut App,
 ) -> usize {
+    update_registered_panes(registry, terminal_ids, cx, notify_pane_weaks)
+}
+
+/// Request activity repaints from the concrete terminal-content panes. Each
+/// pane independently gates the request against its own OS window activation,
+/// so the same terminal can stay live in an active extra window without
+/// repainting copies rendered by inactive windows.
+pub fn request_registered_content_pane_repaints(
+    registry: &mut HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>,
+    terminal_ids: &[String],
+    cx: &mut App,
+) -> usize {
+    update_registered_panes(registry, terminal_ids, cx, |weaks, cx| {
+        update_pane_weaks(weaks, cx, |pane, cx| {
+            pane.request_activity_repaint(cx);
+        })
+    })
+}
+
+fn update_registered_panes<T: 'static>(
+    registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
+    terminal_ids: &[String],
+    cx: &mut App,
+    mut update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
+) -> usize {
     let mut notified = 0;
     let mut empty = Vec::new();
     for terminal_id in terminal_ids {
         if let Some(weaks) = registry.get_mut(terminal_id) {
-            if notify_pane_weaks(weaks, cx) {
+            if update(weaks, cx) {
                 notified += 1;
             }
             if weaks.is_empty() {
@@ -133,6 +167,8 @@ pub struct WindowView {
     request_broker: Entity<RequestBroker>,
     terminals: TerminalsRegistry,
     sidebar: Entity<Sidebar>,
+    /// Coalesces terminal-activity sidebar updates while this OS window is inactive.
+    sidebar_activity_repaint: ActivityRepaintGate,
     /// Sidebar state controller
     sidebar_ctrl: SidebarController,
     /// Stored project column entities (created once, not during render)
@@ -337,6 +373,7 @@ impl WindowView {
             request_broker,
             terminals,
             sidebar,
+            sidebar_activity_repaint: ActivityRepaintGate::new(window.is_window_active()),
             sidebar_ctrl,
             project_columns: HashMap::new(),
             title_bar,
@@ -379,6 +416,22 @@ impl WindowView {
         // path coalesce. Conversion mirrors the inverse path in
         // `src/app/extras.rs::open_extra_window` (gpui `Bounds<Pixels>` ->
         // `PersistedWindowBounds` via four `f32::from(...)` calls).
+        cx.observe_window_activation(window, |this, window, cx| {
+            let active = window.is_window_active();
+            let changed = active != this.sidebar_activity_repaint.is_active();
+            let flush_pending = this.sidebar_activity_repaint.set_active(active);
+            if flush_pending {
+                this.sidebar.update(cx, |_, cx| cx.notify());
+                this.sidebar_activity_repaint.repainted();
+            }
+            if changed {
+                // Refresh active/inactive chrome and ensure the current terminal
+                // scene is presented once when the user returns to this window.
+                cx.notify();
+            }
+        })
+        .detach();
+
         cx.observe_window_bounds(window, |this, window, cx| {
             let bounds = window.window_bounds().get_bounds();
             let persisted = PersistedWindowBounds {
@@ -584,33 +637,22 @@ impl WindowView {
                 status_bar_for_observe.update(cx, |_, cx| cx.notify());
             })
             .detach();
-
-            // Repaint the sidebar on remote terminal activity (bell / idle).
-            // The sidebar reads these flags straight from the TerminalsRegistry,
-            // which GPUI's dependency tracking can't see, so incoming server
-            // output would otherwise only surface on local input (issue #128).
-            // This rides a dedicated event rather than cx.notify() so the
-            // high-frequency output cadence doesn't trigger the project-sync
-            // observer above.
-            let sidebar_for_activity = self.sidebar.clone();
-            cx.subscribe(&manager, move |_this, _rm, event, cx| match event {
-                // The app-wide manager subscription performs targeted terminal
-                // pane fan-out once; each WindowView only owns its sidebar repaint.
-                RemoteManagerEvent::TerminalActivity(_) => {
-                    sidebar_for_activity.update(cx, |_, cx| cx.notify());
-                }
-                // Local-daemon self-heal is driven by `Okena`, not the sidebar.
-                RemoteManagerEvent::LocalConnectionFailed
-                | RemoteManagerEvent::SettingsChanged(_)
-                | RemoteManagerEvent::TerminalFocusRequested { .. } => {}
-            })
-            .detach();
         }
 
         self.remote_manager = Some(manager);
 
         // Rebuild dispatch callback with remote manager
         self.rebuild_sidebar_dispatch(cx);
+    }
+
+    /// Request the sidebar half of the app-wide terminal activity frame.
+    /// Parsing and notifications already ran; this only presents current bell /
+    /// idle state, or retains one pending presentation while the window is inactive.
+    pub(crate) fn request_sidebar_activity_repaint(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_activity_repaint.request() {
+            self.sidebar.update(cx, |_, cx| cx.notify());
+            self.sidebar_activity_repaint.repainted();
+        }
     }
 
     /// Set the service manager entity (called by Okena after creation).

@@ -201,6 +201,33 @@ impl Okena {
         }
     }
 
+    /// Apply OSC 52 clipboard *writes* queued by terminals that produced output.
+    ///
+    /// This side effect is intentionally drained from the immediate activity
+    /// handler rather than relying on `TerminalContent::render`: background-only
+    /// panes may remain inactive indefinitely, while clipboard semantics must not.
+    /// The render path keeps a fallback drain for non-remote terminal producers.
+    pub(super) fn process_clipboard_writes(
+        &mut self,
+        dirty_terminal_ids: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let writes = {
+            let reg = self.terminals.lock();
+            let mut writes = Vec::new();
+            for terminal_id in dirty_terminal_ids {
+                if let Some(terminal) = reg.get(terminal_id) {
+                    writes.extend(terminal.take_pending_clipboard_writes());
+                }
+            }
+            writes
+        };
+
+        for text in writes {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
     /// Answer (or silently deny) OSC 52 clipboard *read* requests
     /// (`OSC 52 ; c ; ?`) queued by terminals that produced output this batch.
     /// Runs here, in the PTY event loop, because this is where the opt-in
