@@ -524,11 +524,12 @@ impl DaemonCore {
                 reactor.workspace.clone(),
                 git_status_tx.clone(),
                 reactor.state_version.clone(),
-                remote_subscribed_terminals,
+                remote_subscribed_terminals.clone(),
                 git_poll_trigger_rx,
             ));
             tokio::task::spawn_local(crate::git_poll::run_git_head_poll(
                 reactor.workspace.clone(),
+                remote_subscribed_terminals,
                 git_poll_trigger_tx.clone(),
             ));
             // Forward the daemon's HookMonitor toasts to clients. The daemon has
