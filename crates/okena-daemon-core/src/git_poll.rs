@@ -1,34 +1,11 @@
-//! GPUI-free git-status poller: the headless analogue of
-//! `okena-views-git`'s `GitStatusWatcher` (its `watcher.rs`), minus the GUI.
-//! A separate cheap HEAD-only loop wakes the full poll within 250ms of commits
-//! and checkouts without walking the index or worktree.
+//! GPUI-free git-status polling for the headless daemon.
 //!
-//! The GUI's watcher polls git status every ~5s for the set of *visible*
-//! non-remote projects, caches per-project [`GitStatus`], and pushes a slimmed
-//! [`ApiGitStatus`] map into a `tokio::sync::watch` channel (`remote_tx`) that
-//! the remote server broadcasts to clients. The daemon reproduces exactly that
-//! `watch`-channel output path with `okena-git` directly (NOT `okena-views-git`,
-//! which is a GUI crate).
-//!
-//! ## What is faithfully ported vs. dropped
-//!
-//! * **Ported:** the 5s cadence, the visible-non-remote project selection (via
-//!   [`Workspace::all_visible_project_ids`], which is the union across the main
-//!   and all extra windows — the same set the GUI uses), running
-//!   [`okena_git::refresh_git_status`] on a blocking pool under [`Lane::Poll`],
-//!   building the `HashMap<String, ApiGitStatus>`, and `send_replace`-ing it.
-//!   Also ported: the `gh` PR/CI fan-out and its adaptive cadence
-//!   ([`okena_git::repository::get_pr_info`] / [`get_ci_checks`], gated by
-//!   [`has_github_remote`]), with the across-cycle `pr_infos`/`ci_checks` caches
-//!   and the two-phase publish — basic gix status is published first so the
-//!   branch/diff badge never waits on a (possibly hanging) `gh` call, then the
-//!   richer PR/CI data is merged in and published as a follow-up.
-//! * **Dropped (GUI/remote-server concerns not present in daemon-core):** the
-//!   `cx.notify()` local-UI push, the branch-only warmup, and the
-//!   remotely-subscribed-terminals augmentation of the poll set (that set lives
-//!   in the remote server, which wires the daemon — it can extend the poll set
-//!   there later). The primary output is the `git_status_tx` watch, exactly as
-//!   in the GUI.
+//! Projects visible in any window, or owning a terminal subscribed by a remote
+//! client, stay on the responsive tier: HEAD every 250ms and full status every
+//! 5s. Hidden, unsubscribed repositories use bounded fallback cadences (2s HEAD,
+//! 30s full status). Explicit actions and detected HEAD changes still trigger an
+//! immediate targeted refresh. Cached statuses for projects not selected in a
+//! cycle remain published, so tiering changes freshness rather than visibility.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -43,10 +20,14 @@ use okena_workspace::state::Workspace;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
-/// How often to poll git status. Mirrors the GUI watcher's `GIT_POLL_INTERVAL`.
+/// Responsive full-status cadence for visible or remotely subscribed projects.
 const GIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
-/// Cheap HEAD-only cadence used to wake the full status poll after commits and checkouts.
+/// Hidden projects receive a full fallback scan every 6 responsive cycles (30s).
+const HIDDEN_GIT_POLL_EVERY_N_CYCLES: u64 = 6;
+/// Responsive HEAD cadence for visible or remotely subscribed projects.
 const HEAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Hidden projects receive a cheap HEAD fallback scan every 8 ticks (2s).
+const HIDDEN_HEAD_POLL_EVERY_N_TICKS: u64 = 8;
 /// How many git poll cycles between PR URL checks (~60s). Mirrors the GUI
 /// watcher's `PR_POLL_EVERY_N_CYCLES`.
 const PR_POLL_EVERY_N_CYCLES: u64 = 12;
@@ -101,6 +82,15 @@ impl TriggerAccumulator {
         }
     }
 
+    fn local_status_ids(&self) -> HashSet<String> {
+        self.head_change_ids
+            .iter()
+            .chain(&self.force_gh_ids)
+            .chain(&self.candidate_gh_ids)
+            .cloned()
+            .collect()
+    }
+
     fn clear(&mut self) {
         self.head_change_ids.clear();
         self.force_gh_ids.clear();
@@ -116,13 +106,76 @@ struct GithubPollResult {
     ci_checks: HashMap<String, Option<git::CiCheckSummary>>,
 }
 
+fn relevant_project_ids(
+    workspace: &Workspace,
+    remote_subscribed_terminals: &RwLock<HashMap<u64, HashSet<String>>>,
+) -> HashSet<String> {
+    let mut relevant = workspace.all_visible_project_ids();
+    if let Ok(subscribed) = remote_subscribed_terminals.read() {
+        for terminal_ids in subscribed.values() {
+            for terminal_id in terminal_ids {
+                if let Some(project) = workspace.find_project_for_terminal(terminal_id)
+                    && !project.is_remote
+                {
+                    relevant.insert(project.id.clone());
+                }
+            }
+        }
+    }
+    relevant
+}
+
+fn select_status_poll_ids(
+    active_ids: &HashSet<String>,
+    relevant_ids: &HashSet<String>,
+    forced_ids: &HashSet<String>,
+    newly_relevant_ids: &HashSet<String>,
+    cadence_due: bool,
+    poll_hidden: bool,
+) -> HashSet<String> {
+    if poll_hidden {
+        return active_ids.clone();
+    }
+
+    let mut selected = HashSet::new();
+    if cadence_due {
+        selected.extend(relevant_ids.iter().cloned());
+    }
+    selected.extend(forced_ids.iter().cloned());
+    selected.extend(newly_relevant_ids.iter().cloned());
+    selected.retain(|id| active_ids.contains(id));
+    selected
+}
+
+fn merge_status_results(
+    previous: &HashMap<String, GitStatus>,
+    active_ids: &HashSet<String>,
+    attempted: HashMap<String, Option<GitStatus>>,
+) -> HashMap<String, GitStatus> {
+    let mut merged = previous.clone();
+    merged.retain(|id, _| active_ids.contains(id));
+    for (id, status) in attempted {
+        match status {
+            Some(status) if active_ids.contains(&id) => {
+                merged.insert(id, status);
+            }
+            _ => {
+                merged.remove(&id);
+            }
+        }
+    }
+    merged
+}
+
 /// Poll only each repository's symbolic HEAD and commit id, waking the full
 /// status loop when either changes. This never reads the index or worktree.
 pub async fn run_git_head_poll(
     workspace: Arc<Mutex<Workspace>>,
+    remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     trigger_tx: mpsc::UnboundedSender<GitPollTrigger>,
 ) {
     let mut previous = HashMap::<String, HeadSnapshot>::new();
+    let mut tick = 0u64;
     let mut interval = tokio::time::interval(HEAD_POLL_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -132,15 +185,24 @@ pub async fn run_git_head_poll(
             return;
         }
 
-        let projects: Vec<(String, String)> = {
-            let ws = workspace.lock();
-            ws.projects()
+        let (projects, relevant_ids): (Vec<(String, String)>, HashSet<String>) = {
+            let workspace = workspace.lock();
+            let relevant = relevant_project_ids(&workspace, &remote_subscribed_terminals);
+            let projects = workspace
+                .projects()
                 .iter()
                 .filter(|project| !project.is_remote)
                 .map(|project| (project.id.clone(), project.path.clone()))
-                .collect()
+                .collect();
+            (projects, relevant)
         };
         let active_ids: HashSet<String> = projects.iter().map(|(id, _)| id.clone()).collect();
+        let poll_hidden = tick.is_multiple_of(HIDDEN_HEAD_POLL_EVERY_N_TICKS);
+        tick = tick.wrapping_add(1);
+        let projects: Vec<_> = projects
+            .into_iter()
+            .filter(|(id, _)| poll_hidden || relevant_ids.contains(id))
+            .collect();
         let snapshots = tokio::task::spawn_blocking(move || {
             projects
                 .into_iter()
@@ -156,6 +218,8 @@ pub async fn run_git_head_poll(
             continue;
         };
 
+        // `active_ids` deliberately includes unsampled hidden projects so their
+        // prior snapshots survive fast-tier ticks and later changes are detected.
         for id in update_head_snapshots(&mut previous, &active_ids, snapshots) {
             if trigger_tx.send(GitPollTrigger::head_change(id)).is_err() {
                 return;
@@ -164,10 +228,10 @@ pub async fn run_git_head_poll(
     }
 }
 
-fn update_head_snapshots(
-    previous: &mut HashMap<String, HeadSnapshot>,
+fn update_head_snapshots<T: PartialEq>(
+    previous: &mut HashMap<String, T>,
     active_ids: &HashSet<String>,
-    snapshots: HashMap<String, HeadSnapshot>,
+    snapshots: HashMap<String, T>,
 ) -> Vec<String> {
     previous.retain(|id, _| active_ids.contains(id));
     snapshots
@@ -304,18 +368,12 @@ fn apply_github_result(
 /// Run the daemon git-status poll loop until the `watch` channel is closed (all
 /// receivers dropped → the server is gone).
 ///
-/// Each cycle:
-/// 1. Lock the workspace, snapshot the `(id, path)` of the projects to poll
-///    (visible, non-remote — see module docs), then DROP the lock.
-/// 2. Run [`git::refresh_git_status`] for each on a blocking pool
-///    ([`tokio::task::spawn_blocking`], under [`Lane::Poll`]) so the gix dir-walk
-///    and diff never stall the reactor thread. Merge in any cached PR/CI so the
-///    badges don't blank mid-cycle, then build + `send_replace` the slimmed
-///    `HashMap<String, ApiGitStatus>` on change — BEFORE the slow `gh` calls.
-/// 3. On the PR/CI cadence (skip cycle 0; first check at cycle 1), fan out the
-///    `gh` PR/CI lookups — also on the blocking pool, gated by `has_github_remote`
-///    — merge the results into the across-cycle caches, then re-publish the
-///    statuses with the richer PR/CI data as a follow-up update.
+/// Each cycle snapshots all local projects and their current relevance, selects
+/// only due or explicitly triggered repositories, and runs their gix work on the
+/// blocking pool. Results merge into the prior cache so skipped hidden projects
+/// remain published. The independent wall-clock interval keeps 5s/30s deadlines
+/// stable even when targeted triggers wake the loop between cadence ticks.
+/// PR/CI lookups retain their existing visible-project adaptive cadence.
 ///
 /// Bumps `state_version` on a real change so a snapshot/broadcast observer can
 /// react; the *primary* output is the `git_status_tx` watch.
@@ -344,9 +402,16 @@ pub async fn run_git_poll(
     let mut cycle: u64 = 0;
     let mut trigger_acc = TriggerAccumulator::default();
     let mut known_gh_ids: HashSet<String> = HashSet::new();
+    let mut known_relevant_ids: HashSet<String> = HashSet::new();
     let mut trigger_rx_closed = false;
     let mut head_generations: HashMap<String, u64> = HashMap::new();
     let (github_result_tx, mut github_result_rx) = mpsc::unbounded_channel();
+    // Consume `interval`'s immediate first tick. Subsequent ticks stay anchored
+    // to wall time, so targeted wakes cannot postpone periodic refreshes.
+    let mut cadence = tokio::time::interval(GIT_POLL_INTERVAL);
+    cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    cadence.tick().await;
+    let mut cadence_due = true;
 
     loop {
         drain_git_poll_triggers(&mut trigger_rx, &mut trigger_acc, &mut trigger_rx_closed);
@@ -364,39 +429,47 @@ pub async fn run_git_poll(
             any_pending_ci = has_pending_ci(&ci_checks);
         }
 
-        // ── 1. Snapshot the projects to poll under the workspace lock ────────
-        // git status (gix, cheap, local-only) is polled for EVERY non-remote
-        // project: the daemon's own window visibility is synthetic and must not
-        // gate it, or a project a CLIENT views (but the daemon's window hides)
-        // would show no branch/diff/PR badge. The expensive `gh` PR/CI fan-out
-        // (network) is instead gated to `gh_ids` — projects visible in some
-        // window PLUS any with a remotely-subscribed terminal (i.e. what a
-        // client is actually looking at). Mirrors the GUI watcher's split.
-        let (projects, mut gh_ids): (Vec<(String, String)>, HashSet<String>) = {
-            let ws = workspace.lock();
-            let projects = ws
+        // ── 1. Snapshot relevance and choose this cycle's local work ─────────
+        let (projects, relevant_ids): (Vec<(String, String)>, HashSet<String>) = {
+            let workspace = workspace.lock();
+            let relevant = relevant_project_ids(&workspace, &remote_subscribed_terminals);
+            let projects = workspace
                 .projects()
                 .iter()
-                .filter(|p| !p.is_remote)
-                .map(|p| (p.id.clone(), p.path.clone()))
+                .filter(|project| !project.is_remote)
+                .map(|project| (project.id.clone(), project.path.clone()))
                 .collect();
-
-            let mut gh_ids = ws.all_visible_project_ids();
-            if let Ok(subscribed) = remote_subscribed_terminals.read() {
-                for terminal_ids in subscribed.values() {
-                    for tid in terminal_ids {
-                        if let Some(p) = ws.find_project_for_terminal(tid)
-                            && !p.is_remote
-                        {
-                            gh_ids.insert(p.id.clone());
-                        }
-                    }
-                }
-            }
-            gh_ids.extend(trigger_acc.force_gh_ids.iter().cloned());
-            gh_ids.extend(trigger_acc.candidate_gh_ids.iter().cloned());
-            (projects, gh_ids)
+            (projects, relevant)
         };
+        let active_ids: HashSet<String> = projects.iter().map(|(id, _)| id.clone()).collect();
+        pr_infos.retain(|id, _| active_ids.contains(id));
+        ci_checks.retain(|id, _| active_ids.contains(id));
+        head_generations.retain(|id, _| active_ids.contains(id));
+        known_gh_ids.retain(|id| active_ids.contains(id));
+        known_relevant_ids.retain(|id| active_ids.contains(id));
+
+        let newly_relevant_ids: HashSet<String> = relevant_ids
+            .difference(&known_relevant_ids)
+            .cloned()
+            .collect();
+        known_relevant_ids = relevant_ids.clone();
+        let forced_local_ids = trigger_acc.local_status_ids();
+        let poll_hidden =
+            cycle == 0 || (cadence_due && cycle.is_multiple_of(HIDDEN_GIT_POLL_EVERY_N_CYCLES));
+        let status_poll_ids = select_status_poll_ids(
+            &active_ids,
+            &relevant_ids,
+            &forced_local_ids,
+            &newly_relevant_ids,
+            cadence_due,
+            poll_hidden,
+        );
+
+        // `gh` stays limited to relevant/explicit projects independently of the
+        // slower hidden local-status fallback.
+        let mut gh_ids = relevant_ids;
+        gh_ids.extend(trigger_acc.force_gh_ids.iter().cloned());
+        gh_ids.extend(trigger_acc.candidate_gh_ids.iter().cloned());
         if cycle != 0 || !known_gh_ids.is_empty() {
             trigger_acc.force_gh_ids.extend(missing_github_stats_ids(
                 gh_ids.difference(&known_gh_ids),
@@ -412,9 +485,12 @@ pub async fn run_git_poll(
         gh_ids.extend(trigger_acc.force_gh_ids.iter().cloned());
         known_gh_ids = gh_ids.clone();
 
-        // ── 2. Refresh each project's git status on the blocking pool ────────
-        let mut new_statuses: HashMap<String, GitStatus> = HashMap::new();
-        for (id, path) in &projects {
+        // ── 2. Refresh selected statuses and merge into the published cache ──
+        let mut attempted: HashMap<String, Option<GitStatus>> = HashMap::new();
+        for (id, path) in projects
+            .iter()
+            .filter(|(id, _)| status_poll_ids.contains(id))
+        {
             let id = id.clone();
             let path = path.clone();
             let status = tokio::task::spawn_blocking(move || {
@@ -427,16 +503,26 @@ pub async fn run_git_poll(
                     // badge doesn't blank between `gh` cadence cycles.
                     status.pr_info = pr_infos.get(&id).cloned().flatten();
                     status.ci_checks = ci_checks.get(&id).cloned().flatten();
-                    new_statuses.insert(id, status);
+                    attempted.insert(id, Some(status));
                 }
-                // No status (not a repo / transient miss with no cache): omit it,
-                // matching the GUI's `filter_map` over `Some` statuses.
-                Ok(None) => {}
-                Err(e) => {
-                    log::error!("git status poll task panicked for {id}: {e}");
+                Ok(None) => {
+                    attempted.insert(id, None);
+                }
+                Err(error) => {
+                    // Preserve the last published value on a panicked blocking
+                    // task; the next cadence or targeted trigger retries it.
+                    log::error!("git status poll task panicked for {id}: {error}");
                 }
             }
         }
+        let missing_status_ids: HashSet<String> = attempted
+            .iter()
+            .filter_map(|(id, status)| status.is_none().then_some(id.clone()))
+            .collect();
+        if clear_github_cache_for_ids(&missing_status_ids, &mut pr_infos, &mut ci_checks) {
+            any_pending_ci = has_pending_ci(&ci_checks);
+        }
+        let mut new_statuses = merge_status_results(&last, &active_ids, attempted);
 
         let branch_changes = branch_changed_ids(&last, &new_statuses);
         if !branch_changes.is_empty() {
@@ -462,8 +548,10 @@ pub async fn run_git_poll(
         } else {
             CI_SETTLED_POLL_EVERY_N_CYCLES
         };
-        let pr_cadence = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(PR_POLL_EVERY_N_CYCLES));
-        let ci_cadence = cycle == 1 || (cycle != 0 && cycle.is_multiple_of(ci_poll_interval));
+        let pr_cadence = cadence_due
+            && (cycle == 1 || (cycle != 0 && cycle.is_multiple_of(PR_POLL_EVERY_N_CYCLES)));
+        let ci_cadence =
+            cadence_due && (cycle == 1 || (cycle != 0 && cycle.is_multiple_of(ci_poll_interval)));
         let force_gh = !trigger_acc.force_gh_ids.is_empty();
         let check_prs = force_gh || pr_cadence;
         let check_ci = force_gh || ci_cadence;
@@ -513,12 +601,17 @@ pub async fn run_git_poll(
         }
 
         trigger_acc.clear();
-        cycle += 1;
-        let deadline = tokio::time::sleep(GIT_POLL_INTERVAL);
-        tokio::pin!(deadline);
+        if cadence_due {
+            cycle = cycle.wrapping_add(1);
+        }
+        cadence_due = false;
         loop {
             tokio::select! {
                 biased;
+                _ = cadence.tick() => {
+                    cadence_due = true;
+                    break;
+                }
                 trigger = trigger_rx.recv(), if !trigger_rx_closed => {
                     match trigger {
                         Some(trigger) => {
@@ -539,7 +632,6 @@ pub async fn run_git_poll(
                         &state_version,
                     );
                 }
-                _ = &mut deadline => break,
             }
         }
     }
@@ -789,6 +881,116 @@ mod tests {
         assert!(acc.head_change_ids.contains("committed"));
         assert!(!acc.force_gh_ids.contains("committed"));
         assert!(!acc.force_gh_ids.contains("visible"));
+        assert_eq!(
+            acc.local_status_ids(),
+            HashSet::from([
+                "committed".to_string(),
+                "visible".to_string(),
+                "switched".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn status_poll_selection_respects_tiers_and_targeted_wakes() {
+        let active = HashSet::from(["visible".to_string(), "hidden".to_string()]);
+        let relevant = HashSet::from(["visible".to_string()]);
+        let hidden = HashSet::from(["hidden".to_string()]);
+        let empty = HashSet::new();
+
+        assert_eq!(
+            select_status_poll_ids(&active, &relevant, &empty, &empty, true, true),
+            active,
+            "startup and hidden fallback cycles scan every active project"
+        );
+        assert_eq!(
+            select_status_poll_ids(&active, &relevant, &empty, &empty, true, false),
+            relevant,
+            "ordinary cadence scans only relevant projects"
+        );
+        assert_eq!(
+            select_status_poll_ids(&active, &relevant, &hidden, &empty, false, false),
+            hidden,
+            "targeted hidden refreshes do not wait for fallback cadence"
+        );
+        assert_eq!(
+            select_status_poll_ids(&active, &empty, &empty, &hidden, false, false),
+            hidden,
+            "promotion to the relevant tier refreshes immediately"
+        );
+    }
+
+    #[test]
+    fn merging_targeted_statuses_retains_unpolled_and_prunes_deleted() {
+        let previous = HashMap::from([
+            (
+                "visible".to_string(),
+                GitStatus {
+                    branch: Some("main".to_string()),
+                    ..GitStatus::default()
+                },
+            ),
+            (
+                "hidden".to_string(),
+                GitStatus {
+                    branch: Some("main".to_string()),
+                    ..GitStatus::default()
+                },
+            ),
+            ("deleted".to_string(), GitStatus::default()),
+        ]);
+        let active = HashSet::from([
+            "visible".to_string(),
+            "hidden".to_string(),
+            "not-a-repo".to_string(),
+        ]);
+        let attempted = HashMap::from([
+            (
+                "hidden".to_string(),
+                Some(GitStatus {
+                    branch: Some("feature".to_string()),
+                    ..GitStatus::default()
+                }),
+            ),
+            ("not-a-repo".to_string(), None),
+        ]);
+
+        let merged = merge_status_results(&previous, &active, attempted);
+        assert_eq!(
+            merged
+                .get("visible")
+                .and_then(|status| status.branch.as_deref()),
+            Some("main"),
+            "unpolled active status stays published"
+        );
+        assert_eq!(
+            merged
+                .get("hidden")
+                .and_then(|status| status.branch.as_deref()),
+            Some("feature")
+        );
+        assert!(!merged.contains_key("deleted"));
+        assert!(!merged.contains_key("not-a-repo"));
+    }
+
+    #[test]
+    fn unsampled_head_snapshots_survive_fast_tier_ticks() {
+        let mut previous = HashMap::from([
+            ("hidden".to_string(), "old".to_string()),
+            ("deleted".to_string(), "old".to_string()),
+        ]);
+        let active = HashSet::from(["hidden".to_string()]);
+
+        assert!(update_head_snapshots(&mut previous, &active, HashMap::new()).is_empty());
+        assert_eq!(previous.get("hidden").map(String::as_str), Some("old"));
+        assert!(!previous.contains_key("deleted"));
+
+        let changed = update_head_snapshots(
+            &mut previous,
+            &active,
+            HashMap::from([("hidden".to_string(), "new".to_string())]),
+        );
+        assert_eq!(changed, vec!["hidden".to_string()]);
     }
 
     #[test]
