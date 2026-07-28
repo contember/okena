@@ -9,7 +9,6 @@ use crate::terminal_view_settings;
 use gpui::*;
 use okena_files::theme::theme;
 use okena_terminal::terminal::Terminal;
-use okena_ui::activity_repaint::ActivityRepaintGate;
 use okena_ui::color_utils::tint_color;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{WindowId, Workspace};
@@ -33,7 +32,6 @@ pub struct TerminalContent {
     terminal: Option<Arc<Terminal>>,
     resize_viewer_id: u64,
     focus_handle: FocusHandle,
-    activity_repaint: ActivityRepaintGate,
     window_activation_subscription: Option<Subscription>,
     url_detector: UrlDetector,
     scrollbar: Entity<Scrollbar>,
@@ -82,7 +80,6 @@ impl TerminalContent {
             terminal: None,
             resize_viewer_id: next_resize_viewer_id(),
             focus_handle,
-            activity_repaint: ActivityRepaintGate::new(true),
             window_activation_subscription: None,
             url_detector: UrlDetector::new(),
             scrollbar,
@@ -106,13 +103,11 @@ impl TerminalContent {
         }
     }
 
-    /// Schedule a content repaint only when this pane's OS window is active.
-    /// Activity that arrives in the background is represented by one pending
-    /// repaint, flushed when GPUI reports that window active again.
+    /// Present the latest parsed terminal state. Calls are already coalesced by
+    /// the app-wide activity frame, so visible non-key windows stay live without
+    /// each terminal stream driving an independent repaint clock.
     pub fn request_activity_repaint(&mut self, cx: &mut Context<Self>) {
-        if self.activity_repaint.request() {
-            cx.notify();
-        }
+        cx.notify();
     }
 
     fn bind_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -120,25 +115,19 @@ impl TerminalContent {
             return;
         }
 
-        self.activity_repaint.set_active(window.is_window_active());
         let subscription = cx.observe_window_activation(window, |this, window, cx| {
-            let active = window.is_window_active();
-            let changed = active != this.activity_repaint.is_active();
-            let flush_pending = this.activity_repaint.set_active(active);
-
             // A GPUI focus handle remains focused when its OS window deactivates.
-            // Keep the terminal's notification-suppression reporter aligned with
-            // actual foreground visibility even while activity paints are gated.
+            // Keep the notification-suppression reporter aligned with the exact
+            // key window.
             if let Some(ref terminal) = this.terminal {
                 terminal.update_focus_reporter(
                     this.resize_viewer_id,
-                    active && this.focus_handle.is_focused(window),
+                    window.is_window_active() && this.focus_handle.is_focused(window),
                 );
             }
 
-            if changed || flush_pending {
-                cx.notify();
-            }
+            // Activation changes update focused styling immediately.
+            cx.notify();
         });
         self.window_activation_subscription = Some(subscription);
     }
@@ -640,7 +629,6 @@ impl TerminalContent {
 impl Render for TerminalContent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.bind_window_activation(window, cx);
-        self.activity_repaint.repainted();
 
         let t = theme(cx);
         let is_focused = window.is_window_active() && self.focus_handle.is_focused(window);

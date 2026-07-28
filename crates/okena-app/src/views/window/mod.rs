@@ -19,7 +19,6 @@ use crate::workspace::focus::FocusManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, Workspace};
 use gpui::*;
-use okena_ui::activity_repaint::ActivityRepaintGate;
 use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -80,10 +79,9 @@ pub fn notify_registered_panes<T: 'static>(
     update_registered_panes(registry, terminal_ids, cx, notify_pane_weaks)
 }
 
-/// Request activity repaints from the concrete terminal-content panes. Each
-/// pane independently gates the request against its own OS window activation,
-/// so the same terminal can stay live in an active extra window without
-/// repainting copies rendered by inactive windows.
+/// Request activity repaints from concrete terminal-content panes. Calls are
+/// already limited by the app-wide presentation cadence, so every visible copy
+/// remains live without each stream driving an independent clock.
 pub fn request_registered_content_pane_repaints(
     registry: &mut HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>,
     terminal_ids: &[String],
@@ -167,8 +165,6 @@ pub struct WindowView {
     request_broker: Entity<RequestBroker>,
     terminals: TerminalsRegistry,
     sidebar: Entity<Sidebar>,
-    /// Coalesces terminal-activity sidebar updates while this OS window is inactive.
-    sidebar_activity_repaint: ActivityRepaintGate,
     /// Sidebar state controller
     sidebar_ctrl: SidebarController,
     /// Stored project column entities (created once, not during render)
@@ -373,7 +369,6 @@ impl WindowView {
             request_broker,
             terminals,
             sidebar,
-            sidebar_activity_repaint: ActivityRepaintGate::new(window.is_window_active()),
             sidebar_ctrl,
             project_columns: HashMap::new(),
             title_bar,
@@ -416,19 +411,10 @@ impl WindowView {
         // path coalesce. Conversion mirrors the inverse path in
         // `src/app/extras.rs::open_extra_window` (gpui `Bounds<Pixels>` ->
         // `PersistedWindowBounds` via four `f32::from(...)` calls).
-        cx.observe_window_activation(window, |this, window, cx| {
-            let active = window.is_window_active();
-            let changed = active != this.sidebar_activity_repaint.is_active();
-            let flush_pending = this.sidebar_activity_repaint.set_active(active);
-            if flush_pending {
-                this.sidebar.update(cx, |_, cx| cx.notify());
-                this.sidebar_activity_repaint.repainted();
-            }
-            if changed {
-                // Refresh active/inactive chrome and ensure the current terminal
-                // scene is presented once when the user returns to this window.
-                cx.notify();
-            }
+        cx.observe_window_activation(window, |_this, _window, cx| {
+            // Refresh key-window chrome while activity-driven presentation stays
+            // live in every visible window.
+            cx.notify();
         })
         .detach();
 
@@ -647,12 +633,9 @@ impl WindowView {
 
     /// Request the sidebar half of the app-wide terminal activity frame.
     /// Parsing and notifications already ran; this only presents current bell /
-    /// idle state, or retains one pending presentation while the window is inactive.
+    /// idle state at the shared capped cadence.
     pub(crate) fn request_sidebar_activity_repaint(&mut self, cx: &mut Context<Self>) {
-        if self.sidebar_activity_repaint.request() {
-            self.sidebar.update(cx, |_, cx| cx.notify());
-            self.sidebar_activity_repaint.repainted();
-        }
+        self.sidebar.update(cx, |_, cx| cx.notify());
     }
 
     /// Set the service manager entity (called by Okena after creation).
