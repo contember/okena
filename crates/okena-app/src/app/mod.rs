@@ -19,10 +19,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Repaint-only terminal activity is limited to one app-wide presentation frame.
-/// A ~30 FPS terminal scene keeps interactive output fluid without allowing
+/// A ~50 FPS terminal scene keeps interactive output responsive without allowing
 /// independent TUI animations to drive the same OS window at aggregate rates.
 /// Parsing, notifications, and OSC clipboard replies are intentionally not delayed.
-const TERMINAL_ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
+const TERMINAL_ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Default)]
 struct WindowLayoutSaveTracker {
@@ -198,8 +198,8 @@ pub struct Okena {
     /// (`open_extra_window` calls `set_remote_manager` on the new view).
     remote_manager: Entity<RemoteConnectionManager>,
     /// Exact terminal panes dirtied during the current app-wide frame window.
-    /// Keeps parsing/notification handling immediate while all OS windows share
-    /// one repaint cadence under multi-stream terminal activity.
+    /// The idle-to-active edge is presented immediately; sustained activity is
+    /// coalesced while parsing and notification handling remain immediate.
     terminal_activity_repaints: ActivityRepaintBatch<String>,
     /// Sender handed to desktop-notification threads. When a user clicks an
     /// XDG notification, the thread sends a `NotificationJump` here and the
@@ -373,9 +373,9 @@ impl Okena {
         cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
             RemoteManagerEvent::TerminalActivity(terminal_ids) => {
                 if !terminal_ids.is_empty() {
-                    // Parsing already happened in the manager pump. Keep
-                    // notification/clipboard semantics immediate, but collect
-                    // exact pane ids behind one app-wide display-frame repaint.
+                    // Parsing already happened in the manager pump. Present the
+                    // first output immediately, then coalesce sustained output,
+                    // while notification and clipboard semantics stay immediate.
                     this.queue_terminal_activity_repaints(terminal_ids, cx);
                     this.process_terminal_notifications(terminal_ids, cx);
                     this.process_clipboard_writes(terminal_ids, cx);
@@ -637,33 +637,59 @@ impl Okena {
             return;
         }
 
+        // Leading edge: normal typed echo is presented immediately after the
+        // first output arrives. Only sustained activity enters the 20 ms cadence.
+        let immediate_ids: Vec<_> = self
+            .terminal_activity_repaints
+            .take_immediate()
+            .into_iter()
+            .collect();
+        self.present_terminal_activity_repaints(&immediate_ids, cx);
+
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            cx.background_executor()
-                .timer(TERMINAL_ACTIVITY_REPAINT_INTERVAL)
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                let terminal_ids: Vec<_> =
-                    this.terminal_activity_repaints.take().into_iter().collect();
-
-                // Pane and sidebar notifications happen in this single app
-                // update so GPUI can present one frame for all windows rather
-                // than racing independent per-view timers.
-                {
-                    let mut registry = content_pane_registry().lock();
-                    request_registered_content_pane_repaints(&mut registry, &terminal_ids, cx);
+            loop {
+                cx.background_executor()
+                    .timer(TERMINAL_ACTIVITY_REPAINT_INTERVAL)
+                    .await;
+                let keep_scheduled = this
+                    .update(cx, |this, cx| {
+                        let Some(terminal_ids) = this.terminal_activity_repaints.take_scheduled()
+                        else {
+                            return false;
+                        };
+                        let terminal_ids: Vec<_> = terminal_ids.into_iter().collect();
+                        this.present_terminal_activity_repaints(&terminal_ids, cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_scheduled {
+                    break;
                 }
-
-                let mut window_views = Vec::with_capacity(1 + this.extra_windows.len());
-                window_views.push(this.main_window.clone());
-                window_views.extend(this.extra_windows.values().cloned());
-                for window_view in window_views {
-                    window_view.update(cx, |window_view, cx| {
-                        window_view.request_sidebar_activity_repaint(cx);
-                    });
-                }
-            });
+            }
         })
         .detach();
+    }
+
+    fn present_terminal_activity_repaints(
+        &mut self,
+        terminal_ids: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        // Pane and sidebar notifications happen in one app update so GPUI can
+        // present one frame for all windows rather than racing per-view timers.
+        {
+            let mut registry = content_pane_registry().lock();
+            request_registered_content_pane_repaints(&mut registry, terminal_ids, cx);
+        }
+
+        let mut window_views = Vec::with_capacity(1 + self.extra_windows.len());
+        window_views.push(self.main_window.clone());
+        window_views.extend(self.extra_windows.values().cloned());
+        for window_view in window_views {
+            window_view.update(cx, |window_view, cx| {
+                window_view.request_sidebar_activity_repaint(cx);
+            });
+        }
     }
 
     /// Mark the app as quitting before the platform loop stops. Called from
