@@ -1259,6 +1259,7 @@ impl PtyManager {
                         n,
                         String::from_utf8_lossy(&data[..n.min(100)])
                     );
+                    okena_core::latency_probe::daemon_pty_output_received(&terminal_id);
                     // Broadcast to external consumers immediately (bypasses UI event loop)
                     let sequence = {
                         let instances = instances.lock();
@@ -1318,6 +1319,7 @@ impl PtyManager {
             }
 
             // Write the batched data
+            okena_core::latency_probe::daemon_pty_write_started(&terminal_id);
             if let Err(e) = writer.lock().write_all(&batch) {
                 log::error!("Failed to write to PTY {}: {}", terminal_id, e);
                 shutdown.mark_broken();
@@ -1328,6 +1330,7 @@ impl PtyManager {
                 });
                 break;
             }
+            okena_core::latency_probe::daemon_pty_write_completed(&terminal_id);
         }
     }
 
@@ -1338,6 +1341,7 @@ impl PtyManager {
         if let Some(handle) = self.terminals.lock().get(terminal_id)
             && let Some(input_tx) = handle.input_tx.as_ref()
         {
+            okena_core::latency_probe::daemon_pty_queued(terminal_id);
             let _ = input_tx.send(data.to_vec());
         }
     }

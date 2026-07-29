@@ -390,6 +390,7 @@ impl Element for TerminalElement {
         // Register input handler
         let input_handler = TerminalInputHandler {
             terminal: self.terminal.clone(),
+            viewer_id: self.resize_viewer_id,
         };
         window.handle_input(&self.focus_handle, input_handler, cx);
 
@@ -818,6 +819,22 @@ impl Element for TerminalElement {
                 a: 0.2,
             });
             window.paint_quad(fill(bounds, fog));
+        }
+
+        let painted_samples = okena_core::latency_probe::client_painted(
+            &self.terminal.terminal_id,
+            self.resize_viewer_id,
+        );
+        if !painted_samples.is_empty() {
+            let terminal_id = self.terminal.terminal_id.clone();
+            let viewer_id = self.resize_viewer_id;
+            window.on_next_frame(move |_window, _cx| {
+                okena_core::latency_probe::client_frame_completed(
+                    &terminal_id,
+                    viewer_id,
+                    &painted_samples,
+                );
+            });
         }
     }
 }

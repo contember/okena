@@ -78,6 +78,7 @@ impl ConnectionHandler for DesktopConnectionHandler {
     fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]) {
         let terminal = self.terminals.lock().get(prefixed_id).cloned();
         if let Some(terminal) = terminal {
+            okena_core::latency_probe::client_output_received(prefixed_id);
             terminal.enqueue_output(data);
             // Ring the doorbell so the GPUI-side activity pump wakes and
             // repaints bell/idle indicators. Capacity 1: a full channel means a

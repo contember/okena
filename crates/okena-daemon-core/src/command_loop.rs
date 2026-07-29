@@ -2481,6 +2481,9 @@ pub async fn daemon_command_loop(
                 action,
                 connection_id,
             } => {
+                if let ActionRequest::SendBytes { terminal_id, .. } = &action {
+                    okena_core::latency_probe::daemon_bridge_received(terminal_id);
+                }
                 claim_input_resize_owner(&action, &connection_id);
                 RemoteCommand::Action(action)
             }

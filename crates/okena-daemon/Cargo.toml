@@ -8,6 +8,11 @@ license = "MIT"
 name = "okena-daemon"
 path = "src/main.rs"
 
+[features]
+default = []
+# Runtime collection still requires OKENA_TERMINAL_LATENCY_PROBE=1.
+terminal-latency-probe = ["okena-core/terminal-latency-probe"]
+
 [dependencies]
 okena-daemon-core = { path = "../okena-daemon-core" }
 # gpui-free: provides the profile resolution used to honor OKENA_PROFILE so the

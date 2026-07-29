@@ -8,6 +8,8 @@ license = "MIT"
 default = []
 # Exposes `process::testing` (command bus mock) to downstream crates' tests.
 test-support = []
+# Compiles opt-in terminal input latency instrumentation.
+terminal-latency-probe = []
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

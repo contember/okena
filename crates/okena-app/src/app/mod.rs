@@ -373,6 +373,9 @@ impl Okena {
         cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
             RemoteManagerEvent::TerminalActivity(terminal_ids) => {
                 if !terminal_ids.is_empty() {
+                    for terminal_id in terminal_ids {
+                        okena_core::latency_probe::client_activity_received(terminal_id);
+                    }
                     // Parsing already happened in the manager pump. Present the
                     // first output immediately, then coalesce sustained output,
                     // while notification and clipboard semantics stay immediate.
@@ -683,6 +686,10 @@ impl Okena {
         terminal_ids: &[String],
         cx: &mut Context<Self>,
     ) {
+        for terminal_id in terminal_ids {
+            okena_core::latency_probe::client_repaint_dispatched(terminal_id);
+        }
+
         // Pane and sidebar notifications happen in one app update so GPUI can
         // present one frame for all windows rather than racing per-view timers.
         {

@@ -269,6 +269,10 @@ async fn handle_ws(
                                 }).await;
                             }
                             Ok(WsInbound::SendBytes { terminal_id, data }) => {
+                                okena_core::latency_probe::daemon_input_received(
+                                    &terminal_id,
+                                    &data,
+                                );
                                 let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::ActionFromConnection {
                                         action: ActionRequest::SendBytes { terminal_id, data },
@@ -344,6 +348,10 @@ async fn handle_ws(
                         // Binary input frame from client — fire-and-forget
                         if let Some((FRAME_TYPE_INPUT, stream_id, payload)) = parse_binary_frame(&data)
                             && let Some(terminal_id) = reverse_stream_map.get(&stream_id) {
+                                okena_core::latency_probe::daemon_input_received(
+                                    terminal_id,
+                                    payload,
+                                );
                                 let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::ActionFromConnection {
                                         action: ActionRequest::SendBytes {
@@ -374,6 +382,7 @@ async fn handle_ws(
                                 if output_is_newer(&output_watermarks, terminal_id, *sequence)
                                     && let Some(&stream_id) = subscribed_ids.get(terminal_id)
                                 {
+                                    okena_core::latency_probe::daemon_stream_queued(terminal_id);
                                     batch.entry(stream_id).or_default().extend_from_slice(data);
                                 }
                             }
@@ -406,6 +415,7 @@ async fn handle_ws(
                                         if output_is_newer(&output_watermarks, terminal_id, *sequence)
                                             && let Some(&sid) = subscribed_ids.get(terminal_id)
                                         {
+                                            okena_core::latency_probe::daemon_stream_queued(terminal_id);
                                             batch.entry(sid).or_default().extend_from_slice(data);
                                         }
                                     }

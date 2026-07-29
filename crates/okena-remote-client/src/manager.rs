@@ -300,6 +300,7 @@ impl RemoteConnectionManager {
                         // Parse on the GPUI thread so bell/idle flags are
                         // current even for terminals with no mounted pane.
                         terminal.process_pending_output();
+                        okena_core::latency_probe::client_output_parsed(id);
                         let generation = terminal.content_generation();
                         if last_generations.get(id) != Some(&generation) {
                             advanced.push(id.clone());
@@ -310,6 +311,9 @@ impl RemoteConnectionManager {
                     last_generations = next_generations;
 
                     if changed {
+                        for terminal_id in &advanced {
+                            okena_core::latency_probe::client_activity_emitted(terminal_id);
+                        }
                         // Emit (not notify): repaint the sidebar's bell/idle
                         // indicators without dragging in the heavy project-sync
                         // observer that fires on `cx.notify()`, and let `Okena`

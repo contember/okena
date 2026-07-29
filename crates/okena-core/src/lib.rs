@@ -3,6 +3,7 @@
 pub mod api;
 pub mod git_poll;
 pub mod keys;
+pub mod latency_probe;
 pub mod process;
 pub mod profiles;
 pub mod selection;
