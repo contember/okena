@@ -1,5 +1,6 @@
 mod focus_report;
 mod helpers;
+mod input_repaint;
 mod kitty;
 mod osc;
 mod prompt_jump;

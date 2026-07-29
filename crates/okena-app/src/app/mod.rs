@@ -630,21 +630,29 @@ impl Okena {
         terminal_ids: &[String],
         cx: &mut Context<Self>,
     ) {
-        if !self
+        let input_response_ids: Vec<_> = {
+            let registry = self.terminals.lock();
+            terminal_ids
+                .iter()
+                .filter(|terminal_id| {
+                    registry
+                        .get(*terminal_id)
+                        .is_some_and(|terminal| terminal.take_input_repaint_request())
+                })
+                .cloned()
+                .collect()
+        };
+
+        let decision = self
             .terminal_activity_repaints
-            .queue(terminal_ids.iter().cloned())
-        {
+            .queue_activity(terminal_ids.iter().cloned(), input_response_ids);
+        if !decision.immediate.is_empty() {
+            let immediate_ids: Vec<_> = decision.immediate.into_iter().collect();
+            self.present_terminal_activity_repaints(&immediate_ids, cx);
+        }
+        if !decision.start_timer {
             return;
         }
-
-        // Leading edge: normal typed echo is presented immediately after the
-        // first output arrives. Only sustained activity enters the 20 ms cadence.
-        let immediate_ids: Vec<_> = self
-            .terminal_activity_repaints
-            .take_immediate()
-            .into_iter()
-            .collect();
-        self.present_terminal_activity_repaints(&immediate_ids, cx);
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             loop {

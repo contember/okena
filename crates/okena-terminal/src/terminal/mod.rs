@@ -55,6 +55,12 @@ use osc_sidecar::OscSidecar;
 use prompt_marks::{PromptSidecar, PromptTracker};
 use types::FocusReportState;
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct InputRepaintRequest {
+    after_output_epoch: u64,
+    expires_at: Instant,
+}
+
 /// A terminal instance wrapping alacritty_terminal
 /// Terminal emulator state.
 ///
@@ -71,7 +77,7 @@ use types::FocusReportState;
 ///
 /// 2. **Tokio reader task** (remote connections only) — calls `enqueue_output`
 ///    to buffer incoming data without holding `term.lock()`. Only touches
-///    `pending_output`, `dirty`, and `last_output_time`.
+///    `pending_output`, output epochs, `dirty`, and `last_output_time`.
 ///
 /// 3. **Resize debounce timer** — a short-lived `std::thread::spawn` that
 ///    flushes a trailing-edge resize after the debounce window. Only touches
@@ -94,8 +100,8 @@ use types::FocusReportState;
 ///   threads contend.
 ///
 /// - **`AtomicBool` / `AtomicU64`** — lock-free signaling between the GPUI
-///   thread and the tokio reader task (for `dirty`), or between the GPUI
-///   thread's output path and its render path (for `content_generation`,
+///   thread and the tokio reader task (for `dirty` and output epochs), or between
+///   the GPUI thread's output path and its render path (for `content_generation`,
 ///   `waiting_for_input`, `had_user_input`) to avoid mutex overhead on every
 ///   frame.
 pub struct Terminal {
@@ -275,6 +281,22 @@ pub struct Terminal {
     /// freeze the UI.
     pub(super) pending_output: Mutex<Vec<u8>>,
 
+    /// Monotonic arrival epoch for local and remotely enqueued output. Input
+    /// captures the next epoch as its causal repaint boundary.
+    pub(super) output_epoch: AtomicU64,
+
+    /// Last remote-output epoch represented by `pending_output`. Updated while
+    /// holding `pending_output` so a drain captures bytes and epoch atomically.
+    pub(super) pending_output_epoch: AtomicU64,
+
+    /// Highest output epoch incorporated into the terminal model.
+    pub(super) processed_output_epoch: AtomicU64,
+
+    /// Output-after-input promotion request. The epoch prevents pre-input
+    /// backlog from consuming it; expiry prevents an unanswered input from
+    /// promoting unrelated output indefinitely.
+    pub(super) input_repaint_request: Mutex<Option<InputRepaintRequest>>,
+
     /// Content-changed flag. Set by `process_output` (GPUI) and
     /// `enqueue_output` (tokio). Cleared by `take_dirty` (GPUI render).
     /// `AtomicBool` for lock-free cross-thread signaling.
@@ -402,6 +424,10 @@ impl Terminal {
             pending_clipboard_reads,
             palette,
             pending_output: Mutex::new(Vec::new()),
+            output_epoch: AtomicU64::new(0),
+            pending_output_epoch: AtomicU64::new(0),
+            processed_output_epoch: AtomicU64::new(0),
+            input_repaint_request: Mutex::new(None),
             dirty: AtomicBool::new(false),
             content_generation: AtomicU64::new(0),
             processed_output_sequence: AtomicU64::new(0),
