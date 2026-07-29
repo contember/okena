@@ -107,6 +107,12 @@ impl TerminalContent {
     /// the app-wide activity frame, so visible non-key windows stay live without
     /// each terminal stream driving an independent repaint clock.
     pub fn request_activity_repaint(&mut self, cx: &mut Context<Self>) {
+        if let Some(terminal) = &self.terminal {
+            okena_core::latency_probe::client_notify_requested(
+                &terminal.terminal_id,
+                self.resize_viewer_id,
+            );
+        }
         cx.notify();
     }
 

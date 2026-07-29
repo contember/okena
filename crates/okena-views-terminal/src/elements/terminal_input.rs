@@ -14,6 +14,7 @@ const MACOS_FUNCTION_KEY_RANGE: std::ops::RangeInclusive<char> = '\u{F700}'..='\
 /// Input handler for terminal text input
 pub(crate) struct TerminalInputHandler {
     pub terminal: Arc<Terminal>,
+    pub viewer_id: u64,
 }
 
 impl TerminalInputHandler {
@@ -37,19 +38,20 @@ impl TerminalInputHandler {
 
         // Fast path: no control characters, send entire string at once
         if !filtered.chars().any(|c| matches!(c, '\n' | '\r' | '\u{8}')) {
-            self.terminal.send_input(&filtered);
+            self.terminal
+                .send_input_from_viewer(&filtered, self.viewer_id);
             return;
         }
 
         // Slow path: handle control characters individually
         for c in filtered.chars() {
             match c {
-                '\u{8}' => self.terminal.send_bytes(&[DEL]),
-                '\n' | '\r' => self.terminal.send_bytes(b"\r"),
+                '\u{8}' => self.terminal.send_bytes_from_viewer(&[DEL], self.viewer_id),
+                '\n' | '\r' => self.terminal.send_bytes_from_viewer(b"\r", self.viewer_id),
                 _ => {
                     let mut buf = [0u8; 4];
                     let s = c.encode_utf8(&mut buf);
-                    self.terminal.send_input(s);
+                    self.terminal.send_input_from_viewer(s, self.viewer_id);
                 }
             }
         }

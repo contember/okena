@@ -208,8 +208,20 @@ impl Terminal {
     /// Send input to the PTY
     /// Automatically scrolls to bottom if scrolled into history
     pub fn send_input(&self, input: &str) {
+        self.send_input_inner(input, None);
+    }
+
+    /// Send text input and associate latency samples with its originating viewer.
+    pub fn send_input_from_viewer(&self, input: &str, viewer: u64) {
+        self.send_input_inner(input, Some(viewer));
+    }
+
+    fn send_input_inner(&self, input: &str, viewer: Option<u64>) {
         self.mark_user_input(!input.is_empty());
         self.scroll_to_bottom();
+        if let Some(viewer) = viewer {
+            okena_core::latency_probe::client_start(&self.terminal_id, viewer, input.as_bytes());
+        }
         self.transport
             .send_input(&self.terminal_id, input.as_bytes());
     }
@@ -268,8 +280,20 @@ impl Terminal {
     /// Send raw bytes to the PTY
     /// Automatically scrolls to bottom if scrolled into history
     pub fn send_bytes(&self, data: &[u8]) {
+        self.send_bytes_inner(data, None);
+    }
+
+    /// Send raw input and associate latency samples with its originating viewer.
+    pub fn send_bytes_from_viewer(&self, data: &[u8], viewer: u64) {
+        self.send_bytes_inner(data, Some(viewer));
+    }
+
+    fn send_bytes_inner(&self, data: &[u8], viewer: Option<u64>) {
         self.mark_user_input(!data.is_empty());
         self.scroll_to_bottom();
+        if let Some(viewer) = viewer {
+            okena_core::latency_probe::client_start(&self.terminal_id, viewer, data);
+        }
         self.transport.send_input(&self.terminal_id, data);
     }
 

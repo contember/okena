@@ -85,6 +85,10 @@ rust-embed = "8.5"
 default = ["jemalloc", "mimalloc"]
 mimalloc = ["dep:mimalloc"]
 
+# Compile the terminal latency probe into both desktop and headless modes.
+# Runtime collection still requires OKENA_TERMINAL_LATENCY_PROBE=1.
+terminal-latency-probe = ["okena-core/terminal-latency-probe"]
+
 # jemalloc: default on Unix. Shares a small fixed set of arenas across all
 # threads (narenas:N in src/main.rs) instead of mimalloc's per-thread heaps, so
 # okena's ~90 threads don't each pin their own segments — cut anon-heap RSS
