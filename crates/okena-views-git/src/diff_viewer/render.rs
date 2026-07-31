@@ -1,11 +1,12 @@
 //! Render trait impl and helper methods for the diff viewer.
 
-use super::types::{DiffViewMode, FileTreeNode};
+use super::types::DiffViewMode;
 use super::{Cancel, DiffViewer};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use okena_core::theme::ThemeColors;
+use okena_files::file_tree::{FileTreeRow, expandable_file_row, expandable_folder_row};
 use okena_files::selection::Selection2DNonEmpty;
 use okena_files::theme::theme;
 use okena_git::DiffMode;
@@ -856,112 +857,108 @@ impl DiffViewer {
             )
     }
 
-    pub(super) fn render_tree_node(
+    pub(super) fn render_file_tree(
         &self,
-        node: &FileTreeNode,
-        depth: usize,
-        parent_path: &str,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         use super::context_menu::DiffTargetKind;
-        use okena_files::file_tree::{expandable_file_row, expandable_folder_row};
 
         let mut elements: Vec<AnyElement> = Vec::new();
 
-        for (name, child) in &node.children {
-            let folder_path = if parent_path.is_empty() {
-                name.clone()
-            } else {
-                format!("{parent_path}/{name}")
-            };
-            let is_expanded = self.expanded_folders.contains(&folder_path);
-
-            let fp_toggle = folder_path.clone();
-            let fp_menu = folder_path.clone();
-            elements.push(
-                expandable_folder_row(name, depth, is_expanded, t, cx)
-                    .id(ElementId::Name(format!("dv-folder-{}", folder_path).into()))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.toggle_folder(&fp_toggle, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            this.open_context_menu(
-                                event.position,
-                                fp_menu.clone(),
-                                DiffTargetKind::Folder,
-                                cx,
-                            );
-                        }),
-                    )
-                    .into_any_element(),
-            );
-
-            if is_expanded {
-                elements.extend(self.render_tree_node(child, depth + 1, &folder_path, t, cx));
-            }
-        }
-
-        for &file_index in &node.files {
-            if let Some(file) = self.file_stats.get(file_index) {
-                let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
-                let is_selected = file_index == self.selected_file_index;
-                let file_path_for_menu = file.path.clone();
-
-                let name_color = if file.is_new {
-                    Some(t.diff_added_fg)
-                } else if file.is_deleted {
-                    Some(t.diff_removed_fg)
-                } else {
-                    None
-                };
-
-                elements.push(
-                    expandable_file_row(filename, depth, name_color, false, t, cx)
-                        .id(ElementId::Name(format!("tree-file-{}", file_index).into()))
-                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.select_file(file_index, cx);
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                this.select_file(file_index, cx);
-                                this.open_context_menu(
-                                    event.position,
-                                    file_path_for_menu.clone(),
-                                    DiffTargetKind::File,
-                                    cx,
-                                );
-                            }),
-                        )
-                        // Line counts
-                        .when(file.added > 0 || file.removed > 0, |d| {
-                            d.child(
-                                h_flex()
-                                    .gap(px(4.0))
-                                    .text_size(ui_text_ms(cx))
-                                    .flex_shrink_0()
-                                    .when(file.added > 0, |d| {
-                                        d.child(
-                                            div()
-                                                .text_color(rgb(t.diff_added_fg))
-                                                .child(format!("+{}", file.added)),
-                                        )
-                                    })
-                                    .when(file.removed > 0, |d| {
-                                        d.child(
-                                            div()
-                                                .text_color(rgb(t.diff_removed_fg))
-                                                .child(format!("-{}", file.removed)),
-                                        )
-                                    }),
+        for row in self.file_tree_rows(false) {
+            match row {
+                FileTreeRow::Folder {
+                    path,
+                    name,
+                    depth,
+                    is_expanded,
+                } => {
+                    let path_for_toggle = path.clone();
+                    let path_for_menu = path.clone();
+                    elements.push(
+                        expandable_folder_row(&name, depth, is_expanded, t, cx)
+                            .id(ElementId::Name(format!("dv-folder-{path}").into()))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.toggle_folder(&path_for_toggle, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.open_context_menu(
+                                        event.position,
+                                        path_for_menu.clone(),
+                                        DiffTargetKind::Folder,
+                                        cx,
+                                    );
+                                }),
                             )
-                        })
-                        .into_any_element(),
-                );
+                            .into_any_element(),
+                    );
+                }
+                FileTreeRow::File {
+                    item: file_index,
+                    depth,
+                } => {
+                    let Some(file) = self.file_stats.get(file_index) else {
+                        continue;
+                    };
+                    let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
+                    let is_selected = file_index == self.selected_file_index;
+                    let file_path_for_menu = file.path.clone();
+                    let name_color = if file.is_new {
+                        Some(t.diff_added_fg)
+                    } else if file.is_deleted {
+                        Some(t.diff_removed_fg)
+                    } else {
+                        None
+                    };
+
+                    elements.push(
+                        expandable_file_row(filename, depth, name_color, false, t, cx)
+                            .id(ElementId::Name(format!("tree-file-{file_index}").into()))
+                            .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.select_file(file_index, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.select_file(file_index, cx);
+                                    this.open_context_menu(
+                                        event.position,
+                                        file_path_for_menu.clone(),
+                                        DiffTargetKind::File,
+                                        cx,
+                                    );
+                                }),
+                            )
+                            .when(file.added > 0 || file.removed > 0, |d| {
+                                d.child(
+                                    h_flex()
+                                        .gap(px(4.0))
+                                        .text_size(ui_text_ms(cx))
+                                        .flex_shrink_0()
+                                        .when(file.added > 0, |d| {
+                                            d.child(
+                                                div()
+                                                    .text_color(rgb(t.diff_added_fg))
+                                                    .child(format!("+{}", file.added)),
+                                            )
+                                        })
+                                        .when(file.removed > 0, |d| {
+                                            d.child(
+                                                div()
+                                                    .text_color(rgb(t.diff_removed_fg))
+                                                    .child(format!("-{}", file.removed)),
+                                            )
+                                        }),
+                                )
+                            })
+                            .into_any_element(),
+                    );
+                }
+                FileTreeRow::Loading { .. } => {}
             }
         }
 
@@ -1006,7 +1003,7 @@ impl Render for DiffViewer {
             .unwrap_or(0);
 
         let tree_elements = if has_files {
-            self.render_tree_node(&self.file_tree.clone(), 0, "", &t, cx)
+            self.render_file_tree(&t, cx)
         } else {
             Vec::new()
         };

@@ -2,7 +2,8 @@
 
 use okena_core::theme::ThemeColors;
 use okena_files::file_tree::{
-    FileTreeNode, build_file_tree, expandable_file_row, expandable_folder_row,
+    FileTreeRow, build_file_tree, expandable_file_row, expandable_folder_row,
+    indexed_file_tree_rows,
 };
 use okena_git::FileDiffSummary;
 use okena_ui::tokens::ui_text_ms;
@@ -10,6 +11,7 @@ use okena_ui::tokens::ui_text_ms;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Called with the clicked file path inside the diff file list.
@@ -27,12 +29,17 @@ pub fn render_diff_file_list_interactive(
 ) -> Vec<AnyElement> {
     let tree = build_file_tree(summaries.iter().enumerate().map(|(i, f)| (i, &f.path)));
     let on_file_click: FileClickCallback = Arc::new(on_file_click);
-    render_diff_tree_node(&tree, 0, summaries, &on_file_click, t, cx)
+    render_diff_tree_rows(
+        indexed_file_tree_rows(&tree, &HashSet::new(), true),
+        summaries,
+        &on_file_click,
+        t,
+        cx,
+    )
 }
 
-fn render_diff_tree_node(
-    node: &FileTreeNode,
-    depth: usize,
+fn render_diff_tree_rows(
+    rows: Vec<FileTreeRow<usize>>,
     summaries: &[FileDiffSummary],
     on_file_click: &FileClickCallback,
     t: &ThemeColors,
@@ -40,64 +47,62 @@ fn render_diff_tree_node(
 ) -> Vec<AnyElement> {
     let mut elements: Vec<AnyElement> = Vec::new();
 
-    for (name, child) in &node.children {
-        elements.push(expandable_folder_row(name, depth, true, t, cx).into_any_element());
-        elements.extend(render_diff_tree_node(
-            child,
-            depth + 1,
-            summaries,
-            on_file_click,
-            t,
-            cx,
-        ));
-    }
+    for row in rows {
+        match row {
+            FileTreeRow::Folder { name, depth, .. } => {
+                elements.push(expandable_folder_row(&name, depth, true, t, cx).into_any_element());
+            }
+            FileTreeRow::File {
+                item: file_index,
+                depth,
+            } => {
+                let Some(summary) = summaries.get(file_index) else {
+                    continue;
+                };
+                let filename = summary.path.rsplit('/').next().unwrap_or(&summary.path);
+                let is_deleted = summary.removed > 0 && summary.added == 0;
+                let name_color = if summary.is_new {
+                    Some(t.diff_added_fg)
+                } else if is_deleted {
+                    Some(t.diff_removed_fg)
+                } else {
+                    None
+                };
+                let file_path = summary.path.clone();
+                let cb = on_file_click.clone();
 
-    for &file_index in &node.files {
-        if let Some(summary) = summaries.get(file_index) {
-            let filename = summary.path.rsplit('/').next().unwrap_or(&summary.path);
-            let is_deleted = summary.removed > 0 && summary.added == 0;
-
-            let name_color = if summary.is_new {
-                Some(t.diff_added_fg)
-            } else if is_deleted {
-                Some(t.diff_removed_fg)
-            } else {
-                None
-            };
-
-            let file_path = summary.path.clone();
-            let cb = on_file_click.clone();
-            elements.push(
-                expandable_file_row(filename, depth, name_color, false, t, cx)
-                    .id(ElementId::Name(format!("diff-file-{}", file_index).into()))
-                    .on_click(move |_, window, cx| {
-                        cb(&file_path, window, cx);
-                    })
-                    // Line counts
-                    .when(summary.added > 0 || summary.removed > 0, |d| {
-                        d.child(
-                            h_flex()
-                                .gap(px(4.0))
-                                .text_size(ui_text_ms(cx))
-                                .flex_shrink_0()
-                                .when(summary.added > 0, |d| {
-                                    d.child(
-                                        div()
-                                            .text_color(rgb(t.diff_added_fg))
-                                            .child(format!("+{}", summary.added)),
-                                    )
-                                })
-                                .when(summary.removed > 0, |d| {
-                                    d.child(
-                                        div()
-                                            .text_color(rgb(t.diff_removed_fg))
-                                            .child(format!("-{}", summary.removed)),
-                                    )
-                                }),
-                        )
-                    })
-                    .into_any_element(),
-            );
+                elements.push(
+                    expandable_file_row(filename, depth, name_color, false, t, cx)
+                        .id(ElementId::Name(format!("diff-file-{file_index}").into()))
+                        .on_click(move |_, window, cx| {
+                            cb(&file_path, window, cx);
+                        })
+                        .when(summary.added > 0 || summary.removed > 0, |d| {
+                            d.child(
+                                h_flex()
+                                    .gap(px(4.0))
+                                    .text_size(ui_text_ms(cx))
+                                    .flex_shrink_0()
+                                    .when(summary.added > 0, |d| {
+                                        d.child(
+                                            div()
+                                                .text_color(rgb(t.diff_added_fg))
+                                                .child(format!("+{}", summary.added)),
+                                        )
+                                    })
+                                    .when(summary.removed > 0, |d| {
+                                        d.child(
+                                            div()
+                                                .text_color(rgb(t.diff_removed_fg))
+                                                .child(format!("-{}", summary.removed)),
+                                        )
+                                    }),
+                            )
+                        })
+                        .into_any_element(),
+                );
+            }
+            FileTreeRow::Loading { .. } => {}
         }
     }
 

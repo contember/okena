@@ -5,7 +5,7 @@ use crate::code_view::{
     selection_bg_ranges,
 };
 use crate::file_search::Cancel;
-use crate::file_tree::{expandable_file_row, expandable_folder_row};
+use crate::file_tree::{FileTreeRow, expandable_file_row, expandable_folder_row};
 use crate::selection::{Selection1DExtension, Selection2DNonEmpty};
 use crate::syntax::HighlightedLine;
 use crate::theme::theme;
@@ -283,18 +283,13 @@ impl FileViewer {
         )
     }
 
-    /// Recursively render file tree nodes with expand/collapse, lazy-loading
-    /// directory listings via `loaded_dirs` as folders open.
-    pub(super) fn render_tree_node(
+    /// Render the canonical visible file-tree rows.
+    pub(super) fn render_file_tree(
         &self,
-        parent_relative: &str,
-        depth: usize,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut elements: Vec<AnyElement> = Vec::new();
-
-        // Active and open file paths drive highlighting in the tree.
         let active_relative = self.active_tab().relative_path.clone();
         let open_relatives: std::collections::HashSet<String> = self
             .tabs
@@ -303,41 +298,34 @@ impl FileViewer {
             .map(|t| t.relative_path.clone())
             .collect();
 
-        let entries = match self.loaded_dirs.get(parent_relative) {
-            Some(entries) => entries,
-            None => {
-                if self.loading_dirs.contains(parent_relative) {
+        for row in self.file_tree_rows(false) {
+            match row {
+                FileTreeRow::Folder {
+                    path, name, depth, ..
+                } => {
+                    self.render_folder_row(&mut elements, &name, &path, depth, t, cx);
+                }
+                FileTreeRow::File {
+                    item: file_relative,
+                    depth,
+                } => {
+                    let filename = file_relative.rsplit('/').next().unwrap_or(&file_relative);
+                    let is_active = active_relative == file_relative;
+                    let is_open = open_relatives.contains(&file_relative);
+                    self.render_file_row(
+                        &mut elements,
+                        filename,
+                        &file_relative,
+                        depth,
+                        is_active,
+                        is_open,
+                        t,
+                        cx,
+                    );
+                }
+                FileTreeRow::Loading { depth } => {
                     elements.push(loading_row(depth, t, cx).into_any_element());
                 }
-                return elements;
-            }
-        };
-
-        for entry in entries {
-            let child_relative = if parent_relative.is_empty() {
-                entry.name.clone()
-            } else {
-                format!("{}/{}", parent_relative, entry.name)
-            };
-
-            if entry.is_dir {
-                self.render_folder_row(&mut elements, entry, &child_relative, depth, t, cx);
-                if self.expanded_folders.contains(&child_relative) {
-                    elements.extend(self.render_tree_node(&child_relative, depth + 1, t, cx));
-                }
-            } else {
-                let is_active = active_relative == child_relative;
-                let is_open = open_relatives.contains(&child_relative);
-                self.render_file_row(
-                    &mut elements,
-                    entry,
-                    &child_relative,
-                    depth,
-                    is_active,
-                    is_open,
-                    t,
-                    cx,
-                );
             }
         }
 
@@ -347,7 +335,7 @@ impl FileViewer {
     fn render_folder_row(
         &self,
         elements: &mut Vec<AnyElement>,
-        entry: &crate::list_directory::DirEntry,
+        name: &str,
         folder_relative: &str,
         depth: usize,
         t: &ThemeColors,
@@ -406,7 +394,7 @@ impl FileViewer {
         let abs_path_for_ctx = PathBuf::from(self.project_fs.project_id()).join(folder_relative);
 
         elements.push(
-            expandable_folder_row(&entry.name, depth, is_expanded, t, cx)
+            expandable_folder_row(name, depth, is_expanded, t, cx)
                 .id(ElementId::Name(
                     format!("fv-folder-{}", folder_relative).into(),
                 ))
@@ -441,7 +429,7 @@ impl FileViewer {
     fn render_file_row(
         &self,
         elements: &mut Vec<AnyElement>,
-        entry: &crate::list_directory::DirEntry,
+        filename: &str,
         file_relative: &str,
         depth: usize,
         is_active: bool,
@@ -467,7 +455,7 @@ impl FileViewer {
                 .pl(px(indent + 8.0 + 18.0))
                 .pr(px(12.0))
                 .bg(rgb(t.bg_selection))
-                .child(file_icon(&entry.name, t, cx).mr(px(4.0)));
+                .child(file_icon(filename, t, cx).mr(px(4.0)));
             if let Some(input) = self.render_rename_input(t, cx) {
                 row = row.child(input);
             }
@@ -482,7 +470,7 @@ impl FileViewer {
 
         let file_relative_for_click = file_relative.to_string();
         elements.push(
-            expandable_file_row(&entry.name, depth, None, is_open || is_active, t, cx)
+            expandable_file_row(filename, depth, None, is_open || is_active, t, cx)
                 .id(ElementId::Name(format!("fv-file-{}", file_relative).into()))
                 .when(highlight, |d| d.bg(rgba(t.bg_selection, 0.5)))
                 .on_click(cx.listener(move |this, _, _window, cx| {
@@ -1215,7 +1203,7 @@ impl Render for FileViewer {
 
         // Pre-render tree elements for sidebar
         let tree_elements = if sidebar_visible {
-            self.render_tree_node("", 0, &t, cx)
+            self.render_file_tree(&t, cx)
         } else {
             Vec::new()
         };
@@ -1307,6 +1295,9 @@ impl Render for FileViewer {
                 }) {
                     return;
                 }
+                if this.rename_state.is_some() {
+                    return;
+                }
 
                 let key = event.keystroke.key.as_str();
                 let modifiers = &event.keystroke.modifiers;
@@ -1381,6 +1372,8 @@ impl Render for FileViewer {
                     "r" if !modifiers.platform && !modifiers.control => {
                         this.refresh_file_tree_async(cx);
                     }
+                    "up" => this.previous_file_tree_item(cx),
+                    "down" => this.next_file_tree_item(cx),
                     "left" if modifiers.alt => {
                         this.go_back(cx);
                     }

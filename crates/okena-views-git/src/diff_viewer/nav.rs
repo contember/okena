@@ -7,84 +7,18 @@ use super::side_by_side;
 use crate::settings::{git_settings, set_git_settings};
 
 use okena_core::types::DiffViewMode;
-use okena_files::file_tree::FileTreeNode;
+use okena_files::file_tree::{
+    FileTreeNavigationDirection, FileTreeRow, adjacent_file_tree_item, indexed_file_tree_rows,
+};
 use okena_git::DiffMode;
 
 use gpui::*;
-use std::collections::HashSet;
-
-#[derive(Clone, Copy)]
-enum FileNavigationDirection {
-    Previous,
-    Next,
-}
-
-fn collect_file_indices(
-    node: &FileTreeNode,
-    parent_path: &str,
-    expanded_folders: &HashSet<String>,
-    include_collapsed: bool,
-    out: &mut Vec<usize>,
-) {
-    for (name, child) in &node.children {
-        let folder_path = if parent_path.is_empty() {
-            name.clone()
-        } else {
-            format!("{parent_path}/{name}")
-        };
-        if include_collapsed || expanded_folders.contains(&folder_path) {
-            collect_file_indices(
-                child,
-                &folder_path,
-                expanded_folders,
-                include_collapsed,
-                out,
-            );
-        }
-    }
-    out.extend(node.files.iter().copied());
-}
-
-fn adjacent_visible_file_index(
-    tree: &FileTreeNode,
-    expanded_folders: &HashSet<String>,
-    selected_file_index: usize,
-    direction: FileNavigationDirection,
-) -> Option<usize> {
-    let mut visible = Vec::new();
-    collect_file_indices(tree, "", expanded_folders, false, &mut visible);
-
-    if let Some(position) = visible
-        .iter()
-        .position(|&index| index == selected_file_index)
-    {
-        return match direction {
-            FileNavigationDirection::Previous => {
-                position.checked_sub(1).map(|position| visible[position])
-            }
-            FileNavigationDirection::Next => visible.get(position + 1).copied(),
-        };
-    }
-
-    let visible: HashSet<usize> = visible.into_iter().collect();
-    let mut all = Vec::new();
-    collect_file_indices(tree, "", expanded_folders, true, &mut all);
-    let position = all.iter().position(|&index| index == selected_file_index)?;
-
-    match direction {
-        FileNavigationDirection::Previous => all[..position]
-            .iter()
-            .rev()
-            .find(|index| visible.contains(index))
-            .copied(),
-        FileNavigationDirection::Next => all[position + 1..]
-            .iter()
-            .find(|index| visible.contains(index))
-            .copied(),
-    }
-}
 
 impl DiffViewer {
+    pub(super) fn file_tree_rows(&self, include_collapsed: bool) -> Vec<FileTreeRow<usize>> {
+        indexed_file_tree_rows(&self.file_tree, &self.expanded_folders, include_collapsed)
+    }
+
     pub(super) fn toggle_folder(&mut self, path: &str, cx: &mut Context<Self>) {
         if self.expanded_folders.contains(path) {
             self.expanded_folders.remove(path);
@@ -151,26 +85,26 @@ impl DiffViewer {
         cx.notify();
     }
 
-    pub(super) fn prev_file(&mut self, cx: &mut Context<Self>) {
-        if let Some(index) = adjacent_visible_file_index(
-            &self.file_tree,
-            &self.expanded_folders,
-            self.selected_file_index,
-            FileNavigationDirection::Previous,
-        ) {
+    fn navigate_file_tree(
+        &mut self,
+        direction: FileTreeNavigationDirection,
+        cx: &mut Context<Self>,
+    ) {
+        let visible = self.file_tree_rows(false);
+        let all = self.file_tree_rows(true);
+        if let Some(index) =
+            adjacent_file_tree_item(&visible, &all, Some(&self.selected_file_index), direction)
+        {
             self.select_file(index, cx);
         }
     }
 
+    pub(super) fn prev_file(&mut self, cx: &mut Context<Self>) {
+        self.navigate_file_tree(FileTreeNavigationDirection::Previous, cx);
+    }
+
     pub(super) fn next_file(&mut self, cx: &mut Context<Self>) {
-        if let Some(index) = adjacent_visible_file_index(
-            &self.file_tree,
-            &self.expanded_folders,
-            self.selected_file_index,
-            FileNavigationDirection::Next,
-        ) {
-            self.select_file(index, cx);
-        }
+        self.navigate_file_tree(FileTreeNavigationDirection::Next, cx);
     }
 
     pub(super) fn close(&self, cx: &mut Context<Self>) {
@@ -228,63 +162,5 @@ impl DiffViewer {
         self.commit_message = Some(commit.message.clone());
         let mode = DiffMode::Commit(commit.hash.clone());
         self.load_diff_async(mode, None, cx);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{FileNavigationDirection, adjacent_visible_file_index, collect_file_indices};
-    use okena_files::file_tree::build_file_tree;
-    use std::collections::HashSet;
-
-    fn tree() -> okena_files::file_tree::FileTreeNode {
-        let paths = ["README.md", "src/lib.rs", "src/views/mod.rs", "src/main.rs"];
-        build_file_tree(paths.iter().enumerate().map(|(index, path)| (index, path)))
-    }
-
-    fn expanded() -> HashSet<String> {
-        HashSet::from(["src".to_string(), "src/views".to_string()])
-    }
-
-    #[test]
-    fn file_order_matches_rendered_tree() {
-        let mut indices = Vec::new();
-        collect_file_indices(&tree(), "", &expanded(), false, &mut indices);
-
-        assert_eq!(indices, vec![2, 1, 3, 0]);
-    }
-
-    #[test]
-    fn navigation_follows_rendered_tree_order() {
-        let tree = tree();
-        let expanded = expanded();
-
-        assert_eq!(
-            adjacent_visible_file_index(&tree, &expanded, 2, FileNavigationDirection::Next),
-            Some(1)
-        );
-        assert_eq!(
-            adjacent_visible_file_index(&tree, &expanded, 0, FileNavigationDirection::Previous),
-            Some(3)
-        );
-        assert_eq!(
-            adjacent_visible_file_index(&tree, &expanded, 0, FileNavigationDirection::Next),
-            None
-        );
-    }
-
-    #[test]
-    fn navigation_skips_files_in_collapsed_folders() {
-        let tree = tree();
-        let expanded = HashSet::from(["src".to_string()]);
-
-        assert_eq!(
-            adjacent_visible_file_index(&tree, &expanded, 3, FileNavigationDirection::Previous),
-            Some(1)
-        );
-        assert_eq!(
-            adjacent_visible_file_index(&tree, &expanded, 2, FileNavigationDirection::Next),
-            Some(1)
-        );
     }
 }

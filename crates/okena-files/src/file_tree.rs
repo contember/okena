@@ -3,7 +3,7 @@
 //! Used by both the diff viewer and file viewer for sidebar navigation,
 //! and by the git status popover.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -18,6 +18,30 @@ pub struct FileTreeNode {
     pub files: Vec<usize>,
     /// Subdirectories.
     pub children: BTreeMap<String, FileTreeNode>,
+}
+
+/// A flattened row in the order shown by a file tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileTreeRow<T> {
+    Folder {
+        path: String,
+        name: String,
+        depth: usize,
+        is_expanded: bool,
+    },
+    File {
+        item: T,
+        depth: usize,
+    },
+    Loading {
+        depth: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileTreeNavigationDirection {
+    Previous,
+    Next,
 }
 
 /// Build a file tree from an iterator of (index, relative_path) pairs.
@@ -35,6 +59,113 @@ pub fn build_file_tree(paths: impl Iterator<Item = (usize, impl AsRef<str>)>) ->
         }
     }
     root
+}
+
+/// Flatten an indexed tree in the same order used by the tree renderer.
+pub fn indexed_file_tree_rows(
+    node: &FileTreeNode,
+    expanded_folders: &HashSet<String>,
+    include_collapsed: bool,
+) -> Vec<FileTreeRow<usize>> {
+    fn collect(
+        node: &FileTreeNode,
+        parent_path: &str,
+        depth: usize,
+        expanded_folders: &HashSet<String>,
+        include_collapsed: bool,
+        rows: &mut Vec<FileTreeRow<usize>>,
+    ) {
+        for (name, child) in &node.children {
+            let path = if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!("{parent_path}/{name}")
+            };
+            let is_expanded = expanded_folders.contains(&path);
+            rows.push(FileTreeRow::Folder {
+                path: path.clone(),
+                name: name.clone(),
+                depth,
+                is_expanded,
+            });
+            if include_collapsed || is_expanded {
+                collect(
+                    child,
+                    &path,
+                    depth + 1,
+                    expanded_folders,
+                    include_collapsed,
+                    rows,
+                );
+            }
+        }
+
+        rows.extend(
+            node.files
+                .iter()
+                .copied()
+                .map(|item| FileTreeRow::File { item, depth }),
+        );
+    }
+
+    let mut rows = Vec::new();
+    collect(node, "", 0, expanded_folders, include_collapsed, &mut rows);
+    rows
+}
+
+/// Find the adjacent visible file, falling back from a selection hidden by collapse.
+pub fn adjacent_file_tree_item<T: Clone + Eq>(
+    visible_rows: &[FileTreeRow<T>],
+    all_rows: &[FileTreeRow<T>],
+    selected: Option<&T>,
+    direction: FileTreeNavigationDirection,
+) -> Option<T> {
+    let visible: Vec<&T> = visible_rows
+        .iter()
+        .filter_map(|row| match row {
+            FileTreeRow::File { item, .. } => Some(item),
+            FileTreeRow::Folder { .. } | FileTreeRow::Loading { .. } => None,
+        })
+        .collect();
+
+    let Some(selected) = selected else {
+        return match direction {
+            FileTreeNavigationDirection::Previous => visible.last().map(|item| (**item).clone()),
+            FileTreeNavigationDirection::Next => visible.first().map(|item| (**item).clone()),
+        };
+    };
+
+    if let Some(position) = visible.iter().position(|item| *item == selected) {
+        return match direction {
+            FileTreeNavigationDirection::Previous => position
+                .checked_sub(1)
+                .map(|position| (*visible[position]).clone()),
+            FileTreeNavigationDirection::Next => {
+                visible.get(position + 1).map(|item| (**item).clone())
+            }
+        };
+    }
+
+    let all: Vec<&T> = all_rows
+        .iter()
+        .filter_map(|row| match row {
+            FileTreeRow::File { item, .. } => Some(item),
+            FileTreeRow::Folder { .. } | FileTreeRow::Loading { .. } => None,
+        })
+        .collect();
+    let position = all.iter().position(|item| *item == selected)?;
+
+    match direction {
+        FileTreeNavigationDirection::Previous => all[..position]
+            .iter()
+            .rev()
+            .find(|item| visible.iter().any(|visible_item| *visible_item == **item))
+            .map(|item| (**item).clone()),
+        FileTreeNavigationDirection::Next => all[position + 1..]
+            .iter()
+            .find(|item| visible.iter().any(|visible_item| *visible_item == **item))
+            .map(|item| (**item).clone()),
+    }
 }
 
 /// Base div for an expandable folder row: chevron + folder icon + name.
@@ -146,7 +277,11 @@ pub fn expandable_file_row(
 
 #[cfg(test)]
 mod tests {
-    use super::build_file_tree;
+    use super::{
+        FileTreeNavigationDirection, FileTreeRow, adjacent_file_tree_item, build_file_tree,
+        indexed_file_tree_rows,
+    };
+    use std::collections::HashSet;
 
     #[test]
     fn test_build_file_tree_empty() {
@@ -187,5 +322,89 @@ mod tests {
         assert_eq!(src.files, vec![2]); // main.rs
         let views = &src.children["views"];
         assert_eq!(views.files, vec![0, 1]); // mod.rs, render.rs
+    }
+
+    fn navigation_tree() -> super::FileTreeNode {
+        let paths = ["README.md", "src/lib.rs", "src/views/mod.rs", "src/main.rs"];
+        build_file_tree(paths.iter().enumerate())
+    }
+
+    fn expanded() -> HashSet<String> {
+        HashSet::from(["src".to_string(), "src/views".to_string()])
+    }
+
+    fn file_items(rows: &[FileTreeRow<usize>]) -> Vec<usize> {
+        rows.iter()
+            .filter_map(|row| match row {
+                FileTreeRow::File { item, .. } => Some(*item),
+                FileTreeRow::Folder { .. } | FileTreeRow::Loading { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn indexed_rows_match_rendered_tree_order() {
+        let rows = indexed_file_tree_rows(&navigation_tree(), &expanded(), false);
+
+        assert_eq!(file_items(&rows), vec![2, 1, 3, 0]);
+    }
+
+    #[test]
+    fn adjacent_item_follows_visible_tree_order() {
+        let tree = navigation_tree();
+        let visible = indexed_file_tree_rows(&tree, &expanded(), false);
+        let all = indexed_file_tree_rows(&tree, &expanded(), true);
+
+        assert_eq!(
+            adjacent_file_tree_item(&visible, &all, Some(&2), FileTreeNavigationDirection::Next),
+            Some(1)
+        );
+        assert_eq!(
+            adjacent_file_tree_item(
+                &visible,
+                &all,
+                Some(&0),
+                FileTreeNavigationDirection::Previous
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            adjacent_file_tree_item(&visible, &all, Some(&0), FileTreeNavigationDirection::Next),
+            None
+        );
+    }
+
+    #[test]
+    fn adjacent_item_skips_collapsed_folder_contents() {
+        let tree = navigation_tree();
+        let expanded = HashSet::from(["src".to_string()]);
+        let visible = indexed_file_tree_rows(&tree, &expanded, false);
+        let all = indexed_file_tree_rows(&tree, &expanded, true);
+
+        assert_eq!(file_items(&visible), vec![1, 3, 0]);
+        assert_eq!(
+            adjacent_file_tree_item(&visible, &all, Some(&2), FileTreeNavigationDirection::Next),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn adjacent_item_starts_at_visible_edge_without_selection() {
+        let tree = navigation_tree();
+        let visible = indexed_file_tree_rows(&tree, &expanded(), false);
+
+        assert_eq!(
+            adjacent_file_tree_item(&visible, &visible, None, FileTreeNavigationDirection::Next),
+            Some(2)
+        );
+        assert_eq!(
+            adjacent_file_tree_item(
+                &visible,
+                &visible,
+                None,
+                FileTreeNavigationDirection::Previous
+            ),
+            Some(0)
+        );
     }
 }

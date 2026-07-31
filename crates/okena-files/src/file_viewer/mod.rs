@@ -10,6 +10,7 @@ mod loading;
 mod render;
 mod search;
 mod selection;
+mod tree;
 
 use crate::blame::{BlameError, BlameLine, BlameProvider};
 use crate::code_view::ScrollbarDrag;
